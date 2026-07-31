@@ -1,0 +1,127 @@
+import { useCallback, useEffect, useState } from "react";
+import { useParams, useNavigate } from "react-router-dom";
+import { useTasks } from "./hooks/useTasks";
+import { useQoderStatusContext } from "../../hooks/useQoderStatusContext";
+import { useFeedback } from "../../hooks/useGlobalFeedback";
+import { api } from "../../api";
+import { BoardPanel } from "./components/BoardPanel";
+import { DetailPanel } from "./components/DetailPanel";
+import { TaskEditorDialog } from "./components/TaskEditorDialog";
+import { JiraDialog } from "./components/JiraDialog";
+import { JiraSyncDialog } from "./components/JiraSyncDialog";
+import { UiRequestDialog } from "./components/UiRequestDialog";
+
+export default function CodingPage() {
+  const navigate = useNavigate();
+  const { taskId } = useParams();
+  const qoder = useQoderStatusContext();
+  const { showError, showSuccess } = useFeedback();
+  const tasks = useTasks();
+  const [editingTask, setEditingTask] = useState<string>();
+  const [jiraOpen, setJiraOpen] = useState(false);
+  const [jiraSyncOpen, setJiraSyncOpen] = useState(false);
+  const [merging, setMerging] = useState(false);
+
+  // URL ↔ state 同步
+  useEffect(() => {
+    if (taskId && taskId !== tasks.selectedId) tasks.setSelectedId(taskId);
+    if (!taskId && tasks.selectedId) navigate(`/coding/${tasks.selectedId}`, { replace: true });
+  }, [taskId, tasks, navigate]);
+
+  // 监听全局仓库变更事件
+  useEffect(() => {
+    const onChanged = () => tasks.refresh();
+    window.addEventListener("app:repositories-changed", onChanged);
+    return () => window.removeEventListener("app:repositories-changed", onChanged);
+  }, [tasks]);
+
+  const onOpenTask = useCallback((id: string) => {
+    tasks.setSelectedId(id);
+    navigate(`/coding/${id}`);
+  }, [navigate, tasks]);
+
+  const onCloseDetail = useCallback(() => {
+    tasks.setSelectedId(undefined);
+    navigate("/coding");
+  }, [navigate, tasks]);
+
+  const onRemove = useCallback((id: string) => {
+    if (!window.confirm("确认移除任务？该操作无法撤销。")) return;
+    api.deleteTask(id).then(() => tasks.refresh()).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)));
+  }, [showError, tasks]);
+
+  const runAction = useCallback((action: () => Promise<unknown>) => {
+    return tasks.run(action).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)));
+  }, [showError, tasks]);
+
+  const editing = tasks.tasks.find((task) => task.id === editingTask);
+  const showDetail = Boolean(tasks.selectedId && tasks.detail);
+
+  return (
+    <>
+      <div className={`coding-shell${showDetail ? " has-detail" : ""}`}>
+        <BoardPanel
+          tasks={tasks.tasks}
+          search={tasks.search}
+          onSearch={tasks.setSearch}
+          selectedId={tasks.selectedId}
+          onOpen={onOpenTask}
+          onEdit={(id) => setEditingTask(id)}
+          onRemove={onRemove}
+          onCreate={() => { /* handled by BoardPanel menu */ }}
+          onFromJira={() => setJiraOpen(true)}
+          onSyncJira={() => setJiraSyncOpen(true)}
+        />
+        {showDetail && (
+          <DetailPanel
+            card={tasks.tasks.find((t) => t.id === tasks.selectedId)}
+            detail={tasks.detail}
+            liveEvents={tasks.liveEvents}
+            qoder={qoder.status}
+            prompt={tasks.prompt}
+            running={tasks.running}
+            merging={merging}
+            onClose={onCloseDetail}
+            onOpenVSCode={() => { if (tasks.selectedId) api.openTaskEditor(tasks.selectedId, "vscode").catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))); }}
+            onOpenQoder={() => { if (tasks.selectedId) api.openTaskEditor(tasks.selectedId, "qoder").catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))); }}
+            onChangeModel={(value) => {
+              if (!tasks.selectedId) return;
+              api.updateTask(tasks.selectedId, { qoderModel: value }).then(() => tasks.refresh()).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)));
+            }}
+            onStart={() => { if (tasks.selectedId) runAction(() => api.startTask(tasks.selectedId!)); }}
+            onAbort={() => runAction(() => api.abortTask())}
+            onReview={() => { if (tasks.selectedId) runAction(() => api.runReview(tasks.selectedId!)); }}
+            onResetReview={() => { if (tasks.selectedId) runAction(() => api.resetReview(tasks.selectedId!)); }}
+            onResetDelivery={() => { if (tasks.selectedId) runAction(() => api.resetDelivery(tasks.selectedId!)); }}
+            onSubmitMR={() => {
+              if (!tasks.selectedId) return;
+              setMerging(true);
+              api.submitMergeRequests(tasks.selectedId).then(() => {
+                showSuccess("MR 提交完成");
+                return tasks.refresh();
+              }).then(() => api.refreshMergeStatus()).then((summaries) => {
+                for (const summary of summaries) {
+                  if (summary.taskId === tasks.selectedId) {
+                    for (const repo of summary.repos) {
+                      if (repo.state === "error") showError(`${repo.repoName} 提交失败：${repo.error ?? "未知错误"}`);
+                      else if (repo.state === "merged") showSuccess(`${repo.repoName} 已合并`);
+                      else if (repo.state === "closed") showError(`${repo.repoName} MR 已关闭`);
+                    }
+                  }
+                }
+              }).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))).finally(() => setMerging(false));
+            }}
+            onManualComplete={() => { if (tasks.selectedId) runAction(() => api.manualComplete(tasks.selectedId!)); }}
+            onPrompt={tasks.setPrompt}
+            onSend={() => tasks.send()}
+            onOpenUrl={(url) => api.openExternal(url).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)))}
+          />
+        )}
+      </div>
+      <TaskEditorDialog open={Boolean(editingTask)} task={editing} onOpenChange={(open) => { if (!open) setEditingTask(undefined); }} onSaved={tasks.refresh} />
+      <JiraDialog open={jiraOpen} onOpenChange={setJiraOpen} onImported={tasks.refresh} />
+      <JiraSyncDialog open={jiraSyncOpen} onOpenChange={setJiraSyncOpen} onImported={tasks.refresh} />
+      <UiRequestDialog />
+    </>
+  );
+}

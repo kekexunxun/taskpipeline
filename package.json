@@ -1,0 +1,20 @@
+{
+  "name": "internal-coding-agent",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "npm@10.9.8",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "build": "npm run build -w @coding-agent/core && npm run build -w @coding-agent/integrations && npm run build -w @coding-agent/pi-package && npm run build -w @coding-agent/desktop",
+    "package": "npm run build && npm run package -w @coding-agent/desktop",
+    "package:dir": "npm run build && npm run package:dir -w @coding-agent/desktop",
+    "package:mac": "npm run build && npm run package:mac -w @coding-agent/desktop",
+    "package:win": "npm run build && npm run package:win -w @coding-agent/desktop",
+    "package:linux": "npm run build && npm run package:linux -w @coding-agent/desktop",
+    "dev": "npm run rebuild:electron && npm run dev --workspace @coding-agent/desktop",
+    "rebuild:node": "npm rebuild better-sqlite3",
+    "rebuild:electron": "npx --yes @electron/rebuild -f -w better-sqlite3 --build-from-source && node -e \"const fs=require('fs'),p=require('path'),src=p.join('node_modules/better-sqlite3/bin',process.platform+'-'+process.arch+'-136','better-sqlite3.node'),dst='node_modules/better-sqlite3/build/Release/better_sqlite3.node';if(fs.existsSync(src))fs.copyFileSync(src,dst)\"",
+    "test": "npm run rebuild:node && npm run test -ws --if-present",
+    "typecheck": "npm run build -w @coding-agent/core && npm run build -w @coding-agent/integrations && npm run typecheck -w @coding-agent/pi-package && npm run typecheck -w @coding-agent/desktop"
+  }
+}

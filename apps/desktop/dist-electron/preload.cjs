@@ -1,0 +1,47 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const electron_1 = require("electron");
+electron_1.contextBridge.exposeInMainWorld("agentApi", {
+    listTasks: () => electron_1.ipcRenderer.invoke("tasks:list"),
+    getTask: (id) => electron_1.ipcRenderer.invoke("tasks:get", id),
+    createTask: (input) => electron_1.ipcRenderer.invoke("tasks:create", input),
+    updateTask: (id, patch) => electron_1.ipcRenderer.invoke("tasks:update", id, patch),
+    deleteTask: (id) => electron_1.ipcRenderer.invoke("tasks:delete", id),
+    listRepositories: () => electron_1.ipcRenderer.invoke("repos:list"),
+    saveRepository: (profile) => electron_1.ipcRenderer.invoke("repos:save", profile),
+    deleteRepository: (id) => electron_1.ipcRenderer.invoke("repos:delete", id),
+    chooseRepositoryFolder: () => electron_1.ipcRenderer.invoke("repos:choose-folder"),
+    attachRepository: (taskId, repositoryId) => electron_1.ipcRenderer.invoke("tasks:attach-repo", taskId, repositoryId),
+    detachRepository: (taskId, repositoryId) => electron_1.ipcRenderer.invoke("tasks:detach-repo", taskId, repositoryId),
+    getSetting: (key) => electron_1.ipcRenderer.invoke("settings:get", key),
+    setSetting: (key, value, secret) => electron_1.ipcRenderer.invoke("settings:set", key, value, secret),
+    startTask: (taskId) => electron_1.ipcRenderer.invoke("tasks:start", taskId),
+    sendTaskMessage: (taskId, message) => electron_1.ipcRenderer.invoke("tasks:message", taskId, message),
+    abortTask: () => electron_1.ipcRenderer.invoke("tasks:abort"),
+    runReview: (taskId) => electron_1.ipcRenderer.invoke("tasks:review", taskId),
+    resetReview: (taskId) => electron_1.ipcRenderer.invoke("tasks:reset-review", taskId),
+    resetDelivery: (taskId) => electron_1.ipcRenderer.invoke("tasks:reset-delivery", taskId),
+    submitMergeRequests: (taskId) => electron_1.ipcRenderer.invoke("tasks:submit-mrs", taskId),
+    refreshMergeStatus: () => electron_1.ipcRenderer.invoke("tasks:refresh-merge-status"),
+    manualComplete: (taskId) => electron_1.ipcRenderer.invoke("tasks:manual-complete", taskId),
+    importJiraTask: (keyOrUrl) => electron_1.ipcRenderer.invoke("jira:import", keyOrUrl),
+    syncJiraTasks: () => electron_1.ipcRenderer.invoke("jira:sync"),
+    importJiraTasks: (candidates) => electron_1.ipcRenderer.invoke("jira:import-many", candidates),
+    testAtlassian: (kind) => electron_1.ipcRenderer.invoke("atlassian:test", kind),
+    openTaskEditor: (taskId, editor) => electron_1.ipcRenderer.invoke("tasks:open-editor", taskId, editor),
+    openExternal: (url) => electron_1.ipcRenderer.invoke("shell:open-external", url),
+    getQoderStatus: () => electron_1.ipcRenderer.invoke("qoder:status"),
+    respondTaskUi: (response) => electron_1.ipcRenderer.invoke("task:ui-response", response),
+    onTaskEvent: (callback) => { const listener = (_, event) => callback(event); electron_1.ipcRenderer.on("task:event", listener); return () => electron_1.ipcRenderer.removeListener("task:event", listener); },
+    // === Chat 对话(Codex 样式) ==================================================
+    listChats: () => electron_1.ipcRenderer.invoke("chats:list"),
+    getChat: (id) => electron_1.ipcRenderer.invoke("chats:get", id),
+    createChat: (model) => electron_1.ipcRenderer.invoke("chats:create", model),
+    deleteChat: (id) => electron_1.ipcRenderer.invoke("chats:delete", id),
+    appendUserMessage: (id, text) => electron_1.ipcRenderer.invoke("chats:append-message", id, text),
+    listChatModels: () => electron_1.ipcRenderer.invoke("chats:list-models"),
+    sendChatMessage: (chatId, messageId, model) => electron_1.ipcRenderer.invoke("chats:send", chatId, messageId, model),
+    abortChat: (id) => electron_1.ipcRenderer.invoke("chats:abort", id),
+    onChatEvent: (callback) => { const listener = (_, event) => callback(event); electron_1.ipcRenderer.on("chat:event", listener); return () => electron_1.ipcRenderer.removeListener("chat:event", listener); }
+});
+//# sourceMappingURL=preload.cjs.map

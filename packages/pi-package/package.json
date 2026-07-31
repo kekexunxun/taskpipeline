@@ -1,0 +1,15 @@
+{
+  "name": "@coding-agent/pi-package",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "pi": { "extensions": ["./dist/index.js"] },
+  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "vitest run" },
+  "dependencies": {
+    "@coding-agent/core": "0.1.0",
+    "@coding-agent/integrations": "0.1.0",
+    "@earendil-works/pi-coding-agent": "0.82.1"
+  },
+  "devDependencies": { "vitest": "3.2.7" }
+}

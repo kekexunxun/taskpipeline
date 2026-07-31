@@ -1,0 +1,10 @@
+node_modules/
+dist/
+release/
+.vite/
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+.DS_Store
