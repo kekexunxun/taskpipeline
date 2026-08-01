@@ -16,6 +16,7 @@ electron_1.contextBridge.exposeInMainWorld("agentApi", {
     getSetting: (key) => electron_1.ipcRenderer.invoke("settings:get", key),
     setSetting: (key, value, secret) => electron_1.ipcRenderer.invoke("settings:set", key, value, secret),
     startTask: (taskId, options) => electron_1.ipcRenderer.invoke("tasks:start", taskId, options),
+    reimplementTask: (taskId) => electron_1.ipcRenderer.invoke("tasks:reimplement", taskId),
     approveTaskPlan: (taskId) => electron_1.ipcRenderer.invoke("tasks:approve-plan", taskId),
     reviseTaskPlan: (taskId, feedback) => electron_1.ipcRenderer.invoke("tasks:revise-plan", taskId, feedback),
     retryTaskValidation: (taskId) => electron_1.ipcRenderer.invoke("tasks:retry-validation", taskId),

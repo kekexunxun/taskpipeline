@@ -3,7 +3,7 @@ import { AlertTriangleIcon, CheckCircle2Icon, XIcon } from "lucide-react";
 import { useFeedback, type FeedbackMessage } from "@/hooks/useGlobalFeedback";
 import { cn } from "@/lib/utils";
 
-const AUTO_DISMISS_MS = 5000;
+const AUTO_DISMISS_MS = 2000;
 
 const ICONS: Record<FeedbackMessage["kind"], typeof AlertTriangleIcon> = {
   error: AlertTriangleIcon,
@@ -17,17 +17,22 @@ const TONE: Record<FeedbackMessage["kind"], string> = {
 
 /**
  * 浮层式全局反馈，位于 TopBar 下方水平居中，不会挤压页面布局。
- * 默认 5 秒自动消失，error 持续展示，鼠标悬停时暂停倒计时并可手动关闭。
+ * 默认约 2 秒自动消失，鼠标悬停时暂停倒计时并可手动关闭。
  */
 export function GlobalFeedback() {
   const { feedback, setFeedback } = useFeedback();
   const [hovered, setHovered] = useState(false);
   const [leaving, setLeaving] = useState(false);
 
-  // 5s 自动消失（hover/error 时不消失）
+  useEffect(() => {
+    setLeaving(false);
+    setHovered(false);
+  }, [feedback]);
+
+  // 2s 自动消失（悬停时暂停）
   useEffect(() => {
     if (!feedback) return;
-    if (feedback.kind === "error" || hovered) return;
+    if (hovered) return;
     const timer = window.setTimeout(() => setLeaving(true), AUTO_DISMISS_MS);
     return () => window.clearTimeout(timer);
   }, [feedback, hovered]);

@@ -305,6 +305,21 @@ describe("task command workflow", () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
+  it("resets a completed task for reimplementation and preserves the old MR in history", () => {
+    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    try {
+      const store = new TaskStore(join(dir, "store.db"));
+      const task = store.createTask({ title: "Reimplement", description: "test", state: "completed", reviewStatus: "passed", summary: "done", commitMessage: "feat: old" });
+      store.addTaskRepository({ taskId: task.id, repositoryId: "repo", name: "repo", localPath: dir, baseBranch: "main", mergeRequestUrl: "https://gitlab.example.com/group/repo/-/merge_requests/7", mergeRequestIid: 7, mergeRequestState: "merged", deliveryStatus: "mr_created" });
+      const workflow = new TaskWorkflow(store, { get: () => undefined, getSecret: () => undefined }, { addEvent: (event) => store.addEvent(event), emitChanged: () => undefined }, () => dir);
+
+      expect(workflow.reimplement(task.id)).toMatchObject({ state: "preparing", reviewStatus: "pending", summary: undefined, commitMessage: undefined });
+      expect(store.listTaskRepositories(task.id)[0]).toMatchObject({ deliveryStatus: "pending", mergeRequestUrl: null, mergeRequestIid: null });
+      expect(store.listEvents(task.id).some((event) => event.title.includes("保留历史 MR"))).toBe(true);
+      store.close();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("runs validation commands in the configured order and records failure state", async () => {
     const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
     try {

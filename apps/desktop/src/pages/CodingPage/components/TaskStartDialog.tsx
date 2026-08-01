@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { mergeRepositoryOptions, RepositoryPicker } from "./RepositoryPicker";
 import { useFeedback } from "@/hooks/useGlobalFeedback";
 
-export function TaskStartDialog({ open, taskId, onOpenChange, onStarted }: { open: boolean; taskId?: string; onOpenChange(open: boolean): void; onStarted(): Promise<void> }) {
+export function TaskStartDialog({ open, taskId, reimplement = false, onOpenChange, onStarted }: { open: boolean; taskId?: string; reimplement?: boolean; onOpenChange(open: boolean): void; onStarted(): Promise<void> }) {
   const { showError } = useFeedback();
   const [mode, setMode] = useState<TaskStartMode>("direct");
   const [repositories, setRepositories] = useState<RepositoryProfile[]>([]);
@@ -19,11 +19,13 @@ export function TaskStartDialog({ open, taskId, onOpenChange, onStarted }: { ope
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const initialIds = useRef<Set<string>>(new Set());
+  const reimplementedRef = useRef(false);
 
   useEffect(() => {
     if (!open || !taskId) return;
     let cancelled = false;
     setMode("direct");
+    reimplementedRef.current = false;
     setLoading(true);
     Promise.all([api.listRepositories(), api.getTask(taskId)]).then(([profiles, detail]) => {
       if (cancelled) return;
@@ -61,6 +63,10 @@ export function TaskStartDialog({ open, taskId, onOpenChange, onStarted }: { ope
       for (const id of selectedIds) if (!initialIds.current.has(id)) await api.attachRepository(taskId, id);
       for (const id of initialIds.current) if (!selectedIds.has(id)) await api.detachRepository(taskId, id);
       const repositoryCommands = Object.fromEntries([...selectedIds].map((id) => [id, commands[id] ?? {}]));
+      if (reimplement && !reimplementedRef.current) {
+        await api.reimplementTask(taskId);
+        reimplementedRef.current = true;
+      }
       await api.startTask(taskId, { mode, repositoryCommands });
       await onStarted();
       onOpenChange(false);

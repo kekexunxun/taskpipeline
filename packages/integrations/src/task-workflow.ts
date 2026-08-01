@@ -249,6 +249,52 @@ export class TaskWorkflow {
     this.sink.addEvent({ taskId, kind: "status", title: "review 状态已重置,可重新运行", detail: "走合法出口 reviewing -> review_blocked; 点击右上的「重新运行 Review」可再次触发" });
   }
 
+  /**
+   * 将已完成任务重置为可重新实现状态。
+   * 任务和仓库关联保持不变；旧 MR 链接写入事件后清理活动交付字段，
+   * 避免新一轮提交误更新已经完成的 MR。
+   */
+  reimplement(taskId: string): Task {
+    const task = this.store.getTask(taskId);
+    if (!task) throw new Error("Task not found");
+    if (task.state !== "completed") throw new Error("只有已完成任务可以重新实现");
+
+    for (const repo of this.store.listTaskRepositories(taskId)) {
+      if (repo.mergeRequestUrl || repo.mergeRequestIid) {
+        this.sink.addEvent({
+          taskId,
+          kind: "status",
+          title: `${repo.name} 保留历史 MR`,
+          detail: repo.mergeRequestUrl ?? (repo.mergeRequestIid ? `!${repo.mergeRequestIid}` : undefined)
+        });
+      }
+      this.store.updateTaskRepository(repo.id, {
+        changeSummary: undefined,
+        commitSha: undefined,
+        mergeRequestUrl: undefined,
+        mergeRequestIid: undefined,
+        mergeRequestState: undefined,
+        mergeRequestCheckedAt: undefined,
+        deliveryStatus: "pending"
+      });
+    }
+
+    this.store.updateTask(taskId, {
+      summary: undefined,
+      startMode: undefined,
+      planContent: undefined,
+      planRevision: undefined,
+      failureStage: undefined,
+      reviewStatus: "pending",
+      commitMessage: undefined,
+      piSessionPath: undefined,
+      sessionUsage: undefined
+    });
+    const reset = this.transitionTo(taskId, "preparing");
+    this.sink.addEvent({ taskId, kind: "status", title: "任务已重置,可重新实现" });
+    return reset;
+  }
+
   isReviewEnabled(): boolean { return this.reviewEnabled(); }
   shouldAutoCreateMergeRequests(): boolean { return this.autoCreateMergeRequests(); }
 }

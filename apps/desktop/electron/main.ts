@@ -17,7 +17,7 @@ import {
   type ExtensionUIDialogOptions,
   type ExtensionUIContext
 } from "@earendil-works/pi-coding-agent";
-import { TaskStore, LocalFileKeyStore, transitionTask, type AgentEvent, type SessionUsage, type SettingResolver, type Task, type TaskEventSink, type TaskRepository, type TaskStartMode } from "@coding-agent/core";
+import { TaskStore, LocalFileKeyStore, transitionTask, type AgentEvent, type SessionUsage, type SettingResolver, type Task, type TaskEventSink, type TaskRepository, type TaskStartMode, type TaskState } from "@coding-agent/core";
 import {
   AtlassianClientFactory, DeliveryService, GitService, importJiraIssue, MergeStatusRefresher, openTaskEditor, OpenCodeReviewService,
   OpenAICompatReviewer, parseGitLabRemote, redactSecrets,
@@ -415,14 +415,24 @@ async function runQoderPlan(taskId: string, feedback?: string): Promise<void> {
   }
 }
 
+async function advanceAfterValidation(taskId: string, state: TaskState): Promise<void> {
+  if (state !== "awaiting_review") return;
+  if (taskWorkflow.isReviewEnabled()) {
+    await taskWorkflow.runReview(taskId, buildReviewOrchestrator());
+  } else {
+    store.updateTask(taskId, { reviewStatus: "waived" });
+    updateState(store.getTask(taskId)!, "awaiting_commit");
+    addTaskEvent({ taskId, kind: "status", title: "已跳过 Review,等待提交 MR" });
+  }
+  const updated = store.getTask(taskId);
+  if (updated?.state === "awaiting_commit" && taskWorkflow.shouldAutoCreateMergeRequests()) await deliveryService.submitMergeRequests(taskId);
+}
+
 async function finishImplementation(taskId: string): Promise<void> {
   const task = store.getTask(taskId);
   if (!task || task.state !== "implementing") return;
   const validated = await taskWorkflow.runValidation(taskId);
-  if (validated.state === "validation_failed") return;
-  if (taskWorkflow.isReviewEnabled()) await taskWorkflow.runReview(taskId, buildReviewOrchestrator());
-  const updated = store.getTask(taskId);
-  if (updated?.state === "awaiting_commit" && taskWorkflow.shouldAutoCreateMergeRequests()) await deliveryService.submitMergeRequests(taskId);
+  await advanceAfterValidation(taskId, validated.state);
 }
 
 // === Pi Session 集成(留在 desktop) ============================================
@@ -651,8 +661,7 @@ async function reviseTaskPlan(taskId: string, feedback: string): Promise<void> {
 
 async function retryTaskValidation(taskId: string): Promise<void> {
   const validated = await taskWorkflow.runValidation(taskId);
-  if (validated.state !== "awaiting_review") return;
-  if (taskWorkflow.isReviewEnabled()) await taskWorkflow.runReview(taskId, buildReviewOrchestrator());
+  await advanceAfterValidation(taskId, validated.state);
 }
 
 async function sendTaskMessage(taskId: string, message: string): Promise<void> {
@@ -762,6 +771,7 @@ function registerIpc(): void {
     if (key === "modelProfile") syncPiModelConfig(value);
   });
   ipcMain.handle("tasks:start", (_event, taskId: string, options?: { mode?: TaskStartMode; repositoryCommands?: RepositoryCommandMap }) => startTask(taskId, options));
+  ipcMain.handle("tasks:reimplement", (_event, taskId: string) => taskWorkflow.reimplement(taskId));
   ipcMain.handle("tasks:approve-plan", (_event, taskId: string) => approveTaskPlan(taskId));
   ipcMain.handle("tasks:revise-plan", (_event, taskId: string, feedback: string) => reviseTaskPlan(taskId, feedback));
   ipcMain.handle("tasks:retry-validation", (_event, taskId: string) => retryTaskValidation(taskId));

@@ -15,7 +15,8 @@ export function DetailActions({
   onResetDelivery,
   onRetryValidation,
   onSubmitMR,
-  onManualComplete
+  onManualComplete,
+  onReimplement
 }: {
   card: TaskCard;
   running: boolean;
@@ -29,6 +30,7 @@ export function DetailActions({
   onRetryValidation(): void;
   onSubmitMR(): void;
   onManualComplete(): void;
+  onReimplement(): void;
 }) {
   const state = card.state;
   const isDraft = state === "draft";
@@ -90,9 +92,14 @@ export function DetailActions({
         </Button>
       )}
       {isCompleted && (
-        <Badge variant="success">
-          <CheckIcon size={10} />已完成
-        </Badge>
+        <>
+          <Button size="sm" className="gap-1 px-2" onClick={onReimplement}>
+            <RefreshCcwIcon size={11} />重新实现
+          </Button>
+          <Badge variant="success">
+            <CheckIcon size={10} />已完成
+          </Badge>
+        </>
       )}
       {isCancelled && (
         <Badge variant="muted">

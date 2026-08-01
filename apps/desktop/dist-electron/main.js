@@ -400,18 +400,27 @@ async function runQoderPlan(taskId, feedback) {
         emitPi({ type: "agent_end", provider: "qoder", taskId, phase: "planning" });
     }
 }
+async function advanceAfterValidation(taskId, state) {
+    if (state !== "awaiting_review")
+        return;
+    if (taskWorkflow.isReviewEnabled()) {
+        await taskWorkflow.runReview(taskId, buildReviewOrchestrator());
+    }
+    else {
+        store.updateTask(taskId, { reviewStatus: "waived" });
+        updateState(store.getTask(taskId), "awaiting_commit");
+        addTaskEvent({ taskId, kind: "status", title: "已跳过 Review,等待提交 MR" });
+    }
+    const updated = store.getTask(taskId);
+    if (updated?.state === "awaiting_commit" && taskWorkflow.shouldAutoCreateMergeRequests())
+        await deliveryService.submitMergeRequests(taskId);
+}
 async function finishImplementation(taskId) {
     const task = store.getTask(taskId);
     if (!task || task.state !== "implementing")
         return;
     const validated = await taskWorkflow.runValidation(taskId);
-    if (validated.state === "validation_failed")
-        return;
-    if (taskWorkflow.isReviewEnabled())
-        await taskWorkflow.runReview(taskId, buildReviewOrchestrator());
-    const updated = store.getTask(taskId);
-    if (updated?.state === "awaiting_commit" && taskWorkflow.shouldAutoCreateMergeRequests())
-        await deliveryService.submitMergeRequests(taskId);
+    await advanceAfterValidation(taskId, validated.state);
 }
 // === Pi Session 集成(留在 desktop) ============================================
 function syncPiModelConfig(raw) {
@@ -655,10 +664,7 @@ async function reviseTaskPlan(taskId, feedback) {
 }
 async function retryTaskValidation(taskId) {
     const validated = await taskWorkflow.runValidation(taskId);
-    if (validated.state !== "awaiting_review")
-        return;
-    if (taskWorkflow.isReviewEnabled())
-        await taskWorkflow.runReview(taskId, buildReviewOrchestrator());
+    await advanceAfterValidation(taskId, validated.state);
 }
 async function sendTaskMessage(taskId, message) {
     let task = store.getTask(taskId);
@@ -793,6 +799,7 @@ function registerIpc() {
             syncPiModelConfig(value);
     });
     ipcMain.handle("tasks:start", (_event, taskId, options) => startTask(taskId, options));
+    ipcMain.handle("tasks:reimplement", (_event, taskId) => taskWorkflow.reimplement(taskId));
     ipcMain.handle("tasks:approve-plan", (_event, taskId) => approveTaskPlan(taskId));
     ipcMain.handle("tasks:revise-plan", (_event, taskId, feedback) => reviseTaskPlan(taskId, feedback));
     ipcMain.handle("tasks:retry-validation", (_event, taskId) => retryTaskValidation(taskId));

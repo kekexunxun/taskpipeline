@@ -23,6 +23,7 @@ export default function CodingPage() {
   const [jiraSyncOpen, setJiraSyncOpen] = useState(false);
   const [merging, setMerging] = useState(false);
   const [startOpen, setStartOpen] = useState(false);
+  const [reimplementing, setReimplementing] = useState(false);
 
   // URL ↔ state 同步
   useEffect(() => {
@@ -121,6 +122,7 @@ export default function CodingPage() {
               }).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))).finally(() => setMerging(false));
             }}
             onManualComplete={() => { if (tasks.selectedId) runAction(() => api.manualComplete(tasks.selectedId!)); }}
+            onReimplement={() => { setReimplementing(true); setStartOpen(true); }}
             onPrompt={tasks.setPrompt}
             onSend={() => tasks.send()}
             onOpenUrl={(url) => api.openExternal(url).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)))}
@@ -139,8 +141,9 @@ export default function CodingPage() {
       <TaskStartDialog
         open={startOpen}
         taskId={tasks.selectedId}
-        onOpenChange={setStartOpen}
-        onStarted={async () => { await tasks.refresh(); if (tasks.selectedId) await tasks.loadDetail(tasks.selectedId); }}
+        reimplement={reimplementing}
+        onOpenChange={(open) => { setStartOpen(open); if (!open) setReimplementing(false); }}
+        onStarted={async () => { setReimplementing(false); await tasks.refresh(); if (tasks.selectedId) await tasks.loadDetail(tasks.selectedId); }}
       />
     </>
   );

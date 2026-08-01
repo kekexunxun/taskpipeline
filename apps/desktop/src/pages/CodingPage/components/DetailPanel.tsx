@@ -33,6 +33,7 @@ type Props = {
   onRevisePlan(feedback: string): void;
   onSubmitMR(): void;
   onManualComplete(): void;
+  onReimplement(): void;
   onPrompt(value: string): void;
   onSend(): void;
   onOpenUrl(url: string): void;
@@ -60,6 +61,7 @@ export function DetailPanel({
   onRevisePlan,
   onSubmitMR,
   onManualComplete,
+  onReimplement,
   onPrompt,
   onSend,
   onOpenUrl
@@ -115,6 +117,7 @@ export function DetailPanel({
         onRetryValidation={onRetryValidation}
         onSubmitMR={onSubmitMR}
         onManualComplete={onManualComplete}
+        onReimplement={onReimplement}
       />
       <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto">
         <PlanSection task={task} running={running} onApprove={onApprovePlan} onRevise={onRevisePlan} />

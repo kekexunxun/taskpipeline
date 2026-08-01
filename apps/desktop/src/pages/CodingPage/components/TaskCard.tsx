@@ -74,31 +74,35 @@ export function TaskCardView({
         </div>
       )}
       {task.planContent && <div className="pointer-events-none relative z-10 mt-1.5"><Badge variant="secondary"><FileTextIcon size={9} />计划 v{task.planRevision ?? 1}</Badge></div>}
-      {task.repositories.map((repo) => (
-        <div
-          className="pointer-events-none relative z-10 mt-2 flex min-w-0 items-center justify-between gap-2 border-t pt-1.5 text-xs text-muted-foreground"
-          key={repo.id}
-        >
-          <span className="flex min-w-0 items-center gap-1 truncate">
-            <GitBranchIcon size={10} />
-            {repo.name}
-          </span>
-          <Badge
-            variant={
-              repo.deliveryStatus === "mr_created"
-                ? "success"
-                : repo.changeSummary
-                ? "secondary"
-                : "muted"
-            }
-            className="shrink-0"
-          >
-            {repo.deliveryStatus === "mr_created"
-              ? "MR 已提交"
-              : repo.changeSummary ?? "等待修改"}
-          </Badge>
+      {task.repositories.length > 0 && (
+        <div className="pointer-events-none relative z-10 mt-2 rounded border-t pt-1.5 text-xs text-muted-foreground">
+          <div className="mb-1 flex items-center justify-between text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">
+            <span className="inline-flex items-center gap-1"><GitBranchIcon size={10} />仓库</span>
+            <span>{task.repositories.length}</span>
+          </div>
+          <div className="space-y-1">
+            {task.repositories.map((repo) => (
+              <div className="flex min-w-0 items-center justify-between gap-2" key={repo.id}>
+                <span className="min-w-0 truncate">{repo.name}</span>
+                <Badge
+                  variant={
+                    repo.deliveryStatus === "mr_created"
+                      ? "success"
+                      : repo.changeSummary
+                      ? "secondary"
+                      : "muted"
+                  }
+                  className="shrink-0"
+                >
+                  {repo.deliveryStatus === "mr_created"
+                    ? "MR 已提交"
+                    : repo.changeSummary ?? "等待修改"}
+                </Badge>
+              </div>
+            ))}
+          </div>
         </div>
-      ))}
+      )}
       <div className="pointer-events-none relative z-10 mt-2 flex min-h-6 items-center justify-between border-t pt-1.5 text-xs text-muted-foreground">
         <span className="inline-flex items-center gap-1">
           <ShieldIcon size={10} />

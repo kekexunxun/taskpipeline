@@ -6,6 +6,7 @@ describe("task workflow", () => {
   it("allows the normal delivery path", () => {
     expect(() => transitionTask("draft", "confirmed")).not.toThrow();
     expect(() => transitionTask("reviewing", "awaiting_commit")).not.toThrow();
+    expect(() => transitionTask("awaiting_review", "awaiting_commit")).not.toThrow();
   });
   it("supports planning and validation gates without adding a board lane", () => {
     expect(() => transitionTask("preparing", "planning")).not.toThrow();
@@ -49,5 +50,9 @@ describe("task workflow", () => {
     expect(() => transitionTask("delivering", "awaiting_commit")).not.toThrow();
     expect(() => transitionTask("delivering", "failed")).not.toThrow();
     expect(() => transitionTask("delivering", "await_merge")).not.toThrow();
+  });
+
+  it("allows completed tasks to be reimplemented", () => {
+    expect(() => transitionTask("completed", "preparing")).not.toThrow();
   });
 });

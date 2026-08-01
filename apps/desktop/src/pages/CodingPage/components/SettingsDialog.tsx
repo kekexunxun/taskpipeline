@@ -37,6 +37,7 @@ import {
 import { Field, FieldGroup } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { SecretInput } from "@/components/ui/secret-input";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ModelBadges } from "@/components/ModelBadges";
 import { RepositoryDialog, TestButton, type RepoDraft } from "./RepositoryDialog";
@@ -56,6 +57,8 @@ type Settings = {
   confluenceUrl: string;
   confluenceEmail: string;
   confluenceToken: string;
+  autoCreateMergeRequests: string;
+  openCodeReviewEnabled: string;
   // modelApiKey 不再在通用设置中展示，由 OpenAI-Compatible 弹窗维护
   modelApiKey?: string;
 };
@@ -74,14 +77,18 @@ const defaults: Settings = {
   jiraToken: "",
   confluenceUrl: "",
   confluenceEmail: "",
-  confluenceToken: ""
+  confluenceToken: "",
+  autoCreateMergeRequests: "false",
+  openCodeReviewEnabled: "false"
 };
 const ordinaryKeys = [
   "defaultModel",
   "jiraUrl",
   "jiraEmail",
   "confluenceUrl",
-  "confluenceEmail"
+  "confluenceEmail",
+  "autoCreateMergeRequests",
+  "openCodeReviewEnabled"
 ] as const;
 const secretKeys = [
   "qoderToken",
@@ -409,6 +416,30 @@ export function SettingsDialog({
                         />
                       </SettingField>
                     </FieldGroup>
+                  </Section>
+                  <Section title="任务自动化" description="控制实现完成后的 Review 与 MR 提交流程。">
+                    <div className="space-y-2.5">
+                      <label className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
+                        <span className="min-w-0">
+                          <span className="block text-xs font-medium text-foreground">开启 CodeReview</span>
+                          <span className="mt-0.5 block text-[11px] text-muted-foreground">实现和校验完成后自动执行代码评审。</span>
+                        </span>
+                        <Switch
+                          checked={settings.openCodeReviewEnabled === "true"}
+                          onCheckedChange={(checked) => update("openCodeReviewEnabled", checked ? "true" : "false")}
+                        />
+                      </label>
+                      <label className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
+                        <span className="min-w-0">
+                          <span className="block text-xs font-medium text-foreground">自动提交 MR</span>
+                          <span className="mt-0.5 block text-[11px] text-muted-foreground">Review 通过后自动提交 Merge Request。</span>
+                        </span>
+                        <Switch
+                          checked={settings.autoCreateMergeRequests === "true"}
+                          onCheckedChange={(checked) => update("autoCreateMergeRequests", checked ? "true" : "false")}
+                        />
+                      </label>
+                    </div>
                   </Section>
                 </TabsContent>
                 <TabsContent value="atlassian" className="space-y-5">

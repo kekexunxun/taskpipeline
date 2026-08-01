@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld("agentApi", {
   getSetting: (key: string) => ipcRenderer.invoke("settings:get", key),
   setSetting: (key: string, value: string, secret?: boolean) => ipcRenderer.invoke("settings:set", key, value, secret),
   startTask: (taskId: string, options?: unknown) => ipcRenderer.invoke("tasks:start", taskId, options),
+  reimplementTask: (taskId: string) => ipcRenderer.invoke("tasks:reimplement", taskId),
   approveTaskPlan: (taskId: string) => ipcRenderer.invoke("tasks:approve-plan", taskId),
   reviseTaskPlan: (taskId: string, feedback: string) => ipcRenderer.invoke("tasks:revise-plan", taskId, feedback),
   retryTaskValidation: (taskId: string) => ipcRenderer.invoke("tasks:retry-validation", taskId),

@@ -41,7 +41,7 @@ export function useTasks(): CodingPageState {
 
   const liveMessageId = useRef<string | undefined>(undefined);
   const planningRef = useRef(false);
-  const notifiedPlanRef = useRef<string>();
+  const notifiedPlanRef = useRef<string | undefined>(undefined);
 
   const acceptDetail = useCallback((next: TaskDetail) => {
     setDetail(next);
