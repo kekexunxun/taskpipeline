@@ -2,14 +2,19 @@ import type { TaskState } from "./types.js";
 import { TASK_STATES } from "./types.js";
 
 const transitions: Record<TaskState, TaskState[]> = {
-  draft: ["confirmed", "cancelled"], confirmed: ["preparing", "cancelled"], preparing: ["implementing", "failed", "cancelled"],
-  implementing: ["awaiting_review", "failed", "cancelled"], awaiting_review: ["reviewing", "implementing", "cancelled"], reviewing: ["review_blocked", "awaiting_commit", "implementing", "failed"],
+  draft: ["confirmed", "cancelled"], confirmed: ["preparing", "cancelled"], preparing: ["planning", "implementing", "failed", "cancelled"],
+  planning: ["awaiting_plan_approval", "completed", "failed", "cancelled"],
+  awaiting_plan_approval: ["planning", "implementing", "failed", "cancelled"],
+  implementing: ["validating", "awaiting_review", "failed", "cancelled"],
+  validating: ["awaiting_review", "validation_failed", "failed", "cancelled"],
+  validation_failed: ["validating", "implementing", "cancelled"],
+  awaiting_review: ["reviewing", "implementing", "cancelled"], reviewing: ["review_blocked", "awaiting_commit", "implementing", "failed"],
   review_blocked: ["reviewing", "implementing", "awaiting_commit", "cancelled"], awaiting_commit: ["delivering", "implementing", "cancelled"],
   // delivering 允许退到 awaiting_commit: commit/push/MR 中途失败、进程崩溃或 hook 卡死时,
   // 用户可以一键重置并重新提交,不必被迫进入 failed 再重跑实现。
   delivering: ["await_merge", "failed", "awaiting_commit"],
   await_merge: ["implementing", "completed"],
-  completed: [], failed: ["preparing", "implementing", "cancelled"], cancelled: []
+  completed: [], failed: ["preparing", "planning", "implementing", "validating", "cancelled"], cancelled: []
 };
 
 export function transitionTask(from: TaskState, to: TaskState): void {

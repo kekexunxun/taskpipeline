@@ -82,4 +82,18 @@ describe("TaskStore", () => {
     expect(store.updateTask(task.id, { qoderModel: "ultimate" }).qoderModel).toBe("ultimate");
     store.close();
   });
+
+  it("persists plan metadata and repository command snapshots", () => {
+    const dir = mkdtempSync(join(tmpdir(), "coding-agent-db-")); dirs.push(dir);
+    const store = new TaskStore(join(dir, "store.db"));
+    const repo = { id: "repo", name: "repo", localPath: join(dir, "repo"), defaultBranch: "main", setupCommand: "npm ci", lintCommand: "npm run lint", testCommand: "npm test", buildCommand: "npm run build" };
+    store.saveRepositoryProfile(repo);
+    const task = store.createTask({ title: "Plan", description: "test" });
+    const attached = store.attachRepository(task.id, repo.id);
+    expect(attached.setupCommand).toBe("npm ci");
+    store.updateTask(task.id, { startMode: "plan", state: "awaiting_plan_approval", planContent: "1. edit", planRevision: 1 });
+    expect(store.getTask(task.id)).toMatchObject({ startMode: "plan", state: "awaiting_plan_approval", planContent: "1. edit", planRevision: 1 });
+    expect(store.listTaskRepositories(task.id)[0]).toMatchObject({ lintCommand: "npm run lint", testCommand: "npm test", buildCommand: "npm run build" });
+    store.close();
+  });
 });

@@ -10,6 +10,7 @@ import { TaskEditorDialog } from "./components/TaskEditorDialog";
 import { JiraDialog } from "./components/JiraDialog";
 import { JiraSyncDialog } from "./components/JiraSyncDialog";
 import { UiRequestDialog } from "./components/UiRequestDialog";
+import { TaskStartDialog } from "./components/TaskStartDialog";
 
 export default function CodingPage() {
   const navigate = useNavigate();
@@ -21,6 +22,7 @@ export default function CodingPage() {
   const [jiraOpen, setJiraOpen] = useState(false);
   const [jiraSyncOpen, setJiraSyncOpen] = useState(false);
   const [merging, setMerging] = useState(false);
+  const [startOpen, setStartOpen] = useState(false);
 
   // URL ↔ state 同步
   useEffect(() => {
@@ -30,10 +32,13 @@ export default function CodingPage() {
 
   // 监听全局仓库变更事件
   useEffect(() => {
-    const onChanged = () => tasks.refresh();
+    const onChanged = () => {
+      void tasks.refresh();
+      if (tasks.selectedId) void tasks.loadDetail(tasks.selectedId);
+    };
     window.addEventListener("app:repositories-changed", onChanged);
     return () => window.removeEventListener("app:repositories-changed", onChanged);
-  }, [tasks]);
+  }, [tasks.refresh, tasks.loadDetail, tasks.selectedId]);
 
   const onOpenTask = useCallback((id: string) => {
     tasks.setSelectedId(id);
@@ -84,13 +89,19 @@ export default function CodingPage() {
             onOpenQoder={() => { if (tasks.selectedId) api.openTaskEditor(tasks.selectedId, "qoder").catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))); }}
             onChangeModel={(value) => {
               if (!tasks.selectedId) return;
-              api.updateTask(tasks.selectedId, { qoderModel: value }).then(() => tasks.refresh()).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)));
+              api.updateTask(tasks.selectedId, { qoderModel: value }).then(async () => {
+                await tasks.refresh();
+                if (tasks.selectedId) await tasks.loadDetail(tasks.selectedId);
+              }).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)));
             }}
-            onStart={() => { if (tasks.selectedId) runAction(() => api.startTask(tasks.selectedId!)); }}
+            onStart={() => { setStartOpen(true); }}
             onAbort={() => runAction(() => api.abortTask())}
             onReview={() => { if (tasks.selectedId) runAction(() => api.runReview(tasks.selectedId!)); }}
             onResetReview={() => { if (tasks.selectedId) runAction(() => api.resetReview(tasks.selectedId!)); }}
             onResetDelivery={() => { if (tasks.selectedId) runAction(() => api.resetDelivery(tasks.selectedId!)); }}
+            onRetryValidation={() => { if (tasks.selectedId) runAction(() => api.retryTaskValidation(tasks.selectedId!)); }}
+            onApprovePlan={() => { if (tasks.selectedId) runAction(() => api.approveTaskPlan(tasks.selectedId!)); }}
+            onRevisePlan={(feedback) => { if (tasks.selectedId) runAction(() => api.reviseTaskPlan(tasks.selectedId!, feedback)); }}
             onSubmitMR={() => {
               if (!tasks.selectedId) return;
               setMerging(true);
@@ -120,11 +131,17 @@ export default function CodingPage() {
         open={Boolean(editingTask)}
         task={editing}
         onOpenChange={(open) => { if (!open) setEditingTask(undefined); }}
-        onSaved={async (saved) => { await tasks.refresh(); if (editingTask === "new") onOpenTask(saved.id); }}
+        onSaved={async (saved) => { await tasks.refresh(); await tasks.loadDetail(saved.id); if (editingTask === "new") onOpenTask(saved.id); }}
       />
       <JiraDialog open={jiraOpen} onOpenChange={setJiraOpen} onImported={tasks.refresh} />
       <JiraSyncDialog open={jiraSyncOpen} onOpenChange={setJiraSyncOpen} onImported={tasks.refresh} />
       <UiRequestDialog />
+      <TaskStartDialog
+        open={startOpen}
+        taskId={tasks.selectedId}
+        onOpenChange={setStartOpen}
+        onStarted={async () => { await tasks.refresh(); if (tasks.selectedId) await tasks.loadDetail(tasks.selectedId); }}
+      />
     </>
   );
 }

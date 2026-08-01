@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { Task, TaskCard } from "@coding-agent/core";
-import type { QoderStatus, TaskDetail, ChangedFile } from "../../../api";
+import type { ChatModelGroup, QoderStatus, TaskDetail, ChangedFile } from "../../../api";
 import { DetailHeader } from "./DetailHeader";
 import { UsageSection } from "./UsageSection";
 import { ChangedFilesSection } from "./ChangedFilesSection";
@@ -8,6 +8,7 @@ import { MergeRequestsSection } from "./MergeRequestsSection";
 import { DetailActions } from "./DetailActions";
 import { Timeline, type TimelineItem } from "./Timeline";
 import { TaskComposer } from "./Composer";
+import { PlanSection } from "./PlanSection";
 import { inReviewStates } from "../../../utils/status";
 
 type Props = {
@@ -27,6 +28,9 @@ type Props = {
   onReview(): void;
   onResetReview(): void;
   onResetDelivery(): void;
+  onRetryValidation(): void;
+  onApprovePlan(): void;
+  onRevisePlan(feedback: string): void;
   onSubmitMR(): void;
   onManualComplete(): void;
   onPrompt(value: string): void;
@@ -51,6 +55,9 @@ export function DetailPanel({
   onReview,
   onResetReview,
   onResetDelivery,
+  onRetryValidation,
+  onApprovePlan,
+  onRevisePlan,
   onSubmitMR,
   onManualComplete,
   onPrompt,
@@ -70,15 +77,20 @@ export function DetailPanel({
   }, [detail?.changedFiles]);
   if (!task || !card) return null;
   const totalFiles = detail?.changedFiles.length ?? 0;
-  const canChat = inReviewStates.has(task.state) || task.state === "failed" || task.state === "draft" || running;
+  const canChat = inReviewStates.has(task.state) || ["failed", "validation_failed"].includes(task.state) || running;
+  const modelGroups: ChatModelGroup[] = qoder?.enabled && qoder.connected && qoder.models.length > 0
+    ? [{ provider: "qoder", displayName: "Qoder Agent SDK", models: qoder.models }]
+    : [];
+  const hasModelSelector = modelGroups.length > 0;
   const showUsage =
     running ||
+    (task.state === "draft" && hasModelSelector) ||
     task.state === "implementing" ||
     task.sessionUsage ||
     card.sessionUsage;
   const showChangedFiles =
     inReviewStates.has(task.state) ||
-    ["completed", "failed", "cancelled"].includes(task.state);
+    ["completed", "failed", "validation_failed", "cancelled"].includes(task.state);
   return (
     <section className="flex min-h-0 min-w-0 flex-col overflow-hidden border-l bg-card/50">
       <DetailHeader
@@ -100,23 +112,21 @@ export function DetailPanel({
         onReview={onReview}
         onResetReview={onResetReview}
         onResetDelivery={onResetDelivery}
+        onRetryValidation={onRetryValidation}
         onSubmitMR={onSubmitMR}
         onManualComplete={onManualComplete}
       />
       <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto">
+        <PlanSection task={task} running={running} onApprove={onApprovePlan} onRevise={onRevisePlan} />
         {showUsage && (
           <UsageSection
             task={task}
             card={card}
             model={task.qoderModel}
             onChangeModel={onChangeModel}
-            modelOptions={qoder?.models ?? []}
+            modelGroups={modelGroups}
             running={running}
-            hasModelSelector={Boolean(
-              qoder?.enabled &&
-                qoder.connected &&
-                (qoder?.models.length ?? 0) > 0
-            )}
+            hasModelSelector={hasModelSelector}
           />
         )}
         {showChangedFiles && <ChangedFilesSection groups={groups} total={totalFiles} />}
@@ -132,6 +142,7 @@ export function DetailPanel({
             disabled={
               !running &&
               task.state !== "failed" &&
+              task.state !== "validation_failed" &&
               task.state !== "draft" &&
               !inReviewStates.has(task.state)
             }

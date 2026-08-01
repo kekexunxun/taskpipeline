@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Field, FieldGroup } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 
 export type RepoDraft = Omit<RepositoryProfile, "id"> & { id?: string };
 const empty: RepoDraft = { name: "", localPath: "", remoteUrl: "", defaultBranch: "main" };
@@ -56,7 +57,11 @@ export function RepositoryDialog({
         name: draft.name.trim(),
         localPath: draft.localPath.trim(),
         remoteUrl: draft.remoteUrl?.trim() || undefined,
-        defaultBranch: draft.defaultBranch.trim() || "main"
+        defaultBranch: draft.defaultBranch.trim() || "main",
+        setupCommand: draft.setupCommand?.trim() || undefined,
+        lintCommand: draft.lintCommand?.trim() || undefined,
+        testCommand: draft.testCommand?.trim() || undefined,
+        buildCommand: draft.buildCommand?.trim() || undefined
       };
       await api.saveRepository(profile);
       onSaved(profile);
@@ -101,6 +106,18 @@ export function RepositoryDialog({
               onChange={(event) => update("remoteUrl", event.target.value)}
               placeholder="可选，留空可后续再配置"
             />
+          </Field>
+          <Field className="col-span-2" label="准备命令">
+            <Textarea value={draft.setupCommand ?? ""} onChange={(event) => update("setupCommand", event.target.value || undefined)} placeholder="例如 npm install" />
+          </Field>
+          <Field label="Lint 命令">
+            <Input value={draft.lintCommand ?? ""} onChange={(event) => update("lintCommand", event.target.value || undefined)} placeholder="例如 npm run lint" />
+          </Field>
+          <Field label="Test 命令">
+            <Input value={draft.testCommand ?? ""} onChange={(event) => update("testCommand", event.target.value || undefined)} placeholder="例如 npm test" />
+          </Field>
+          <Field className="col-span-2" label="Build 命令">
+            <Input value={draft.buildCommand ?? ""} onChange={(event) => update("buildCommand", event.target.value || undefined)} placeholder="例如 npm run build" />
           </Field>
         </FieldGroup>
         <DialogFooter>

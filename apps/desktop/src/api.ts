@@ -1,4 +1,4 @@
-import type { AgentEvent, Approval, RepositoryProfile, Task, TaskCard, TaskRepository } from "@coding-agent/core";
+import type { AgentEvent, Approval, RepositoryProfile, Task, TaskCard, TaskRepository, TaskStartMode } from "@coding-agent/core";
 import type { UIMessage, UIMessageChunk } from "ai";
 
 export type ChangedFile = { repositoryId: string; repositoryName: string; path: string; status: string };
@@ -15,6 +15,8 @@ export type RepositoryFolder = Omit<RepositoryProfile, "id">;
 export type MergeRepoStatus = { repoId: string; repoName: string; mergeRequestIid: number; mergeRequestUrl?: string; state: "opened" | "merged" | "closed" | "error"; error?: string };
 export type MergeStatusSummary = { taskId: string; taskTitle: string; repos: MergeRepoStatus[]; allMerged: boolean; taskCompleted: boolean };
 export type CreateTaskInput = Pick<Task, "title" | "description"> & Partial<Pick<Task, "keywords" | "acceptanceCriteria">>;
+export type RepositoryCommands = Partial<Pick<TaskRepository, "setupCommand" | "lintCommand" | "testCommand" | "buildCommand">>;
+export type StartTaskOptions = { mode: TaskStartMode; repositoryCommands?: Record<string, RepositoryCommands> };
 
 // === Chat API surface ===
 
@@ -56,7 +58,7 @@ export type ChatStreamEvent = { streamId: string; chatId: string; chunk?: UIMess
 export type AgentApi = {
   listTasks(): Promise<TaskCard[]>; getTask(id: string): Promise<TaskDetail>; createTask(input: CreateTaskInput): Promise<Task>; updateTask(id: string, patch: Partial<Task>): Promise<Task>;
   deleteTask(id: string): Promise<void>; listRepositories(): Promise<RepositoryProfile[]>; saveRepository(profile: RepositoryProfile): Promise<void>; deleteRepository(id: string): Promise<void>; chooseRepositoryFolder(): Promise<RepositoryFolder | undefined>; attachRepository(taskId: string, repositoryId: string): Promise<TaskRepository>; detachRepository(taskId: string, repositoryId: string): Promise<void>; getSetting(key: string): Promise<string | undefined>; setSetting(key: string, value: string, secret?: boolean): Promise<void>;
-  startTask(taskId: string): Promise<void>; sendTaskMessage(taskId: string, message: string): Promise<void>; abortTask(): Promise<void>; runReview(taskId: string): Promise<void>; resetReview(taskId: string): Promise<void>; resetDelivery(taskId: string): Promise<void>; submitMergeRequests(taskId: string): Promise<void>; refreshMergeStatus(): Promise<MergeStatusSummary[]>; manualComplete(taskId: string): Promise<void>;
+  startTask(taskId: string, options?: StartTaskOptions): Promise<void>; approveTaskPlan(taskId: string): Promise<void>; reviseTaskPlan(taskId: string, feedback: string): Promise<void>; retryTaskValidation(taskId: string): Promise<void>; sendTaskMessage(taskId: string, message: string): Promise<void>; abortTask(): Promise<void>; runReview(taskId: string): Promise<void>; resetReview(taskId: string): Promise<void>; resetDelivery(taskId: string): Promise<void>; submitMergeRequests(taskId: string): Promise<void>; refreshMergeStatus(): Promise<MergeStatusSummary[]>; manualComplete(taskId: string): Promise<void>;
   importJiraTask(keyOrUrl: string): Promise<Task>; syncJiraTasks(): Promise<JiraTaskCandidate[]>; importJiraTasks(candidates: JiraTaskCandidate[]): Promise<Task[]>; testAtlassian(kind: "jira" | "confluence"): Promise<{ ok: boolean; message: string }>;
   openTaskEditor(taskId: string, editor: "vscode" | "qoder"): Promise<void>;
   openExternal(url: string): Promise<void>;
@@ -82,6 +84,33 @@ const demoTasks: TaskCard[] = [
   { id: "demo-4", jiraKey: "WEB-206", title: "修复控制台权限展示", description: "MR 已合并。", keywords: ["console"], acceptanceCriteria: [], state: "completed", reviewStatus: "passed", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "done", repositories: [{ id: "r4", name: "web-console", deliveryStatus: "mr_created", mergeRequestUrl: "#" }] }
 ];
 
+const demoRepositories: RepositoryProfile[] = [
+  { id: "repo-payment", name: "payment-service", localPath: "/demo/payment-service", defaultBranch: "main", setupCommand: "npm install", lintCommand: "npm run lint", testCommand: "npm test", buildCommand: "npm run build" },
+  { id: "repo-order", name: "order-console", localPath: "/demo/order-console", defaultBranch: "main", setupCommand: "npm install", lintCommand: "npm run lint", testCommand: "npm test", buildCommand: "npm run build" },
+  { id: "repo-events", name: "event-core", localPath: "/demo/event-core", defaultBranch: "main" },
+  { id: "repo-web", name: "web-console", localPath: "/demo/web-console", defaultBranch: "main" }
+];
+
+const demoTaskRepositories = new Map<string, TaskRepository[]>(demoTasks.map((task, index) => {
+  const profile = demoRepositories[index]!;
+  const cardRepo = task.repositories[0]!;
+  return [task.id, [{
+    id: cardRepo.id,
+    taskId: task.id,
+    repositoryId: profile.id,
+    name: profile.name,
+    localPath: profile.localPath,
+    baseBranch: profile.defaultBranch,
+    setupCommand: profile.setupCommand,
+    lintCommand: profile.lintCommand,
+    testCommand: profile.testCommand,
+    buildCommand: profile.buildCommand,
+    changeSummary: cardRepo.changeSummary,
+    mergeRequestUrl: cardRepo.mergeRequestUrl,
+    deliveryStatus: cardRepo.deliveryStatus
+  }]];
+}));
+
 // 浏览器回退（vite 不带 Electron 启动时使用）的 mock 实现：任务走 demo 数据，
 // Chat 走纯内存 store —— 仅供 UI 演示，不会写本地文件。
 const memoryChats = new Map<string, ChatConversation>();
@@ -105,7 +134,7 @@ function messageText(message: ChatMessage) { return message.parts.filter((part):
 
 export const api: AgentApi = window.agentApi ?? {
   async listTasks() { return demoTasks; },
-  async getTask(id) { const task = demoTasks.find((item) => item.id === id); return { task, repositories: [], approvals: [], changedFiles: [], events: task?.state === "implementing" ? [{ id: "e1", taskId: id, kind: "status", title: "任务已确认，AI 会话已启动", createdAt: new Date(Date.now() - 240000).toISOString() }, { id: "e2", taskId: id, kind: "tool", title: "读取支付服务上下文", detail: "分析幂等键生成与优惠券核销路径", createdAt: new Date(Date.now() - 170000).toISOString() }, { id: "e3", taskId: id, kind: "command", title: "单元测试通过", detail: "18 passed · 1.8s", createdAt: new Date(Date.now() - 60000).toISOString() }] : [] }; },
+  async getTask(id) { const task = demoTasks.find((item) => item.id === id); return { task, repositories: demoTaskRepositories.get(id) ?? [], approvals: [], changedFiles: [], events: task?.state === "implementing" ? [{ id: "e1", taskId: id, kind: "status", title: "任务已确认，AI 会话已启动", createdAt: new Date(Date.now() - 240000).toISOString() }, { id: "e2", taskId: id, kind: "tool", title: "读取支付服务上下文", detail: "分析幂等键生成与优惠券核销路径", createdAt: new Date(Date.now() - 170000).toISOString() }, { id: "e3", taskId: id, kind: "command", title: "单元测试通过", detail: "18 passed · 1.8s", createdAt: new Date(Date.now() - 60000).toISOString() }] : [] }; },
   async createTask(input) {
     const now = nowIso();
     const task: TaskCard = { id: makeId(), ...input, keywords: input.keywords ?? [], acceptanceCriteria: input.acceptanceCriteria ?? [], state: "draft", reviewStatus: "pending", createdAt: now, updatedAt: now, boardColumn: "todo", repositories: [] };
@@ -119,7 +148,7 @@ export const api: AgentApi = window.agentApi ?? {
     demoTasks[index] = next;
     return next;
   },
-  async deleteTask(id) { const index = demoTasks.findIndex((item) => item.id === id); if (index >= 0) demoTasks.splice(index, 1); }, async listRepositories() { return []; }, async saveRepository() {}, async deleteRepository() {}, async chooseRepositoryFolder() { return undefined; }, async attachRepository() { throw new Error("Electron is required"); }, async detachRepository() {}, async getSetting() { return undefined; }, async setSetting() {}, async startTask() {}, async sendTaskMessage() {}, async abortTask() {}, async runReview() {}, async resetReview() {}, async resetDelivery() {}, async submitMergeRequests() {}, async refreshMergeStatus() { return [] as MergeStatusSummary[]; }, async manualComplete() {}, async importJiraTask() { return demoTasks[1]!; }, async syncJiraTasks() { return []; }, async importJiraTasks() { return []; }, async testAtlassian() { return { ok: false, message: "Electron is required" }; }, async openTaskEditor() { throw new Error("Electron is required"); }, async openExternal() {}, async getQoderStatus() { return { enabled: false, connected: false, running: false, models: [] }; }, async respondTaskUi() {}, onTaskEvent() { return () => undefined; },
+  async deleteTask(id) { const index = demoTasks.findIndex((item) => item.id === id); if (index >= 0) demoTasks.splice(index, 1); demoTaskRepositories.delete(id); }, async listRepositories() { return demoRepositories; }, async saveRepository() {}, async deleteRepository() {}, async chooseRepositoryFolder() { return undefined; }, async attachRepository(taskId, repositoryId) { const profile = demoRepositories.find((item) => item.id === repositoryId); if (!profile) throw new Error("Repository not found"); const repo: TaskRepository = { id: makeId(), taskId, repositoryId, name: profile.name, localPath: profile.localPath, baseBranch: profile.defaultBranch, setupCommand: profile.setupCommand, lintCommand: profile.lintCommand, testCommand: profile.testCommand, buildCommand: profile.buildCommand, deliveryStatus: "pending" }; demoTaskRepositories.set(taskId, [...(demoTaskRepositories.get(taskId) ?? []), repo]); return repo; }, async detachRepository(taskId, repositoryId) { demoTaskRepositories.set(taskId, (demoTaskRepositories.get(taskId) ?? []).filter((repo) => repo.repositoryId !== repositoryId)); }, async getSetting() { return undefined; }, async setSetting() {}, async startTask() {}, async approveTaskPlan() {}, async reviseTaskPlan() {}, async retryTaskValidation() {}, async sendTaskMessage() {}, async abortTask() {}, async runReview() {}, async resetReview() {}, async resetDelivery() {}, async submitMergeRequests() {}, async refreshMergeStatus() { return [] as MergeStatusSummary[]; }, async manualComplete() {}, async importJiraTask() { return demoTasks[1]!; }, async syncJiraTasks() { return []; }, async importJiraTasks() { return []; }, async testAtlassian() { return { ok: false, message: "Electron is required" }; }, async openTaskEditor() { throw new Error("Electron is required"); }, async openExternal() {}, async getQoderStatus() { return { enabled: false, connected: false, running: false, models: [] }; }, async respondTaskUi() {}, onTaskEvent() { return () => undefined; },
 
   // Chat mock
   async listChats() { return [...memoryChats.values()].map(({ messages, ...meta }) => meta).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)); },

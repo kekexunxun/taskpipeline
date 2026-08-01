@@ -2,11 +2,14 @@ export const BOARD_COLUMNS = ["todo", "in_progress", "in_review", "done"] as con
 export type BoardColumn = (typeof BOARD_COLUMNS)[number];
 
 export const TASK_STATES = [
-  "draft", "confirmed", "preparing", "implementing", "awaiting_review",
+  "draft", "confirmed", "preparing", "planning", "awaiting_plan_approval",
+  "implementing", "validating", "validation_failed", "awaiting_review",
   "reviewing", "review_blocked", "awaiting_commit", "delivering",
   "await_merge", "completed", "failed", "cancelled"
 ] as const;
 export type TaskState = (typeof TASK_STATES)[number];
+export type TaskStartMode = "direct" | "plan";
+export type TaskFailureStage = "preparing" | "planning" | "implementing" | "validating";
 
 export type Task = {
   id: string;
@@ -17,6 +20,10 @@ export type Task = {
   acceptanceCriteria: string[];
   state: TaskState;
   summary?: string;
+  startMode?: TaskStartMode;
+  planContent?: string;
+  planRevision?: number;
+  failureStage?: TaskFailureStage;
   reviewStatus: "pending" | "running" | "passed" | "blocked" | "waived";
   commitMessage?: string;
   piSessionPath?: string;
@@ -45,6 +52,10 @@ export type TaskRepository = {
   name: string;
   localPath: string;
   baseBranch: string;
+  setupCommand?: string;
+  lintCommand?: string;
+  testCommand?: string;
+  buildCommand?: string;
   featureBranch?: string;
   worktreePath?: string;
   changeSummary?: string;
@@ -88,6 +99,7 @@ export type RepositoryProfile = {
   remoteUrl?: string;
   defaultBranch: string;
   gitlabProjectId?: string;
+  setupCommand?: string;
   testCommand?: string;
   lintCommand?: string;
   buildCommand?: string;

@@ -102,6 +102,7 @@ async function approve(task: Task, kind: Parameters<TaskStore["addApproval"]>[0]
 }
 
 export default function codingAgentExtension(pi: ExtensionAPI) {
+  let toolsBeforePlanning: string[] | undefined;
   sandboxRouter.register(pi, process.cwd());
   pi.on("session_start", async (_event, ctx) => {
     const mode = await sandboxRouter.check();
@@ -119,6 +120,10 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     const input = event.input as Record<string, unknown>;
     const task = selectedTask("");
+    if (task?.state === "planning" && event.toolName === "bash") {
+      const command = String(input.command ?? "").trim();
+      if (!/^(pwd|ls|find|rg|grep|sed|head|tail|cat|wc|git\s+(status|diff|log|show|branch|rev-parse)\b)/.test(command)) return { block: true, reason: "计划模式只允许只读命令" };
+    }
     const roots = task ? store.listTaskRepositories(task.id).map((repo) => resolvePath(repo.worktreePath ?? repo.localPath)) : [];
     const decision = evaluatePermission(event.toolName, input, roots, sandboxRouter.activeCwd(process.cwd()));
     if (decision.action === "allow") return undefined;
@@ -130,6 +135,37 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
     if (!allowed) return { block: true, reason: "用户拒绝执行" };
     if (task) store.addEvent({ taskId: task.id, kind: "permission", title: "已批准受保护命令", detail: command });
     return undefined;
+  });
+
+  pi.on("agent_end", async (event, ctx) => {
+    const task = selectedTask("");
+    if (!task || task.state !== "planning") return;
+    const last = [...event.messages].reverse().find((message: any) => message?.role === "assistant") as any;
+    const plan = last?.content?.filter((block: any) => block?.type === "text").map((block: any) => block.text).join("\n").trim();
+    if (!plan) return;
+    if (/"outcome"\s*:\s*"already_satisfied"|无需(?:任何)?(?:代码)?修改|代码已满足|already satisfied|no (?:code )?changes? (?:are )?required/i.test(plan)) {
+      taskWorkflow.completeWithoutChanges(task.id, plan);
+      if (toolsBeforePlanning) pi.setActiveTools(toolsBeforePlanning);
+      toolsBeforePlanning = undefined;
+      ctx.ui.notify("代码已满足任务要求，任务已自动完成", "info");
+      return;
+    }
+    taskWorkflow.setPlan(task.id, plan);
+    const choice = await ctx.ui.select("计划已生成", ["批准并开始", "补充意见并重新生成", "稍后确认"]);
+    if (choice === "批准并开始") {
+      const approval = store.addApproval({ taskId: task.id, kind: "plan", context: plan });
+      store.resolveApproval(approval.id, "approved");
+      await taskWorkflow.approvePlan(task.id);
+      if (toolsBeforePlanning) pi.setActiveTools(toolsBeforePlanning);
+      toolsBeforePlanning = undefined;
+      pi.sendUserMessage(`按已批准计划实现任务：\n\n${plan}`, { deliverAs: "followUp" });
+    } else if (choice === "补充意见并重新生成") {
+      const feedback = await ctx.ui.editor("计划调整意见", "");
+      if (feedback?.trim()) {
+        taskWorkflow.revisePlan(task.id);
+        pi.sendUserMessage(`根据以下意见重新生成完整计划，仍然禁止修改文件：\n\n${feedback.trim()}`, { deliverAs: "followUp" });
+      }
+    }
   });
 
   pi.registerCommand("tasks", {
@@ -173,13 +209,21 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
         if (!approved) { store.releaseLease(task.id, owner); return; }
         task = setState(task, "confirmed");
       }
-      // 准备环境(draft->confirmed->preparing->implementing)由下沉模块负责
-      try { await taskWorkflow.prepare(task.id); }
+      const selection = await ctx.ui.select("启动方式", ["直接开始", "先生成计划"]);
+      if (!selection) { store.releaseLease(task.id, owner); return; }
+      const mode = selection === "先生成计划" ? "plan" : "direct";
+      try { await taskWorkflow.begin(task.id, mode); }
       catch (error) { store.releaseLease(task.id, owner); return ctx.ui.notify(`准备环境失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
       store.setSetting("activeTaskId", task.id);
-      const planApproved = await approve(task, "plan", `确认执行任务：${task.title}`, ctx);
-      if (!planApproved) { store.releaseLease(task.id, owner); return; }
-      ctx.ui.notify("任务已锁定并批准，可以开始修改代码。", "info");
+      if (mode === "plan") {
+        toolsBeforePlanning = pi.getActiveTools();
+        pi.setActiveTools(toolsBeforePlanning.filter((name) => !["write", "edit", "apply_patch", "notebookedit"].includes(name.toLowerCase())));
+        pi.sendUserMessage(`只读分析任务，禁止修改文件或执行会改变工作区的命令。最终只输出 JSON：无需修改时输出 {"outcome":"already_satisfied","summary":"判断依据"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${task.title}\n\n${task.description}`, { deliverAs: "followUp" });
+        ctx.ui.notify("已进入计划模式", "info");
+      } else {
+        pi.sendUserMessage(`开始实现任务：\n\n${task.title}\n\n${task.description}`, { deliverAs: "followUp" });
+        ctx.ui.notify("worktree 与准备命令已完成，开始实现。", "info");
+      }
     }
   });
 

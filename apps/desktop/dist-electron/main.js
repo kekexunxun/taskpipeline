@@ -22,8 +22,11 @@ const keyStore = new LocalFileKeyStore(dataDir);
 let activeTaskId;
 let activeQoderQuery;
 let activeQoderAbort;
+let activePlanningTaskId;
+let activePlanText = "";
 const taskStateLabels = {
     draft: "待处理", confirmed: "已确认", preparing: "准备环境", implementing: "实现中",
+    planning: "计划中", awaiting_plan_approval: "等待计划确认", validating: "校验中", validation_failed: "校验失败",
     awaiting_review: "等待 Review", reviewing: "Review 中", review_blocked: "Review 阻断",
     awaiting_commit: "等待提交 MR", delivering: "提交 MR 中", await_merge: "等待合并",
     completed: "已完成", failed: "执行失败", cancelled: "已取消"
@@ -204,7 +207,7 @@ function buildReviewPromptForQoder(input) {
 function qoderText(message) {
     const record = message;
     if (message.type === "result")
-        return record.result ?? record.errors?.join("\n");
+        return record.result == null ? record.errors?.join("\n") : String(record.result);
     if (message.type !== "assistant")
         return undefined;
     const content = record.message?.content;
@@ -212,7 +215,35 @@ function qoderText(message) {
         return undefined;
     return content.filter((item) => item?.type === "text").map((item) => item.text).filter(Boolean).join("\n") || undefined;
 }
-function recordQoderMessage(taskId, message) {
+function parsePlanDecision(texts) {
+    for (const text of [...texts].reverse()) {
+        const start = text.indexOf("{");
+        const end = text.lastIndexOf("}");
+        if (start < 0 || end <= start)
+            continue;
+        try {
+            const value = JSON.parse(text.slice(start, end + 1));
+            if (["changes_required", "already_satisfied"].includes(value.outcome ?? "")) {
+                const content = String(value.plan || value.summary || "").trim();
+                if (content)
+                    return { outcome: value.outcome, content };
+            }
+        }
+        catch { /* Older agents may return prose instead of the requested JSON. */ }
+    }
+    const content = [...texts].sort((a, b) => b.length - a.length)[0]?.trim() ?? "";
+    if (!content)
+        throw new Error("Agent 未返回有效计划");
+    const alreadySatisfied = /(?:结论\s*[:：]?\s*)?(?:该任务|当前代码|代码)?(?:已经|已)(?:完成|满足)|无需(?:任何)?(?:代码)?修改|无需改动|already satisfied|no (?:code )?changes? (?:are )?required/i.test(content);
+    return { outcome: alreadySatisfied ? "already_satisfied" : "changes_required", content };
+}
+function savePlanDecision(taskId, texts) {
+    const decision = parsePlanDecision(texts);
+    return decision.outcome === "already_satisfied"
+        ? taskWorkflow.completeWithoutChanges(taskId, decision.content)
+        : taskWorkflow.setPlan(taskId, decision.content);
+}
+function recordQoderMessage(taskId, message, recordText = true) {
     const text = qoderText(message);
     const current = store.getTask(taskId)?.sessionUsage;
     const previous = current?.provider === "qoder" ? current : undefined;
@@ -255,7 +286,7 @@ function recordQoderMessage(taskId, message) {
         };
         store.updateTask(taskId, { sessionUsage: usage });
     }
-    if (text)
+    if (text && recordText)
         addTaskEvent({ taskId, kind: "message", title: "Qoder Agent", detail: text });
     else if (message.type === "system")
         addTaskEvent({ taskId, kind: "status", title: `Qoder ${message.subtype}`, detail: JSON.stringify(message).slice(0, 2000) });
@@ -291,11 +322,11 @@ async function runQoder(taskId, extraPrompt) {
     activeQoderAbort?.abort();
     activeQoderAbort = new AbortController();
     const prompt = extraPrompt
-        ? `${task.title}\n\n${task.description}\n\nAdditional request:\n${extraPrompt}`
-        : `${task.title}\n\n${task.description}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`;
+        ? `${task.title}\n\n${task.description}\n\nApproved implementation plan:\n${task.planContent ?? "(none)"}\n\nAdditional request:\n${extraPrompt}`
+        : `${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ""}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`;
     const q = query({ prompt, options: { auth: accessToken(token), cwd: repos[0].worktreePath ?? repos[0].localPath, additionalDirectories: repos.slice(1).map((repo) => repo.worktreePath ?? repo.localPath), abortController: activeQoderAbort, includePartialMessages: true, permissionMode: "acceptEdits", persistSession: true, ...(task.qoderModel ? { model: task.qoderModel } : {}) } });
     activeQoderQuery = q;
-    emitPi({ type: "agent_start", provider: "qoder", taskId });
+    emitPi({ type: "agent_start", provider: "qoder", taskId, phase: "implementation" });
     const logFile = qoderLogFile(task.id);
     if (logFile) {
         try {
@@ -317,24 +348,67 @@ async function runQoder(taskId, extraPrompt) {
         const detail = error instanceof Error ? error.message : String(error);
         addTaskEvent({ taskId, kind: "error", title: "Qoder 执行失败", detail });
         const current = store.getTask(task.id);
-        if (current?.state === "implementing")
+        if (["implementing", "validating"].includes(current?.state ?? ""))
             updateState(current, "failed");
         emitPi({ type: "agent_error", taskId, message: detail });
     }
     finally {
         activeQoderQuery = undefined;
         activeQoderAbort = undefined;
-        emitPi({ type: "agent_end", provider: "qoder", taskId });
+        emitPi({ type: "agent_end", provider: "qoder", taskId, phase: "implementation" });
+    }
+}
+async function runQoderPlan(taskId, feedback) {
+    const task = store.getTask(taskId);
+    const token = protectedValue("qoderToken");
+    if (!task || task.state !== "planning")
+        throw new Error("当前任务不能生成计划");
+    if (!token)
+        throw new Error("请先配置 Qoder Token");
+    const repos = store.listTaskRepositories(task.id);
+    if (repos.length === 0)
+        throw new Error("任务未关联代码仓库");
+    activeTaskId = task.id;
+    activePlanningTaskId = task.id;
+    activePlanText = "";
+    const prompt = [`请只读分析以下 Coding 任务。`, `任务：${task.title}`, task.description, `验收标准：\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`, feedback ? `上一次计划的调整意见：\n${feedback}` : "", "禁止修改文件，禁止执行安装、构建或其他会改变工作区的命令。", "最终只输出一个 JSON 对象，不要输出过程说明或 Markdown 代码块。若代码已满足要求，输出 {\"outcome\":\"already_satisfied\",\"summary\":\"判断依据和验证建议\"}；否则输出 {\"outcome\":\"changes_required\",\"plan\":\"完整实施计划，包含涉及文件、实施步骤、验证方式和风险\"}。"].filter(Boolean).join("\n\n");
+    const abort = new AbortController();
+    activeQoderAbort = abort;
+    const q = query({ prompt, options: { auth: accessToken(token), cwd: repos[0].worktreePath ?? repos[0].localPath, additionalDirectories: repos.slice(1).map((repo) => repo.worktreePath ?? repo.localPath), abortController: abort, includePartialMessages: true, permissionMode: "plan", persistSession: true, ...(task.qoderModel ? { model: task.qoderModel } : {}) } });
+    activeQoderQuery = q;
+    emitPi({ type: "agent_start", provider: "qoder", taskId, phase: "planning" });
+    const planMessages = [];
+    try {
+        for await (const message of q) {
+            recordQoderMessage(task.id, message, false);
+            const text = qoderText(message);
+            if ((message.type === "assistant" || message.type === "result") && text)
+                planMessages.push(text);
+        }
+        savePlanDecision(taskId, planMessages);
+    }
+    catch (error) {
+        const current = store.getTask(taskId);
+        if (current?.state === "planning")
+            updateState(current, "failed");
+        throw error;
+    }
+    finally {
+        activePlanningTaskId = undefined;
+        activeQoderQuery = undefined;
+        activeQoderAbort = undefined;
+        emitPi({ type: "agent_end", provider: "qoder", taskId, phase: "planning" });
     }
 }
 async function finishImplementation(taskId) {
     const task = store.getTask(taskId);
     if (!task || task.state !== "implementing")
         return;
+    const validated = await taskWorkflow.runValidation(taskId);
+    if (validated.state === "validation_failed")
+        return;
     if (taskWorkflow.isReviewEnabled())
         await taskWorkflow.runReview(taskId, buildReviewOrchestrator());
-    else
-        updateState(task, "awaiting_review");
     const updated = store.getTask(taskId);
     if (updated?.state === "awaiting_commit" && taskWorkflow.shouldAutoCreateMergeRequests())
         await deliveryService.submitMergeRequests(taskId);
@@ -369,6 +443,13 @@ function syncPiModelConfig(raw) {
 function emitPi(event) {
     const json = JSON.stringify(event, (_key, value) => typeof value === "string" ? redactSecrets(value) : value);
     const record = JSON.parse(json);
+    if (activePlanningTaskId && record.type === "message_update") {
+        const update = record.assistantMessageEvent;
+        if (update?.type === "text_delta" && update.delta)
+            activePlanText += update.delta;
+    }
+    if (activePlanningTaskId)
+        record.phase = "planning";
     if (activeTaskId && modelProvider() === "openai" && ["message_end", "agent_end"].includes(String(record.type)))
         updatePiUsage(activeTaskId);
     if (activeTaskId && record.type === "tool_execution_end")
@@ -511,11 +592,27 @@ async function startPi(taskId) {
     store.updateTask(task.id, { piSessionPath: session.sessionFile });
     emitPi({ type: "session_ready", sessionId: session.sessionId, sessionFile: session.sessionFile, diagnostics: created.extensionsResult.errors });
 }
-async function startTask(taskId) {
+async function startTask(taskId, options = {}) {
     const current = store.getTask(taskId);
     if (modelProvider() === "qoder" && current && ["draft", "failed"].includes(current.state))
         store.updateTask(taskId, { sessionUsage: undefined });
-    const task = await taskWorkflow.prepare(taskId);
+    const mode = options.mode ?? "direct";
+    const task = await taskWorkflow.begin(taskId, mode, options.repositoryCommands);
+    if (mode === "plan") {
+        if (modelProvider() === "qoder")
+            void runQoderPlan(taskId).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
+        else {
+            activePlanningTaskId = taskId;
+            activePlanText = "";
+            await startPi(taskId);
+            await piSession.prompt(`你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${task.title}\n${task.description}`, { source: "rpc" });
+            const plan = activePlanText.trim();
+            activePlanningTaskId = undefined;
+            if (plan)
+                savePlanDecision(taskId, [plan]);
+        }
+        return;
+    }
     if (modelProvider() === "qoder") {
         void runQoder(taskId).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
         return;
@@ -523,12 +620,50 @@ async function startTask(taskId) {
     await startPi(taskId);
     if (!piSession)
         throw new Error("OpenAI agent session is unavailable");
-    await piSession.prompt(`${task.title}\n\n${task.description}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`, { source: "rpc" });
+    await piSession.prompt(`${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ""}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`, { source: "rpc" });
+}
+async function approveTaskPlan(taskId) {
+    const before = store.getTask(taskId);
+    if (!before?.planContent)
+        throw new Error("当前任务没有可批准的计划");
+    const approval = store.addApproval({ taskId, kind: "plan", context: before.planContent });
+    store.resolveApproval(approval.id, "approved");
+    const task = await taskWorkflow.approvePlan(taskId);
+    if (modelProvider() === "qoder") {
+        void runQoder(taskId).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
+        return;
+    }
+    await startPi(taskId);
+    await piSession.prompt(`${task.title}\n\n${task.description}\n\nApproved implementation plan:\n${task.planContent}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`, { source: "rpc" });
+}
+async function reviseTaskPlan(taskId, feedback) {
+    const task = taskWorkflow.revisePlan(taskId);
+    addTaskEvent({ taskId, kind: "message", title: "计划调整意见", detail: feedback });
+    if (modelProvider() === "qoder") {
+        void runQoderPlan(taskId, feedback).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
+        return;
+    }
+    activePlanningTaskId = taskId;
+    activePlanText = "";
+    await startPi(taskId);
+    await piSession.prompt(`你处于只读计划模式。根据调整意见重新判断，禁止修改文件。最终只输出 JSON：无需修改时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n任务：${task.title}\n${task.description}\n\n上一版计划：\n${task.planContent ?? ""}\n\n调整意见：\n${feedback}`, { source: "rpc" });
+    const plan = activePlanText.trim();
+    activePlanningTaskId = undefined;
+    if (!plan)
+        throw new Error("Agent 未返回有效计划");
+    savePlanDecision(taskId, [plan]);
+}
+async function retryTaskValidation(taskId) {
+    const validated = await taskWorkflow.runValidation(taskId);
+    if (validated.state !== "awaiting_review")
+        return;
+    if (taskWorkflow.isReviewEnabled())
+        await taskWorkflow.runReview(taskId, buildReviewOrchestrator());
 }
 async function sendTaskMessage(taskId, message) {
     let task = store.getTask(taskId);
-    if (!task || !["awaiting_review", "reviewing", "review_blocked", "awaiting_commit", "await_merge"].includes(task.state))
-        throw new Error("只有 InReview 任务可以继续 AI 对话");
+    if (!task || !["awaiting_review", "reviewing", "review_blocked", "awaiting_commit", "await_merge", "validation_failed"].includes(task.state))
+        throw new Error("当前任务不能继续 AI 对话");
     task = updateState(task, "implementing");
     store.updateTask(task.id, { reviewStatus: "pending" });
     addTaskEvent({ taskId, kind: "message", title: "你", detail: message });
@@ -657,9 +792,12 @@ function registerIpc() {
         if (key === "modelProfile")
             syncPiModelConfig(value);
     });
-    ipcMain.handle("tasks:start", (_event, taskId) => startTask(taskId));
+    ipcMain.handle("tasks:start", (_event, taskId, options) => startTask(taskId, options));
+    ipcMain.handle("tasks:approve-plan", (_event, taskId) => approveTaskPlan(taskId));
+    ipcMain.handle("tasks:revise-plan", (_event, taskId, feedback) => reviseTaskPlan(taskId, feedback));
+    ipcMain.handle("tasks:retry-validation", (_event, taskId) => retryTaskValidation(taskId));
     ipcMain.handle("tasks:message", (_event, taskId, message) => sendTaskMessage(taskId, message));
-    ipcMain.handle("tasks:abort", async () => { const task = activeTaskId ? store.getTask(activeTaskId) : undefined; if (task?.state === "implementing")
+    ipcMain.handle("tasks:abort", async () => { const task = activeTaskId ? store.getTask(activeTaskId) : undefined; if (task && ["planning", "implementing", "validating"].includes(task.state))
         updateState(task, "failed"); activeQoderAbort?.abort(); await activeQoderQuery?.interrupt(); await piSession?.abort(); });
     ipcMain.handle("tasks:review", (_event, taskId) => taskWorkflow.runReview(taskId, buildReviewOrchestrator()));
     ipcMain.handle("tasks:reset-review", (_event, taskId) => taskWorkflow.resetReview(taskId));

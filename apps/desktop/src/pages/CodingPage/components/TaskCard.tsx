@@ -1,4 +1,4 @@
-import { CircleDotIcon, GitBranchIcon, PencilIcon, ShieldIcon, Trash2Icon } from "lucide-react";
+import { CircleDotIcon, FileTextIcon, GitBranchIcon, PencilIcon, ShieldIcon, Trash2Icon } from "lucide-react";
 import type { TaskCard } from "@coding-agent/core";
 import {
   AlertDialog,
@@ -17,9 +17,9 @@ import { cn } from "@/lib/utils";
 import { statusLabels } from "@/utils/status";
 
 const stateTone = (state: string) =>
-  state === "failed" || state === "review_blocked"
+  state === "failed" || state === "validation_failed" || state === "review_blocked"
     ? "destructive"
-    : state === "implementing" || state === "reviewing"
+    : ["planning", "awaiting_plan_approval", "implementing", "validating"].includes(state) || state === "reviewing"
     ? "warning"
     : state === "completed" || state === "await_merge"
     ? "success"
@@ -73,6 +73,7 @@ export function TaskCardView({
           ))}
         </div>
       )}
+      {task.planContent && <div className="pointer-events-none relative z-10 mt-1.5"><Badge variant="secondary"><FileTextIcon size={9} />计划 v{task.planRevision ?? 1}</Badge></div>}
       {task.repositories.map((repo) => (
         <div
           className="pointer-events-none relative z-10 mt-2 flex min-w-0 items-center justify-between gap-2 border-t pt-1.5 text-xs text-muted-foreground"

@@ -7,6 +7,18 @@ describe("task workflow", () => {
     expect(() => transitionTask("draft", "confirmed")).not.toThrow();
     expect(() => transitionTask("reviewing", "awaiting_commit")).not.toThrow();
   });
+  it("supports planning and validation gates without adding a board lane", () => {
+    expect(() => transitionTask("preparing", "planning")).not.toThrow();
+    expect(() => transitionTask("planning", "awaiting_plan_approval")).not.toThrow();
+    expect(() => transitionTask("planning", "completed")).not.toThrow();
+    expect(() => transitionTask("awaiting_plan_approval", "implementing")).not.toThrow();
+    expect(() => transitionTask("implementing", "validating")).not.toThrow();
+    expect(() => transitionTask("validating", "validation_failed")).not.toThrow();
+    expect(() => transitionTask("validation_failed", "validating")).not.toThrow();
+    expect(boardColumnFor("planning")).toBe("in_progress");
+    expect(boardColumnFor("awaiting_plan_approval")).toBe("in_progress");
+    expect(boardColumnFor("validating")).toBe("in_progress");
+  });
   it("rejects skipping a human gate", () => {
     expect(() => transitionTask("implementing", "completed")).toThrow();
   });

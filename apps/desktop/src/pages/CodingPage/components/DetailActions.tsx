@@ -13,6 +13,7 @@ export function DetailActions({
   onReview,
   onResetReview,
   onResetDelivery,
+  onRetryValidation,
   onSubmitMR,
   onManualComplete
 }: {
@@ -25,6 +26,7 @@ export function DetailActions({
   onReview(): void;
   onResetReview(): void;
   onResetDelivery(): void;
+  onRetryValidation(): void;
   onSubmitMR(): void;
   onManualComplete(): void;
 }) {
@@ -37,6 +39,9 @@ export function DetailActions({
   const isCompleted = state === "completed";
   const isCancelled = state === "cancelled";
   const isFailed = state === "failed";
+  const isValidationFailed = state === "validation_failed";
+  const hasActions = isDraft || running || isImplemented || isReviewBlocked || isFailed || isValidationFailed || isAwaitingCommit || isDelivering || isCompleted || isCancelled;
+  if (!hasActions) return null;
 
   return (
     <div className="flex min-h-10 shrink-0 items-center gap-1.5 border-b px-4 py-2">
@@ -55,11 +60,17 @@ export function DetailActions({
           <RefreshCcwIcon size={11} />重新 Review
         </Button>
       )}
-      {(isReviewBlocked || isFailed) && (
+      {isFailed && (
+        <Button size="sm" className="gap-1 px-2" onClick={onStart}>
+          <RefreshCcwIcon size={11} />重新开始
+        </Button>
+      )}
+      {isReviewBlocked && (
         <Button size="sm" className="gap-1 px-2" onClick={onResetReview}>
           <RefreshCcwIcon size={11} />重置 Review
         </Button>
       )}
+      {isValidationFailed && <Button size="sm" className="gap-1 px-2" onClick={onRetryValidation}><RefreshCcwIcon size={11} />重新校验</Button>}
       {(isAwaitingCommit || isDelivering) && (
         <Button size="sm" className="gap-1 px-2" onClick={onResetDelivery}>
           <RefreshCcwIcon size={11} />重置提交

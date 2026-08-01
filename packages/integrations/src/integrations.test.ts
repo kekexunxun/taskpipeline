@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { TaskStore } from "@coding-agent/core";
 import { GitService } from "./git.js";
 import { parseGitLabRemote } from "./gitlab.js";
 import { mapJiraTasks } from "./jira.js";
 import { McpClient } from "./mcp.js";
 import { OpenCodeReviewService, extractFirstJsonObject } from "./review.js";
+import { TaskWorkflow } from "./task-workflow.js";
 
 describe("Jira mapping", () => {
   it("maps internal MCP text content using configurable field paths", () => {
@@ -258,6 +263,61 @@ describe("process integrations", () => {
       throw err;
     });
     await expect(git.push("/repo", "feature/x", "wrong-token")).rejects.toBeInstanceOf(Error);
+  });
+});
+
+describe("task command workflow", () => {
+  it("restarts a failed setup and lets a task override clear the repository default", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    try {
+      const store = new TaskStore(join(dir, "store.db"));
+      store.saveRepositoryProfile({ id: "repo", name: "repo", localPath: dir, defaultBranch: "main", setupCommand: "install" });
+      const task = store.createTask({ title: "Retry setup", description: "test", state: "failed" });
+      const taskRepo = store.addTaskRepository({ taskId: task.id, repositoryId: "repo", name: "repo", localPath: dir, baseBranch: "main", setupCommand: "install", deliveryStatus: "pending" });
+      const calls: string[] = [];
+      const workflow = new TaskWorkflow(store, { get: () => undefined, getSecret: () => undefined }, { addEvent: (event) => store.addEvent(event), emitChanged: () => undefined }, () => dir, undefined, undefined, (async (command: string) => { calls.push(command); return { stdout: "", stderr: "", command, exitCode: 0 }; }) as any);
+
+      await expect(workflow.begin(task.id, "direct", { repo: { setupCommand: "" } })).resolves.toMatchObject({ state: "implementing" });
+
+      expect(calls).toEqual([]);
+      expect(store.listTaskRepositories(task.id).find((repo) => repo.id === taskRepo.id)?.setupCommand).toBe("");
+      store.close();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("completes a planning task when the repository already satisfies the request", () => {
+    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    try {
+      const store = new TaskStore(join(dir, "store.db"));
+      const task = store.createTask({ title: "Already done", description: "test", state: "planning" });
+      const workflow = new TaskWorkflow(store, { get: () => undefined, getSecret: () => undefined }, { addEvent: (event) => store.addEvent(event), emitChanged: () => undefined }, () => dir);
+
+      const completed = workflow.completeWithoutChanges(task.id, "现有实现已经满足验收条件。无需修改代码。");
+
+      expect(completed).toMatchObject({
+        state: "completed",
+        planContent: "现有实现已经满足验收条件。无需修改代码。",
+        planRevision: 1,
+        summary: "代码已满足任务要求，无需修改"
+      });
+      expect(store.listEvents(task.id).some((event) => event.title === "代码已满足要求，任务自动完成")).toBe(true);
+      store.close();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("runs validation commands in the configured order and records failure state", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    try {
+      const store = new TaskStore(join(dir, "store.db"));
+      const task = store.createTask({ title: "Validate", description: "test", state: "implementing" });
+      store.addTaskRepository({ taskId: task.id, repositoryId: "repo", name: "repo", localPath: dir, baseBranch: "main", worktreePath: dir, lintCommand: "lint", testCommand: "test", buildCommand: "build", deliveryStatus: "pending" });
+      const calls: string[] = [];
+      const workflow = new TaskWorkflow(store, { get: () => undefined, getSecret: () => undefined }, { addEvent: (event) => store.addEvent(event), emitChanged: () => undefined }, () => dir, undefined, undefined, (async (command: string) => { calls.push(command); return { stdout: "", stderr: "", command, exitCode: 0 }; }) as any);
+      await expect(workflow.runValidation(task.id)).resolves.toMatchObject({ state: "awaiting_review" });
+      expect(calls).toEqual(["lint", "test", "build"]);
+      expect(store.listEvents(task.id).some((event) => event.title.includes("Build 通过"))).toBe(true);
+      store.close();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
 

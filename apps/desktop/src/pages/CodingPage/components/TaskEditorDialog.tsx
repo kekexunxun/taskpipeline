@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { CheckIcon, GitBranchIcon, Loader2Icon, SaveIcon, XIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Loader2Icon, SaveIcon } from "lucide-react";
 import type { RepositoryProfile, Task } from "@coding-agent/core";
 import { api } from "@/api";
 import { useFeedback } from "@/hooks/useGlobalFeedback";
@@ -17,7 +17,7 @@ import { Field, FieldGroup } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
-import { cn } from "@/lib/utils";
+import { mergeRepositoryOptions, RepositoryPicker } from "./RepositoryPicker";
 
 /**
  * 任务编辑器（新建/编辑）。
@@ -65,8 +65,9 @@ export function TaskEditorDialog({
     ])
       .then(([repos, detail]) => {
         if (cancelled) return;
-        setRepositories(repos);
-        const ids = (detail?.repositories ?? []).map((item) => item.repositoryId);
+        const attached = detail?.repositories ?? [];
+        setRepositories(mergeRepositoryOptions(repos, attached));
+        const ids = attached.map((item) => item.repositoryId);
         initialIdsRef.current = ids;
         setInitialRepoIds(ids);
         setSelectedRepoIds(new Set(ids));
@@ -128,11 +129,6 @@ export function TaskEditorDialog({
     }
   };
 
-  const selectedRepos = useMemo(
-    () => repositories.filter((repo) => selectedRepoIds.has(repo.id)),
-    [repositories, selectedRepoIds]
-  );
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="w-[min(680px,calc(100vw-48px))]">
@@ -182,50 +178,7 @@ export function TaskEditorDialog({
               </span>
             }
           >
-            {repositories.length === 0 && !loading ? (
-              <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                还没有可关联的仓库。请到设置 → 仓库 中添加。
-              </div>
-            ) : (
-              <div className="thin-scrollbar max-h-44 space-y-1.5 overflow-y-auto rounded-md border bg-card/60 p-1.5">
-                {repositories.map((repo) => {
-                  const checked = selectedRepoIds.has(repo.id);
-                  return (
-                    <button
-                      type="button"
-                      key={repo.id}
-                      onClick={() => toggleRepo(repo.id, !checked)}
-                      className={cn(
-                        "flex w-full items-start gap-2 rounded-md border bg-card p-2 text-left transition-colors hover:border-border hover:bg-accent/40",
-                        checked && "border-ring bg-accent/70"
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          "mt-0.5 grid size-3.5 shrink-0 place-items-center rounded-[3px] border",
-                          checked
-                            ? "border-foreground bg-foreground text-background"
-                            : "border-border bg-background"
-                        )}
-                      >
-                        {checked && <CheckIcon size={9} strokeWidth={3} />}
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="flex items-center gap-1.5">
-                          <span className="truncate text-xs font-semibold text-white">
-                            {repo.name}
-                          </span>
-                        </span>
-                        <span className="mt-0.5 flex items-center gap-1 truncate text-xs text-muted-foreground">
-                          <GitBranchIcon size={9} className="shrink-0" />
-                          {repo.defaultBranch || "main"}
-                        </span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+            <RepositoryPicker repositories={repositories} selectedIds={selectedRepoIds} loading={loading} onToggle={toggleRepo} />
           </Field>
         </FieldGroup>
         <DialogFooter>
