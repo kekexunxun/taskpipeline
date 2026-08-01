@@ -17,7 +17,7 @@ export default function CodingPage() {
   const qoder = useQoderStatusContext();
   const { showError, showSuccess } = useFeedback();
   const tasks = useTasks();
-  const [editingTask, setEditingTask] = useState<string>();
+  const [editingTask, setEditingTask] = useState<string | "new">();
   const [jiraOpen, setJiraOpen] = useState(false);
   const [jiraSyncOpen, setJiraSyncOpen] = useState(false);
   const [merging, setMerging] = useState(false);
@@ -25,8 +25,8 @@ export default function CodingPage() {
   // URL ↔ state 同步
   useEffect(() => {
     if (taskId && taskId !== tasks.selectedId) tasks.setSelectedId(taskId);
-    if (!taskId && tasks.selectedId) navigate(`/coding/${tasks.selectedId}`, { replace: true });
-  }, [taskId, tasks, navigate]);
+    if (!taskId && tasks.selectedId) tasks.setSelectedId(undefined);
+  }, [taskId, tasks.selectedId, tasks.setSelectedId]);
 
   // 监听全局仓库变更事件
   useEffect(() => {
@@ -41,12 +41,10 @@ export default function CodingPage() {
   }, [navigate, tasks]);
 
   const onCloseDetail = useCallback(() => {
-    tasks.setSelectedId(undefined);
     navigate("/coding");
-  }, [navigate, tasks]);
+  }, [navigate]);
 
   const onRemove = useCallback((id: string) => {
-    if (!window.confirm("确认移除任务？该操作无法撤销。")) return;
     api.deleteTask(id).then(() => tasks.refresh()).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)));
   }, [showError, tasks]);
 
@@ -54,12 +52,12 @@ export default function CodingPage() {
     return tasks.run(action).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)));
   }, [showError, tasks]);
 
-  const editing = tasks.tasks.find((task) => task.id === editingTask);
+  const editing = editingTask === "new" ? undefined : tasks.tasks.find((task) => task.id === editingTask);
   const showDetail = Boolean(tasks.selectedId && tasks.detail);
 
   return (
     <>
-      <div className={`coding-shell${showDetail ? " has-detail" : ""}`}>
+      <div className={`grid h-full min-h-0 min-w-0 ${showDetail ? "grid-cols-[minmax(0,1fr)_clamp(400px,34vw,520px)]" : "grid-cols-1"}`}>
         <BoardPanel
           tasks={tasks.tasks}
           search={tasks.search}
@@ -68,7 +66,7 @@ export default function CodingPage() {
           onOpen={onOpenTask}
           onEdit={(id) => setEditingTask(id)}
           onRemove={onRemove}
-          onCreate={() => { /* handled by BoardPanel menu */ }}
+          onCreate={() => setEditingTask("new")}
           onFromJira={() => setJiraOpen(true)}
           onSyncJira={() => setJiraSyncOpen(true)}
         />
@@ -118,7 +116,12 @@ export default function CodingPage() {
           />
         )}
       </div>
-      <TaskEditorDialog open={Boolean(editingTask)} task={editing} onOpenChange={(open) => { if (!open) setEditingTask(undefined); }} onSaved={tasks.refresh} />
+      <TaskEditorDialog
+        open={Boolean(editingTask)}
+        task={editing}
+        onOpenChange={(open) => { if (!open) setEditingTask(undefined); }}
+        onSaved={async (saved) => { await tasks.refresh(); if (editingTask === "new") onOpenTask(saved.id); }}
+      />
       <JiraDialog open={jiraOpen} onOpenChange={setJiraOpen} onImported={tasks.refresh} />
       <JiraSyncDialog open={jiraSyncOpen} onOpenChange={setJiraSyncOpen} onImported={tasks.refresh} />
       <UiRequestDialog />

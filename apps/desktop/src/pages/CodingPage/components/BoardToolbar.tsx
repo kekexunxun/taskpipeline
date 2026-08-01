@@ -1,39 +1,58 @@
-import { useEffect, useRef, useState } from "react";
-import { Plus, RefreshCw, Search } from "lucide-react";
+import { PlusIcon, RefreshCwIcon, SearchIcon } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 
-export function NewTaskMenu({ onNew, onFromJira, onSyncJira, onClose }: { onNew(): void; onFromJira(): void; onSyncJira(): void; onClose(): void }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const onClick = (event: MouseEvent) => { if (!ref.current?.contains(event.target as Node)) onClose(); };
-    window.addEventListener("mousedown", onClick);
-    return () => window.removeEventListener("mousedown", onClick);
-  }, [onClose]);
-  return (
-    <div className="new-menu" ref={ref}>
-      <button onClick={onNew}>全新创建</button>
-      <button onClick={onFromJira}>从 Jira Key 创建</button>
-      <button onClick={onSyncJira}><RefreshCw size={14} />同步我的 Jira</button>
-    </div>
-  );
-}
-
-export function BoardToolbar({ search, onSearch, onCreateClick, onMenuOpen, menuOpen }: {
+export function BoardToolbar({
+  search,
+  onSearch,
+  onNew,
+  onFromJira,
+  onSyncJira
+}: {
   search: string;
   onSearch(value: string): void;
-  onCreateClick(): void;
-  onMenuOpen(): void;
-  menuOpen: boolean;
+  onNew(): void;
+  onFromJira(): void;
+  onSyncJira(): void;
 }) {
   return (
-    <div className="board-actions">
-      <label className="search-box">
-        <Search size={15} />
-        <input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="搜索任务" />
+    <div className="flex items-center gap-2">
+      <label className="relative w-56">
+        <SearchIcon
+          className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground"
+          size={11}
+        />
+        <Input
+          className="h-7 pl-7 text-xs placeholder:text-xs"
+          value={search}
+          onChange={(event) => onSearch(event.target.value)}
+          placeholder="搜索任务"
+        />
       </label>
-      <div className="new-task-wrap">
-        <button className="primary icon-command" title="新建任务" onClick={onCreateClick}><Plus size={16} /></button>
-        {menuOpen && <NewTaskMenu onNew={() => { onCreateClick(); onMenuOpen(); }} onFromJira={() => { onCreateClick(); onMenuOpen(); }} onSyncJira={() => { onCreateClick(); onMenuOpen(); }} onClose={onMenuOpen} />}
-      </div>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button size="icon-sm" aria-label="新建任务" className="h-7 w-7">
+            <PlusIcon size={13} strokeWidth={2} />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="text-xs">
+          <DropdownMenuItem onSelect={onNew} className="text-xs">
+            <PlusIcon size={11} />全新创建
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onFromJira} className="text-xs">
+            从 Jira Key 创建
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onSyncJira} className="text-xs">
+            <RefreshCwIcon size={11} />同步我的 Jira
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

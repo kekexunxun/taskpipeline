@@ -1,6 +1,8 @@
-import { CircleDot, RefreshCw } from "lucide-react";
+import { CircleDotIcon, RefreshCwIcon } from "lucide-react";
 import type { QoderStatus } from "../api";
 import { formatTokens } from "../utils/format";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 export function QoderStatusBar({ status, refreshing, onRefresh }: { status: QoderStatus; refreshing: boolean; onRefresh(): void }) {
   const quotaUsed = status.usage?.userQuota?.used ?? status.usage?.orgResourcePackage?.used;
@@ -10,28 +12,26 @@ export function QoderStatusBar({ status, refreshing, onRefresh }: { status: Qode
   const tier = status.account?.subscriptionType ?? status.usage?.userType ?? "Qoder";
   const defaultModel = status.models.find((model) => model.isDefault)?.displayName;
   return (
-    <footer className={`qoder-statusbar ${status.connected ? "connected" : "disconnected"}`}>
-      <div className="qoder-status-items">
-        <span className="qoder-connection" title={status.error}>
-          <CircleDot size={10} />{status.connected ? status.running ? "Qoder 执行中" : "Qoder 已连接" : "Qoder 未连接"}
+    <footer className="flex h-[26px] min-w-0 items-center gap-3 overflow-hidden border-t bg-card/80 px-2 text-xs text-muted-foreground">
+      <div className="flex min-w-0 flex-1 items-center gap-4 overflow-hidden">
+        <span className={cn("inline-flex shrink-0 items-center gap-1", status.connected ? "text-emerald-400" : "text-red-300")} title={status.error}>
+          <CircleDotIcon size={10} />{status.connected ? status.running ? "Qoder 执行中" : "Qoder 已连接" : "Qoder 未连接"}
         </span>
-        <span>档位 <b>{tier}</b></span>
-        {defaultModel && <span>默认模型 <b>{defaultModel}</b></span>}
+        <span className="shrink-0">档位 <b className="text-foreground">{tier}</b></span>
+        {defaultModel && <span className="shrink-0">默认模型 <b className="text-foreground">{defaultModel}</b></span>}
         {quotaUsed !== undefined && (
-          <span>用量 <b>{formatTokens(quotaUsed)}{quotaTotal !== undefined ? ` / ${formatTokens(quotaTotal)}` : ""}{quotaUnit ? ` ${quotaUnit}` : ""}</b></span>
+          <span className="shrink-0">用量 <b className="text-foreground">{formatTokens(quotaUsed)}{quotaTotal !== undefined ? ` / ${formatTokens(quotaTotal)}` : ""}{quotaUnit ? ` ${quotaUnit}` : ""}</b></span>
         )}
         {percentage !== undefined && (
           <>
-            <span className="qoder-quota-bar"><i style={{ width: `${Math.min(100, Math.max(0, percentage))}%` }} /></span>
-            <span><b>{percentage.toFixed(1)}%</b></span>
+            <span className="h-1 w-20 overflow-hidden rounded-full bg-muted"><i className="block h-full bg-emerald-400" style={{ width: `${Math.min(100, Math.max(0, percentage))}%` }} /></span>
+            <span><b className="text-foreground">{percentage.toFixed(1)}%</b></span>
           </>
         )}
         {status.usage?.addOnQuota?.remaining !== undefined && <span>加量包剩余 <b>{formatTokens(status.usage.addOnQuota.remaining)}</b></span>}
-        {status.usage?.isQuotaExceeded && <span className="quota-warning">配额已用尽</span>}
+        {status.usage?.isQuotaExceeded && <span className="text-red-300">配额已用尽</span>}
       </div>
-      <button className="qoder-refresh" type="button" title={refreshing ? "正在刷新 Qoder 状态" : "刷新 Qoder 状态"} aria-label="刷新 Qoder 状态" disabled={refreshing} onClick={onRefresh}>
-        <RefreshCw className={refreshing ? "spinning" : ""} size={12} />
-      </button>
+      <Button variant="ghost" size="icon-sm" title={refreshing ? "正在刷新 Qoder 状态" : "刷新 Qoder 状态"} aria-label="刷新 Qoder 状态" disabled={refreshing} onClick={onRefresh}><RefreshCwIcon className={refreshing ? "animate-spin-slow" : ""} size={12} /></Button>
     </footer>
   );
 }

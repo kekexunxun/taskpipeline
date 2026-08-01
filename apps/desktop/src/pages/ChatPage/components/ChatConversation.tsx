@@ -1,26 +1,47 @@
-import { useEffect, useRef } from "react";
-import { Sparkles } from "lucide-react";
-import type { ChatMessage as ChatMessageT } from "../../../api";
+import { MessageSquareTextIcon } from "lucide-react";
+import type { ChatMessage } from "@/api";
+import {
+  Conversation,
+  ConversationContent,
+  ConversationScrollButton
+} from "@/components/ai-elements/conversation";
 import { ChatMessageView } from "./ChatMessage";
 
-export function ChatConversation({ messages }: { messages: ChatMessageT[] }) {
-  const endRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages.length, messages[messages.length - 1]?.content]);
+export function ChatConversation({
+  messages,
+  streaming
+}: {
+  messages: ChatMessage[];
+  streaming?: boolean;
+}) {
+  const lastIndex = messages.length - 1;
   if (messages.length === 0) {
     return (
-      <div className="chat-conversation">
-        <div className="chat-empty">
-          <Sparkles size={28} />
-          <strong>开始一次新对话</strong>
-          <span>支持自由问答、代码解释、重构建议等</span>
+      <div className="flex h-full min-h-0 flex-1 items-center justify-center px-6 py-16">
+        <div className="flex max-w-sm flex-col items-center gap-3 text-center">
+          <div className="grid size-10 place-items-center rounded-lg border bg-card text-muted-foreground">
+            <MessageSquareTextIcon size={18} />
+          </div>
+          <h3 className="text-sm font-semibold text-foreground">开始一次新对话</h3>
+          <p className="text-xs leading-5 text-muted-foreground">
+            询问代码、架构和重构问题
+          </p>
         </div>
       </div>
     );
   }
   return (
-    <div className="chat-conversation">
-      {messages.map((m) => <ChatMessageView key={m.id} message={m} />)}
-      <div ref={endRef} />
-    </div>
+    <Conversation className="thin-scrollbar min-h-0 flex-1 overflow-y-auto">
+      <ConversationContent className="mx-auto w-full max-w-3xl gap-5 px-5 py-5">
+        {messages.map((message, index) => (
+          <ChatMessageView
+            key={message.id}
+            message={message}
+            isAnimating={streaming && !message.metadata?.status && index === lastIndex}
+          />
+        ))}
+      </ConversationContent>
+      <ConversationScrollButton />
+    </Conversation>
   );
 }

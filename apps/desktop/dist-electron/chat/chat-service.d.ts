@@ -1,8 +1,6 @@
-import { EventEmitter } from "node:events";
 import type { BrowserWindow } from "electron";
 import type { TaskStore } from "@coding-agent/core";
-import { type ChatMessage, type ChatConversationMeta } from "./chat-storage.js";
-import type { ChatConversation, ChatModelGroup } from "./chat-types.js";
+import type { AbortChatStreamInput, ChatConversation, ChatModelGroup, StartChatStreamInput } from "./chat-types.js";
 type GetQoderStatus = () => Promise<{
     enabled: boolean;
     connected: boolean;
@@ -12,28 +10,28 @@ type GetQoderStatus = () => Promise<{
         displayName: string;
         isDefault?: boolean;
         isReasoning?: boolean;
+        isVl?: boolean;
         priceFactor?: number;
     }>;
 }>;
-type QoderTokenProvider = () => string | undefined;
-export declare class ChatService extends EventEmitter {
+type TokenProvider = () => string | undefined;
+export declare class ChatService {
     private readonly store;
-    private readonly dataDir;
     private readonly getQoderStatus;
     private readonly getQoderToken;
+    private readonly getOpenAIKey;
     private readonly getMainWindow;
-    private storage;
-    private activeStreams;
-    constructor(store: TaskStore, dataDir: string, getQoderStatus: GetQoderStatus, getQoderToken: QoderTokenProvider, getMainWindow: () => BrowserWindow | undefined);
-    listChats(): ChatConversationMeta[];
+    private readonly storage;
+    private readonly activeStreams;
+    constructor(store: TaskStore, dataDir: string, getQoderStatus: GetQoderStatus, getQoderToken: TokenProvider, getOpenAIKey: TokenProvider, getMainWindow: () => BrowserWindow | undefined);
+    listChats(): import("./chat-types.js").ChatConversationMeta[];
     getChat(id: string): ChatConversation | undefined;
+    listModels(): Promise<ChatModelGroup[]>;
     createChat(model?: string): ChatConversation;
     deleteChat(id: string): void;
-    appendUserMessage(id: string, text: string): ChatMessage;
-    listModels(): Promise<ChatModelGroup[]>;
-    abortChat(id: string): void;
-    sendChatMessage(chatId: string, messageId: string, model: string): Promise<void>;
-    private updateAssistantMessage;
+    abortChat(input: AbortChatStreamInput): void;
+    startChatStream(input: StartChatStreamInput): Promise<void>;
     private dispatch;
+    private finish;
 }
 export {};

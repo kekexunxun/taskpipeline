@@ -8,8 +8,8 @@ import { useQoderStatus } from "../hooks/useQoderStatus";
 import { QoderStatusProvider, useQoderStatusContext } from "../hooks/useQoderStatusContext";
 import { useFeedbackProvider, FeedbackProvider } from "../hooks/useGlobalFeedback";
 import { GlobalFeedback } from "../components/GlobalFeedback";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { SettingsDialog } from "../pages/CodingPage/components/SettingsDialog";
-import { RepositoryDialog } from "../pages/CodingPage/components/RepositoryDialog";
 
 const ChatPage = lazy(() => import("../pages/ChatPage/index"));
 const CodingPage = lazy(() => import("../pages/CodingPage/index"));
@@ -17,12 +17,12 @@ const CodingPage = lazy(() => import("../pages/CodingPage/index"));
 function ShellInner({ onOpenSettings }: { onOpenSettings(): void }) {
   const qoder = useQoderStatusContext();
   return (
-    <main className={`app-shell ${qoder.status?.enabled ? "with-status" : ""}`}>
+    <main className={`grid h-screen min-h-0 grid-rows-[44px_minmax(0,1fr)] bg-background ${qoder.status?.enabled ? "grid-rows-[44px_minmax(0,1fr)_26px]" : ""}`}>
       <TopBar onOpenSettings={onOpenSettings} />
-      <div className="app-body">
+      <div className="flex min-h-0">
         <ActionBar />
-        <div className="app-content">
-          <Suspense fallback={<div className="app-loading">加载中…</div>}>
+        <div className="min-w-0 flex-1">
+          <Suspense fallback={<div className="grid h-full place-items-center text-xs text-muted-foreground">加载中…</div>}>
             <Routes>
               <Route path="/" element={<ChatPage />} />
               <Route path="/chat" element={<ChatPage />} />
@@ -42,14 +42,14 @@ export function AppShell() {
   const qoder = useQoderStatus();
   const feedback = useFeedbackProvider();
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [repoDialogOpen, setRepoDialogOpen] = useState(false);
   return (
     <FeedbackProvider value={feedback}>
       <QoderStatusProvider value={qoder}>
-        <GlobalFeedback />
-        <ShellInner onOpenSettings={() => setSettingsOpen(true)} />
-        <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} qoder={qoder.status} onRepositoriesChanged={() => setRepoDialogOpen(true)} />
-        <RepositoryDialog open={repoDialogOpen} onOpenChange={setRepoDialogOpen} onSaved={() => { setRepoDialogOpen(false); window.dispatchEvent(new CustomEvent("app:repositories-changed")); }} />
+        <TooltipProvider delayDuration={350}>
+          <GlobalFeedback />
+          <ShellInner onOpenSettings={() => setSettingsOpen(true)} />
+          <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} qoder={qoder.status} />
+        </TooltipProvider>
       </QoderStatusProvider>
     </FeedbackProvider>
   );

@@ -1,145 +1,133 @@
 import { randomUUID } from "node:crypto";
-import { EventEmitter } from "node:events";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { ChatStorage } from "./chat-storage.js";
-import { listChatModels, parseModelValue } from "./chat-models.js";
+import { listChatModels, resolveChatModel } from "./chat-models.js";
 import { streamChat } from "./chat-llm.js";
-export class ChatService extends EventEmitter {
+function textOf(message) { return message.parts.filter((part) => part.type === "text").map((part) => part.text).join(""); }
+function titleOf(text) { return text.slice(0, 32).replace(/\s+/g, " ").trim() || "新对话"; }
+export class ChatService {
     store;
-    dataDir;
     getQoderStatus;
     getQoderToken;
+    getOpenAIKey;
     getMainWindow;
     storage;
     activeStreams = new Map();
-    constructor(store, dataDir, getQoderStatus, getQoderToken, getMainWindow) {
-        super();
+    constructor(store, dataDir, getQoderStatus, getQoderToken, getOpenAIKey, getMainWindow) {
         this.store = store;
-        this.dataDir = dataDir;
         this.getQoderStatus = getQoderStatus;
         this.getQoderToken = getQoderToken;
+        this.getOpenAIKey = getOpenAIKey;
         this.getMainWindow = getMainWindow;
         this.storage = new ChatStorage(dataDir);
     }
-    listChats() {
-        return this.storage.listMetas();
-    }
-    getChat(id) {
-        const meta = this.storage.listMetas().find((m) => m.id === id);
-        if (!meta)
-            return undefined;
-        return { ...meta, messages: this.storage.readMessages(id) };
-    }
+    listChats() { return this.storage.listMetas(); }
+    getChat(id) { return this.storage.getConversation(id); }
+    listModels() { return listChatModels(this.store, this.getQoderStatus); }
     createChat(model) {
-        const id = randomUUID();
-        const now = new Date().toISOString();
-        const meta = { id, title: "新对话", createdAt: now, updatedAt: now, messageCount: 0, model };
-        if (model) {
-            const parsed = parseModelValue(model);
-            meta.provider = parsed.provider;
+        const existing = this.storage.listMetas().find((item) => item.messageCount === 0);
+        if (existing) {
+            const conversation = this.storage.getConversation(existing.id);
+            if (conversation)
+                return conversation;
         }
-        this.storage.upsertMeta(meta);
-        return { ...meta, messages: [] };
+        const now = new Date().toISOString();
+        const conversation = { id: randomUUID(), title: "新对话", createdAt: now, updatedAt: now, messageCount: 0, model, provider: model?.startsWith("openai:") ? "openai" : model ? "qoder" : undefined, messages: [] };
+        this.storage.saveConversation(conversation);
+        return conversation;
     }
     deleteChat(id) {
-        this.activeStreams.get(id)?.abort();
-        this.activeStreams.delete(id);
+        this.activeStreams.get(id)?.abort.abort();
         this.storage.deleteConversation(id);
     }
-    appendUserMessage(id, text) {
-        const msg = { id: randomUUID(), role: "user", content: text, createdAt: new Date().toISOString(), status: "done" };
-        this.storage.appendMessage(id, msg);
-        const meta = this.storage.listMetas().find((m) => m.id === id);
-        if (meta) {
-            const messages = this.storage.readMessages(id);
-            const updated = {
-                ...meta,
-                title: meta.title === "新对话" && messages.filter((m) => m.role === "user").length === 1 ? text.slice(0, 32).replace(/\s+/g, " ").trim() || "新对话" : meta.title,
-                messageCount: messages.length,
-                updatedAt: new Date().toISOString()
-            };
-            this.storage.upsertMeta(updated);
-        }
-        return msg;
+    abortChat(input) {
+        const active = this.activeStreams.get(input.chatId);
+        if (active?.streamId === input.streamId)
+            active.abort.abort();
     }
-    listModels() {
-        return listChatModels(this.store, this.getQoderStatus);
-    }
-    abortChat(id) {
-        this.activeStreams.get(id)?.abort();
-        this.activeStreams.delete(id);
-    }
-    async sendChatMessage(chatId, messageId, model) {
-        if (this.activeStreams.has(chatId))
-            this.activeStreams.get(chatId).abort();
+    async startChatStream(input) {
+        const conversation = this.storage.getConversation(input.chatId);
+        if (!conversation)
+            throw new Error("对话不存在");
+        const prior = this.activeStreams.get(input.chatId);
+        if (prior)
+            prior.abort.abort();
         const abort = new AbortController();
-        this.activeStreams.set(chatId, abort);
-        const messages = this.storage.readMessages(chatId);
-        const parsed = parseModelValue(model);
-        const qoderToken = parsed.provider === "qoder" ? this.getQoderToken() : undefined;
+        this.activeStreams.set(input.chatId, { streamId: input.streamId, abort });
+        const now = new Date().toISOString();
+        const userMessage = { ...input.message, metadata: { ...(input.message.metadata ?? {}), createdAt: input.message.metadata?.createdAt ?? now, status: "done" } };
+        const existing = conversation.messages.filter((message) => message.id !== userMessage.id);
+        const messages = [...existing, userMessage];
         const assistantId = randomUUID();
-        const assistantMessage = { id: assistantId, role: "assistant", content: "", createdAt: new Date().toISOString(), model: parsed.key, status: "streaming" };
-        this.storage.appendMessage(chatId, assistantMessage);
-        this.dispatch(chatId, { type: "chat_message_start", chatId, messageId: assistantId, role: "assistant" });
-        const meta = this.storage.listMetas().find((m) => m.id === chatId);
-        let buffer = "";
+        const textPartId = `text-${assistantId}`;
+        let content = "";
+        let status = "done";
+        let modelKey = input.model;
+        let userPersisted = false;
         try {
-            for await (const event of streamChat({
-                provider: parsed.provider,
-                modelKey: parsed.key,
-                qoderToken,
-                openaiProfile: parsed.openai,
-                messages,
-                signal: abort.signal
-            })) {
+            const title = conversation.messages.some((message) => message.role === "user") ? conversation.title : titleOf(textOf(userMessage));
+            this.storage.replaceMessages(input.chatId, messages, { title, model: input.model, provider: input.model.startsWith("openai:") ? "openai" : "qoder", updatedAt: now });
+            userPersisted = true;
+            const model = resolveChatModel(input.model, this.store, this.getOpenAIKey);
+            modelKey = model.key;
+            const startMetadata = { createdAt: now, model: modelKey };
+            this.dispatch(input, { type: "start", messageId: assistantId, messageMetadata: startMetadata });
+            this.dispatch(input, { type: "text-start", id: textPartId });
+            for await (const event of streamChat({ model, qoderToken: model.provider === "qoder" ? this.getQoderToken() : undefined, messages, signal: abort.signal })) {
                 if (event.type === "delta") {
-                    buffer += event.delta;
-                    this.dispatch(chatId, { type: "chat_message_delta", chatId, messageId: assistantId, delta: event.delta });
-                }
-                else if (event.type === "done") {
-                    buffer = event.content || buffer;
-                }
-                else if (event.type === "error") {
-                    this.dispatch(chatId, { type: "chat_message_error", chatId, messageId: assistantId, error: event.error });
-                    this.updateAssistantMessage(chatId, assistantId, { content: event.error, status: "error" });
-                    this.activeStreams.delete(chatId);
-                    return;
+                    content += event.delta;
+                    this.dispatch(input, { type: "text-delta", id: textPartId, delta: event.delta });
                 }
             }
-            this.updateAssistantMessage(chatId, assistantId, { content: buffer, status: "done" });
-            this.dispatch(chatId, { type: "chat_message_done", chatId, messageId: assistantId, content: buffer, model: parsed.key });
-            if (meta) {
-                this.storage.upsertMeta({ ...meta, updatedAt: new Date().toISOString(), messageCount: this.storage.readMessages(chatId).length });
-            }
+            if (abort.signal.aborted)
+                status = "aborted";
+            if (!content && status === "done")
+                throw new Error("模型返回了空响应");
         }
         catch (reason) {
-            this.dispatch(chatId, { type: "chat_message_error", chatId, messageId: assistantId, error: reason instanceof Error ? reason.message : String(reason) });
+            if (abort.signal.aborted)
+                status = "aborted";
+            else {
+                status = "error";
+                const message = reason instanceof Error ? reason.message : String(reason);
+                this.dispatch(input, { type: "error", errorText: message });
+            }
         }
         finally {
-            this.activeStreams.delete(chatId);
+            const metadata = { createdAt: now, model: modelKey, status };
+            try {
+                if (userPersisted) {
+                    const assistant = { id: assistantId, role: "assistant", metadata, parts: [{ type: "text", text: content, state: "done" }] };
+                    const latest = this.storage.getConversation(input.chatId);
+                    if (latest) {
+                        const merged = latest.messages.filter((message) => message.id !== assistantId);
+                        const userIndex = merged.findIndex((message) => message.id === userMessage.id);
+                        merged.splice(userIndex >= 0 ? userIndex + 1 : merged.length, 0, assistant);
+                        this.storage.replaceMessages(input.chatId, merged, { model: input.model, updatedAt: new Date().toISOString() });
+                    }
+                }
+            }
+            catch (reason) {
+                const message = reason instanceof Error ? reason.message : String(reason);
+                this.dispatch(input, { type: "error", errorText: `保存聊天失败：${message}` });
+            }
+            finally {
+                if (status === "aborted")
+                    this.dispatch(input, { type: "abort", reason: "用户已停止生成" });
+                else {
+                    this.dispatch(input, { type: "text-end", id: textPartId });
+                    this.dispatch(input, { type: "finish", finishReason: status === "error" ? "error" : "stop", messageMetadata: metadata });
+                }
+                this.finish(input);
+                if (this.activeStreams.get(input.chatId)?.streamId === input.streamId)
+                    this.activeStreams.delete(input.chatId);
+            }
         }
     }
-    updateAssistantMessage(chatId, assistantId, patch) {
-        const file = `${this.dataDir}/chats/chat-${chatId}.jsonl`;
-        if (!existsSync(file))
-            return;
-        const lines = readFileSync(file, "utf8").split("\n").filter(Boolean);
-        const updated = lines.map((line) => {
-            try {
-                const parsed = JSON.parse(line);
-                if (parsed.id === assistantId)
-                    return JSON.stringify({ ...parsed, ...patch });
-                return line;
-            }
-            catch {
-                return line;
-            }
-        });
-        writeFileSync(file, updated.join("\n") + "\n");
+    dispatch(input, chunk) {
+        this.getMainWindow()?.webContents.send("chat:stream-event", { streamId: input.streamId, chatId: input.chatId, chunk });
     }
-    dispatch(chatId, event) {
-        this.getMainWindow()?.webContents.send("chat:event", event);
-        super.emit(chatId, event);
+    finish(input) {
+        this.getMainWindow()?.webContents.send("chat:stream-event", { streamId: input.streamId, chatId: input.chatId, done: true });
     }
 }
 //# sourceMappingURL=chat-service.js.map

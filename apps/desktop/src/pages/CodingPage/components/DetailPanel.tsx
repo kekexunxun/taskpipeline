@@ -7,7 +7,7 @@ import { ChangedFilesSection } from "./ChangedFilesSection";
 import { MergeRequestsSection } from "./MergeRequestsSection";
 import { DetailActions } from "./DetailActions";
 import { Timeline, type TimelineItem } from "./Timeline";
-import { Composer } from "./Composer";
+import { TaskComposer } from "./Composer";
 import { inReviewStates } from "../../../utils/status";
 
 type Props = {
@@ -34,7 +34,29 @@ type Props = {
   onOpenUrl(url: string): void;
 };
 
-export function DetailPanel({ card, detail, liveEvents, qoder, prompt, running, merging, onClose, onOpenVSCode, onOpenQoder, onChangeModel, onStart, onAbort, onReview, onResetReview, onResetDelivery, onSubmitMR, onManualComplete, onPrompt, onSend, onOpenUrl }: Props) {
+export function DetailPanel({
+  card,
+  detail,
+  liveEvents,
+  qoder,
+  prompt,
+  running,
+  merging,
+  onClose,
+  onOpenVSCode,
+  onOpenQoder,
+  onChangeModel,
+  onStart,
+  onAbort,
+  onReview,
+  onResetReview,
+  onResetDelivery,
+  onSubmitMR,
+  onManualComplete,
+  onPrompt,
+  onSend,
+  onOpenUrl
+}: Props) {
   const task = detail?.task;
   const groups = useMemo(() => {
     const byRepo = new Map<string, { repositoryId: string; repositoryName: string; files: ChangedFile[] }>();
@@ -49,15 +71,29 @@ export function DetailPanel({ card, detail, liveEvents, qoder, prompt, running, 
   if (!task || !card) return null;
   const totalFiles = detail?.changedFiles.length ?? 0;
   const canChat = inReviewStates.has(task.state) || task.state === "failed" || task.state === "draft" || running;
-  const showUsage = running || task.state === "implementing" || task.sessionUsage || card.sessionUsage;
-  const showChangedFiles = inReviewStates.has(task.state) || ["completed", "failed", "cancelled"].includes(task.state);
+  const showUsage =
+    running ||
+    task.state === "implementing" ||
+    task.sessionUsage ||
+    card.sessionUsage;
+  const showChangedFiles =
+    inReviewStates.has(task.state) ||
+    ["completed", "failed", "cancelled"].includes(task.state);
   return (
-    <section className="detail-panel">
-      <DetailHeader task={task} onClose={onClose} onOpenVSCode={onOpenVSCode} onOpenQoder={onOpenQoder} />
+    <section className="flex min-h-0 min-w-0 flex-col overflow-hidden border-l bg-card/50">
+      <DetailHeader
+        task={task}
+        onClose={onClose}
+        onOpenVSCode={onOpenVSCode}
+        onOpenQoder={onOpenQoder}
+      />
       <DetailActions
         card={card}
         running={running}
-        canSubmit={card.repositories.some((repo) => repo.deliveryStatus === "committed" || repo.deliveryStatus === "pushed")}
+        canSubmit={card.repositories.some(
+          (repo) =>
+            repo.deliveryStatus === "committed" || repo.deliveryStatus === "pushed"
+        )}
         merging={merging}
         onStart={onStart}
         onAbort={onAbort}
@@ -67,13 +103,41 @@ export function DetailPanel({ card, detail, liveEvents, qoder, prompt, running, 
         onSubmitMR={onSubmitMR}
         onManualComplete={onManualComplete}
       />
-      <div className="detail-body">
-        {showUsage && <UsageSection task={task} card={card} model={task.qoderModel} onChangeModel={onChangeModel} modelOptions={qoder?.models ?? []} running={running} hasModelSelector={Boolean(qoder?.enabled && qoder.connected && (qoder?.models.length ?? 0) > 0)} />}
+      <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto">
+        {showUsage && (
+          <UsageSection
+            task={task}
+            card={card}
+            model={task.qoderModel}
+            onChangeModel={onChangeModel}
+            modelOptions={qoder?.models ?? []}
+            running={running}
+            hasModelSelector={Boolean(
+              qoder?.enabled &&
+                qoder.connected &&
+                (qoder?.models.length ?? 0) > 0
+            )}
+          />
+        )}
         {showChangedFiles && <ChangedFilesSection groups={groups} total={totalFiles} />}
         <MergeRequestsSection repos={detail?.repositories ?? []} onOpen={onOpenUrl} />
         <Timeline items={[...(detail?.events ?? []), ...liveEvents]} />
       </div>
-      {canChat && <Composer value={prompt} onChange={onPrompt} onSend={onSend} disabled={!running && task.state !== "failed" && task.state !== "draft" && !inReviewStates.has(task.state)} />}
+      {canChat && (
+        <div className="shrink-0 border-t bg-background/95 px-3 pb-2 pt-1.5">
+          <TaskComposer
+            value={prompt}
+            onChange={onPrompt}
+            onSend={onSend}
+            disabled={
+              !running &&
+              task.state !== "failed" &&
+              task.state !== "draft" &&
+              !inReviewStates.has(task.state)
+            }
+          />
+        </div>
+      )}
     </section>
   );
 }

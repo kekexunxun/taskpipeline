@@ -1,33 +1,10 @@
-import { GitBranch, GitMerge } from "lucide-react";
+import { ExternalLinkIcon, GitBranchIcon, GitMergeIcon } from "lucide-react";
 import type { TaskRepository } from "@coding-agent/core";
-import { formatTime } from "../../../utils/format";
-
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { formatTime } from "@/utils/format";
 const stateLabel: Record<string, string> = { opened: "已打开", merged: "已合并", closed: "已关闭", unknown: "未检测" };
-
 export function MergeRequestsSection({ repos, onOpen }: { repos: TaskRepository[]; onOpen(url: string): void }) {
-  const withMr = repos.filter((repo) => repo.mergeRequestUrl);
-  if (withMr.length === 0) return null;
-  return (
-    <section className="merge-requests-section">
-      <div className="section-title">
-        <span><GitMerge size={13} />Merge Requests</span>
-        <small>{withMr.length}</small>
-      </div>
-      <div className="merge-request-list">
-        {withMr.map((repo) => {
-          const state = repo.mergeRequestState ?? "unknown";
-          const stateClass = state === "merged" ? "merged" : state === "closed" ? "closed" : state === "opened" ? "opened" : "unknown";
-          const checkedAt = repo.mergeRequestCheckedAt ? formatTime(repo.mergeRequestCheckedAt) : "尚未检测";
-          return (
-            <div className={`merge-request-row ${stateClass}`} key={repo.id}>
-              <span className="repo-name"><GitBranch size={11} />{repo.name}</span>
-              <span className={`mr-state ${stateClass}`}>{stateLabel[state]}</span>
-              <button className="mr-link" type="button" onClick={() => repo.mergeRequestUrl && onOpen(repo.mergeRequestUrl)} title={repo.mergeRequestUrl ?? ""}>!{repo.mergeRequestIid}</button>
-              <small className="mr-checked">检查于 {checkedAt}</small>
-            </div>
-          );
-        })}
-      </div>
-    </section>
-  );
+  const withMr = repos.filter((repo) => repo.mergeRequestUrl); if (!withMr.length) return null;
+  return <section className="border-b px-5 py-3"><div className="mb-2 flex items-center justify-between text-xs font-semibold text-muted-foreground"><span className="flex items-center gap-1.5"><GitMergeIcon size={12} />Merge Requests</span><Badge variant="secondary">{withMr.length}</Badge></div><div className="space-y-1">{withMr.map((repo) => { const state = repo.mergeRequestState ?? "unknown"; return <div className="grid min-h-8 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 rounded border px-2 text-xs" key={repo.id}><span className="flex min-w-0 items-center gap-1 truncate"><GitBranchIcon size={10} />{repo.name}</span><Badge variant={state === "merged" ? "success" : state === "closed" ? "destructive" : state === "opened" ? "default" : "outline"}>{stateLabel[state]}</Badge><Button variant="ghost" size="icon-sm" aria-label={`打开 MR ${repo.mergeRequestIid}`} onClick={() => repo.mergeRequestUrl && onOpen(repo.mergeRequestUrl)} title={`检查于 ${repo.mergeRequestCheckedAt ? formatTime(repo.mergeRequestCheckedAt) : "尚未检测"}`}><ExternalLinkIcon size={11} /></Button></div>; })}</div></section>;
 }

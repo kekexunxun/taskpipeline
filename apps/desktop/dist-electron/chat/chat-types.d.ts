@@ -1,13 +1,11 @@
-export type ChatMessageRole = "user" | "assistant" | "system";
-export type ChatMessageStatus = "streaming" | "done" | "error";
-export type ChatMessage = {
-    id: string;
-    role: ChatMessageRole;
-    content: string;
+import type { UIMessage, UIMessageChunk } from "ai";
+export type ChatMessageStatus = "done" | "error" | "aborted";
+export type ChatMessageMetadata = {
     createdAt: string;
     model?: string;
     status?: ChatMessageStatus;
 };
+export type ChatMessage = UIMessage<ChatMessageMetadata>;
 export type ChatConversationMeta = {
     id: string;
     title: string;
@@ -25,6 +23,7 @@ export type ChatModelInfo = {
     displayName: string;
     isDefault?: boolean;
     isReasoning?: boolean;
+    isVl?: boolean;
     priceFactor?: number;
 };
 export type ChatModelGroup = {
@@ -32,25 +31,20 @@ export type ChatModelGroup = {
     displayName: string;
     models: ChatModelInfo[];
 };
-export type ChatEvent = {
-    type: "chat_message_start";
+export type StartChatStreamInput = {
+    streamId: string;
     chatId: string;
-    messageId: string;
-    role: "assistant";
-} | {
-    type: "chat_message_delta";
+    model: string;
+    message: ChatMessage;
+};
+export type AbortChatStreamInput = {
+    streamId: string;
     chatId: string;
-    messageId: string;
-    delta: string;
-} | {
-    type: "chat_message_done";
+};
+export type ChatStreamEvent = {
+    streamId: string;
     chatId: string;
-    messageId: string;
-    content: string;
-    model?: string;
-} | {
-    type: "chat_message_error";
-    chatId: string;
-    messageId: string;
-    error: string;
+    chunk?: UIMessageChunk;
+    error?: string;
+    done?: boolean;
 };

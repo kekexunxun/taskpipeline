@@ -37,9 +37,8 @@ contextBridge.exposeInMainWorld("agentApi", {
   getChat: (id: string) => ipcRenderer.invoke("chats:get", id),
   createChat: (model?: string) => ipcRenderer.invoke("chats:create", model),
   deleteChat: (id: string) => ipcRenderer.invoke("chats:delete", id),
-  appendUserMessage: (id: string, text: string) => ipcRenderer.invoke("chats:append-message", id, text),
   listChatModels: () => ipcRenderer.invoke("chats:list-models"),
-  sendChatMessage: (chatId: string, messageId: string, model: string) => ipcRenderer.invoke("chats:send", chatId, messageId, model),
-  abortChat: (id: string) => ipcRenderer.invoke("chats:abort", id),
-  onChatEvent: (callback: (event: unknown) => void) => { const listener = (_: unknown, event: unknown) => callback(event); ipcRenderer.on("chat:event", listener); return () => ipcRenderer.removeListener("chat:event", listener); }
+  startChatStream: (input: unknown) => ipcRenderer.invoke("chats:start-stream", input),
+  abortChat: (input: unknown) => ipcRenderer.invoke("chats:abort", input),
+  onChatStreamEvent: (callback: (event: unknown) => void) => { const listener = (_: unknown, event: unknown) => callback(event); ipcRenderer.on("chat:stream-event", listener); return () => ipcRenderer.removeListener("chat:stream-event", listener); }
 });

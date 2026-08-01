@@ -1,83 +1,79 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import type { ChatConversation, ChatConversationMeta, ChatMessage } from "./chat-types.js";
 
-export type ChatMessage = {
-  id: string;
-  role: "user" | "assistant" | "system";
-  content: string;
-  createdAt: string;
-  model?: string;
-  status?: "streaming" | "done" | "error";
-};
+const STORAGE_VERSION = 2;
+const INDEX_FILE = "index.json";
 
-export type ChatConversationMeta = {
-  id: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-  model?: string;
-  provider?: "qoder" | "openai";
-  messageCount: number;
-};
+type ChatIndex = { version: 2; conversations: ChatConversationMeta[] };
+type ChatFile = { version: 2; conversation: ChatConversation };
 
-const INDEX_FILE = "_index.jsonl";
+function chatsDir(root: string) { return join(root, "chats-v2"); }
+function indexPath(root: string) { return join(chatsDir(root), INDEX_FILE); }
+function conversationPath(root: string, id: string) { return join(chatsDir(root), `chat-${id}.json`); }
 
-function chatDir(root: string): string { return join(root, "chats"); }
-function ensureDir(root: string): void {
-  const dir = chatDir(root);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-}
-function indexPath(root: string): string { return join(chatDir(root), INDEX_FILE); }
-function messagesPath(root: string, id: string): string { return join(chatDir(root), `chat-${id}.jsonl`); }
-
-function safeParse<T>(line: string): T | undefined {
-  try { return JSON.parse(line) as T; } catch { return undefined; }
+function atomicWrite(file: string, value: unknown): void {
+  const temp = `${file}.${randomUUID()}.tmp`;
+  writeFileSync(temp, JSON.stringify(value, null, 2));
+  renameSync(temp, file);
 }
 
-function appendLine(file: string, data: unknown): void {
-  writeFileSync(file, `${JSON.stringify(data)}\n`, { flag: "a" });
-}
-
-function readLines<T>(file: string): T[] {
-  if (!existsSync(file)) return [];
-  const content = readFileSync(file, "utf8");
-  if (!content.trim()) return [];
-  return content.split("\n").filter(Boolean).map((line) => safeParse<T>(line)).filter((v): v is T => Boolean(v));
+function parseFile<T>(file: string): T | undefined {
+  if (!existsSync(file)) return undefined;
+  try { return JSON.parse(readFileSync(file, "utf8")) as T; } catch { return undefined; }
 }
 
 export class ChatStorage {
   constructor(private readonly dataDir: string) {}
 
-  private withDir(): void { ensureDir(this.dataDir); }
+  private ensureDir(): void { mkdirSync(chatsDir(this.dataDir), { recursive: true }); }
 
   listMetas(): ChatConversationMeta[] {
-    this.withDir();
-    return readLines<ChatConversationMeta>(indexPath(this.dataDir)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    this.ensureDir();
+    const index = parseFile<ChatIndex>(indexPath(this.dataDir));
+    if (index?.version !== STORAGE_VERSION || !Array.isArray(index.conversations)) return [];
+    return [...index.conversations].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
-  readMessages(id: string): ChatMessage[] {
-    this.withDir();
-    return readLines<ChatMessage>(messagesPath(this.dataDir, id));
+  getConversation(id: string): ChatConversation | undefined {
+    this.ensureDir();
+    const file = parseFile<ChatFile>(conversationPath(this.dataDir, id));
+    if (file?.version !== STORAGE_VERSION || file.conversation?.id !== id || !Array.isArray(file.conversation.messages)) return undefined;
+    return file.conversation;
   }
 
-  appendMessage(id: string, message: ChatMessage): void {
-    this.withDir();
-    appendLine(messagesPath(this.dataDir, id), message);
+  saveConversation(conversation: ChatConversation): void {
+    this.ensureDir();
+    const normalized = { ...conversation, messageCount: conversation.messages.length };
+    atomicWrite(conversationPath(this.dataDir, conversation.id), { version: STORAGE_VERSION, conversation: normalized } satisfies ChatFile);
+    this.upsertMeta(({ messages: _messages, ...meta }) => meta, normalized);
   }
 
-  upsertMeta(meta: ChatConversationMeta): void {
-    this.withDir();
-    const list = this.listMetas();
-    const idx = list.findIndex((item) => item.id === meta.id);
-    if (idx >= 0) list[idx] = meta; else list.push(meta);
-    writeFileSync(indexPath(this.dataDir), list.map((m) => JSON.stringify(m)).join("\n") + "\n");
+  replaceMessages(id: string, messages: ChatMessage[], patch: Partial<ChatConversationMeta> = {}): ChatConversation | undefined {
+    const current = this.getConversation(id);
+    if (!current) return undefined;
+    const next = { ...current, ...patch, messages, messageCount: messages.length, updatedAt: patch.updatedAt ?? new Date().toISOString() };
+    this.saveConversation(next);
+    return next;
   }
 
   deleteConversation(id: string): void {
-    this.withDir();
-    const file = messagesPath(this.dataDir, id);
+    this.ensureDir();
+    const file = conversationPath(this.dataDir, id);
     if (existsSync(file)) unlinkSync(file);
-    const list = this.listMetas().filter((m) => m.id !== id);
-    writeFileSync(indexPath(this.dataDir), list.map((m) => JSON.stringify(m)).join("\n") + (list.length ? "\n" : ""));
+    this.writeIndex(this.listMetas().filter((item) => item.id !== id));
+  }
+
+  private upsertMeta(select: (conversation: ChatConversation) => ChatConversationMeta, conversation: ChatConversation): void {
+    const meta = select(conversation);
+    const list = this.listMetas();
+    const index = list.findIndex((item) => item.id === meta.id);
+    if (index >= 0) list[index] = meta; else list.push(meta);
+    this.writeIndex(list);
+  }
+
+  private writeIndex(conversations: ChatConversationMeta[]): void {
+    atomicWrite(indexPath(this.dataDir), { version: STORAGE_VERSION, conversations } satisfies ChatIndex);
   }
 }

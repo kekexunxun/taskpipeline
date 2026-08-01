@@ -1,27 +1,13 @@
-export type ChatMessage = {
-    id: string;
-    role: "user" | "assistant" | "system";
-    content: string;
-    createdAt: string;
-    model?: string;
-    status?: "streaming" | "done" | "error";
-};
-export type ChatConversationMeta = {
-    id: string;
-    title: string;
-    createdAt: string;
-    updatedAt: string;
-    model?: string;
-    provider?: "qoder" | "openai";
-    messageCount: number;
-};
+import type { ChatConversation, ChatConversationMeta, ChatMessage } from "./chat-types.js";
 export declare class ChatStorage {
     private readonly dataDir;
     constructor(dataDir: string);
-    private withDir;
+    private ensureDir;
     listMetas(): ChatConversationMeta[];
-    readMessages(id: string): ChatMessage[];
-    appendMessage(id: string, message: ChatMessage): void;
-    upsertMeta(meta: ChatConversationMeta): void;
+    getConversation(id: string): ChatConversation | undefined;
+    saveConversation(conversation: ChatConversation): void;
+    replaceMessages(id: string, messages: ChatMessage[], patch?: Partial<ChatConversationMeta>): ChatConversation | undefined;
     deleteConversation(id: string): void;
+    private upsertMeta;
+    private writeIndex;
 }

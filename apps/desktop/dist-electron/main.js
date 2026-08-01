@@ -112,7 +112,7 @@ const deliveryService = new DeliveryService(store, gitService, desktopResolver, 
 const mergeRefresher = new MergeStatusRefresher(store, desktopResolver, desktopSink);
 const taskCompleter = new TaskCompleter(store, desktopSink);
 const atlassianFactory = new AtlassianClientFactory(desktopResolver);
-const chatService = new ChatService(store, dataDir, getQoderStatus, () => protectedValue("qoderToken"), () => mainWindow);
+const chatService = new ChatService(store, dataDir, getQoderStatus, () => protectedValue("qoderToken"), () => protectedValue("modelApiKey"), () => mainWindow);
 // === Review 实现(Qoder / OpenAI 兼容) =========================================
 async function callQoderReviewer(prompt, taskId, model) {
     const token = protectedValue("qoderToken");
@@ -611,7 +611,7 @@ async function getQoderStatus() {
         return {
             enabled: true, connected: true, running: Boolean(activeQoderQuery),
             account: initialization.account, usage,
-            models: models.filter((model) => model.isEnabled !== false).map(({ value, displayName, description, isDefault, isEnabled, isReasoning, priceFactor }) => ({ value, displayName, description, isDefault, isEnabled, isReasoning, priceFactor }))
+            models: models.filter((model) => model.isEnabled !== false).map(({ value, displayName, description, isDefault, isEnabled, isReasoning, isVl, priceFactor }) => ({ value, displayName, description, isDefault, isEnabled, isReasoning, isVl, priceFactor }))
         };
     }
     catch (error) {
@@ -701,12 +701,11 @@ function registerIpc() {
     ipcMain.handle("chats:get", (_event, id) => chatService.getChat(id));
     ipcMain.handle("chats:create", (_event, model) => chatService.createChat(model));
     ipcMain.handle("chats:delete", (_event, id) => chatService.deleteChat(id));
-    ipcMain.handle("chats:append-message", (_event, id, text) => chatService.appendUserMessage(id, text));
     ipcMain.handle("chats:list-models", () => chatService.listModels());
-    ipcMain.handle("chats:send", (_event, chatId, messageId, model) => {
-        void chatService.sendChatMessage(chatId, messageId, model);
+    ipcMain.handle("chats:start-stream", (_event, input) => {
+        void chatService.startChatStream(input).catch((reason) => console.error("[chat] stream failed", reason));
     });
-    ipcMain.handle("chats:abort", (_event, id) => chatService.abortChat(id));
+    ipcMain.handle("chats:abort", (_event, input) => chatService.abortChat(input));
 }
 async function createWindow() {
     mainWindow = new BrowserWindow({

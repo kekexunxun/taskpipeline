@@ -1,11 +1,11 @@
 import type { BoardColumn } from "@coding-agent/core";
-import { Inbox, Activity, Shield, CheckCircle2 } from "lucide-react";
+import { InboxIcon, ActivityIcon, ShieldIcon, CheckCircle2Icon } from "lucide-react";
 
-export const columns: Array<{ id: BoardColumn; title: string; icon: typeof Inbox }> = [
-  { id: "todo", title: "Todo", icon: Inbox },
-  { id: "in_progress", title: "InProgress", icon: Activity },
-  { id: "in_review", title: "InReview", icon: Shield },
-  { id: "done", title: "Done", icon: CheckCircle2 }
+export const columns: Array<{ id: BoardColumn; title: string; icon: typeof InboxIcon }> = [
+  { id: "todo", title: "Todo", icon: InboxIcon },
+  { id: "in_progress", title: "InProgress", icon: ActivityIcon },
+  { id: "in_review", title: "InReview", icon: ShieldIcon },
+  { id: "done", title: "Done", icon: CheckCircle2Icon }
 ];
 
 export const statusLabels: Record<string, string> = {

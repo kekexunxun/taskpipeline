@@ -1,103 +1,107 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { ChevronDown } from "lucide-react";
-import type { ChatModelGroup } from "../../../api";
+import { useState } from "react";
+import { CheckIcon, ChevronDownIcon, CpuIcon, SparklesIcon } from "lucide-react";
+import type { ChatModelGroup } from "@/api";
+import { Button } from "@/components/ui/button";
+import {
+  ModelSelector,
+  ModelSelectorContent,
+  ModelSelectorEmpty,
+  ModelSelectorGroup,
+  ModelSelectorInput,
+  ModelSelectorItem,
+  ModelSelectorList,
+  ModelSelectorName,
+  ModelSelectorTrigger
+} from "@/components/ai-elements/model-selector";
+import { ModelBadges } from "@/components/ModelBadges";
+import { cn } from "@/lib/utils";
 
-type Props = {
+/**
+ * 模型选择器：直接基于 ai-elements 的 ModelSelector + Command。
+ * 触发按钮采用 11px 紧凑样式（与 ChatComposer 工具栏同高），下拉项紧凑。
+ */
+export function ChatModelSelector({
+  groups,
+  value,
+  onChange,
+  disabled
+}: {
   groups: ChatModelGroup[];
   value?: string;
-  onChange(value: string): void;
+  onChange(value: string | undefined): void;
   disabled?: boolean;
-};
-
-// 菜单用 Portal 挂到 body 并用 fixed 定位，避开任何祖先容器的 overflow: hidden / transform
-// 创建的裁剪/层级问题。trigger 仍保留在原位置。
-export function ChatModelSelector({ groups, value, onChange, disabled }: Props) {
+}) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  const current = groups.flatMap((group) => group.models).find((m) => m.value === value);
-
-  // 打开时立即定位一次；之后跟随 resize / 任意祖先滚动实时更新。
-  useLayoutEffect(() => {
-    if (!open || !triggerRef.current) return;
-    const measure = () => {
-      const rect = triggerRef.current!.getBoundingClientRect();
-      setPos({ left: rect.left, bottom: window.innerHeight - rect.top + 6 });
-    };
-    measure();
-    const onResize = () => measure();
-    const onScroll = () => measure();
-    window.addEventListener("resize", onResize);
-    window.addEventListener("scroll", onScroll, true);
-    return () => { window.removeEventListener("resize", onResize); window.removeEventListener("scroll", onScroll, true); };
-  }, [open]);
-
-  // 外部点击 / Esc 关闭
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (triggerRef.current?.contains(target)) return;
-      if (menuRef.current?.contains(target)) return;
-      setOpen(false);
-    };
-    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
-    window.addEventListener("mousedown", onPointerDown);
-    window.addEventListener("keydown", onKey);
-    return () => { window.removeEventListener("mousedown", onPointerDown); window.removeEventListener("keydown", onKey); };
-  }, [open]);
-
-  if (groups.length === 0) {
-    return <span className="chat-model-empty" title="在设置中配置 Qoder 或 OpenAI-Compatible 后才可选择模型">未配置模型</span>;
-  }
+  const flat = groups.flatMap((group) =>
+    group.models.map((model) => ({ ...model, provider: group.displayName }))
+  );
+  const current = flat.find((model) => model.value === value) ?? flat.find((model) => model.isDefault);
+  const hasModels = flat.length > 0;
 
   return (
-    <div className="chat-model-selector">
-      <button
-        ref={triggerRef}
-        type="button"
-        className="chat-model-selector-trigger"
-        disabled={disabled}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <span>{current?.displayName ?? "选择模型"}</span>
-        <ChevronDown size={12} className={open ? "rotated" : ""} />
-      </button>
-      {open && pos && createPortal(
-        <div
-          ref={menuRef}
-          className="chat-model-menu"
-          style={{ position: "fixed", left: pos.left, bottom: pos.bottom }}
-          role="menu"
+    <ModelSelector open={open} onOpenChange={setOpen}>
+      <ModelSelectorTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={disabled || !hasModels}
+          className="h-6 gap-1 px-1.5 font-normal text-muted-foreground hover:text-foreground"
+          aria-label="选择模型"
         >
+          <CpuIcon size={10} className="opacity-70" />
+          <span className="max-w-32 truncate">{current?.displayName ?? "Auto"}</span>
+          <ChevronDownIcon size={9} className="opacity-70" />
+        </Button>
+      </ModelSelectorTrigger>
+      <ModelSelectorContent
+        title="选择模型"
+        className="w-[min(420px,calc(100vw-40px))] border bg-popover text-popover-foreground text-sm"
+      >
+        <ModelSelectorInput placeholder="搜索模型…" />
+        <ModelSelectorList>
+          <ModelSelectorEmpty>未找到匹配的模型</ModelSelectorEmpty>
           {groups.map((group) => (
-            <div className="chat-model-group" key={group.provider}>
-              <div className="chat-model-group-label">{group.displayName}</div>
-              {group.models.map((m) => (
-                <button
-                  type="button"
-                  className={`chat-model-option ${m.value === value ? "selected" : ""}`}
-                  key={m.value}
-                  onClick={() => { onChange(m.value); setOpen(false); }}
-                >
-                  <span>{m.displayName}</span>
-                  <span className="tag">
-                    {m.isDefault ? "默认" : null}
-                    {m.isReasoning ? " · 推理" : ""}
-                    {m.priceFactor !== undefined && m.priceFactor !== 1 ? ` · ${m.priceFactor}x` : ""}
-                  </span>
-                </button>
-              ))}
-            </div>
+            <ModelSelectorGroup
+              key={group.provider}
+              heading={
+                <span className="inline-flex items-center gap-1">
+                  {group.provider === "qoder" ? <SparklesIcon size={10} /> : <CpuIcon size={10} />}
+                  {group.displayName}
+                </span>
+              }
+            >
+              {group.models.map((model) => {
+                const isActive = model.value === value;
+                return (
+                  <ModelSelectorItem
+                    key={model.value}
+                    value={model.displayName}
+                    onSelect={() => {
+                      onChange(model.value);
+                      setOpen(false);
+                    }}
+                  >
+                    <ModelSelectorName>{model.displayName}</ModelSelectorName>
+                    <ModelBadges model={model} />
+                    {model.isDefault && (
+                      <span className="rounded bg-muted px-1 text-[10px] font-medium text-muted-foreground">
+                        默认
+                      </span>
+                    )}
+                    <CheckIcon
+                      size={11}
+                      className={cn(
+                        "ml-auto text-foreground",
+                        isActive ? "opacity-100" : "opacity-0"
+                      )}
+                    />
+                  </ModelSelectorItem>
+                );
+              })}
+            </ModelSelectorGroup>
           ))}
-        </div>,
-        document.body
-      )}
-    </div>
+        </ModelSelectorList>
+      </ModelSelectorContent>
+    </ModelSelector>
   );
 }

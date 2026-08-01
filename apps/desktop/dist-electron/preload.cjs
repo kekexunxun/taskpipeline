@@ -38,10 +38,9 @@ electron_1.contextBridge.exposeInMainWorld("agentApi", {
     getChat: (id) => electron_1.ipcRenderer.invoke("chats:get", id),
     createChat: (model) => electron_1.ipcRenderer.invoke("chats:create", model),
     deleteChat: (id) => electron_1.ipcRenderer.invoke("chats:delete", id),
-    appendUserMessage: (id, text) => electron_1.ipcRenderer.invoke("chats:append-message", id, text),
     listChatModels: () => electron_1.ipcRenderer.invoke("chats:list-models"),
-    sendChatMessage: (chatId, messageId, model) => electron_1.ipcRenderer.invoke("chats:send", chatId, messageId, model),
-    abortChat: (id) => electron_1.ipcRenderer.invoke("chats:abort", id),
-    onChatEvent: (callback) => { const listener = (_, event) => callback(event); electron_1.ipcRenderer.on("chat:event", listener); return () => electron_1.ipcRenderer.removeListener("chat:event", listener); }
+    startChatStream: (input) => electron_1.ipcRenderer.invoke("chats:start-stream", input),
+    abortChat: (input) => electron_1.ipcRenderer.invoke("chats:abort", input),
+    onChatStreamEvent: (callback) => { const listener = (_, event) => callback(event); electron_1.ipcRenderer.on("chat:stream-event", listener); return () => electron_1.ipcRenderer.removeListener("chat:stream-event", listener); }
 });
 //# sourceMappingURL=preload.cjs.map

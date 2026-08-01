@@ -1,7 +1,21 @@
-import { Check, Loader2, Play, RefreshCcw, Send, Square } from "lucide-react";
+import { CheckIcon, Loader2Icon, PlayIcon, RefreshCcwIcon, SendIcon, SquareIcon } from "lucide-react";
 import type { TaskCard } from "@coding-agent/core";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 
-export function DetailActions({ card, running, canSubmit, merging, onStart, onAbort, onReview, onResetReview, onResetDelivery, onSubmitMR, onManualComplete }: {
+export function DetailActions({
+  card,
+  running,
+  canSubmit,
+  merging,
+  onStart,
+  onAbort,
+  onReview,
+  onResetReview,
+  onResetDelivery,
+  onSubmitMR,
+  onManualComplete
+}: {
   card: TaskCard;
   running: boolean;
   canSubmit: boolean;
@@ -20,18 +34,60 @@ export function DetailActions({ card, running, canSubmit, merging, onStart, onAb
   const isReviewBlocked = state === "review_blocked";
   const isAwaitingCommit = state === "awaiting_commit";
   const isDelivering = state === "delivering";
-  const isCompleted = state === "completed" || state === "cancelled";
+  const isCompleted = state === "completed";
+  const isCancelled = state === "cancelled";
   const isFailed = state === "failed";
+
   return (
-    <div className="action-row">
-      {isDraft && <button className="primary" onClick={onStart}><Play size={14} />开始实现</button>}
-      {running && <button className="primary" onClick={onAbort}><Square size={14} />终止</button>}
-      {isImplemented && <button className="primary" onClick={onReview}><RefreshCcw size={14} />重新 Review</button>}
-      {(isReviewBlocked || isFailed) && <button className="primary" onClick={onResetReview}><RefreshCcw size={14} />重置 Review</button>}
-      {(isAwaitingCommit || isDelivering) && <button className="primary" onClick={onResetDelivery}><RefreshCcw size={14} />重置提交</button>}
-      {isAwaitingCommit && canSubmit && <button className="primary" onClick={onSubmitMR}>{merging ? <><Loader2 className="spinning" size={14} />正在提交…</> : <><Send size={14} />提交 MR</>}</button>}
-      {isCompleted && <span className="state-badge terminal completed"><Check size={12} />{state === "completed" ? "已完成" : "已取消"}</span>}
-      {isCompleted && <button className="secondary" onClick={onManualComplete}><Check size={12} />手动结束</button>}
+    <div className="flex min-h-10 shrink-0 items-center gap-1.5 border-b px-4 py-2">
+      {isDraft && (
+        <Button size="sm" className="gap-1 px-2" onClick={onStart}>
+          <PlayIcon size={11} />开始实现
+        </Button>
+      )}
+      {running && (
+        <Button size="sm" variant="destructive" className="gap-1 px-2" onClick={onAbort}>
+          <SquareIcon size={11} />终止
+        </Button>
+      )}
+      {isImplemented && (
+        <Button size="sm" className="gap-1 px-2" onClick={onReview}>
+          <RefreshCcwIcon size={11} />重新 Review
+        </Button>
+      )}
+      {(isReviewBlocked || isFailed) && (
+        <Button size="sm" className="gap-1 px-2" onClick={onResetReview}>
+          <RefreshCcwIcon size={11} />重置 Review
+        </Button>
+      )}
+      {(isAwaitingCommit || isDelivering) && (
+        <Button size="sm" className="gap-1 px-2" onClick={onResetDelivery}>
+          <RefreshCcwIcon size={11} />重置提交
+        </Button>
+      )}
+      {isAwaitingCommit && canSubmit && (
+        <Button size="sm" className="gap-1 px-2" disabled={merging} onClick={onSubmitMR}>
+          {merging ? (
+            <>
+              <Loader2Icon className="animate-spin-slow" size={11} />正在提交
+            </>
+          ) : (
+            <>
+              <SendIcon size={11} />提交 MR
+            </>
+          )}
+        </Button>
+      )}
+      {isCompleted && (
+        <Badge variant="success">
+          <CheckIcon size={10} />已完成
+        </Badge>
+      )}
+      {isCancelled && (
+        <Badge variant="muted">
+          <CheckIcon size={10} />已取消
+        </Badge>
+      )}
     </div>
   );
 }

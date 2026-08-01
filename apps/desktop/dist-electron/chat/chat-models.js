@@ -1,51 +1,36 @@
+function readProfile(store) {
+    const raw = store.getSetting("modelProfile");
+    if (!raw)
+        return undefined;
+    try {
+        return JSON.parse(raw);
+    }
+    catch {
+        return undefined;
+    }
+}
 export async function listChatModels(store, getQoderStatus) {
     const groups = [];
     try {
         const qoder = await getQoderStatus();
-        if (qoder.enabled && qoder.connected && qoder.models.length > 0) {
-            groups.push({
-                provider: "qoder",
-                displayName: "Qoder Agent SDK",
-                models: qoder.models.map((m) => ({
-                    value: `qoder:${m.value}`,
-                    displayName: m.displayName,
-                    isDefault: m.isDefault,
-                    isReasoning: m.isReasoning,
-                    priceFactor: m.priceFactor
-                }))
-            });
-        }
+        if (qoder.enabled && qoder.connected && qoder.models.length)
+            groups.push({ provider: "qoder", displayName: "Qoder Agent SDK", models: qoder.models.map((model) => ({ value: `qoder:${model.value}`, displayName: model.displayName, isDefault: model.isDefault, isReasoning: model.isReasoning, isVl: model.isVl, priceFactor: model.priceFactor })) });
     }
-    catch { /* qoder not configured */ }
-    try {
-        const raw = store.getSetting("modelProfile");
-        if (raw) {
-            const profile = JSON.parse(raw);
-            if (profile.provider === "company-openai" && profile.baseUrl && profile.model) {
-                groups.push({
-                    provider: "openai",
-                    displayName: "OpenAI-Compatible",
-                    models: [{ value: `openai:${profile.baseUrl}|${profile.model}`, displayName: profile.model }]
-                });
-            }
-        }
-    }
-    catch { /* malformed profile */ }
+    catch { /* Qoder is optional. */ }
+    const profile = readProfile(store);
+    if (profile?.provider === "company-openai" && profile.baseUrl && profile.model)
+        groups.push({ provider: "openai", displayName: "OpenAI-Compatible", models: [{ value: "openai:default", displayName: profile.displayName || profile.model, isDefault: groups.length === 0 }] });
     return groups;
 }
-export function parseModelValue(value) {
-    const colon = value.indexOf(":");
-    const head = colon >= 0 ? value.slice(0, colon) : "";
-    const body = value.slice(colon + 1);
-    if (head === "openai") {
-        const sep = body.indexOf("|");
-        if (sep < 0)
-            return { provider: "openai", key: body };
-        const baseUrl = body.slice(0, sep);
-        const model = body.slice(sep + 1);
-        const apiKey = process.env.OPENAI_API_KEY;
-        return { provider: "openai", key: model, openai: { baseUrl, model, apiKey } };
-    }
-    return { provider: "qoder", key: body };
+export function resolveChatModel(value, store, getOpenAIKey) {
+    if (value.startsWith("qoder:") && value.length > 6)
+        return { provider: "qoder", key: value.slice(6) };
+    if (value !== "openai:default")
+        throw new Error("未知的聊天模型");
+    const profile = readProfile(store);
+    if (!profile?.baseUrl || !profile.model)
+        throw new Error("OpenAI-Compatible profile 未配置");
+    const apiKey = (profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : undefined) ?? getOpenAIKey();
+    return { provider: "openai", key: profile.model, baseUrl: profile.baseUrl, apiKey };
 }
 //# sourceMappingURL=chat-models.js.map

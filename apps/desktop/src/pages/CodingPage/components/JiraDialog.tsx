@@ -1,35 +1,73 @@
 import { useState } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
-import { Link2, Loader2 } from "lucide-react";
-import { api } from "../../../api";
+import { Link2Icon, Loader2Icon } from "lucide-react";
+import { api } from "@/api";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog";
+import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 
-export function JiraDialog({ open, onOpenChange, onImported }: { open: boolean; onOpenChange(open: boolean): void; onImported(): void }) {
+export function JiraDialog({
+  open,
+  onOpenChange,
+  onImported
+}: {
+  open: boolean;
+  onOpenChange(open: boolean): void;
+  onImported(): void;
+}) {
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content">
-          <Dialog.Title>从 Jira 导入</Dialog.Title>
-          <Dialog.Description>支持 Jira Key（如 PAY-1842）或 Issue 浏览链接。</Dialog.Description>
-          <div className="dialog-form">
-            <label>Jira Key / URL<input value={key} onChange={(event) => setKey(event.target.value)} placeholder="PAY-1842 或 https://…" /></label>
-          </div>
-          <div className="dialog-actions">
-            <Dialog.Close asChild><button className="secondary">取消</button></Dialog.Close>
-            <button className="primary" disabled={!key.trim() || busy} onClick={async () => {
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>从 Jira 导入</DialogTitle>
+          <DialogDescription>支持 Jira Key 或 Issue 浏览链接。</DialogDescription>
+        </DialogHeader>
+        <div className="px-1">
+          <Field label="Jira Key / URL">
+            <Input
+              autoFocus
+              value={key}
+              onChange={(event) => setKey(event.target.value)}
+              placeholder="PAY-1842 或 https://..."
+            />
+          </Field>
+        </div>
+        <DialogFooter>
+          <DialogClose asChild>
+            <Button variant="secondary" size="sm">
+              取消
+            </Button>
+          </DialogClose>
+          <Button
+            size="sm"
+            disabled={!key.trim() || busy}
+            onClick={async () => {
               setBusy(true);
               try {
                 await api.importJiraTask(key.trim());
                 onImported();
                 onOpenChange(false);
                 setKey("");
-              } finally { setBusy(false); }
-            }}>{busy ? <Loader2 className="spinning" size={14} /> : <Link2 size={14} />}导入</button>
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? <Loader2Icon className="animate-spin-slow" size={11} /> : <Link2Icon size={11} />}
+            导入
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

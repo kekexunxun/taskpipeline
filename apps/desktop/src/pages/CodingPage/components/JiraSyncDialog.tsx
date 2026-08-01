@@ -1,54 +1,107 @@
 import { useEffect, useState } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
-import { Loader2, RefreshCw } from "lucide-react";
-import { api, type JiraTaskCandidate } from "../../../api";
+import { Loader2Icon, RefreshCwIcon } from "lucide-react";
+import { api, type JiraTaskCandidate } from "@/api";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog";
 
-export function JiraSyncDialog({ open, onOpenChange, onImported }: { open: boolean; onOpenChange(open: boolean): void; onImported(): void }) {
+export function JiraSyncDialog({
+  open,
+  onOpenChange,
+  onImported
+}: {
+  open: boolean;
+  onOpenChange(open: boolean): void;
+  onImported(): void;
+}) {
   const [candidates, setCandidates] = useState<JiraTaskCandidate[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   useEffect(() => {
     if (!open) return;
-    setBusy(true); setError(undefined);
-    api.syncJiraTasks().then((items) => {
-      setCandidates(items);
-      setSelected(new Set(items.map((item) => item.jiraKey)));
-    }).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason))).finally(() => setBusy(false));
+    setBusy(true);
+    setError(undefined);
+    api
+      .syncJiraTasks()
+      .then((items) => {
+        setCandidates(items);
+        setSelected(new Set(items.map((item) => item.jiraKey)));
+      })
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+      .finally(() => setBusy(false));
   }, [open]);
+
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content jira-sync-dialog">
-          <Dialog.Title>同步 Jira 任务</Dialog.Title>
-          <Dialog.Description>勾选需要导入的任务，未勾选任务将在关闭后丢弃。</Dialog.Description>
-          {busy && <div className="loading-row"><Loader2 className="spinning" size={14} />正在拉取 Jira…</div>}
-          {error && <div className="error-row">{error}</div>}
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="w-[min(640px,calc(100vw-48px))]">
+        <DialogHeader>
+          <DialogTitle>同步 Jira 任务</DialogTitle>
+          <DialogDescription>勾选需要导入的任务。</DialogDescription>
+        </DialogHeader>
+        <div className="thin-scrollbar min-h-48 max-h-[55vh] overflow-y-auto px-1">
+          {busy && (
+            <div className="flex items-center justify-center gap-2 py-12 text-xs text-muted-foreground">
+              <Loader2Icon className="animate-spin-slow" size={13} />
+              正在拉取 Jira
+            </div>
+          )}
+          {error && (
+            <div className="rounded-md border border-red-500/30 bg-red-500/5 p-3 text-xs text-red-300">
+              {error}
+            </div>
+          )}
           {!busy && !error && (
-            <ul className="jira-candidates">
-              {candidates.length === 0 && <li className="empty">没有待导入任务</li>}
+            <ul className="space-y-1">
+              {!candidates.length && (
+                <li className="py-12 text-center text-xs text-muted-foreground">没有待导入任务</li>
+              )}
               {candidates.map((item) => (
                 <li key={item.jiraKey}>
-                  <label>
-                    <input type="checkbox" checked={selected.has(item.jiraKey)} onChange={(event) => {
-                      const next = new Set(selected);
-                      if (event.target.checked) next.add(item.jiraKey); else next.delete(item.jiraKey);
-                      setSelected(next);
-                    }} />
-                    <span>
-                      <b>{item.jiraKey}</b>
-                      <span>{item.title}</span>
-                      {item.keywords.length > 0 && <small>{item.keywords.join(" · ")}</small>}
+                  <label className="flex items-start gap-2.5 rounded-md border p-2.5 hover:bg-accent/40">
+                    <Checkbox
+                      className="mt-0.5"
+                      checked={selected.has(item.jiraKey)}
+                      onCheckedChange={(value) => {
+                        const next = new Set(selected);
+                        if (value === true) next.add(item.jiraKey);
+                        else next.delete(item.jiraKey);
+                        setSelected(next);
+                      }}
+                    />
+                    <span className="min-w-0">
+                      <b className="block font-mono text-xs text-muted-foreground">{item.jiraKey}</b>
+                      <span className="block truncate text-xs">{item.title}</span>
+                      {item.keywords.length > 0 && (
+                        <small className="text-xs text-muted-foreground">
+                          {item.keywords.join(" · ")}
+                        </small>
+                      )}
                     </span>
                   </label>
                 </li>
               ))}
             </ul>
           )}
-          <div className="dialog-actions">
-            <Dialog.Close asChild><button className="secondary">取消</button></Dialog.Close>
-            <button className="primary" disabled={busy || selected.size === 0} onClick={async () => {
+        </div>
+        <DialogFooter>
+          <DialogClose asChild>
+            <Button variant="secondary" size="sm">
+              取消
+            </Button>
+          </DialogClose>
+          <Button
+            size="sm"
+            disabled={busy || selected.size === 0}
+            onClick={async () => {
               setBusy(true);
               try {
                 const items = candidates.filter((item) => selected.has(item.jiraKey));
@@ -57,11 +110,16 @@ export function JiraSyncDialog({ open, onOpenChange, onImported }: { open: boole
                   onImported();
                 }
                 onOpenChange(false);
-              } finally { setBusy(false); }
-            }}><RefreshCw size={14} />导入 {selected.size} 项</button>
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            <RefreshCwIcon size={11} />
+            导入 {selected.size} 项
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

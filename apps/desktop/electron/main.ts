@@ -48,7 +48,7 @@ type QoderStatus = {
   running: boolean;
   account?: AccountInfo;
   usage?: UsageInfo | null;
-  models: Array<Pick<ModelInfo, "value" | "displayName" | "description" | "isDefault" | "isEnabled" | "isReasoning" | "priceFactor">>;
+  models: Array<Pick<ModelInfo, "value" | "displayName" | "description" | "isDefault" | "isEnabled" | "isReasoning" | "isVl" | "priceFactor">>;
   error?: string;
 };
 
@@ -142,7 +142,7 @@ const deliveryService = new DeliveryService(store, gitService, desktopResolver, 
 const mergeRefresher = new MergeStatusRefresher(store, desktopResolver, desktopSink);
 const taskCompleter = new TaskCompleter(store, desktopSink);
 const atlassianFactory = new AtlassianClientFactory(desktopResolver);
-const chatService = new ChatService(store, dataDir, getQoderStatus, () => protectedValue("qoderToken"), () => mainWindow);
+const chatService = new ChatService(store, dataDir, getQoderStatus, () => protectedValue("qoderToken"), () => protectedValue("modelApiKey"), () => mainWindow);
 
 // === Review 实现(Qoder / OpenAI 兼容) =========================================
 
@@ -604,7 +604,7 @@ async function getQoderStatus(): Promise<QoderStatus> {
     return {
       enabled: true, connected: true, running: Boolean(activeQoderQuery),
       account: initialization.account, usage,
-      models: models.filter((model) => model.isEnabled !== false).map(({ value, displayName, description, isDefault, isEnabled, isReasoning, priceFactor }) => ({ value, displayName, description, isDefault, isEnabled, isReasoning, priceFactor }))
+      models: models.filter((model) => model.isEnabled !== false).map(({ value, displayName, description, isDefault, isEnabled, isReasoning, isVl, priceFactor }) => ({ value, displayName, description, isDefault, isEnabled, isReasoning, isVl, priceFactor }))
     };
   } catch (error) {
     return { enabled: true, connected: false, running: Boolean(activeQoderQuery), models: [], error: error instanceof Error ? error.message : String(error) };
@@ -618,7 +618,7 @@ async function getQoderStatus(): Promise<QoderStatus> {
 function registerIpc(): void {
   ipcMain.handle("tasks:list", async () => { await mergeRefresher.refresh(); return store.listCards(); });
   ipcMain.handle("tasks:get", async (_event, id: string) => { await mergeRefresher.refresh(); return { task: store.getTask(id), repositories: store.listTaskRepositories(id), events: store.listEvents(id), approvals: store.listApprovals(id), changedFiles: await taskChangedFiles(id) }; });
-  ipcMain.handle("tasks:create", (_event, input: { title: string; description: string }) => store.createTask(input));
+  ipcMain.handle("tasks:create", (_event, input: Pick<Task, "title" | "description"> & Partial<Pick<Task, "keywords" | "acceptanceCriteria">>) => store.createTask(input));
   ipcMain.handle("tasks:update", (_event, id: string, patch: Record<string, unknown>) => store.updateTask(id, patch));
   ipcMain.handle("tasks:delete", (_event, id: string) => deleteTask(id));
   ipcMain.handle("repos:list", () => store.listRepositoryProfiles());
@@ -674,12 +674,11 @@ function registerIpc(): void {
   ipcMain.handle("chats:get", (_event, id: string) => chatService.getChat(id));
   ipcMain.handle("chats:create", (_event, model?: string) => chatService.createChat(model));
   ipcMain.handle("chats:delete", (_event, id: string) => chatService.deleteChat(id));
-  ipcMain.handle("chats:append-message", (_event, id: string, text: string) => chatService.appendUserMessage(id, text));
   ipcMain.handle("chats:list-models", () => chatService.listModels());
-  ipcMain.handle("chats:send", (_event, chatId: string, messageId: string, model: string) => {
-    void chatService.sendChatMessage(chatId, messageId, model);
+  ipcMain.handle("chats:start-stream", (_event, input) => {
+    void chatService.startChatStream(input).catch((reason) => console.error("[chat] stream failed", reason));
   });
-  ipcMain.handle("chats:abort", (_event, id: string) => chatService.abortChat(id));
+  ipcMain.handle("chats:abort", (_event, input) => chatService.abortChat(input));
 }
 
 async function createWindow(): Promise<void> {
