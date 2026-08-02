@@ -30,12 +30,19 @@ describe("TaskStore", () => {
     expect(store.listTasks()).toHaveLength(1);
     for (const id of ["repo-a", "repo-b"]) store.saveRepositoryProfile({ id, name: id, localPath: join(dir, id), defaultBranch: "main" });
     store.attachRepository(first.id, "repo-a"); store.attachRepository(first.id, "repo-b");
+    store.addEvent({ taskId: first.id, kind: "status", title: "Started" });
+    store.addApproval({ taskId: first.id, kind: "review", context: "Review changes" });
+    expect(store.acquireLease(first.id, "desktop")).toBe(true);
     expect(store.listTaskRepositories(first.id)).toHaveLength(2);
     store.deleteRepositoryProfile("repo-a");
     expect(store.listRepositoryProfiles().map((repo) => repo.id)).toEqual(["repo-b"]);
     expect(store.listTaskRepositories(first.id)).toHaveLength(2);
     store.deleteTask(first.id);
     expect(store.getTask(first.id)).toBeUndefined();
+    expect(store.listTaskRepositories(first.id)).toHaveLength(0);
+    expect(store.listEvents(first.id)).toHaveLength(0);
+    expect(store.listApprovals(first.id)).toHaveLength(0);
+    expect(store.db.prepare("SELECT COUNT(*) AS count FROM task_leases WHERE task_id = ?").get(first.id)).toEqual({ count: 0 });
     store.close();
   });
 

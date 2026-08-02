@@ -7,6 +7,7 @@ export function BoardColumn({
   icon: Icon,
   cards,
   selectedId,
+  removingTaskIds,
   onOpen,
   onEdit,
   onRemove
@@ -16,9 +17,10 @@ export function BoardColumn({
   icon: React.ComponentType<{ size?: number }>;
   cards: TaskCard[];
   selectedId?: string;
+  removingTaskIds: ReadonlySet<string>;
   onOpen(taskId: string): void;
   onEdit?(taskId: string): void;
-  onRemove?(taskId: string): void;
+  onRemove?(taskId: string): Promise<boolean>;
 }) {
   return (
     <section
@@ -40,6 +42,7 @@ export function BoardColumn({
             key={task.id}
             task={task}
             active={task.id === selectedId}
+            removing={removingTaskIds.has(task.id)}
             onOpen={() => onOpen(task.id)}
             onEdit={onEdit ? () => onEdit(task.id) : undefined}
             onRemove={onRemove ? () => onRemove(task.id) : undefined}

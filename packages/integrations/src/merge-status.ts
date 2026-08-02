@@ -108,9 +108,10 @@ export class MergeStatusRefresher {
 /**
  * 任务手动结束器。
  *
- * 适用场景:某些 repo 的 MR 在 GitLab 单独处理(cherry-pick / 重提 / 走 hotfix),
- * 任务从应用视角已交付,不希望被某个未合并的 MR 阻塞整个 task。
- * MR 在 GitLab 继续存在,应用不再追踪。
+ * 适用场景:
+ * - 实现完成后,用户选择跳过 Review / MR 流程直接结束任务。
+ * - 某些 repo 的 MR 在 GitLab 单独处理(cherry-pick / 重提 / 走 hotfix),
+ *   任务从应用视角已交付,不希望被某个未合并的 MR 阻塞整个 task。
  */
 export class TaskCompleter {
   constructor(private readonly store: TaskStore, private readonly sink: TaskEventSink) {}
@@ -118,12 +119,22 @@ export class TaskCompleter {
   manualComplete(taskId: string): void {
     const task = this.store.getTask(taskId);
     if (!task) throw new Error("Task not found");
-    if (task.state !== "await_merge") throw new Error(`当前状态 ${task.state} 不支持手动结束,仅 await_merge 可手动结束`);
-    // 先记一笔 status 事件,记录手动结束时的 MR 状态快照,便于用户日后回溯。
+    const completableStates = ["awaiting_review", "reviewing", "review_blocked", "awaiting_commit", "await_merge"] as const;
+    if (!completableStates.includes(task.state as typeof completableStates[number])) {
+      throw new Error(`当前状态 ${task.state} 不支持手动完成`);
+    }
+    // 先记一笔 status 事件,记录手动完成时的 MR 状态快照,便于用户日后回溯。
     const repos = this.store.listTaskRepositories(taskId);
     const summary = repos.map((repo) => `${repo.name} ${repo.mergeRequestState ?? "未知"}`).join(" · ");
-    this.sink.addEvent({ taskId, kind: "status", title: `任务已手动结束(跳过未合并 MR: ${summary || "无"})`, detail: "MR 在 GitLab 继续存在,应用不再追踪其状态" });
+    if (task.state === "await_merge") {
+      this.sink.addEvent({ taskId, kind: "status", title: `任务已手动结束(跳过未合并 MR: ${summary || "无"})`, detail: "MR 在 GitLab 继续存在,应用不再追踪其状态" });
+    } else {
+      this.sink.addEvent({ taskId, kind: "status", title: "任务已手动完成", detail: "已跳过可选的 Review / MR 流程" });
+    }
     transitionTask(task.state, "completed");
-    this.store.updateTask(taskId, { state: "completed" });
+    this.store.updateTask(taskId, {
+      state: "completed",
+      reviewStatus: task.reviewStatus === "passed" ? "passed" : "waived"
+    });
   }
 }

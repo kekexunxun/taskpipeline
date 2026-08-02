@@ -100,7 +100,7 @@ input:focus-visible, textarea:focus-visible { outline: none; }
 @keyframes slide-out-to-bottom { from { transform: translateY(0); opacity: 1; } to { transform: translateY(8px); opacity: 0; } }
 @keyframes slide-out-to-left { from { transform: translateX(0); opacity: 1; } to { transform: translateX(-8px); opacity: 0; } }
 @keyframes slide-out-to-right { from { transform: translateX(0); opacity: 1; } to { transform: translateX(8px); opacity: 0; } }
-@keyframes global-feedback-in { from { transform: translate(-50%, -10px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+@keyframes global-feedback-in { from { transform: translateY(-10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 @keyframes caret-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 
 /* ---------- Animation utilities (compat with Radix/tailwindcss-animate) ---------- */

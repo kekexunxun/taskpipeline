@@ -3,10 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ChatComposer } from "./ChatComposer";
 
-function renderComposer(value = "你好") {
+function renderComposer(value = "你好", disabled = false) {
   const onSend = vi.fn();
   const onChange = vi.fn();
-  render(<TooltipProvider><ChatComposer value={value} onChange={onChange} onSend={onSend} onStop={vi.fn()} /></TooltipProvider>);
+  render(<TooltipProvider><ChatComposer value={value} disabled={disabled} onChange={onChange} onSend={onSend} onStop={vi.fn()} /></TooltipProvider>);
   return { field: screen.getByTestId("chat-composer"), onSend, onChange };
 }
 
@@ -28,5 +28,12 @@ describe("ChatComposer", () => {
   it("disables sending for blank content", () => {
     renderComposer("   ");
     expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  });
+
+  it("disables input while the task is executing", () => {
+    const { field, onSend } = renderComposer("你好", true);
+    expect(field).toBeDisabled();
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(onSend).not.toHaveBeenCalled();
   });
 });

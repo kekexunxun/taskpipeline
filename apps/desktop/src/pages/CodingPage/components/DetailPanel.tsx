@@ -18,6 +18,7 @@ type Props = {
   qoder?: QoderStatus;
   prompt: string;
   running: boolean;
+  starting: boolean;
   merging: boolean;
   onClose(): void;
   onOpenVSCode(): void;
@@ -46,6 +47,7 @@ export function DetailPanel({
   qoder,
   prompt,
   running,
+  starting,
   merging,
   onClose,
   onOpenVSCode,
@@ -84,12 +86,7 @@ export function DetailPanel({
     ? [{ provider: "qoder", displayName: "Qoder Agent SDK", models: qoder.models }]
     : [];
   const hasModelSelector = modelGroups.length > 0;
-  const showUsage =
-    running ||
-    (task.state === "draft" && hasModelSelector) ||
-    task.state === "implementing" ||
-    task.sessionUsage ||
-    card.sessionUsage;
+  const showUsage = hasModelSelector || running || Boolean(task.sessionUsage || card.sessionUsage);
   const showChangedFiles =
     inReviewStates.has(task.state) ||
     ["completed", "failed", "validation_failed", "cancelled"].includes(task.state);
@@ -104,10 +101,8 @@ export function DetailPanel({
       <DetailActions
         card={card}
         running={running}
-        canSubmit={card.repositories.some(
-          (repo) =>
-            repo.deliveryStatus === "committed" || repo.deliveryStatus === "pushed"
-        )}
+        starting={starting}
+        canSubmit={card.repositories.length > 0}
         merging={merging}
         onStart={onStart}
         onAbort={onAbort}
@@ -128,7 +123,7 @@ export function DetailPanel({
             model={task.qoderModel}
             onChangeModel={onChangeModel}
             modelGroups={modelGroups}
-            running={running}
+            running={running || starting}
             hasModelSelector={hasModelSelector}
           />
         )}
@@ -143,11 +138,13 @@ export function DetailPanel({
             onChange={onPrompt}
             onSend={onSend}
             disabled={
-              !running &&
-              task.state !== "failed" &&
-              task.state !== "validation_failed" &&
-              task.state !== "draft" &&
-              !inReviewStates.has(task.state)
+              running ||
+              starting ||
+              (!running &&
+                task.state !== "failed" &&
+                task.state !== "validation_failed" &&
+                task.state !== "draft" &&
+                !inReviewStates.has(task.state))
             }
           />
         </div>

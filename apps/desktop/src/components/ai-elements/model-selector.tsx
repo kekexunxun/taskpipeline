@@ -11,11 +11,14 @@ import {
 } from "@/components/ui/command";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { XIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 
 export type ModelSelectorProps = ComponentProps<typeof Dialog>;
@@ -41,14 +44,22 @@ export const ModelSelectorContent = ({
   ...props
 }: ModelSelectorContentProps) => (
   <DialogContent
+    hideClose
     aria-describedby={undefined}
     className={cn(
-      "outline! border-none! p-0 outline-border! outline-solid!",
+      "grid max-h-[min(600px,calc(100vh-32px))] gap-0 overflow-hidden outline! border-none! p-0 outline-border! outline-solid!",
       className
     )}
     {...props}
   >
-    <DialogTitle className="sr-only">{title}</DialogTitle>
+    <div className="flex h-9 shrink-0 items-center justify-between border-b px-3">
+      <DialogTitle className="text-xs font-semibold">{title}</DialogTitle>
+      <DialogClose asChild>
+        <Button variant="ghost" size="icon-sm" aria-label="关闭模型选择">
+          <XIcon />
+        </Button>
+      </DialogClose>
+    </div>
     <Command className="[&_[cmdk-input-wrapper]]:h-7 [&_[cmdk-input-wrapper]]:px-2 [&_[cmdk-input-wrapper]_svg]:h-3 [&_[cmdk-input-wrapper]_svg]:w-3 [&_[cmdk-input]]:h-7 [&_[cmdk-input]]:py-1 [&_[cmdk-input]]:text-xs [&_[cmdk-input]]:placeholder:text-xs [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1 [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group]:not([hidden])_~[cmdk-group]]:pt-0 [&_[cmdk-group]]:px-1 [&_[cmdk-item]]:h-7 [&_[cmdk-item]]:px-2 [&_[cmdk-item]]:py-1 [&_[cmdk-item]]:text-xs [&_[cmdk-item]_svg]:h-3 [&_[cmdk-item]_svg]:w-3">
       {children}
     </Command>

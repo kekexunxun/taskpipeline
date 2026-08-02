@@ -1,4 +1,4 @@
-import type { BoardColumn, TaskCard } from "@coding-agent/core";
+import type { TaskCard } from "@coding-agent/core";
 import { columns } from "../../../utils/status";
 import { BoardToolbar } from "./BoardToolbar";
 import { BoardColumn as BoardColumnView } from "./BoardColumn";
@@ -8,6 +8,7 @@ export function BoardPanel({
   search,
   onSearch,
   selectedId,
+  removingTaskIds,
   onOpen,
   onEdit,
   onRemove,
@@ -19,9 +20,10 @@ export function BoardPanel({
   search: string;
   onSearch(value: string): void;
   selectedId?: string;
+  removingTaskIds: ReadonlySet<string>;
   onOpen(taskId: string): void;
   onEdit(taskId: string): void;
-  onRemove(taskId: string, columnId: BoardColumn): void;
+  onRemove(taskId: string): Promise<boolean>;
   onCreate(): void;
   onFromJira(): void;
   onSyncJira(): void;
@@ -48,7 +50,7 @@ export function BoardPanel({
           onSyncJira={onSyncJira}
         />
       </div>
-      <div className="thin-scrollbar grid min-h-0 grid-cols-[repeat(4,minmax(240px,1fr))] gap-3 overflow-auto p-3 pb-4">
+      <div className="thin-scrollbar grid min-h-0 grid-cols-[repeat(4,minmax(260px,1fr))] gap-3 overflow-auto p-3 pb-4">
         {columns.map(({ id, title, icon }) => {
           const cards = filtered.filter((task) => task.boardColumn === id);
           return (
@@ -59,11 +61,12 @@ export function BoardPanel({
               icon={icon}
               cards={cards}
               selectedId={selectedId}
+              removingTaskIds={removingTaskIds}
               onOpen={onOpen}
               onEdit={id === "todo" ? onEdit : undefined}
               onRemove={
                 id === "todo" || id === "done"
-                  ? (taskId) => onRemove(taskId, id)
+                  ? onRemove
                   : undefined
               }
             />

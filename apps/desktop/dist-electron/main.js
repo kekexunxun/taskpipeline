@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentSession, DefaultResourceLoader, getAgentDir, hasTrustRequiringProjectResources, ModelRuntime, ProjectTrustStore, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { TaskStore, LocalFileKeyStore, transitionTask } from "@coding-agent/core";
-import { AtlassianClientFactory, DeliveryService, GitService, importJiraIssue, MergeStatusRefresher, openTaskEditor, OpenCodeReviewService, OpenAICompatReviewer, redactSecrets, ReviewOrchestrator, syncJiraTasks, TaskCompleter, TaskWorkflow, testAtlassianConnection, asReviewer } from "@coding-agent/integrations";
+import { AtlassianClientFactory, DeliveryService, fetchJiraTasks, GitService, importJiraIssue, MergeStatusRefresher, openTaskEditor, OpenCodeReviewService, OpenAICompatReviewer, redactSecrets, ReviewOrchestrator, TaskCompleter, TaskWorkflow, testAtlassianConnection, asReviewer } from "@coding-agent/integrations";
 import { resolveBundledOcrBinary, resolveOcrBinary, createOcrRunner } from "./ocr.js";
 import { accessToken, query } from "@qoder-ai/qoder-agent-sdk";
 import { ChatService } from "./chat/chat-service.js";
@@ -831,14 +831,19 @@ function registerIpc() {
         await shell.openExternal(parsed.toString());
     });
     ipcMain.handle("jira:import", async (_event, keyOrUrl) => importJiraIssue(atlassianFactory.create("jira"), keyOrUrl, store));
-    ipcMain.handle("jira:sync", async () => syncJiraTasks(atlassianFactory.create("jira"), store));
-    ipcMain.handle("jira:import-many", (_event, candidates) => candidates.flatMap((candidate) => {
-        const jiraKey = typeof candidate.jiraKey === "string" ? candidate.jiraKey.trim().toUpperCase() : "";
-        const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
-        if (!jiraKey || !title)
-            return [];
-        return [store.upsertJiraTask({ jiraKey, title, description: typeof candidate.description === "string" ? candidate.description : "", keywords: Array.isArray(candidate.keywords) ? candidate.keywords.map(String) : [], acceptanceCriteria: Array.isArray(candidate.acceptanceCriteria) ? candidate.acceptanceCriteria.map(String) : [], state: "draft", reviewStatus: "pending" })];
-    }));
+    ipcMain.handle("jira:sync", async () => fetchJiraTasks(atlassianFactory.create("jira")));
+    ipcMain.handle("jira:import-many", (_event, candidates) => {
+        const tasks = candidates.flatMap((candidate) => {
+            const jiraKey = typeof candidate.jiraKey === "string" ? candidate.jiraKey.trim().toUpperCase() : "";
+            const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
+            if (!jiraKey || !title)
+                return [];
+            return [store.upsertJiraTask({ jiraKey, title, description: typeof candidate.description === "string" ? candidate.description : "", keywords: Array.isArray(candidate.keywords) ? candidate.keywords.map(String) : [], acceptanceCriteria: Array.isArray(candidate.acceptanceCriteria) ? candidate.acceptanceCriteria.map(String) : [], state: "draft", reviewStatus: "pending" })];
+        });
+        if (tasks.length > 0)
+            store.setSetting("lastJiraSync", new Date().toISOString());
+        return tasks;
+    });
     ipcMain.handle("atlassian:test", async (_event, kind) => testAtlassianConnection(atlassianFactory.create(kind)));
     ipcMain.handle("task:ui-response", (_event, response) => pendingUi.get(String(response.id))?.(response));
     // === Chat 对话(Codex 样式) =================================================

@@ -52,6 +52,13 @@ describe("task workflow", () => {
     expect(() => transitionTask("delivering", "await_merge")).not.toThrow();
   });
 
+  it("allows manually completing after implementation without review or MR", () => {
+    expect(() => transitionTask("awaiting_review", "completed")).not.toThrow();
+    expect(() => transitionTask("reviewing", "completed")).not.toThrow();
+    expect(() => transitionTask("review_blocked", "completed")).not.toThrow();
+    expect(() => transitionTask("awaiting_commit", "completed")).not.toThrow();
+  });
+
   it("allows completed tasks to be reimplemented", () => {
     expect(() => transitionTask("completed", "preparing")).not.toThrow();
   });

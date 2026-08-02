@@ -6,6 +6,7 @@ import { TaskStore } from "@coding-agent/core";
 import { GitService } from "./git.js";
 import { parseGitLabRemote } from "./gitlab.js";
 import { mapJiraTasks } from "./jira.js";
+import { fetchJiraTasks } from "./jira-mcp.js";
 import { McpClient } from "./mcp.js";
 import { OpenCodeReviewService, extractFirstJsonObject } from "./review.js";
 import { TaskWorkflow } from "./task-workflow.js";
@@ -20,6 +21,32 @@ describe("Jira mapping", () => {
   it("maps the simplified issue shape returned by mcp-atlassian", () => {
     const response = { content: [{ type: "text", text: JSON.stringify({ total: 1, issues: [{ key: "OPS-12", summary: "Fix export", description: "Include audit fields", labels: ["audit"], status: { name: "Open" } }] }) }] };
     expect(mapJiraTasks(response)).toEqual([{ jiraKey: "OPS-12", title: "Fix export", description: "Include audit fields", keywords: ["audit"], acceptanceCriteria: [], state: "draft" }]);
+  });
+
+  it("fetches Jira candidates without requiring a local task store", async () => {
+    let closed = false;
+    const client = {
+      callTool: async () => ({
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            total: 1,
+            issues: [{ key: "OPS-13", summary: "Confirm before import", labels: [] }]
+          })
+        }]
+      }),
+      close: () => { closed = true; }
+    } as unknown as McpClient;
+
+    await expect(fetchJiraTasks(client)).resolves.toEqual([{
+      jiraKey: "OPS-13",
+      title: "Confirm before import",
+      description: "",
+      keywords: [],
+      acceptanceCriteria: [],
+      state: "draft"
+    }]);
+    expect(closed).toBe(true);
   });
 });
 
@@ -102,10 +129,23 @@ describe("process integrations", () => {
 
   it("creates a branch worktree with the expected Git sequence", async () => {
     const calls: string[][] = [];
-    const git = new GitService(async (args) => { calls.push(args); return ""; });
+    const timeouts: Array<number | undefined> = [];
+    const git = new GitService(async (args, _cwd, timeoutMs) => { calls.push(args); timeouts.push(timeoutMs); return ""; });
     const path = await git.ensureWorktree("/repo", "/worktrees", "agent/ABC-1-fix", "main");
     expect(path).toBe("/worktrees/agent-ABC-1-fix");
     expect(calls).toEqual([["fetch", "--all", "--prune"], ["worktree", "add", "-B", "agent/ABC-1-fix", "/worktrees/agent-ABC-1-fix", "main"]]);
+    expect(timeouts).toEqual([60_000, undefined]);
+  });
+
+  it("reports fetch timeouts as a retryable remote connection error", async () => {
+    const git = new GitService(async (args) => {
+      if (args[0] === "fetch") throw Object.assign(new Error("Command timed out after 60000 milliseconds"), { timedOut: true });
+      if (args[0] === "config") return "git@gitlab.example.com:group/repo.git\n";
+      return "";
+    });
+    await expect(git.createTaskWorktree("/repo", "/worktrees", "ABC-1", "main")).rejects.toThrow(
+      "Git 拉取超时，无法连接远程仓库 (git@gitlab.example.com:group/repo.git)。请检查网络或 VPN 后重试。"
+    );
   });
 
   it("uses a repository-specific folder inside a shared task workspace", async () => {
@@ -273,7 +313,7 @@ describe("task command workflow", () => {
       const store = new TaskStore(join(dir, "store.db"));
       store.saveRepositoryProfile({ id: "repo", name: "repo", localPath: dir, defaultBranch: "main", setupCommand: "install" });
       const task = store.createTask({ title: "Retry setup", description: "test", state: "failed" });
-      const taskRepo = store.addTaskRepository({ taskId: task.id, repositoryId: "repo", name: "repo", localPath: dir, baseBranch: "main", setupCommand: "install", deliveryStatus: "pending" });
+      const taskRepo = store.addTaskRepository({ taskId: task.id, repositoryId: "repo", name: "repo", localPath: dir, baseBranch: "main", worktreePath: dir, featureBranch: "task-branch", setupCommand: "install", deliveryStatus: "pending" });
       const calls: string[] = [];
       const workflow = new TaskWorkflow(store, { get: () => undefined, getSecret: () => undefined }, { addEvent: (event) => store.addEvent(event), emitChanged: () => undefined }, () => dir, undefined, undefined, (async (command: string) => { calls.push(command); return { stdout: "", stderr: "", command, exitCode: 0 }; }) as any);
 
@@ -281,6 +321,42 @@ describe("task command workflow", () => {
 
       expect(calls).toEqual([]);
       expect(store.listTaskRepositories(task.id).find((repo) => repo.id === taskRepo.id)?.setupCommand).toBe("");
+      store.close();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("marks environment preparation as failed and retries a missing worktree", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    try {
+      const store = new TaskStore(join(dir, "store.db"));
+      store.saveRepositoryProfile({ id: "repo", name: "repo", localPath: dir, defaultBranch: "main" });
+      const task = store.createTask({ title: "Prepare repository", description: "test" });
+      store.addTaskRepository({ taskId: task.id, repositoryId: "repo", name: "repo", localPath: dir, baseBranch: "main", deliveryStatus: "pending" });
+      let attempts = 0;
+      const git = new GitService(async () => "");
+      git.createTaskWorktree = async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("Git 拉取超时，无法连接远程仓库。请检查网络或 VPN 后重试。");
+        return { path: join(dir, "repo-worktree"), branch: "task-branch" };
+      };
+      const workflow = new TaskWorkflow(
+        store,
+        { get: () => undefined, getSecret: () => undefined },
+        { addEvent: (event) => store.addEvent(event), emitChanged: () => undefined },
+        () => join(dir, "workspaces", task.id),
+        undefined,
+        undefined,
+        undefined,
+        git
+      );
+
+      await expect(workflow.begin(task.id, "direct")).rejects.toThrow(/准备任务环境失败.*Git 拉取超时/);
+      expect(store.getTask(task.id)).toMatchObject({ state: "failed", failureStage: "preparing" });
+      expect(store.listEvents(task.id).some((event) => event.title === "任务环境准备失败" && event.detail?.includes("Git 拉取超时"))).toBe(true);
+
+      await expect(workflow.begin(task.id, "direct")).resolves.toMatchObject({ state: "implementing", failureStage: undefined });
+      expect(attempts).toBe(2);
+      expect(store.listTaskRepositories(task.id)[0]).toMatchObject({ worktreePath: join(dir, "repo-worktree"), featureBranch: "task-branch" });
       store.close();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -331,6 +407,21 @@ describe("task command workflow", () => {
       await expect(workflow.runValidation(task.id)).resolves.toMatchObject({ state: "awaiting_review" });
       expect(calls).toEqual(["lint", "test", "build"]);
       expect(store.listEvents(task.id).some((event) => event.title.includes("Build 通过"))).toBe(true);
+      store.close();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("can resume validation when the task was left in validating", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    try {
+      const store = new TaskStore(join(dir, "store.db"));
+      const task = store.createTask({ title: "Resume validation", description: "test", state: "validating" });
+      store.addTaskRepository({ taskId: task.id, repositoryId: "repo", name: "repo", localPath: dir, baseBranch: "main", worktreePath: dir, lintCommand: "lint", deliveryStatus: "pending" });
+      const calls: string[] = [];
+      const workflow = new TaskWorkflow(store, { get: () => undefined, getSecret: () => undefined }, { addEvent: (event) => store.addEvent(event), emitChanged: () => undefined }, () => dir, undefined, undefined, (async (command: string) => { calls.push(command); return { stdout: "", stderr: "", command, exitCode: 0 }; }) as any);
+
+      await expect(workflow.runValidation(task.id)).resolves.toMatchObject({ state: "awaiting_review" });
+      expect(calls).toEqual(["lint"]);
       store.close();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });

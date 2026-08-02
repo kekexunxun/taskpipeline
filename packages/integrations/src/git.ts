@@ -8,6 +8,7 @@ export type GitChangedFile = { path: string; status: string };
 export type GitWorktree = { path: string; branch: string };
 
 const RANDOM_BRANCH_CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789";
+const REMOTE_OPERATION_TIMEOUT_MS = 60_000;
 
 function randomBranchSuffix(): string {
   return Array.from({ length: 4 }, () => RANDOM_BRANCH_CHARACTERS[randomInt(RANDOM_BRANCH_CHARACTERS.length)]).join("");
@@ -62,9 +63,31 @@ export class GitService {
   // 会接住并把状态退到 awaiting_commit,避免任务永远卡在 delivering。
   // 不用 reject:false 是因为我们要拿到 timeout 这个 reason 走统一的错误流。
   constructor(
-    private readonly run: GitRunner = async (args, cwd, timeoutMs) => (await execa("git", args, { cwd, timeout: timeoutMs ?? 10 * 60_000 })).stdout,
+    private readonly run: GitRunner = async (args, cwd, timeoutMs) => (await execa("git", args, {
+      cwd,
+      timeout: timeoutMs ?? 10 * 60_000,
+      env: { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never" }
+    })).stdout,
     private readonly branchSuffix: () => string = randomBranchSuffix
   ) {}
+
+  private async fetchRemote(cwd: string): Promise<string> {
+    try {
+      return await this.run(["fetch", "--all", "--prune"], cwd, REMOTE_OPERATION_TIMEOUT_MS);
+    } catch (error) {
+      const failure = error as { stdout?: string; stderr?: string; message?: string; timedOut?: boolean };
+      const detail = [failure.stderr, failure.stdout, failure.message].filter(Boolean).join("\n");
+      const remoteUrl = (await this.run(["config", "--get", "remote.origin.url"], cwd).catch(() => "")).trim();
+      const remote = remoteUrl ? ` (${remoteUrl})` : "";
+      if (failure.timedOut || /timed out|Could not resolve host|Failed to connect|Connection refused|Network is unreachable|No route to host|ssh: connect to host/i.test(detail)) {
+        throw new Error(`Git 拉取超时，无法连接远程仓库${remote}。请检查网络或 VPN 后重试。`);
+      }
+      if (/Authentication failed|Access denied|Permission denied|could not read Username|terminal prompts disabled/i.test(detail)) {
+        throw new Error(`Git 远程仓库认证失败${remote}。请检查本机 Git 凭据或 SSH Key 后重试。`);
+      }
+      throw new Error(`Git 远程同步失败${remote}：${detail || "未知错误"}`);
+    }
+  }
 
   status(cwd: string): Promise<string> { return this.run(["status", "--short"], cwd); }
   diff(cwd: string): Promise<string> { return this.run(["diff", "HEAD"], cwd); }
@@ -99,7 +122,7 @@ export class GitService {
   }
   async ensureWorktree(repoPath: string, worktreeRoot: string, branch: string, baseBranch: string, directoryName?: string): Promise<string> {
     const path = join(worktreeRoot, directoryName ?? branch.replaceAll("/", "-"));
-    await this.run(["fetch", "--all", "--prune"], repoPath);
+    await this.fetchRemote(repoPath);
     await this.run(["worktree", "add", "-B", branch, path, baseBranch], repoPath);
     return path;
   }
@@ -107,7 +130,7 @@ export class GitService {
     const normalizedBranch = preferredBranch.trim();
     if (!normalizedBranch) throw new Error("Task branch name is required");
     const path = join(worktreeRoot, directoryName ?? normalizedBranch.replaceAll("/", "-"));
-    await this.run(["fetch", "--all", "--prune"], repoPath);
+    await this.fetchRemote(repoPath);
     const refs = new Set((await this.run(["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"], repoPath)).split(/\r?\n/).filter(Boolean));
     const baseRef = originBranchRef(baseBranch);
     if (!refs.has(baseRef)) throw new Error(`Configured remote base branch does not exist: ${baseRef}`);

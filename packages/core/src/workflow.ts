@@ -8,8 +8,8 @@ const transitions: Record<TaskState, TaskState[]> = {
   implementing: ["validating", "awaiting_review", "failed", "cancelled"],
   validating: ["awaiting_review", "validation_failed", "failed", "cancelled"],
   validation_failed: ["validating", "implementing", "cancelled"],
-  awaiting_review: ["reviewing", "awaiting_commit", "implementing", "cancelled"], reviewing: ["review_blocked", "awaiting_commit", "implementing", "failed"],
-  review_blocked: ["reviewing", "implementing", "awaiting_commit", "cancelled"], awaiting_commit: ["delivering", "implementing", "cancelled"],
+  awaiting_review: ["reviewing", "awaiting_commit", "implementing", "completed", "cancelled"], reviewing: ["review_blocked", "awaiting_commit", "implementing", "completed", "failed"],
+  review_blocked: ["reviewing", "implementing", "awaiting_commit", "completed", "cancelled"], awaiting_commit: ["delivering", "implementing", "completed", "cancelled"],
   // delivering 允许退到 awaiting_commit: commit/push/MR 中途失败、进程崩溃或 hook 卡死时,
   // 用户可以一键重置并重新提交,不必被迫进入 failed 再重跑实现。
   delivering: ["await_merge", "failed", "awaiting_commit"],

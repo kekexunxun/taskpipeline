@@ -24,6 +24,8 @@ export default function CodingPage() {
   const [merging, setMerging] = useState(false);
   const [startOpen, setStartOpen] = useState(false);
   const [reimplementing, setReimplementing] = useState(false);
+  const [startingTaskId, setStartingTaskId] = useState<string>();
+  const [removingTaskIds, setRemovingTaskIds] = useState<Set<string>>(() => new Set());
 
   // URL ↔ state 同步
   useEffect(() => {
@@ -50,9 +52,28 @@ export default function CodingPage() {
     navigate("/coding");
   }, [navigate]);
 
-  const onRemove = useCallback((id: string) => {
-    api.deleteTask(id).then(() => tasks.refresh()).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)));
-  }, [showError, tasks]);
+  const onRemove = useCallback(async (id: string) => {
+    setRemovingTaskIds((current) => new Set(current).add(id));
+    if (tasks.selectedId === id) {
+      tasks.setSelectedId(undefined);
+      navigate("/coding");
+    }
+    try {
+      await api.deleteTask(id);
+      await tasks.refresh();
+      showSuccess("任务已移除");
+      return true;
+    } catch (reason) {
+      showError(reason instanceof Error ? reason.message : String(reason));
+      return false;
+    } finally {
+      setRemovingTaskIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    }
+  }, [navigate, showError, showSuccess, tasks]);
 
   const runAction = useCallback((action: () => Promise<unknown>) => {
     return tasks.run(action).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)));
@@ -69,6 +90,7 @@ export default function CodingPage() {
           search={tasks.search}
           onSearch={tasks.setSearch}
           selectedId={tasks.selectedId}
+          removingTaskIds={removingTaskIds}
           onOpen={onOpenTask}
           onEdit={(id) => setEditingTask(id)}
           onRemove={onRemove}
@@ -84,6 +106,7 @@ export default function CodingPage() {
             qoder={qoder.status}
             prompt={tasks.prompt}
             running={tasks.running}
+            starting={startingTaskId === tasks.selectedId && !tasks.running}
             merging={merging}
             onClose={onCloseDetail}
             onOpenVSCode={() => { if (tasks.selectedId) api.openTaskEditor(tasks.selectedId, "vscode").catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))); }}
@@ -143,7 +166,8 @@ export default function CodingPage() {
         taskId={tasks.selectedId}
         reimplement={reimplementing}
         onOpenChange={(open) => { setStartOpen(open); if (!open) setReimplementing(false); }}
-        onStarted={async () => { setReimplementing(false); await tasks.refresh(); if (tasks.selectedId) await tasks.loadDetail(tasks.selectedId); }}
+        onStarting={setStartingTaskId}
+        onStarted={async () => { setStartingTaskId(undefined); setReimplementing(false); await tasks.refresh(); if (tasks.selectedId) await tasks.loadDetail(tasks.selectedId); }}
       />
     </>
   );

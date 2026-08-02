@@ -94,7 +94,13 @@ export class TaskStore {
     return next;
   }
 
-  deleteTask(id: string): void { this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id); }
+  deleteTask(id: string): void {
+    this.db.transaction(() => {
+      // task_leases predates the foreign-key-backed task tables, so clean it explicitly.
+      this.db.prepare("DELETE FROM task_leases WHERE task_id = ?").run(id);
+      this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+    })();
+  }
 
   getTask(id: string): Task | undefined { return this.parseTask(this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id)); }
   getTaskByJiraKey(jiraKey: string): Task | undefined { return this.parseTask(this.db.prepare("SELECT * FROM tasks WHERE jira_key = ?").get(jiraKey)); }

@@ -77,14 +77,14 @@ export async function importJiraIssue(client: McpClient, keyOrUrl: string, store
 }
 
 /**
- * 同步 Jira 任务到本地 store,按 `jiraKey` 去重,保留每个 key 的最新映射。
+ * 只读取 Jira 任务候选项，不写入本地 store。
  *
  * 分页策略:
  * - 优先用 `next_page_token`(mcp-atlassian 现代接口)
  * - 没有时退回 `start_at` + `total` 传统分页
  * - 最多 100 页,每页 50 条
  */
-export async function syncJiraTasks(client: McpClient, store: TaskStore, jql?: string): Promise<Task[]> {
+export async function fetchJiraTasks(client: McpClient, jql?: string): Promise<JiraTaskInput[]> {
   try {
     const tasks = new Map<string, JiraTaskInput & { jiraKey: string }>();
     let startAt = 0;
@@ -103,13 +103,19 @@ export async function syncJiraTasks(client: McpClient, store: TaskStore, jql?: s
       if (issueCount === 0 || (Number.isFinite(total) && total >= 0 && nextStart >= total) || issueCount < 50) break;
       startAt = nextStart;
     }
-    store.setSetting("lastJiraSync", new Date().toISOString());
-    const upserted: Task[] = [];
-    for (const task of tasks.values()) upserted.push(store.upsertJiraTask({ ...task, reviewStatus: "pending" }));
-    return upserted;
+    return [...tasks.values()];
   } finally {
     client.close();
   }
+}
+
+/**
+ * 同步 Jira 任务到本地 store,按 `jiraKey` 去重,保留每个 key 的最新映射。
+ */
+export async function syncJiraTasks(client: McpClient, store: TaskStore, jql?: string): Promise<Task[]> {
+  const tasks = await fetchJiraTasks(client, jql);
+  store.setSetting("lastJiraSync", new Date().toISOString());
+  return tasks.map((task) => store.upsertJiraTask({ ...task, reviewStatus: "pending" }));
 }
 
 /**

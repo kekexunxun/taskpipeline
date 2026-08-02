@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { mergeRepositoryOptions, RepositoryPicker } from "./RepositoryPicker";
 import { useFeedback } from "@/hooks/useGlobalFeedback";
 
-export function TaskStartDialog({ open, taskId, reimplement = false, onOpenChange, onStarted }: { open: boolean; taskId?: string; reimplement?: boolean; onOpenChange(open: boolean): void; onStarted(): Promise<void> }) {
+export function TaskStartDialog({ open, taskId, reimplement = false, onOpenChange, onStarting, onStarted }: { open: boolean; taskId?: string; reimplement?: boolean; onOpenChange(open: boolean): void; onStarting(taskId: string): void; onStarted(): Promise<void> }) {
   const { showError } = useFeedback();
   const [mode, setMode] = useState<TaskStartMode>("direct");
   const [repositories, setRepositories] = useState<RepositoryProfile[]>([]);
@@ -29,6 +29,7 @@ export function TaskStartDialog({ open, taskId, reimplement = false, onOpenChang
     setLoading(true);
     Promise.all([api.listRepositories(), api.getTask(taskId)]).then(([profiles, detail]) => {
       if (cancelled) return;
+      setMode(detail.task?.state === "planning" ? "plan" : "direct");
       const attached = detail.repositories;
       const options = mergeRepositoryOptions(profiles, attached);
       const ids = new Set(attached.map((repo) => repo.repositoryId));
@@ -59,6 +60,9 @@ export function TaskStartDialog({ open, taskId, reimplement = false, onOpenChang
   const submit = async () => {
     if (!taskId) return;
     setSaving(true);
+    // 启动请求进入后台后立即释放弹窗，过程和异常通过任务时间线反馈。
+    onStarting(taskId);
+    onOpenChange(false);
     try {
       for (const id of selectedIds) if (!initialIds.current.has(id)) await api.attachRepository(taskId, id);
       for (const id of initialIds.current) if (!selectedIds.has(id)) await api.detachRepository(taskId, id);
@@ -69,8 +73,11 @@ export function TaskStartDialog({ open, taskId, reimplement = false, onOpenChang
       }
       await api.startTask(taskId, { mode, repositoryCommands });
       await onStarted();
-      onOpenChange(false);
-    } catch (reason) { showError(reason instanceof Error ? reason.message : String(reason)); } finally { setSaving(false); }
+    } catch (reason) {
+      // 即使启动失败也刷新详情，让错误事件和失败状态立即出现在流程中。
+      await onStarted();
+      showError(reason instanceof Error ? reason.message : String(reason));
+    } finally { setSaving(false); }
   };
 
   const selectedProfiles = repositories.filter((repo) => selectedIds.has(repo.id));

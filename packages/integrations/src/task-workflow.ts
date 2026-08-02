@@ -27,7 +27,8 @@ export class TaskWorkflow {
     private readonly worktreeRootFor: (taskId: string) => string,
     private readonly reviewEnabled: () => boolean = () => this.resolver.get("openCodeReviewEnabled") === "true",
     private readonly autoCreateMergeRequests: () => boolean = () => this.resolver.get("autoCreateMergeRequests") === "true",
-    private readonly shell: ShellRunner = runShell
+    private readonly shell: ShellRunner = runShell,
+    private readonly git: GitService = new GitService()
   ) {}
 
   /** 状态机辅助:推进到指定 state,内部用 `transitionTask` 校验。 */
@@ -68,7 +69,6 @@ export class TaskWorkflow {
     if (task.state !== "preparing") return task;
     const root = this.worktreeRootFor(taskId);
     if (!existsSync(root)) mkdirSync(root, { recursive: true });
-    const git = new GitService();
     const usedEntries = new Set<string>();
     for (const repo of this.store.listTaskRepositories(taskId)) {
       const base = repo.name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-|-$/g, "") || "repository";
@@ -76,7 +76,7 @@ export class TaskWorkflow {
       usedEntries.add(entry);
       if (repo.worktreePath && repo.featureBranch) continue;
       const preferredBranch = task.jiraKey?.trim() || task.id.slice(0, 8);
-      const { path: worktreePath, branch } = await git.createTaskWorktree(repo.localPath, root, preferredBranch, repo.baseBranch, entry);
+      const { path: worktreePath, branch } = await this.git.createTaskWorktree(repo.localPath, root, preferredBranch, repo.baseBranch, entry);
       this.store.updateTaskRepository(repo.id, { featureBranch: branch, worktreePath });
     }
     return this.store.getTask(taskId)!;
@@ -84,7 +84,23 @@ export class TaskWorkflow {
 
   async begin(taskId: string, mode: TaskStartMode, overrides: RepositoryCommandMap = {}): Promise<Task> {
     this.snapshotCommands(taskId, overrides);
-    const task = await this.prepareWorktree(taskId);
+    let current = this.store.getTask(taskId);
+    if (!current) throw new Error("Task not found");
+    const repositories = this.store.listTaskRepositories(taskId);
+    if (current.state === "failed" && repositories.some((repo) => !repo.worktreePath || !repo.featureBranch)) {
+      current = this.transitionTo(taskId, "preparing");
+    }
+    let task: Task;
+    try {
+      task = await this.prepareWorktree(taskId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.store.updateTask(taskId, { failureStage: "preparing" });
+      const failed = this.store.getTask(taskId);
+      if (failed && failed.state !== "failed") this.transitionTo(taskId, "failed");
+      this.sink.addEvent({ taskId, kind: "error", title: "任务环境准备失败", detail: message });
+      throw new Error(`准备任务环境失败：${message}`, { cause: error });
+    }
     this.store.updateTask(taskId, { startMode: mode, failureStage: undefined });
     if (mode === "plan") return this.transitionTo(taskId, "planning");
     if (task.state !== "preparing" && task.state !== "failed") return task;
@@ -136,7 +152,7 @@ export class TaskWorkflow {
 
   async runValidation(taskId: string): Promise<Task> {
     const task = this.store.getTask(taskId);
-    if (!task || !["implementing", "validation_failed"].includes(task.state)) throw new Error("当前任务不能运行校验");
+    if (!task || !["implementing", "validating", "validation_failed"].includes(task.state)) throw new Error("当前任务不能运行校验");
     this.transitionTo(taskId, "validating");
     try {
       await this.runCommands(taskId, "validation");

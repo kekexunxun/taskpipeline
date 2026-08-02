@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Routes, Route } from "react-router-dom";
+import { Navigate, Routes, Route } from "react-router-dom";
 import { lazy, Suspense } from "react";
 import { TopBar } from "./TopBar";
 import { ActionBar } from "./ActionBar";
@@ -24,7 +24,7 @@ function ShellInner({ onOpenSettings }: { onOpenSettings(): void }) {
         <div className="min-w-0 flex-1">
           <Suspense fallback={<div className="grid h-full place-items-center text-xs text-muted-foreground">加载中…</div>}>
             <Routes>
-              <Route path="/" element={<ChatPage />} />
+              <Route path="/" element={<Navigate to="/coding" replace />} />
               <Route path="/chat" element={<ChatPage />} />
               <Route path="/chat/:conversationId" element={<ChatPage />} />
               <Route path="/coding" element={<CodingPage />} />
