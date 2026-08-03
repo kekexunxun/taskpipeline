@@ -4,6 +4,7 @@ import { TaskCompleter } from "./merge-status.js";
 
 const task: Task = {
   id: "task-1",
+  source: "local",
   title: "Manual completion",
   description: "test",
   keywords: [],

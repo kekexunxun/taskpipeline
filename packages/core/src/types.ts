@@ -10,10 +10,13 @@ export const TASK_STATES = [
 export type TaskState = (typeof TASK_STATES)[number];
 export type TaskStartMode = "direct" | "plan";
 export type TaskFailureStage = "preparing" | "planning" | "implementing" | "validating";
+export type TaskSource = "local" | "jira" | "github" | "linear";
 
 export type Task = {
   id: string;
-  jiraKey?: string;
+  taskKey?: string;
+  source: TaskSource;
+  sourceUrl?: string;
   title: string;
   description: string;
   keywords: string[];
@@ -129,7 +132,7 @@ export type JiraMapping = {
   itemsPath?: string;
   searchQueryParameter?: string;
   searchArguments?: Record<string, unknown>;
-  fields?: Partial<Record<"key" | "title" | "description" | "keywords" | "acceptanceCriteria" | "status", string>>;
+  fields?: Partial<Record<"key" | "title" | "description" | "keywords" | "acceptanceCriteria" | "status" | "sourceUrl", string>>;
   statusMap?: Record<string, TaskState>;
 };
 

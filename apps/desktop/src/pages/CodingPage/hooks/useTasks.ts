@@ -178,5 +178,5 @@ export function selectTask(state: CodingPageState): Task | undefined {
 
 export function filteredTasks(state: CodingPageState): TaskCard[] {
   const q = state.search.toLowerCase();
-  return state.tasks.filter((task) => !q || `${task.title} ${task.jiraKey ?? ""} ${task.keywords.join(" ")}`.toLowerCase().includes(q));
+  return state.tasks.filter((task) => !q || `${task.title} ${task.taskKey ?? ""} ${task.keywords.join(" ")}`.toLowerCase().includes(q));
 }

@@ -178,7 +178,7 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
         `InReview：${cards.filter((task) => task.boardColumn === "in_review").length}`,
         `Done：${cards.filter((task) => task.boardColumn === "done").length}`,
         "",
-        ...store.listTasks().map((task) => `${task.id.slice(0, 8)}  [${task.state}] ${task.jiraKey ?? "LOCAL"} ${task.title}`)
+        ...store.listTasks().map((task) => `${task.id.slice(0, 8)}  [${task.state}] ${task.taskKey ?? "LOCAL"} ${task.title}`)
       ].join("\n");
       ctx.ui.notify(text, "info");
     }
@@ -190,7 +190,7 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
       const task = selectedTask(args);
       if (!task) return ctx.ui.notify("找不到任务", "error");
       store.setSetting("activeTaskId", task.id);
-      const description = await ctx.ui.editor(`编辑 ${task.jiraKey ?? task.id.slice(0, 8)}：${task.title}`, task.description);
+      const description = await ctx.ui.editor(`编辑 ${task.taskKey ?? task.id.slice(0, 8)}：${task.title}`, task.description);
       if (description !== undefined && description !== task.description) store.updateTask(task.id, { description });
       ctx.ui.notify(`当前任务：${task.title}`, "info");
     }

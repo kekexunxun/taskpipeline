@@ -15,7 +15,8 @@ vi.mock("@/api", () => ({
 }));
 
 const candidate = {
-  jiraKey: "OPS-13",
+  taskKey: "OPS-13",
+  source: "jira",
   title: "Confirm before import",
   description: "",
   keywords: [],

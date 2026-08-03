@@ -799,10 +799,10 @@ function registerIpc(): void {
   ipcMain.handle("jira:sync", async () => fetchJiraTasks(atlassianFactory.create("jira")));
   ipcMain.handle("jira:import-many", (_event, candidates: Array<Record<string, unknown>>) => {
     const tasks = candidates.flatMap((candidate) => {
-      const jiraKey = typeof candidate.jiraKey === "string" ? candidate.jiraKey.trim().toUpperCase() : "";
+      const taskKey = typeof candidate.taskKey === "string" ? candidate.taskKey.trim().toUpperCase() : "";
       const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
-      if (!jiraKey || !title) return [];
-      return [store.upsertJiraTask({ jiraKey, title, description: typeof candidate.description === "string" ? candidate.description : "", keywords: Array.isArray(candidate.keywords) ? candidate.keywords.map(String) : [], acceptanceCriteria: Array.isArray(candidate.acceptanceCriteria) ? candidate.acceptanceCriteria.map(String) : [], state: "draft", reviewStatus: "pending" })];
+      if (!taskKey || !title) return [];
+      return [store.upsertJiraTask({ taskKey, source: "jira", sourceUrl: typeof candidate.sourceUrl === "string" ? candidate.sourceUrl : undefined, title, description: typeof candidate.description === "string" ? candidate.description : "", keywords: Array.isArray(candidate.keywords) ? candidate.keywords.map(String) : [], acceptanceCriteria: Array.isArray(candidate.acceptanceCriteria) ? candidate.acceptanceCriteria.map(String) : [], state: "draft", reviewStatus: "pending" })];
     });
     if (tasks.length > 0) store.setSetting("lastJiraSync", new Date().toISOString());
     return tasks;

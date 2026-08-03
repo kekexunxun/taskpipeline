@@ -91,7 +91,7 @@ export function TaskCardView({
       />
       <div className="pointer-events-none relative z-10 mb-1.5 flex items-center justify-between gap-2">
         <span className="font-mono text-xs font-semibold text-muted-foreground">
-          {task.jiraKey ?? "LOCAL"}
+          {task.taskKey ?? "LOCAL"}
         </span>
         <Badge variant={isRemoving ? "muted" : stateTone(task.state)}>
           {isRemoving ? <Loader2Icon className="animate-spin-slow" size={9} /> : <CircleDotIcon size={9} />}

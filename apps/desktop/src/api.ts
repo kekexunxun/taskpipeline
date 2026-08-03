@@ -10,7 +10,7 @@ export type QoderStatus = {
   models: Array<{ value: string; displayName: string; description: string; isDefault?: boolean; isEnabled?: boolean; isReasoning?: boolean; isVl?: boolean; priceFactor?: number }>;
   error?: string;
 };
-export type JiraTaskCandidate = Pick<Task, "jiraKey" | "title" | "description" | "keywords" | "acceptanceCriteria"> & { jiraKey: string };
+export type JiraTaskCandidate = Pick<Task, "taskKey" | "source" | "sourceUrl" | "title" | "description" | "keywords" | "acceptanceCriteria"> & { taskKey: string };
 export type RepositoryFolder = Omit<RepositoryProfile, "id">;
 export type MergeRepoStatus = { repoId: string; repoName: string; mergeRequestIid: number; mergeRequestUrl?: string; state: "opened" | "merged" | "closed" | "error"; error?: string };
 export type MergeStatusSummary = { taskId: string; taskTitle: string; repos: MergeRepoStatus[]; allMerged: boolean; taskCompleted: boolean };
@@ -22,7 +22,7 @@ export type StartTaskOptions = { mode: TaskStartMode; repositoryCommands?: Recor
 
 export type ChatMessageStatus = "done" | "error" | "aborted";
 export type ChatAgentMode = "chat" | "task-create";
-export type ChatTaskCreationResult = { jiraKey: string; summary: string; projectKey: string; issueType: string };
+export type ChatTaskCreationResult = { taskKey?: string; jiraKey?: string; summary: string; projectKey: string; issueType: string };
 export type ChatMessageMetadata = { createdAt: string; model?: string; status?: ChatMessageStatus; agentMode?: ChatAgentMode; taskCreation?: ChatTaskCreationResult };
 export type ChatMessage = UIMessage<ChatMessageMetadata>;
 
@@ -80,10 +80,10 @@ export type AgentApi = {
 declare global { interface Window { agentApi?: AgentApi } }
 
 const demoTasks: TaskCard[] = [
-  { id: "demo-1", jiraKey: "PAY-1842", title: "修复结算页优惠券并发校验", description: "优惠券并发使用时偶发重复核销。补充幂等保护与回归测试。", keywords: ["payment", "concurrency"], acceptanceCriteria: ["并发请求只核销一次"], state: "implementing", reviewStatus: "pending", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "in_progress", summary: "正在补充幂等锁和单元测试", repositories: [{ id: "r1", name: "payment-service", changeSummary: "5 files +128 -24", deliveryStatus: "changed" }] },
-  { id: "demo-2", jiraKey: "OPS-938", title: "订单导出增加审计字段", description: "从 Jira 同步的待办任务。", keywords: ["export", "audit"], acceptanceCriteria: [], state: "draft", reviewStatus: "pending", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "todo", repositories: [{ id: "r2", name: "order-console", deliveryStatus: "pending" }] },
-  { id: "demo-3", jiraKey: "CORE-417", title: "升级事件重试策略", description: "MR 已提交，等待合并。", keywords: ["events"], acceptanceCriteria: [], state: "await_merge", reviewStatus: "passed", commitMessage: "fix: CORE-417 improve retry backoff", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "in_review", repositories: [{ id: "r3", name: "event-core", changeSummary: "3 files +74 -18", deliveryStatus: "mr_created", mergeRequestUrl: "#" }] },
-  { id: "demo-4", jiraKey: "WEB-206", title: "修复控制台权限展示", description: "MR 已合并。", keywords: ["console"], acceptanceCriteria: [], state: "completed", reviewStatus: "passed", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "done", repositories: [{ id: "r4", name: "web-console", deliveryStatus: "mr_created", mergeRequestUrl: "#" }] }
+  { id: "demo-1", taskKey: "PAY-1842", source: "jira", title: "修复结算页优惠券并发校验", description: "优惠券并发使用时偶发重复核销。补充幂等保护与回归测试。", keywords: ["payment", "concurrency"], acceptanceCriteria: ["并发请求只核销一次"], state: "implementing", reviewStatus: "pending", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "in_progress", summary: "正在补充幂等锁和单元测试", repositories: [{ id: "r1", name: "payment-service", changeSummary: "5 files +128 -24", deliveryStatus: "changed" }] },
+  { id: "demo-2", taskKey: "OPS-938", source: "jira", title: "订单导出增加审计字段", description: "从 Jira 同步的待办任务。", keywords: ["export", "audit"], acceptanceCriteria: [], state: "draft", reviewStatus: "pending", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "todo", repositories: [{ id: "r2", name: "order-console", deliveryStatus: "pending" }] },
+  { id: "demo-3", taskKey: "CORE-417", source: "jira", title: "升级事件重试策略", description: "MR 已提交，等待合并。", keywords: ["events"], acceptanceCriteria: [], state: "await_merge", reviewStatus: "passed", commitMessage: "fix: CORE-417 improve retry backoff", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "in_review", repositories: [{ id: "r3", name: "event-core", changeSummary: "3 files +74 -18", deliveryStatus: "mr_created", mergeRequestUrl: "#" }] },
+  { id: "demo-4", taskKey: "WEB-206", source: "jira", title: "修复控制台权限展示", description: "MR 已合并。", keywords: ["console"], acceptanceCriteria: [], state: "completed", reviewStatus: "passed", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "done", repositories: [{ id: "r4", name: "web-console", deliveryStatus: "mr_created", mergeRequestUrl: "#" }] }
 ];
 
 const demoRepositories: RepositoryProfile[] = [
@@ -139,7 +139,7 @@ export const api: AgentApi = window.agentApi ?? {
   async getTask(id) { const task = demoTasks.find((item) => item.id === id); return { task, repositories: demoTaskRepositories.get(id) ?? [], approvals: [], changedFiles: [], events: task?.state === "implementing" ? [{ id: "e1", taskId: id, kind: "status", title: "任务已确认，AI 会话已启动", createdAt: new Date(Date.now() - 240000).toISOString() }, { id: "e2", taskId: id, kind: "tool", title: "读取支付服务上下文", detail: "分析幂等键生成与优惠券核销路径", createdAt: new Date(Date.now() - 170000).toISOString() }, { id: "e3", taskId: id, kind: "command", title: "单元测试通过", detail: "18 passed · 1.8s", createdAt: new Date(Date.now() - 60000).toISOString() }] : [] }; },
   async createTask(input) {
     const now = nowIso();
-    const task: TaskCard = { id: makeId(), ...input, keywords: input.keywords ?? [], acceptanceCriteria: input.acceptanceCriteria ?? [], state: "draft", reviewStatus: "pending", createdAt: now, updatedAt: now, boardColumn: "todo", repositories: [] };
+    const task: TaskCard = { id: makeId(), ...input, source: "local", keywords: input.keywords ?? [], acceptanceCriteria: input.acceptanceCriteria ?? [], state: "draft", reviewStatus: "pending", createdAt: now, updatedAt: now, boardColumn: "todo", repositories: [] };
     demoTasks.unshift(task);
     return task;
   },
@@ -173,8 +173,8 @@ export const api: AgentApi = window.agentApi ?? {
     if (conv.messages.filter((item) => item.role === "user").length === 1) conv.title = defaultTitle(messageText(message));
     conv.model = model; conv.messageCount = conv.messages.length; conv.updatedAt = createdAt;
     const assistantId = makeId(); const textId = `text-${assistantId}`;
-    const demoCreation = mode === "task-create" ? { jiraKey: "BSADAPT344-36525", summary: messageText(message).slice(0, 32), projectKey: "BSADAPT344", issueType: "任务" } : undefined;
-    const reply = demoCreation ? `已创建 Jira 任务 ${demoCreation.jiraKey}。是否需要立即执行？` : `（演示模式）收到：${messageText(message).slice(0, 80)}`;
+    const demoCreation = mode === "task-create" ? { taskKey: "BSADAPT344-36525", summary: messageText(message).slice(0, 32), projectKey: "BSADAPT344", issueType: "任务" } : undefined;
+    const reply = demoCreation ? `已创建 Jira 任务 ${demoCreation.taskKey}。是否需要立即执行？` : `（演示模式）收到：${messageText(message).slice(0, 80)}`;
     const emit = (chunk?: UIMessageChunk, done?: boolean) => memoryListeners.forEach((callback) => callback({ streamId, chatId, chunk, done }));
     emit({ type: "start", messageId: assistantId, messageMetadata: { createdAt, model: "demo" } }); emit({ type: "text-start", id: textId });
     let index = 0;

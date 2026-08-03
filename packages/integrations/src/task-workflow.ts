@@ -75,7 +75,7 @@ export class TaskWorkflow {
       const entry = usedEntries.has(base) ? `${base}-${repo.repositoryId.slice(0, 8)}` : base;
       usedEntries.add(entry);
       if (repo.worktreePath && repo.featureBranch) continue;
-      const preferredBranch = task.jiraKey?.trim() || task.id.slice(0, 8);
+      const preferredBranch = task.taskKey?.trim() || task.id.slice(0, 8);
       const { path: worktreePath, branch } = await this.git.createTaskWorktree(repo.localPath, root, preferredBranch, repo.baseBranch, entry);
       this.store.updateTaskRepository(repo.id, { featureBranch: branch, worktreePath });
     }

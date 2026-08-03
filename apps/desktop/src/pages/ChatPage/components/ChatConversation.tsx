@@ -14,7 +14,7 @@ export function ChatConversation({
 }: {
   messages: ChatMessage[];
   streaming?: boolean;
-  onExecuteJira?(jiraKey: string): Promise<void>;
+  onExecuteJira?(taskKey: string): Promise<void>;
 }) {
   const lastIndex = messages.length - 1;
   if (messages.length === 0) {

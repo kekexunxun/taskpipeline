@@ -36,7 +36,7 @@ function ChatMessageImpl({
 }: {
   message: ChatMessageType;
   isAnimating?: boolean;
-  onExecuteJira?(jiraKey: string): Promise<void>;
+  onExecuteJira?(taskKey: string): Promise<void>;
 }) {
   const [executing, setExecuting] = useState(false);
   const isUser = message.role === "user";
@@ -50,6 +50,7 @@ function ChatMessageImpl({
   const isError = metaStatus === "error";
   const isStreaming = Boolean(isAnimating) && !isAborted && !isError;
   const taskCreation = message.metadata?.taskCreation;
+  const taskKey = taskCreation?.taskKey ?? taskCreation?.jiraKey;
   const containerClass = isUser ? "justify-end" : "justify-start";
   const widthClass = isUser ? "max-w-[78%]" : "max-w-[88%]";
   const alignClass = isUser ? "items-end" : "items-start";
@@ -102,9 +103,9 @@ function ChatMessageImpl({
             >
               <MessageResponse>{text}</MessageResponse>
             </div>
-            {taskCreation && (
+            {taskCreation && taskKey && (
               <div className="flex w-full flex-wrap items-center gap-2 border-l-2 border-primary/50 pl-3 text-xs">
-                <span className="font-mono font-semibold text-foreground">{taskCreation.jiraKey}</span>
+                <span className="font-mono font-semibold text-foreground">{taskKey}</span>
                 <span className="min-w-0 flex-1 truncate text-muted-foreground">
                   {taskCreation.issueType} · {taskCreation.summary}
                 </span>
@@ -115,7 +116,7 @@ function ChatMessageImpl({
                     disabled={executing}
                     onClick={async () => {
                       setExecuting(true);
-                      try { await onExecuteJira(taskCreation.jiraKey); }
+                      try { await onExecuteJira(taskKey); }
                       catch { /* 全局反馈已展示导入失败原因。 */ }
                       finally { setExecuting(false); }
                     }}

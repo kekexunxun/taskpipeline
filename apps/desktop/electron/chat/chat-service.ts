@@ -83,7 +83,7 @@ export class ChatService {
         else if (event.type === "task-created") {
           taskCreation = event.task;
           if (!content.trim()) {
-            const fallback = `已创建 Jira 任务 ${event.task.jiraKey}。是否需要立即执行？`;
+            const fallback = `已创建 Jira 任务 ${event.task.taskKey}。是否需要立即执行？`;
             content = fallback;
             this.dispatch(input, { type: "text-delta", id: textPartId, delta: fallback });
           }

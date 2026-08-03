@@ -34,7 +34,7 @@ export function JiraSyncDialog({
       .syncJiraTasks()
       .then((items) => {
         setCandidates(items);
-        setSelected(new Set(items.map((item) => item.jiraKey)));
+        setSelected(new Set(items.map((item) => item.taskKey)));
       })
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
       .finally(() => setBusy(false));
@@ -65,20 +65,20 @@ export function JiraSyncDialog({
                 <li className="py-12 text-center text-xs text-muted-foreground">没有待导入任务</li>
               )}
               {candidates.map((item) => (
-                <li key={item.jiraKey}>
+                <li key={item.taskKey}>
                   <label className="flex items-start gap-2.5 rounded-md border p-2.5 hover:bg-accent/40">
                     <Checkbox
                       className="mt-0.5"
-                      checked={selected.has(item.jiraKey)}
+                      checked={selected.has(item.taskKey)}
                       onCheckedChange={(value) => {
                         const next = new Set(selected);
-                        if (value === true) next.add(item.jiraKey);
-                        else next.delete(item.jiraKey);
+                        if (value === true) next.add(item.taskKey);
+                        else next.delete(item.taskKey);
                         setSelected(next);
                       }}
                     />
                     <span className="min-w-0">
-                      <b className="block font-mono text-xs text-muted-foreground">{item.jiraKey}</b>
+                      <b className="block font-mono text-xs text-muted-foreground">{item.taskKey}</b>
                       <span className="block truncate text-xs">{item.title}</span>
                       {item.keywords.length > 0 && (
                         <small className="text-xs text-muted-foreground">
@@ -104,7 +104,7 @@ export function JiraSyncDialog({
             onClick={async () => {
               setBusy(true);
               try {
-                const items = candidates.filter((item) => selected.has(item.jiraKey));
+                const items = candidates.filter((item) => selected.has(item.taskKey));
                 if (items.length) {
                   await api.importJiraTasks(items);
                   onImported();

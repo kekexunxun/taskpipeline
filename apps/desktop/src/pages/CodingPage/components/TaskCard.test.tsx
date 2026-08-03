@@ -5,6 +5,7 @@ import { TaskCardView } from "./TaskCard";
 
 const task: TaskCard = {
   id: "task-1",
+  source: "local",
   title: "Remove task",
   description: "test",
   keywords: [],

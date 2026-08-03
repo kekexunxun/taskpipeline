@@ -54,7 +54,7 @@ describe("JiraTaskCreationAgent", () => {
       componentName: "Adaptor",
       priorityId: "3",
       originalEstimate: "8h"
-    })).resolves.toEqual({ jiraKey: "BSADAPT344-42", projectKey: "BSADAPT344", issueType: "任务", summary: "新增任务创建 Agent" });
+    })).resolves.toEqual({ taskKey: "BSADAPT344-42", projectKey: "BSADAPT344", issueType: "任务", summary: "新增任务创建 Agent" });
     expect(calls[0]).toMatchObject({
       name: "jira_create_issue",
       args: {
@@ -69,7 +69,7 @@ describe("JiraTaskCreationAgent", () => {
         }
       }
     });
-    expect(agent.createdTask?.jiraKey).toBe("BSADAPT344-42");
+    expect(agent.createdTask?.taskKey).toBe("BSADAPT344-42");
   });
 
   it("reports missing Jira configuration without starting MCP", async () => {

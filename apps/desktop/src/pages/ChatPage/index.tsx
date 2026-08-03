@@ -86,9 +86,9 @@ function ChatPageInner() {
         <ChatConversation
           messages={chat.messages}
           streaming={chat.streaming}
-          onExecuteJira={async (jiraKey) => {
+          onExecuteJira={async (taskKey) => {
             try {
-              const task = await api.importJiraTask(jiraKey);
+              const task = await api.importJiraTask(taskKey);
               navigate(`/coding/${task.id}`);
             } catch (reason) {
               showError(reason instanceof Error ? reason.message : String(reason));

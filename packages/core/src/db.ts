@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { AgentEvent, Approval, RepositoryProfile, Task, TaskCard, TaskRepository } from "./types.js";
+import type { AgentEvent, Approval, RepositoryProfile, Task, TaskCard, TaskRepository, TaskSource } from "./types.js";
 import { boardColumnFor } from "./types.js";
 
 export class TaskStore {
@@ -15,7 +15,8 @@ export class TaskStore {
     this.db.pragma("foreign_keys = ON");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
-        id TEXT PRIMARY KEY, jira_key TEXT, title TEXT NOT NULL, description TEXT NOT NULL,
+        id TEXT PRIMARY KEY, task_key TEXT, source TEXT NOT NULL DEFAULT 'local', source_url TEXT,
+        title TEXT NOT NULL, description TEXT NOT NULL,
         keywords TEXT NOT NULL, acceptance_criteria TEXT NOT NULL, state TEXT NOT NULL,
         summary TEXT, start_mode TEXT, plan_content TEXT, plan_revision INTEGER, failure_stage TEXT,
         review_status TEXT NOT NULL, commit_message TEXT, pi_session_path TEXT, qoder_model TEXT, session_usage TEXT,
@@ -55,6 +56,9 @@ export class TaskStore {
       "ALTER TABLE tasks ADD COLUMN plan_content TEXT",
       "ALTER TABLE tasks ADD COLUMN plan_revision INTEGER",
       "ALTER TABLE tasks ADD COLUMN failure_stage TEXT",
+      "ALTER TABLE tasks ADD COLUMN task_key TEXT",
+      "ALTER TABLE tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'local'",
+      "ALTER TABLE tasks ADD COLUMN source_url TEXT",
       "ALTER TABLE task_repositories ADD COLUMN setup_command TEXT",
       "ALTER TABLE task_repositories ADD COLUMN lint_command TEXT",
       "ALTER TABLE task_repositories ADD COLUMN test_command TEXT",
@@ -64,6 +68,10 @@ export class TaskStore {
       "ALTER TABLE task_repositories ADD COLUMN merge_request_state TEXT",
       "ALTER TABLE task_repositories ADD COLUMN merge_request_checked_at TEXT"
     ]) { try { this.db.exec(statement); } catch { /* Existing databases may already contain the column. */ } }
+    const taskColumns = new Set((this.db.pragma("table_info(tasks)") as Array<{ name: string }>).map(({ name }) => name));
+    if (taskColumns.has("jira_key")) {
+      this.db.exec("UPDATE tasks SET task_key = COALESCE(task_key, jira_key), source = CASE WHEN task_key IS NULL AND jira_key IS NOT NULL AND jira_key != '' THEN 'jira' ELSE source END");
+    }
   }
 
   close(): void { this.db.close(); }
@@ -71,14 +79,14 @@ export class TaskStore {
 
   createTask(input: Pick<Task, "title" | "description"> & Partial<Task>): Task {
     const task: Task = {
-      id: input.id ?? randomUUID(), jiraKey: input.jiraKey, title: input.title,
+      id: input.id ?? randomUUID(), taskKey: input.taskKey, source: input.source ?? "local", sourceUrl: input.sourceUrl, title: input.title,
       description: input.description, keywords: input.keywords ?? [], acceptanceCriteria: input.acceptanceCriteria ?? [],
       state: input.state ?? "draft", summary: input.summary, startMode: input.startMode, planContent: input.planContent,
       planRevision: input.planRevision, failureStage: input.failureStage, reviewStatus: input.reviewStatus ?? "pending",
       commitMessage: input.commitMessage, piSessionPath: input.piSessionPath, qoderModel: input.qoderModel, sessionUsage: input.sessionUsage, createdAt: this.now(), updatedAt: this.now()
     };
-    this.db.prepare(`INSERT INTO tasks (id,jira_key,title,description,keywords,acceptance_criteria,state,summary,start_mode,plan_content,plan_revision,failure_stage,review_status,commit_message,pi_session_path,qoder_model,session_usage,created_at,updated_at)
-      VALUES (@id,@jiraKey,@title,@description,@keywords,@acceptanceCriteria,@state,@summary,@startMode,@planContent,@planRevision,@failureStage,@reviewStatus,@commitMessage,@piSessionPath,@qoderModel,@sessionUsage,@createdAt,@updatedAt)`).run({
+    this.db.prepare(`INSERT INTO tasks (id,task_key,source,source_url,title,description,keywords,acceptance_criteria,state,summary,start_mode,plan_content,plan_revision,failure_stage,review_status,commit_message,pi_session_path,qoder_model,session_usage,created_at,updated_at)
+      VALUES (@id,@taskKey,@source,@sourceUrl,@title,@description,@keywords,@acceptanceCriteria,@state,@summary,@startMode,@planContent,@planRevision,@failureStage,@reviewStatus,@commitMessage,@piSessionPath,@qoderModel,@sessionUsage,@createdAt,@updatedAt)`).run({
       ...task, keywords: JSON.stringify(task.keywords), acceptanceCriteria: JSON.stringify(task.acceptanceCriteria), sessionUsage: task.sessionUsage ? JSON.stringify(task.sessionUsage) : null
     });
     return task;
@@ -88,7 +96,7 @@ export class TaskStore {
     const current = this.getTask(id);
     if (!current) throw new Error(`Task not found: ${id}`);
     const next = { ...current, ...patch, updatedAt: this.now() };
-    this.db.prepare(`UPDATE tasks SET jira_key=@jiraKey,title=@title,description=@description,keywords=@keywords,acceptance_criteria=@acceptanceCriteria,state=@state,summary=@summary,start_mode=@startMode,plan_content=@planContent,plan_revision=@planRevision,failure_stage=@failureStage,review_status=@reviewStatus,commit_message=@commitMessage,pi_session_path=@piSessionPath,qoder_model=@qoderModel,session_usage=@sessionUsage,updated_at=@updatedAt WHERE id=@id`).run({
+    this.db.prepare(`UPDATE tasks SET task_key=@taskKey,source=@source,source_url=@sourceUrl,title=@title,description=@description,keywords=@keywords,acceptance_criteria=@acceptanceCriteria,state=@state,summary=@summary,start_mode=@startMode,plan_content=@planContent,plan_revision=@planRevision,failure_stage=@failureStage,review_status=@reviewStatus,commit_message=@commitMessage,pi_session_path=@piSessionPath,qoder_model=@qoderModel,session_usage=@sessionUsage,updated_at=@updatedAt WHERE id=@id`).run({
       ...next, keywords: JSON.stringify(next.keywords), acceptanceCriteria: JSON.stringify(next.acceptanceCriteria), sessionUsage: next.sessionUsage ? JSON.stringify(next.sessionUsage) : null
     });
     return next;
@@ -103,20 +111,24 @@ export class TaskStore {
   }
 
   getTask(id: string): Task | undefined { return this.parseTask(this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id)); }
-  getTaskByJiraKey(jiraKey: string): Task | undefined { return this.parseTask(this.db.prepare("SELECT * FROM tasks WHERE jira_key = ?").get(jiraKey)); }
-  upsertJiraTask(input: Pick<Task, "jiraKey" | "title" | "description"> & Partial<Task>): Task {
-    // jiraKey 命中已存在任务时,只能同步 Jira 上的内容字段(title/description/keywords/acceptanceCriteria),
+  getTaskBySourceKey(source: TaskSource, taskKey: string): Task | undefined {
+    return this.parseTask(this.db.prepare("SELECT * FROM tasks WHERE source = ? AND task_key = ?").get(source, taskKey));
+  }
+  upsertJiraTask(input: Pick<Task, "taskKey" | "title" | "description"> & Partial<Task>): Task {
+    // taskKey 命中已存在的 Jira 任务时,只能同步 Jira 上的内容字段(title/description/keywords/acceptanceCriteria/sourceUrl),
     // 不能把整个 patch 透传给 updateTask,否则:
     // - state / reviewStatus 会被强制写回 draft / pending,把已 completed 的任务回退成 todo,
     //   用户的整条 Review、commit、MR 流程在 UI 上就凭空消失。
     // - commitMessage / qoderModel / piSessionPath / sessionUsage / summary 也属于"工作流或运行期"字段,
     //   一旦被 Jira 同步的默认值(state: "draft" + reviewStatus: "pending" 那一坨)覆盖,用户配置和 AI 用量统计都丢了。
     // 解决方式:更新路径里只放 Jira 内容字段,工作流/运行期字段全部保留 current 的值。
-    if (input.jiraKey) {
-      const current = this.getTaskByJiraKey(input.jiraKey);
+    if (input.taskKey) {
+      const current = this.getTaskBySourceKey("jira", input.taskKey);
       if (current) {
         return this.updateTask(current.id, {
-          jiraKey: input.jiraKey,
+          taskKey: input.taskKey,
+          source: "jira",
+          sourceUrl: input.sourceUrl ?? current.sourceUrl,
           title: input.title,
           description: input.description,
           keywords: input.keywords ?? current.keywords,
@@ -124,14 +136,14 @@ export class TaskStore {
         });
       }
     }
-    return this.createTask(input);
+    return this.createTask({ ...input, source: "jira" });
   }
   listTasks(): Task[] { return (this.db.prepare("SELECT * FROM tasks ORDER BY updated_at DESC").all() as unknown[]).map((row) => this.parseTask(row)!); }
   listCards(): TaskCard[] { return this.listTasks().map((task) => ({ ...task, boardColumn: boardColumnFor(task.state), repositories: this.listTaskRepositories(task.id).map(({ id, name, changeSummary, mergeRequestUrl, deliveryStatus }) => ({ id, name, changeSummary, mergeRequestUrl, deliveryStatus })) })); }
   private parseTask(row: unknown): Task | undefined {
     if (!row) return undefined;
     const r = row as Record<string, unknown>;
-    return { id: String(r.id), jiraKey: r.jira_key ? String(r.jira_key) : undefined, title: String(r.title), description: String(r.description), keywords: JSON.parse(String(r.keywords)), acceptanceCriteria: JSON.parse(String(r.acceptance_criteria)), state: r.state as Task["state"], summary: r.summary ? String(r.summary) : undefined, startMode: r.start_mode as Task["startMode"] || undefined, planContent: r.plan_content ? String(r.plan_content) : undefined, planRevision: r.plan_revision == null ? undefined : Number(r.plan_revision), failureStage: r.failure_stage as Task["failureStage"] || undefined, reviewStatus: r.review_status as Task["reviewStatus"], commitMessage: r.commit_message ? String(r.commit_message) : undefined, piSessionPath: r.pi_session_path ? String(r.pi_session_path) : undefined, qoderModel: r.qoder_model ? String(r.qoder_model) : undefined, sessionUsage: r.session_usage ? JSON.parse(String(r.session_usage)) as Task["sessionUsage"] : undefined, createdAt: String(r.created_at), updatedAt: String(r.updated_at) };
+    return { id: String(r.id), taskKey: r.task_key ? String(r.task_key) : undefined, source: (r.source ? String(r.source) : "local") as Task["source"], sourceUrl: r.source_url ? String(r.source_url) : undefined, title: String(r.title), description: String(r.description), keywords: JSON.parse(String(r.keywords)), acceptanceCriteria: JSON.parse(String(r.acceptance_criteria)), state: r.state as Task["state"], summary: r.summary ? String(r.summary) : undefined, startMode: r.start_mode as Task["startMode"] || undefined, planContent: r.plan_content ? String(r.plan_content) : undefined, planRevision: r.plan_revision == null ? undefined : Number(r.plan_revision), failureStage: r.failure_stage as Task["failureStage"] || undefined, reviewStatus: r.review_status as Task["reviewStatus"], commitMessage: r.commit_message ? String(r.commit_message) : undefined, piSessionPath: r.pi_session_path ? String(r.pi_session_path) : undefined, qoderModel: r.qoder_model ? String(r.qoder_model) : undefined, sessionUsage: r.session_usage ? JSON.parse(String(r.session_usage)) as Task["sessionUsage"] : undefined, createdAt: String(r.created_at), updatedAt: String(r.updated_at) };
   }
 
   addTaskRepository(repo: Omit<TaskRepository, "id">): TaskRepository { const item = { setupCommand: undefined, lintCommand: undefined, testCommand: undefined, buildCommand: undefined, featureBranch: undefined, worktreePath: undefined, changeSummary: undefined, commitSha: undefined, mergeRequestUrl: undefined, mergeRequestIid: undefined, mergeRequestState: undefined, mergeRequestCheckedAt: undefined, ...repo, id: randomUUID() }; this.db.prepare(`INSERT INTO task_repositories (id,task_id,repository_id,name,local_path,base_branch,setup_command,lint_command,test_command,build_command,feature_branch,worktree_path,change_summary,commit_sha,merge_request_url,merge_request_iid,merge_request_state,merge_request_checked_at,delivery_status) VALUES (@id,@taskId,@repositoryId,@name,@localPath,@baseBranch,@setupCommand,@lintCommand,@testCommand,@buildCommand,@featureBranch,@worktreePath,@changeSummary,@commitSha,@mergeRequestUrl,@mergeRequestIid,@mergeRequestState,@mergeRequestCheckedAt,@deliveryStatus)`).run(item); return item; }

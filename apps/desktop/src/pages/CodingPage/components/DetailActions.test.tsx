@@ -5,6 +5,7 @@ import { DetailActions } from "./DetailActions";
 
 const card: TaskCard = {
   id: "task-1",
+  source: "local",
   title: "Resume task",
   description: "test",
   keywords: [],

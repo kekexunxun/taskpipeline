@@ -31,7 +31,7 @@ export function BoardPanel({
   const filtered = tasks.filter((task) => {
     if (!search) return true;
     const q = search.toLowerCase();
-    return `${task.title} ${task.jiraKey ?? ""} ${task.keywords.join(" ")}`
+    return `${task.title} ${task.taskKey ?? ""} ${task.keywords.join(" ")}`
       .toLowerCase()
       .includes(q);
   });

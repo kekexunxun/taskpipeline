@@ -1,6 +1,6 @@
 import type { AtlassianClientFactory } from "@coding-agent/integrations";
 export type JiraCreatedTask = {
-    jiraKey: string;
+    taskKey: string;
     summary: string;
     projectKey: string;
     issueType: string;

@@ -15,12 +15,12 @@ describe("Jira mapping", () => {
   it("maps internal MCP text content using configurable field paths", () => {
     const response = { content: [{ type: "text", text: JSON.stringify({ data: { tickets: [{ id: "PAY-7", subject: "Fix checkout", body: "Race", tags: ["pay"], state: "Doing" }] } }) }] };
     const tasks = mapJiraTasks(response, { itemsPath: "data.tickets", fields: { key: "id", title: "subject", description: "body", keywords: "tags", status: "state" }, statusMap: { Doing: "implementing" } });
-    expect(tasks).toEqual([{ jiraKey: "PAY-7", title: "Fix checkout", description: "Race", keywords: ["pay"], acceptanceCriteria: [], state: "implementing" }]);
+    expect(tasks).toEqual([{ taskKey: "PAY-7", source: "jira", title: "Fix checkout", description: "Race", keywords: ["pay"], acceptanceCriteria: [], state: "implementing" }]);
   });
 
   it("maps the simplified issue shape returned by mcp-atlassian", () => {
-    const response = { content: [{ type: "text", text: JSON.stringify({ total: 1, issues: [{ key: "OPS-12", summary: "Fix export", description: "Include audit fields", labels: ["audit"], status: { name: "Open" } }] }) }] };
-    expect(mapJiraTasks(response)).toEqual([{ jiraKey: "OPS-12", title: "Fix export", description: "Include audit fields", keywords: ["audit"], acceptanceCriteria: [], state: "draft" }]);
+    const response = { content: [{ type: "text", text: JSON.stringify({ total: 1, issues: [{ key: "OPS-12", self: "https://jira.example.com/rest/api/2/issue/OPS-12", summary: "Fix export", description: "Include audit fields", labels: ["audit"], status: { name: "Open" } }] }) }] };
+    expect(mapJiraTasks(response)).toEqual([{ taskKey: "OPS-12", source: "jira", sourceUrl: "https://jira.example.com/rest/api/2/issue/OPS-12", title: "Fix export", description: "Include audit fields", keywords: ["audit"], acceptanceCriteria: [], state: "draft" }]);
   });
 
   it("fetches Jira candidates without requiring a local task store", async () => {
@@ -39,7 +39,8 @@ describe("Jira mapping", () => {
     } as unknown as McpClient;
 
     await expect(fetchJiraTasks(client)).resolves.toEqual([{
-      jiraKey: "OPS-13",
+      taskKey: "OPS-13",
+      source: "jira",
       title: "Confirm before import",
       description: "",
       keywords: [],

@@ -64,7 +64,7 @@ export class DeliveryService {
     task = this.store.getTask(taskId)!;
     const profiles = new Map(this.store.listRepositoryProfiles().map((profile) => [profile.id, profile]));
     const factory = this.options.gitlabFactory ?? ((baseUrl, projectId) => new GitLabService({ baseUrl, token, projectId }));
-    const message = task.commitMessage ?? `feat: ${task.jiraKey ? `${task.jiraKey} ` : ""}${task.title}`;
+    const message = task.commitMessage ?? `feat: ${task.taskKey ? `${task.taskKey} ` : ""}${task.title}`;
     try {
       for (const repo of this.store.listTaskRepositories(taskId)) {
         const profile = profiles.get(repo.repositoryId);
@@ -91,7 +91,7 @@ export class DeliveryService {
           this.store.updateTaskRepository(repo.id, { commitSha: sha, mergeRequestState: "opened", deliveryStatus: "mr_created" });
           this.sink.addEvent({ taskId, kind: "command", title: `${repo.name} 已更新 MR`, detail: repo.mergeRequestUrl });
         } else {
-          const mr = await factory(remote.baseUrl, remote.projectId).createMergeRequest({ sourceBranch: repo.featureBranch, targetBranch: repo.baseBranch, title: `${task.jiraKey ? `${task.jiraKey} ` : ""}${task.title}`, description: `Automated implementation for ${task.jiraKey ?? taskId}.` });
+          const mr = await factory(remote.baseUrl, remote.projectId).createMergeRequest({ sourceBranch: repo.featureBranch, targetBranch: repo.baseBranch, title: `${task.taskKey ? `${task.taskKey} ` : ""}${task.title}`, description: `Automated implementation for ${task.taskKey ?? taskId}.` });
           this.store.updateTaskRepository(repo.id, { commitSha: sha, mergeRequestUrl: mr.web_url, mergeRequestIid: mr.iid, mergeRequestState: "opened", deliveryStatus: "mr_created" });
           this.sink.addEvent({ taskId, kind: "command", title: `${repo.name} 已创建 MR`, detail: mr.web_url });
         }

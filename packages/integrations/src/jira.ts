@@ -6,7 +6,8 @@ const defaultFields = {
   description: "fields.description",
   keywords: "fields.labels",
   acceptanceCriteria: "fields.acceptanceCriteria",
-  status: "fields.status.name"
+  status: "fields.status.name",
+  sourceUrl: "self"
 } as const;
 
 function valueAt(input: unknown, path: string): unknown {
@@ -36,7 +37,7 @@ function asList(value: unknown): string[] {
   return text ? text.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean) : [];
 }
 
-export type JiraTaskInput = Pick<Task, "jiraKey" | "title" | "description" | "keywords" | "acceptanceCriteria" | "state">;
+export type JiraTaskInput = Pick<Task, "taskKey" | "source" | "sourceUrl" | "title" | "description" | "keywords" | "acceptanceCriteria" | "state">;
 
 export function mapJiraTasks(response: unknown, mapping: JiraMapping = {}): JiraTaskInput[] {
   const content = valueAt(response, "content");
@@ -61,6 +62,7 @@ export function mapJiraTasks(response: unknown, mapping: JiraMapping = {}): Jira
     if (!jiraKey || !title) return [];
     const remoteStatus = asText(read(row, "status", "status"));
     const state: TaskState = mapping.statusMap?.[remoteStatus] ?? "draft";
-    return [{ jiraKey, title, description: asText(read(row, "description", "description")), keywords: asList(read(row, "keywords", "labels")), acceptanceCriteria: asList(read(row, "acceptanceCriteria", "acceptance_criteria")), state }];
+    const sourceUrl = asText(read(row, "sourceUrl", "url")) || undefined;
+    return [{ taskKey: jiraKey, source: "jira", ...(sourceUrl ? { sourceUrl } : {}), title, description: asText(read(row, "description", "description")), keywords: asList(read(row, "keywords", "labels")), acceptanceCriteria: asList(read(row, "acceptanceCriteria", "acceptance_criteria")), state }];
   });
 }

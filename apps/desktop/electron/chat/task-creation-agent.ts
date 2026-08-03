@@ -11,7 +11,7 @@ type McpToolDefinition = {
 };
 
 export type JiraCreatedTask = {
-  jiraKey: string;
+  taskKey: string;
   summary: string;
   projectKey: string;
   issueType: string;
@@ -309,7 +309,7 @@ export class JiraTaskCreationAgent {
     const payload = mcpPayload(result);
     const jiraKey = normalizeIssueKey(payload) ?? normalizeIssueKey(result);
     if (!jiraKey) throw new Error("Jira MCP 已返回，但响应中没有可识别的 Jira Key");
-    this.createdTask = { jiraKey, summary: input.summary.trim(), projectKey, issueType: input.issueTypeName.trim() || input.issueTypeId! };
+    this.createdTask = { taskKey: jiraKey, summary: input.summary.trim(), projectKey, issueType: input.issueTypeName.trim() || input.issueTypeId! };
     return this.createdTask;
   }
 

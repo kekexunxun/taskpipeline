@@ -68,7 +68,9 @@ export async function importJiraIssue(client: McpClient, keyOrUrl: string, store
       ? fields.description
       : fields?.description ? JSON.stringify(fields.description) : payload?.text ?? "";
     return store.upsertJiraTask({
-      jiraKey: issue?.key ?? key,
+      taskKey: issue?.key ?? key,
+      source: "jira",
+      sourceUrl: /^https?:\/\//i.test(keyOrUrl.trim()) ? keyOrUrl.trim() : issue?.url ?? issue?.self,
       title: fields?.summary ?? fields?.title ?? key,
       description,
       keywords: fields?.labels ?? [],
@@ -91,14 +93,14 @@ export async function importJiraIssue(client: McpClient, keyOrUrl: string, store
  */
 export async function fetchJiraTasks(client: McpClient, jql?: string): Promise<JiraTaskInput[]> {
   try {
-    const tasks = new Map<string, JiraTaskInput & { jiraKey: string }>();
+    const tasks = new Map<string, JiraTaskInput & { taskKey: string }>();
     let startAt = 0;
     let pageToken: string | undefined;
     const finalJql = jql ?? "assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC";
     for (let page = 0; page < 100; page += 1) {
       const result = await client.callTool("jira_search", { jql: finalJql, fields: "summary,description,labels,status", limit: 50, start_at: startAt, ...(pageToken ? { page_token: pageToken } : {}) });
       const mapped = mapJiraTasks(result);
-      for (const task of mapped) if (task.jiraKey) tasks.set(task.jiraKey, task as JiraTaskInput & { jiraKey: string });
+      for (const task of mapped) if (task.taskKey) tasks.set(task.taskKey, task as JiraTaskInput & { taskKey: string });
       const payload = mcpPayload(result);
       const issueCount = Array.isArray(payload?.issues) ? payload.issues.length : mapped.length;
       const total = Number(payload?.total);
@@ -115,7 +117,7 @@ export async function fetchJiraTasks(client: McpClient, jql?: string): Promise<J
 }
 
 /**
- * 同步 Jira 任务到本地 store,按 `jiraKey` 去重,保留每个 key 的最新映射。
+ * 同步 Jira 任务到本地 store,按 `taskKey` 去重,保留每个 key 的最新映射。
  */
 export async function syncJiraTasks(client: McpClient, store: TaskStore, jql?: string): Promise<Task[]> {
   const tasks = await fetchJiraTasks(client, jql);
