@@ -1,9 +1,18 @@
 import type { UIMessage, UIMessageChunk } from "ai";
 export type ChatMessageStatus = "done" | "error" | "aborted";
+export type ChatAgentMode = "chat" | "task-create";
+export type ChatTaskCreationResult = {
+    jiraKey: string;
+    summary: string;
+    projectKey: string;
+    issueType: string;
+};
 export type ChatMessageMetadata = {
     createdAt: string;
     model?: string;
     status?: ChatMessageStatus;
+    agentMode?: ChatAgentMode;
+    taskCreation?: ChatTaskCreationResult;
 };
 export type ChatMessage = UIMessage<ChatMessageMetadata>;
 export type ChatConversationMeta = {
@@ -36,6 +45,7 @@ export type StartChatStreamInput = {
     chatId: string;
     model: string;
     message: ChatMessage;
+    mode?: ChatAgentMode;
 };
 export type AbortChatStreamInput = {
     streamId: string;

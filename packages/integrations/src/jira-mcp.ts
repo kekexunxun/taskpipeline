@@ -32,6 +32,11 @@ export function mcpPayload(result: unknown): any {
 export class AtlassianClientFactory {
   constructor(private readonly resolver: SettingResolver) {}
 
+  isConfigured(kind: "jira" | "confluence"): boolean {
+    const prefix = kind === "jira" ? "jira" : "confluence";
+    return Boolean(this.resolver.get(`${prefix}Url`) && this.resolver.getSecret(`${prefix}Token`));
+  }
+
   create(kind: "jira" | "confluence"): McpClient {
     const prefix = kind === "jira" ? "jira" : "confluence";
     const url = this.resolver.get(`${prefix}Url`);

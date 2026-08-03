@@ -14,6 +14,7 @@ export function useChat() {
   const [draft, setDraft] = useState("");
   const [modelGroups, setModelGroups] = useState<ChatModelGroup[]>([]);
   const [model, setModel] = useState<string>();
+  const [taskCreationEnabled, setTaskCreationEnabled] = useState(false);
   /**
    * 缓存最新消息的 ref，避免 useEffect 因 `ai` 引用变化而抖动。
    * useAiChat 内部对 messages 用 useSyncExternalStore 订阅；这里只是为了给消费方
@@ -155,12 +156,12 @@ export function useChat() {
       setDraft("");
       // 没有当前对话时，自动创建一个，避免「必须先点新建对话」的额外入口。
       let targetId = activeId;
+      let createdConversation: ChatConversation | undefined;
       if (!targetId) {
         try {
           const created = await api.createChat(model);
           targetId = created.id;
-          setActiveId(targetId);
-          setConversation(created);
+          createdConversation = created;
           await refreshMetas();
         } catch (reason) {
           showError(reason instanceof Error ? reason.message : String(reason));
@@ -168,8 +169,9 @@ export function useChat() {
         }
       }
       try {
-        await aiRef.current.sendMessage({ text }, { body: { model } });
+        await aiRef.current.sendMessage({ text }, { body: { model, chatId: targetId, mode: taskCreationEnabled ? "task-create" : "chat" } });
         const refreshed = await api.getChat(targetId);
+        if (createdConversation) setActiveId(targetId);
         if (refreshed) setConversation(refreshed);
         await refreshMetas();
         return targetId;
@@ -178,7 +180,7 @@ export function useChat() {
         return undefined;
       }
     },
-    [activeId, draft, model, refreshMetas, showError]
+    [activeId, draft, model, refreshMetas, showError, taskCreationEnabled]
   );
 
   const streaming = ai.status === "streaming" || ai.status === "submitted";
@@ -193,8 +195,10 @@ export function useChat() {
       streaming,
       modelGroups,
       model,
+      taskCreationEnabled,
       setDraft,
       setModel,
+      setTaskCreationEnabled,
       select,
       create,
       remove,
@@ -211,6 +215,7 @@ export function useChat() {
       streaming,
       modelGroups,
       model,
+      taskCreationEnabled,
       setDraft,
       setModel,
       select,

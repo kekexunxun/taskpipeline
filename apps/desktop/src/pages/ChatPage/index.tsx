@@ -5,7 +5,10 @@ import { ChatHistoryList } from "./components/ChatHistoryList";
 import { ChatConversation } from "./components/ChatConversation";
 import { ChatComposer } from "./components/ChatComposer";
 import { ChatModelSelector } from "./components/ChatModelSelector";
+import { TaskCreationTool } from "./components/TaskCreationTool";
 import { useChat } from "./hooks/useChat";
+import { api } from "@/api";
+import { useFeedback } from "@/hooks/useGlobalFeedback";
 
 export default function ChatPage() {
   return (
@@ -18,6 +21,7 @@ export default function ChatPage() {
 function ChatPageInner() {
   const { conversationId } = useParams();
   const navigate = useNavigate();
+  const { showError } = useFeedback();
   const chat = useChat();
 
   // URL ↔ state 同步
@@ -79,7 +83,19 @@ function ChatPageInner() {
           )}
         </header>
 
-        <ChatConversation messages={chat.messages} streaming={chat.streaming} />
+        <ChatConversation
+          messages={chat.messages}
+          streaming={chat.streaming}
+          onExecuteJira={async (jiraKey) => {
+            try {
+              const task = await api.importJiraTask(jiraKey);
+              navigate(`/coding/${task.id}`);
+            } catch (reason) {
+              showError(reason instanceof Error ? reason.message : String(reason));
+              throw reason;
+            }
+          }}
+        />
 
         <div className="shrink-0 border-t bg-background/95 px-4 pb-2.5 pt-2">
           <ChatComposer
@@ -91,18 +107,27 @@ function ChatPageInner() {
             placeholder={
               !hasModel
                 ? "请先在设置中配置可用模型"
+                : chat.taskCreationEnabled
+                ? "描述准备创建的 Jira 任务，Agent 会补齐必要信息"
                 : isEmpty
                 ? "输入消息，Enter 发送，将自动创建新对话"
                 : undefined
             }
             streaming={chat.streaming}
             leftSlot={
-              <ChatModelSelector
-                groups={chat.modelGroups}
-                value={chat.model}
-                onChange={chat.setModel}
-                disabled={chat.streaming}
-              />
+              <>
+                <ChatModelSelector
+                  groups={chat.modelGroups}
+                  value={chat.model}
+                  onChange={chat.setModel}
+                  disabled={chat.streaming}
+                />
+                <TaskCreationTool
+                  selected={chat.taskCreationEnabled}
+                  disabled={chat.streaming}
+                  onChange={chat.setTaskCreationEnabled}
+                />
+              </>
             }
           />
         </div>

@@ -21,7 +21,9 @@ export type StartTaskOptions = { mode: TaskStartMode; repositoryCommands?: Recor
 // === Chat API surface ===
 
 export type ChatMessageStatus = "done" | "error" | "aborted";
-export type ChatMessageMetadata = { createdAt: string; model?: string; status?: ChatMessageStatus };
+export type ChatAgentMode = "chat" | "task-create";
+export type ChatTaskCreationResult = { jiraKey: string; summary: string; projectKey: string; issueType: string };
+export type ChatMessageMetadata = { createdAt: string; model?: string; status?: ChatMessageStatus; agentMode?: ChatAgentMode; taskCreation?: ChatTaskCreationResult };
 export type ChatMessage = UIMessage<ChatMessageMetadata>;
 
 export type ChatConversationMeta = {
@@ -51,7 +53,7 @@ export type ChatModelGroup = {
   models: ChatModelInfo[];
 };
 
-export type StartChatStreamInput = { streamId: string; chatId: string; model: string; message: ChatMessage };
+export type StartChatStreamInput = { streamId: string; chatId: string; model: string; message: ChatMessage; mode?: ChatAgentMode };
 export type AbortChatStreamInput = { streamId: string; chatId: string };
 export type ChatStreamEvent = { streamId: string; chatId: string; chunk?: UIMessageChunk; error?: string; done?: boolean };
 
@@ -163,14 +165,16 @@ export const api: AgentApi = window.agentApi ?? {
   },
   async deleteChat(id) { memoryChats.delete(id); },
   async listChatModels() { return defaultModelGroups; },
-  async startChatStream({ streamId, chatId, model, message }) {
+  async startChatStream({ streamId, chatId, model, message, mode }) {
     const conv = memoryChats.get(chatId); if (!conv) throw new Error("Chat not found");
     const createdAt = nowIso();
     const userMessage: ChatMessage = { ...message, metadata: { createdAt, status: "done" } };
     conv.messages = [...conv.messages.filter((item) => item.id !== message.id), userMessage];
     if (conv.messages.filter((item) => item.role === "user").length === 1) conv.title = defaultTitle(messageText(message));
     conv.model = model; conv.messageCount = conv.messages.length; conv.updatedAt = createdAt;
-    const assistantId = makeId(); const textId = `text-${assistantId}`; const reply = `（演示模式）收到：${messageText(message).slice(0, 80)}`;
+    const assistantId = makeId(); const textId = `text-${assistantId}`;
+    const demoCreation = mode === "task-create" ? { jiraKey: "BSADAPT344-36525", summary: messageText(message).slice(0, 32), projectKey: "BSADAPT344", issueType: "任务" } : undefined;
+    const reply = demoCreation ? `已创建 Jira 任务 ${demoCreation.jiraKey}。是否需要立即执行？` : `（演示模式）收到：${messageText(message).slice(0, 80)}`;
     const emit = (chunk?: UIMessageChunk, done?: boolean) => memoryListeners.forEach((callback) => callback({ streamId, chatId, chunk, done }));
     emit({ type: "start", messageId: assistantId, messageMetadata: { createdAt, model: "demo" } }); emit({ type: "text-start", id: textId });
     let index = 0;
@@ -179,8 +183,9 @@ export const api: AgentApi = window.agentApi ?? {
       if (delta) emit({ type: "text-delta", id: textId, delta });
       if (index >= reply.length) {
         window.clearInterval(timer); memoryStreamTimers.delete(streamId);
-        emit({ type: "text-end", id: textId }); emit({ type: "finish", finishReason: "stop", messageMetadata: { createdAt, model: "demo", status: "done" } }); emit(undefined, true);
-        conv.messages.push({ id: assistantId, role: "assistant", metadata: { createdAt, model: "demo", status: "done" }, parts: [{ type: "text", text: reply, state: "done" }] }); conv.messageCount = conv.messages.length; conv.updatedAt = nowIso();
+        const metadata: ChatMessageMetadata = { createdAt, model: "demo", status: "done", agentMode: mode ?? "chat", ...(demoCreation ? { taskCreation: demoCreation } : {}) };
+        emit({ type: "text-end", id: textId }); emit({ type: "finish", finishReason: "stop", messageMetadata: metadata }); emit(undefined, true);
+        conv.messages.push({ id: assistantId, role: "assistant", metadata, parts: [{ type: "text", text: reply, state: "done" }] }); conv.messageCount = conv.messages.length; conv.updatedAt = nowIso();
       }
     }, 45);
     memoryStreamTimers.set(streamId, timer);

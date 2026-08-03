@@ -1,10 +1,19 @@
 import type { UIMessage, UIMessageChunk } from "ai";
 
 export type ChatMessageStatus = "done" | "error" | "aborted";
+export type ChatAgentMode = "chat" | "task-create";
+export type ChatTaskCreationResult = {
+  jiraKey: string;
+  summary: string;
+  projectKey: string;
+  issueType: string;
+};
 export type ChatMessageMetadata = {
   createdAt: string;
   model?: string;
   status?: ChatMessageStatus;
+  agentMode?: ChatAgentMode;
+  taskCreation?: ChatTaskCreationResult;
 };
 export type ChatMessage = UIMessage<ChatMessageMetadata>;
 
@@ -22,6 +31,6 @@ export type ChatConversation = ChatConversationMeta & { messages: ChatMessage[] 
 export type ChatModelInfo = { value: string; displayName: string; isDefault?: boolean; isReasoning?: boolean; isVl?: boolean; priceFactor?: number };
 export type ChatModelGroup = { provider: "qoder" | "openai"; displayName: string; models: ChatModelInfo[] };
 
-export type StartChatStreamInput = { streamId: string; chatId: string; model: string; message: ChatMessage };
+export type StartChatStreamInput = { streamId: string; chatId: string; model: string; message: ChatMessage; mode?: ChatAgentMode };
 export type AbortChatStreamInput = { streamId: string; chatId: string };
 export type ChatStreamEvent = { streamId: string; chatId: string; chunk?: UIMessageChunk; error?: string; done?: boolean };

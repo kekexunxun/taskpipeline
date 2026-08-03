@@ -9,6 +9,7 @@ import { AtlassianClientFactory, DeliveryService, fetchJiraTasks, GitService, im
 import { resolveBundledOcrBinary, resolveOcrBinary, createOcrRunner } from "./ocr.js";
 import { accessToken, query } from "@qoder-ai/qoder-agent-sdk";
 import { ChatService } from "./chat/chat-service.js";
+import { JiraTaskCreationAgent } from "./chat/task-creation-agent.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow;
 let piSession;
@@ -115,7 +116,7 @@ const deliveryService = new DeliveryService(store, gitService, desktopResolver, 
 const mergeRefresher = new MergeStatusRefresher(store, desktopResolver, desktopSink);
 const taskCompleter = new TaskCompleter(store, desktopSink);
 const atlassianFactory = new AtlassianClientFactory(desktopResolver);
-const chatService = new ChatService(store, dataDir, getQoderStatus, () => protectedValue("qoderToken"), () => protectedValue("modelApiKey"), () => mainWindow);
+const chatService = new ChatService(store, dataDir, getQoderStatus, () => protectedValue("qoderToken"), () => protectedValue("modelApiKey"), () => mainWindow, () => new JiraTaskCreationAgent(atlassianFactory));
 // === Review 实现(Qoder / OpenAI 兼容) =========================================
 async function callQoderReviewer(prompt, taskId, model) {
     const token = protectedValue("qoderToken");

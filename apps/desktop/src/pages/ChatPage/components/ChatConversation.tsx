@@ -9,10 +9,12 @@ import { ChatMessageView } from "./ChatMessage";
 
 export function ChatConversation({
   messages,
-  streaming
+  streaming,
+  onExecuteJira
 }: {
   messages: ChatMessage[];
   streaming?: boolean;
+  onExecuteJira?(jiraKey: string): Promise<void>;
 }) {
   const lastIndex = messages.length - 1;
   if (messages.length === 0) {
@@ -38,6 +40,7 @@ export function ChatConversation({
             key={message.id}
             message={message}
             isAnimating={streaming && !message.metadata?.status && index === lastIndex}
+            onExecuteJira={onExecuteJira}
           />
         ))}
       </ConversationContent>

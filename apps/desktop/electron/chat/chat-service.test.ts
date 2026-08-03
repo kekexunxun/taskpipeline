@@ -59,6 +59,20 @@ describe("ChatService", () => {
     expect(events().at(-1)).toMatchObject({ streamId: "stream-1", chatId: conversation.id, done: true });
   });
 
+  it("persists a structured Jira creation result in assistant metadata", async () => {
+    streamChatMock.mockImplementation(async function* () {
+      yield { type: "delta", delta: "已创建任务。" };
+      yield { type: "task-created", task: { jiraKey: "BSADAPT344-42", summary: "Agent", projectKey: "BSADAPT344", issueType: "任务" } };
+      yield { type: "done" };
+    });
+    const { service, conversation, input } = setup();
+    await service.startChatStream({ ...input, mode: "task-create" });
+    expect(service.getChat(conversation.id)?.messages[1]?.metadata).toMatchObject({
+      agentMode: "task-create",
+      taskCreation: { jiraKey: "BSADAPT344-42" }
+    });
+  });
+
   it.each([
     ["empty response", async function* () { yield { type: "done" as const }; }, "模型返回了空响应"],
     ["provider error", async function* () { throw new Error("provider unavailable"); }, "provider unavailable"]

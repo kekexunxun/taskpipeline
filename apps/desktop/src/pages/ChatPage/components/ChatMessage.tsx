@@ -1,6 +1,7 @@
-import { BotIcon, UserIcon } from "lucide-react";
-import { memo, useMemo } from "react";
+import { ArrowRightIcon, BotIcon, Loader2Icon, UserIcon } from "lucide-react";
+import { memo, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { MessageResponse } from "@/components/ai-elements/message";
 import type { ChatMessage as ChatMessageType } from "@/api";
 import { cn } from "@/lib/utils";
@@ -30,11 +31,14 @@ function formatTime(value: string | number | Date | undefined): string | undefin
  */
 function ChatMessageImpl({
   message,
-  isAnimating
+  isAnimating,
+  onExecuteJira
 }: {
   message: ChatMessageType;
   isAnimating?: boolean;
+  onExecuteJira?(jiraKey: string): Promise<void>;
 }) {
+  const [executing, setExecuting] = useState(false);
   const isUser = message.role === "user";
   const text = useMemo(() => extractText(message), [message]);
   const time = useMemo(
@@ -45,6 +49,7 @@ function ChatMessageImpl({
   const isAborted = metaStatus === "aborted";
   const isError = metaStatus === "error";
   const isStreaming = Boolean(isAnimating) && !isAborted && !isError;
+  const taskCreation = message.metadata?.taskCreation;
   const containerClass = isUser ? "justify-end" : "justify-start";
   const widthClass = isUser ? "max-w-[78%]" : "max-w-[88%]";
   const alignClass = isUser ? "items-end" : "items-start";
@@ -88,14 +93,40 @@ function ChatMessageImpl({
             {text}
           </div>
         ) : (
-          <div
-            className={cn(
-              "min-w-0 max-w-full text-sm leading-6 text-foreground",
-              isStreaming && "animate-pulse"
+          <>
+            <div
+              className={cn(
+                "min-w-0 max-w-full text-sm leading-6 text-foreground",
+                isStreaming && "animate-pulse"
+              )}
+            >
+              <MessageResponse>{text}</MessageResponse>
+            </div>
+            {taskCreation && (
+              <div className="flex w-full flex-wrap items-center gap-2 border-l-2 border-primary/50 pl-3 text-xs">
+                <span className="font-mono font-semibold text-foreground">{taskCreation.jiraKey}</span>
+                <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                  {taskCreation.issueType} · {taskCreation.summary}
+                </span>
+                {onExecuteJira && (
+                  <Button
+                    size="sm"
+                    className="h-6 shrink-0"
+                    disabled={executing}
+                    onClick={async () => {
+                      setExecuting(true);
+                      try { await onExecuteJira(taskCreation.jiraKey); }
+                      catch { /* 全局反馈已展示导入失败原因。 */ }
+                      finally { setExecuting(false); }
+                    }}
+                  >
+                    {executing ? <Loader2Icon className="animate-spin-slow" size={11} /> : <ArrowRightIcon size={11} />}
+                    立即执行
+                  </Button>
+                )}
+              </div>
             )}
-          >
-            <MessageResponse>{text}</MessageResponse>
-          </div>
+          </>
         )}
       </div>
     </div>

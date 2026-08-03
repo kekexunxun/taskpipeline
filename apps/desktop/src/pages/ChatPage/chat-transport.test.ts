@@ -30,4 +30,22 @@ describe("ElectronChatTransport", () => {
     expect(unsubscribe).toHaveBeenCalledOnce();
     expect(api.abortChat).toHaveBeenCalledWith(expect.objectContaining({ chatId: "chat-a" }));
   });
+
+  it("forwards task creation mode to the Electron agent", async () => {
+    let listener: ((event: ChatStreamEvent) => void) | undefined;
+    api.onChatStreamEvent = (callback) => { listener = callback; return () => undefined; };
+    api.startChatStream = vi.fn(async (input) => { listener?.({ streamId: input.streamId, chatId: input.chatId, done: true }); });
+    const stream = await new ElectronChatTransport().sendMessages({ trigger: "submit-message", chatId: "chat-a", messageId: undefined, messages: [{ id: "u1", role: "user", parts: [{ type: "text", text: "create" }] }], body: { model: "qoder:test", mode: "task-create" }, abortSignal: undefined });
+    await stream.getReader().read();
+    expect(api.startChatStream).toHaveBeenCalledWith(expect.objectContaining({ mode: "task-create" }));
+  });
+
+  it("uses the newly created conversation id supplied in the request body", async () => {
+    let listener: ((event: ChatStreamEvent) => void) | undefined;
+    api.onChatStreamEvent = (callback) => { listener = callback; return () => undefined; };
+    api.startChatStream = vi.fn(async (input) => { listener?.({ streamId: input.streamId, chatId: input.chatId, done: true }); });
+    const stream = await new ElectronChatTransport().sendMessages({ trigger: "submit-message", chatId: "no-active-chat", messageId: undefined, messages: [{ id: "u1", role: "user", parts: [{ type: "text", text: "hello" }] }], body: { model: "qoder:test", chatId: "created-chat" }, abortSignal: undefined });
+    await stream.getReader().read();
+    expect(api.startChatStream).toHaveBeenCalledWith(expect.objectContaining({ chatId: "created-chat" }));
+  });
 });

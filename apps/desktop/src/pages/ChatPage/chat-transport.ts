@@ -1,10 +1,12 @@
 import type { ChatTransport, UIMessageChunk } from "ai";
-import { api, type ChatMessage, type ChatStreamEvent } from "@/api";
+import { api, type ChatAgentMode, type ChatMessage, type ChatStreamEvent } from "@/api";
 
 export class ElectronChatTransport implements ChatTransport<ChatMessage> {
   async sendMessages({ chatId, messages, abortSignal, body }: Parameters<ChatTransport<ChatMessage>["sendMessages"]>[0]): Promise<ReadableStream<UIMessageChunk>> {
     const requestBody = body as Record<string, unknown> | undefined;
     const model = typeof requestBody?.model === "string" ? requestBody.model : undefined;
+    const mode: ChatAgentMode = requestBody?.mode === "task-create" ? "task-create" : "chat";
+    const targetChatId = typeof requestBody?.chatId === "string" && requestBody.chatId ? requestBody.chatId : chatId;
     const message = messages[messages.length - 1];
     if (!model || !message || message.role !== "user") throw new Error("缺少聊天模型或用户消息");
     const streamId = crypto.randomUUID();
@@ -15,18 +17,18 @@ export class ElectronChatTransport implements ChatTransport<ChatMessage> {
         let off: () => void = () => undefined;
         cleanup = () => { if (closed) return; closed = true; off(); abortSignal?.removeEventListener("abort", onAbort); };
         const close = () => { if (!closed) { cleanup(); controller.close(); } };
-        const onAbort = () => { void api.abortChat({ streamId, chatId }); close(); };
+        const onAbort = () => { void api.abortChat({ streamId, chatId: targetChatId }); close(); };
         off = api.onChatStreamEvent((event: ChatStreamEvent) => {
-          if (event.streamId !== streamId || event.chatId !== chatId || closed) return;
+          if (event.streamId !== streamId || event.chatId !== targetChatId || closed) return;
           if (event.error) { cleanup(); controller.error(new Error(event.error)); return; }
           if (event.chunk) controller.enqueue(event.chunk);
           if (event.done) close();
         });
         abortSignal?.addEventListener("abort", onAbort, { once: true });
         if (abortSignal?.aborted) { onAbort(); return; }
-        void api.startChatStream({ streamId, chatId, model, message }).catch((reason) => { if (!closed) { cleanup(); controller.error(reason); } });
+        void api.startChatStream({ streamId, chatId: targetChatId, model, message, mode }).catch((reason) => { if (!closed) { cleanup(); controller.error(reason); } });
       },
-      cancel() { cleanup(); void api.abortChat({ streamId, chatId }); }
+      cancel() { cleanup(); void api.abortChat({ streamId, chatId: targetChatId }); }
     });
   }
 
