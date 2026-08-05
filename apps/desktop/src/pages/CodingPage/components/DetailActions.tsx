@@ -1,4 +1,4 @@
-import { CheckIcon, Loader2Icon, PlayIcon, RefreshCcwIcon, SendIcon, SquareIcon } from "lucide-react";
+import { CheckIcon, Loader2Icon, MessageCircleIcon, PlayIcon, RefreshCcwIcon, SendIcon, SquareIcon } from "lucide-react";
 import type { TaskCard } from "@coding-agent/core";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -57,10 +57,11 @@ export function DetailActions({
   const isCancelled = state === "cancelled";
   const isFailed = state === "failed";
   const isValidationFailed = state === "validation_failed";
+  const isAwaitingInput = state === "awaiting_input";
   const isContinuable = ["confirmed", "preparing", "planning", "implementing"].includes(state);
   const isValidating = state === "validating";
   const isManuallyCompletable = isAwaitingReview || isReviewing || isReviewBlocked || isAwaitingCommit || isAwaitMerge;
-  const hasActions = isDraft || running || starting || isContinuable || isValidating || isAwaitingReview || isReviewing || isReviewBlocked || isFailed || isValidationFailed || isAwaitingCommit || isDelivering || isAwaitMerge || isCompleted || isCancelled;
+  const hasActions = isDraft || running || starting || isContinuable || isAwaitingInput || isValidating || isAwaitingReview || isReviewing || isReviewBlocked || isFailed || isValidationFailed || isAwaitingCommit || isDelivering || isAwaitMerge || isCompleted || isCancelled;
   if (!hasActions) return null;
 
   return (
@@ -79,6 +80,11 @@ export function DetailActions({
         <Button size="sm" className="gap-1 px-2" onClick={onStart}>
           <PlayIcon size={11} />{state === "planning" ? "继续生成计划" : "继续执行"}
         </Button>
+      )}
+      {!starting && !running && isAwaitingInput && (
+        <Badge variant="warning">
+          <MessageCircleIcon size={10} />等待补充
+        </Badge>
       )}
       {!starting && !running && isValidating && <Button size="sm" className="gap-1 px-2" onClick={onRetryValidation}><RefreshCcwIcon size={11} />继续校验</Button>}
       {!starting && running && (

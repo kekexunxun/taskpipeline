@@ -2,7 +2,7 @@ import { execa } from "execa";
 import { randomInt } from "node:crypto";
 import { join } from "node:path";
 
-export type GitRunner = (args: string[], cwd: string, timeoutMs?: number) => Promise<string>;
+export type GitRunner = (args: string[], cwd: string, timeoutMs?: number, signal?: AbortSignal) => Promise<string>;
 export type GitRepositoryInfo = { rootPath: string; currentBranch: string; remoteUrl?: string };
 export type GitChangedFile = { path: string; status: string };
 export type GitWorktree = { path: string; branch: string };
@@ -63,17 +63,18 @@ export class GitService {
   // 会接住并把状态退到 awaiting_commit,避免任务永远卡在 delivering。
   // 不用 reject:false 是因为我们要拿到 timeout 这个 reason 走统一的错误流。
   constructor(
-    private readonly run: GitRunner = async (args, cwd, timeoutMs) => (await execa("git", args, {
+    private readonly run: GitRunner = async (args, cwd, timeoutMs, signal) => (await execa("git", args, {
       cwd,
       timeout: timeoutMs ?? 10 * 60_000,
+      cancelSignal: signal,
       env: { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never" }
     })).stdout,
     private readonly branchSuffix: () => string = randomBranchSuffix
   ) {}
 
-  private async fetchRemote(cwd: string): Promise<string> {
+  private async fetchRemote(cwd: string, signal?: AbortSignal): Promise<string> {
     try {
-      return await this.run(["fetch", "--all", "--prune"], cwd, REMOTE_OPERATION_TIMEOUT_MS);
+      return await this.run(["fetch", "--all", "--prune"], cwd, REMOTE_OPERATION_TIMEOUT_MS, signal);
     } catch (error) {
       const failure = error as { stdout?: string; stderr?: string; message?: string; timedOut?: boolean };
       const detail = [failure.stderr, failure.stdout, failure.message].filter(Boolean).join("\n");
@@ -91,22 +92,22 @@ export class GitService {
 
   status(cwd: string): Promise<string> { return this.run(["status", "--short"], cwd); }
   diff(cwd: string): Promise<string> { return this.run(["diff", "HEAD"], cwd); }
-  diffRange(cwd: string, range: string, paths?: string[]): Promise<string> {
+  diffRange(cwd: string, range: string, paths?: string[], signal?: AbortSignal): Promise<string> {
     const args = ["diff", "--no-color", range];
     if (paths?.length) args.push("--", ...paths);
-    return this.run(args, cwd);
+    return this.run(args, cwd, undefined, signal);
   }
   showCommit(cwd: string, commit: string, paths?: string[]): Promise<string> {
     const args = ["show", "--no-color", "--format=", commit];
     if (paths?.length) args.push("--", ...paths);
     return this.run(args, cwd);
   }
-  async changedFiles(cwd: string, baseRef: string): Promise<GitChangedFile[]> {
+  async changedFiles(cwd: string, baseRef: string, signal?: AbortSignal): Promise<GitChangedFile[]> {
     const files = new Map<string, GitChangedFile>();
     try {
-      for (const file of parseNameStatus(await this.run(["diff", "--name-status", "-z", `${baseRef}...HEAD`], cwd))) files.set(file.path, file);
+      for (const file of parseNameStatus(await this.run(["diff", "--name-status", "-z", `${baseRef}...HEAD`], cwd, undefined, signal))) files.set(file.path, file);
     } catch { /* The worktree may not have a resolvable base branch yet. */ }
-    for (const file of parseWorkingStatus(await this.run(["status", "--short", "-z"], cwd))) files.set(file.path, file);
+    for (const file of parseWorkingStatus(await this.run(["status", "--short", "-z"], cwd, undefined, signal))) files.set(file.path, file);
     return [...files.values()].sort((a, b) => a.path.localeCompare(b.path));
   }
   currentBranch(cwd: string): Promise<string> { return this.run(["branch", "--show-current"], cwd); }
@@ -126,12 +127,12 @@ export class GitService {
     await this.run(["worktree", "add", "-B", branch, path, baseBranch], repoPath);
     return path;
   }
-  async createTaskWorktree(repoPath: string, worktreeRoot: string, preferredBranch: string, baseBranch: string, directoryName?: string): Promise<GitWorktree> {
+  async createTaskWorktree(repoPath: string, worktreeRoot: string, preferredBranch: string, baseBranch: string, directoryName?: string, signal?: AbortSignal): Promise<GitWorktree> {
     const normalizedBranch = preferredBranch.trim();
     if (!normalizedBranch) throw new Error("Task branch name is required");
     const path = join(worktreeRoot, directoryName ?? normalizedBranch.replaceAll("/", "-"));
-    await this.fetchRemote(repoPath);
-    const refs = new Set((await this.run(["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"], repoPath)).split(/\r?\n/).filter(Boolean));
+    await this.fetchRemote(repoPath, signal);
+    const refs = new Set((await this.run(["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"], repoPath, undefined, signal)).split(/\r?\n/).filter(Boolean));
     const baseRef = originBranchRef(baseBranch);
     if (!refs.has(baseRef)) throw new Error(`Configured remote base branch does not exist: ${baseRef}`);
     let branch = normalizedBranch;
@@ -139,16 +140,16 @@ export class GitService {
       if (attempt >= 100) throw new Error(`Unable to find an available branch name for ${normalizedBranch}`);
       branch = `${normalizedBranch}-${this.branchSuffix()}`;
     }
-    await this.run(["worktree", "add", "-b", branch, path, baseRef], repoPath);
+    await this.run(["worktree", "add", "-b", branch, path, baseRef], repoPath, undefined, signal);
     return { path, branch };
   }
   // 桌面应用是在临时 worktree 里替用户做自动提交,不是开发者在本地提交,
   // 所以必须绕开 pre-commit / commit-msg 等本地 hook (例如 worktree clone
   // 通常没有 `.husky/_/husky.sh` 或 `node_modules`,hook 一启动就报错)。
-  async commit(cwd: string, message: string): Promise<string> {
-    await this.run(["add", "-A"], cwd);
+  async commit(cwd: string, message: string, signal?: AbortSignal): Promise<string> {
+    await this.run(["add", "-A"], cwd, undefined, signal);
     try {
-      await this.run(["commit", "--no-verify", "-m", message], cwd);
+      await this.run(["commit", "--no-verify", "-m", message], cwd, undefined, signal);
     } catch (error) {
       // 二次提交场景:上一次 commit 已经成功 (只是 push 失败 / 进程崩溃 / hook 卡死),
       // worktree 已经是 clean 的,`git commit` 报 "nothing to commit, working tree clean"
@@ -156,20 +157,20 @@ export class GitService {
       // 复用现有 HEAD 继续走 push,而不是把整个流程炸掉,让用户必须去 worktree 手动处理。
       const execaError = error as { exitCode?: number; stdout?: string };
       if (execaError.exitCode === 1 && /nothing to commit/.test(execaError.stdout ?? "")) {
-        return this.run(["rev-parse", "HEAD"], cwd);
+        return this.run(["rev-parse", "HEAD"], cwd, undefined, signal);
       }
       throw error;
     }
-    return this.run(["rev-parse", "HEAD"], cwd);
+    return this.run(["rev-parse", "HEAD"], cwd, undefined, signal);
   }
   // push 需要单独 timeout:commit 是本地操作,默认 10 分钟足够,但 push 涉及网络 + 数据上传,
   // 公司内网 GitLab (192.168.x.x) 在沙盒里经常不可达,git 默认无 timeout 会无限挂起,让用户干等。
   // 90 秒对正常 push 足够 (除非仓库几十 MB),够用且能尽快把网络问题暴露给用户。
   // 同时把网络错误 (Connection timed out / Could not resolve host 等) 包装成"无法连接到 GitLab: {url}"的友好信息,
   // 避免把原始 git stderr 抛回去让用户猜。
-  async push(cwd: string, branch: string, token?: string): Promise<string> {
+  async push(cwd: string, branch: string, token?: string, signal?: AbortSignal): Promise<string> {
     try {
-      return await this.run([...(token ? ["-c", `http.extraHeader=PRIVATE-TOKEN: ${token}`] : []), "push", "--set-upstream", "origin", branch], cwd, 90_000);
+      return await this.run([...(token ? ["-c", `http.extraHeader=PRIVATE-TOKEN: ${token}`] : []), "push", "--set-upstream", "origin", branch], cwd, 90_000, signal);
     } catch (error) {
       const execaError = error as { stdout?: string; stderr?: string; message?: string };
       const combined = `${execaError.stdout ?? ""}\n${execaError.stderr ?? ""}\n${execaError.message ?? ""}`;

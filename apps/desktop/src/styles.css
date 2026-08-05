@@ -80,6 +80,7 @@ button, input, textarea, select { font: inherit; letter-spacing: 0; }
 button:not(:disabled) { cursor: pointer; }
 /* 默认 focus-visible 仅在表单原子控件上生效；容器组件（如 InputGroup / Dialog）需要时由自身负责。 */
 button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+[data-detail-tab]:focus-visible { outline: none; }
 input:focus-visible, textarea:focus-visible { outline: none; }
 
 .window-drag { -webkit-app-region: drag; }

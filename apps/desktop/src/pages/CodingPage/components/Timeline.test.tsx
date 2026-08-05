@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { Timeline, compactTimelineItems, type TimelineItem } from "./Timeline";
+import { Timeline, compactTimelineItems, normalizeTimelineItems, type TimelineItem } from "./Timeline";
 
 function item(id: string, kind: TimelineItem["kind"], title: string, detail?: string): TimelineItem {
   return { id, taskId: "task-1", kind, title, detail, createdAt: `2026-08-01T00:00:0${id}.000Z` };
@@ -45,6 +45,31 @@ describe("compactTimelineItems", () => {
 
     expect(compactTimelineItems(events)).toEqual({ items: events, hiddenCount: 0 });
   });
+
+  it("does not repeat an agent response in the following status detail", () => {
+    const result = compactTimelineItems([
+      item("1", "message", "Qoder Agent", "请补充验收标准"),
+      item("2", "status", "等待补充任务信息", "请补充验收标准")
+    ]);
+
+    expect(result.items[1]?.detail).toBeUndefined();
+  });
+});
+
+describe("normalizeTimelineItems", () => {
+  it("sorts live events with persisted events and removes optimistic duplicates", () => {
+    const persisted = { ...item("1", "message", "你", "直接完成"), createdAt: "2026-08-01T00:00:05.100Z" };
+    const localCopy = { ...item("2", "message", "你", "直接完成"), createdAt: "2026-08-01T00:00:05.000Z" };
+    const reply = { ...item("3", "message", "Qoder Agent", "已处理"), createdAt: "2026-08-01T00:00:07.000Z" };
+
+    expect(normalizeTimelineItems([reply, persisted, localCopy]).map((event) => event.detail)).toEqual(["直接完成", "已处理"]);
+  });
+
+  it("removes internal outcome markers from displayed content", () => {
+    expect(normalizeTimelineItems([
+      item("1", "message", "Qoder Agent", "请补充信息\n<!-- coding-agent-outcome:needs_input -->")
+    ])[0]?.detail).toBe("请补充信息");
+  });
 });
 
 describe("Timeline", () => {
@@ -57,5 +82,16 @@ describe("Timeline", () => {
     expect(screen.queryByText("raw payload")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "显示全部（2）" }));
     expect(screen.getByText("raw payload")).toBeInTheDocument();
+  });
+
+  it("explains when every stored event is an internal protocol record", () => {
+    render(<Timeline items={[
+      item("1", "status", "Qoder init", "raw init"),
+      item("2", "status", "Qoder hook", "raw hook")
+    ]} />);
+
+    expect(screen.getByText("暂无执行摘要")).toBeInTheDocument();
+    expect(screen.getByText(/已折叠 2 条内部运行记录/)).toBeInTheDocument();
+    expect(screen.queryByText("raw init")).not.toBeInTheDocument();
   });
 });

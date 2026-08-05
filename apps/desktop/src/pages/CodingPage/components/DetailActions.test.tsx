@@ -86,6 +86,13 @@ describe("DetailActions", () => {
     expect(screen.queryByRole("button", { name: "继续执行" })).not.toBeInTheDocument();
   });
 
+  it("shows a waiting status instead of a continue action while waiting for input", () => {
+    render(<DetailActions card={cardWithState("awaiting_input")} running={false} starting={false} canSubmit={false} merging={false} {...callbacks} />);
+
+    expect(screen.getByText("等待补充")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "继续执行" })).not.toBeInTheDocument();
+  });
+
   it("re-runs review after a blocked review", () => {
     render(<DetailActions card={cardWithState("review_blocked")} running={false} starting={false} canSubmit={false} merging={false} {...callbacks} />);
 

@@ -367,6 +367,7 @@ describe("task command workflow", () => {
     try {
       const store = new TaskStore(join(dir, "store.db"));
       const task = store.createTask({ title: "Already done", description: "test", state: "planning" });
+      store.addTaskRepository({ taskId: task.id, repositoryId: "repo", name: "repo", localPath: dir, baseBranch: "main", deliveryStatus: "pending" });
       const workflow = new TaskWorkflow(store, { get: () => undefined, getSecret: () => undefined }, { addEvent: (event) => store.addEvent(event), emitChanged: () => undefined }, () => dir);
 
       const completed = workflow.completeWithoutChanges(task.id, "现有实现已经满足验收条件。无需修改代码。");
@@ -377,7 +378,60 @@ describe("task command workflow", () => {
         planRevision: 1,
         summary: "代码已满足任务要求，无需修改"
       });
+      expect(store.listTaskRepositories(task.id)[0]).toMatchObject({ deliveryStatus: "unchanged" });
       expect(store.listEvents(task.id).some((event) => event.title === "代码已满足要求，任务自动完成")).toBe(true);
+      store.close();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("completes an implementing task when the agent confirms no changes are required", () => {
+    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    try {
+      const store = new TaskStore(join(dir, "store.db"));
+      const task = store.createTask({ title: "Already done", description: "test", state: "implementing" });
+      store.addTaskRepository({ taskId: task.id, repositoryId: "repo", name: "repo", localPath: dir, baseBranch: "main", deliveryStatus: "pending" });
+      const workflow = new TaskWorkflow(store, { get: () => undefined, getSecret: () => undefined }, { addEvent: (event) => store.addEvent(event), emitChanged: () => undefined }, () => dir);
+
+      expect(workflow.completeImplementationWithoutChanges(task.id, "现有实现已经满足要求。")).toMatchObject({
+        state: "completed",
+        planContent: undefined,
+        planRevision: undefined,
+        summary: "代码已满足任务要求，无需修改"
+      });
+      expect(store.listTaskRepositories(task.id)[0]).toMatchObject({ deliveryStatus: "unchanged" });
+      store.close();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("pauses for user input and resumes implementation after a reply", () => {
+    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    try {
+      const store = new TaskStore(join(dir, "store.db"));
+      const task = store.createTask({ title: "Needs details", description: "", state: "implementing" });
+      const workflow = new TaskWorkflow(store, { get: () => undefined, getSecret: () => undefined }, { addEvent: (event) => store.addEvent(event), emitChanged: () => undefined }, () => dir);
+
+      expect(workflow.awaitInput(task.id, "请补充验收标准。")).toMatchObject({ state: "awaiting_input" });
+      expect(store.listEvents(task.id).some((event) => event.title === "等待补充任务信息")).toBe(true);
+      expect(workflow.resumeImplementation(task.id)).toMatchObject({ state: "implementing" });
+      store.close();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("completes a waiting task when the user explicitly requests no changes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    try {
+      const store = new TaskStore(join(dir, "store.db"));
+      const task = store.createTask({ title: "No changes", description: "", state: "awaiting_input" });
+      store.addTaskRepository({ taskId: task.id, repositoryId: "repo", name: "repo", localPath: dir, baseBranch: "main", deliveryStatus: "pending" });
+      const workflow = new TaskWorkflow(store, { get: () => undefined, getSecret: () => undefined }, { addEvent: (event) => store.addEvent(event), emitChanged: () => undefined }, () => dir);
+
+      expect(workflow.completeAtUserRequest(task.id)).toMatchObject({
+        state: "completed",
+        summary: "用户确认无需修改，任务已完成",
+        reviewStatus: "waived"
+      });
+      expect(store.listTaskRepositories(task.id)[0]).toMatchObject({ deliveryStatus: "unchanged" });
+      expect(store.listEvents(task.id).some((event) => event.title === "用户确认无需修改，任务已完成")).toBe(true);
       store.close();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -426,6 +480,7 @@ describe("task command workflow", () => {
       store.close();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+
 });
 
 describe("GitLab remote parsing", () => {

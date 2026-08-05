@@ -61,7 +61,13 @@ export class TaskWorkflow {
     }
   }
 
-  private async prepareWorktree(taskId: string): Promise<Task> {
+  private markRepositoriesUnchanged(taskId: string): void {
+    for (const repo of this.store.listTaskRepositories(taskId)) {
+      this.store.updateTaskRepository(repo.id, { deliveryStatus: "unchanged" });
+    }
+  }
+
+  private async prepareWorktree(taskId: string, signal?: AbortSignal): Promise<Task> {
     let task = this.store.getTask(taskId);
     if (!task) throw new Error("Task not found");
     if (task.state === "draft") task = this.transitionTo(taskId, "confirmed");
@@ -76,13 +82,15 @@ export class TaskWorkflow {
       usedEntries.add(entry);
       if (repo.worktreePath && repo.featureBranch) continue;
       const preferredBranch = task.taskKey?.trim() || task.id.slice(0, 8);
-      const { path: worktreePath, branch } = await this.git.createTaskWorktree(repo.localPath, root, preferredBranch, repo.baseBranch, entry);
-      this.store.updateTaskRepository(repo.id, { featureBranch: branch, worktreePath });
+      signal?.throwIfAborted();
+      const { path: worktreePath, branch } = await this.git.createTaskWorktree(repo.localPath, root, preferredBranch, repo.baseBranch, entry, signal);
+      signal?.throwIfAborted();
+      this.store.updateTaskRepository(repo.id, { featureBranch: branch, worktreePath, deliveryStatus: "pending" });
     }
     return this.store.getTask(taskId)!;
   }
 
-  async begin(taskId: string, mode: TaskStartMode, overrides: RepositoryCommandMap = {}): Promise<Task> {
+  async begin(taskId: string, mode: TaskStartMode, overrides: RepositoryCommandMap = {}, signal?: AbortSignal): Promise<Task> {
     this.snapshotCommands(taskId, overrides);
     let current = this.store.getTask(taskId);
     if (!current) throw new Error("Task not found");
@@ -92,8 +100,9 @@ export class TaskWorkflow {
     }
     let task: Task;
     try {
-      task = await this.prepareWorktree(taskId);
+      task = await this.prepareWorktree(taskId, signal);
     } catch (error) {
+      if (signal?.aborted) throw error;
       const message = error instanceof Error ? error.message : String(error);
       this.store.updateTask(taskId, { failureStage: "preparing" });
       const failed = this.store.getTask(taskId);
@@ -104,7 +113,7 @@ export class TaskWorkflow {
     this.store.updateTask(taskId, { startMode: mode, failureStage: undefined });
     if (mode === "plan") return this.transitionTo(taskId, "planning");
     if (task.state !== "preparing" && task.state !== "failed") return task;
-    return this.runSetup(taskId);
+    return this.runSetup(taskId, false, signal);
   }
 
   setPlan(taskId: string, content: string): Task {
@@ -119,7 +128,48 @@ export class TaskWorkflow {
     if (!task || task.state !== "planning") throw new Error("当前任务不在计划生成状态");
     this.store.updateTask(taskId, { planContent: content, planRevision: (task.planRevision ?? 0) + 1, summary: "代码已满足任务要求，无需修改" });
     this.sink.addEvent({ taskId, kind: "status", title: "代码已满足要求，任务自动完成", detail: content });
-    return this.transitionTo(taskId, "completed");
+    const completed = this.transitionTo(taskId, "completed");
+    this.markRepositoriesUnchanged(taskId);
+    return completed;
+  }
+
+  completeImplementationWithoutChanges(taskId: string, content: string): Task {
+    const task = this.store.getTask(taskId);
+    if (!task || task.state !== "implementing") throw new Error("当前任务不在实现状态");
+    // Direct implementation normally cannot skip validation/review. This is the
+    // narrow exception for an agent-confirmed, host-verified zero-change result.
+    const updated = this.store.updateTask(taskId, { state: "completed", summary: "代码已满足任务要求，无需修改" });
+    this.markRepositoriesUnchanged(taskId);
+    this.sink.addEvent({ taskId, kind: "status", title: "代码已满足要求，任务自动完成", detail: content });
+    this.sink.addEvent({ taskId, kind: "status", title: "状态更新为 completed" });
+    return updated;
+  }
+
+  awaitInput(taskId: string, content: string): Task {
+    const task = this.store.getTask(taskId);
+    if (!task || task.state !== "implementing") throw new Error("当前任务不在实现状态");
+    this.sink.addEvent({ taskId, kind: "status", title: "等待补充任务信息", detail: content });
+    return this.transitionTo(taskId, "awaiting_input");
+  }
+
+  resumeImplementation(taskId: string): Task {
+    const task = this.store.getTask(taskId);
+    if (!task || task.state !== "awaiting_input") throw new Error("当前任务不在等待补充状态");
+    return this.transitionTo(taskId, "implementing");
+  }
+
+  completeAtUserRequest(taskId: string): Task {
+    const task = this.store.getTask(taskId);
+    if (!task || task.state !== "awaiting_input") throw new Error("当前任务不在等待补充状态");
+    transitionTask(task.state, "completed");
+    const updated = this.store.updateTask(taskId, {
+      state: "completed",
+      summary: "用户确认无需修改，任务已完成",
+      reviewStatus: "waived"
+    });
+    this.markRepositoriesUnchanged(taskId);
+    this.sink.addEvent({ taskId, kind: "status", title: "用户确认无需修改，任务已完成" });
+    return updated;
   }
 
   revisePlan(taskId: string): Task {
@@ -128,21 +178,23 @@ export class TaskWorkflow {
     return this.transitionTo(taskId, "planning");
   }
 
-  async approvePlan(taskId: string): Promise<Task> {
+  async approvePlan(taskId: string, signal?: AbortSignal): Promise<Task> {
     const task = this.store.getTask(taskId);
     if (!task || task.state !== "awaiting_plan_approval") throw new Error("当前任务没有待确认计划");
-    return this.runSetup(taskId, true);
+    return this.runSetup(taskId, true, signal);
   }
 
-  async runSetup(taskId: string, approvedPlan = false): Promise<Task> {
+  async runSetup(taskId: string, approvedPlan = false, signal?: AbortSignal): Promise<Task> {
     const task = this.store.getTask(taskId);
     if (!task) throw new Error("Task not found");
     if (task.state !== "preparing" && !(approvedPlan && task.state === "awaiting_plan_approval") && task.state !== "failed") return task;
     try {
-      await this.runCommands(taskId, "setup");
+      await this.runCommands(taskId, "setup", signal);
+      signal?.throwIfAborted();
       this.store.updateTask(taskId, { failureStage: undefined });
       return this.transitionTo(taskId, "implementing");
     } catch (error) {
+      if (signal?.aborted) throw error;
       this.store.updateTask(taskId, { failureStage: "preparing" });
       const failed = this.store.getTask(taskId)!;
       if (failed.state !== "failed") this.transitionTo(taskId, "failed");
@@ -150,21 +202,23 @@ export class TaskWorkflow {
     }
   }
 
-  async runValidation(taskId: string): Promise<Task> {
+  async runValidation(taskId: string, signal?: AbortSignal): Promise<Task> {
     const task = this.store.getTask(taskId);
     if (!task || !["implementing", "validating", "validation_failed"].includes(task.state)) throw new Error("当前任务不能运行校验");
     this.transitionTo(taskId, "validating");
     try {
-      await this.runCommands(taskId, "validation");
+      await this.runCommands(taskId, "validation", signal);
+      signal?.throwIfAborted();
       this.store.updateTask(taskId, { failureStage: undefined });
       return this.transitionTo(taskId, "awaiting_review");
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error;
       this.store.updateTask(taskId, { failureStage: "validating" });
       return this.transitionTo(taskId, "validation_failed");
     }
   }
 
-  private async runCommands(taskId: string, phase: "setup" | "validation"): Promise<void> {
+  private async runCommands(taskId: string, phase: "setup" | "validation", signal?: AbortSignal): Promise<void> {
     for (const repo of this.store.listTaskRepositories(taskId)) {
       const cwd = repo.worktreePath ?? repo.localPath;
       const commands = phase === "setup"
@@ -175,7 +229,9 @@ export class TaskWorkflow {
         if (!command) continue;
         this.sink.addEvent({ taskId, kind: "command", title: `${repo.name} ${item.label} 开始`, detail: command });
         try {
-          const result = await this.shell(command, { cwd });
+          signal?.throwIfAborted();
+          const result = await this.shell(command, { cwd, cancelSignal: signal });
+          signal?.throwIfAborted();
           const output = typeof result.stdout === "string" ? result.stdout.trim() : undefined;
           this.sink.addEvent({ taskId, kind: "command", title: `${repo.name} ${item.label} 通过`, detail: output || undefined });
         } catch (error) {
@@ -194,11 +250,11 @@ export class TaskWorkflow {
    * - `preparing` 创建 worktree,然后到 `implementing`
    * - 其他状态直接返回当前 task
    */
-  async prepare(taskId: string): Promise<Task> {
+  async prepare(taskId: string, signal?: AbortSignal): Promise<Task> {
     let task = this.store.getTask(taskId);
     if (!task) throw new Error("Task not found");
     if (task.state === "failed") task = this.transitionTo(taskId, "implementing");
-    if (["draft", "confirmed", "preparing"].includes(task.state)) task = await this.prepareWorktree(taskId);
+    if (["draft", "confirmed", "preparing"].includes(task.state)) task = await this.prepareWorktree(taskId, signal);
     if (task.state === "preparing") task = this.transitionTo(taskId, "implementing");
     return task;
   }
@@ -214,7 +270,7 @@ export class TaskWorkflow {
    * - 有阻断:`reviewStatus: blocked`,`state: review_blocked`。
    * - 异常:`reviewStatus: blocked`,`state: review_blocked`,不冒泡(便于调用方在 IPC 边界吞掉)。
    */
-  async runReview(taskId: string, orchestrator: ReviewOrchestrator): Promise<void> {
+  async runReview(taskId: string, orchestrator: ReviewOrchestrator, signal?: AbortSignal): Promise<void> {
     let task = this.store.getTask(taskId);
     if (!task) throw new Error("Task not found");
     if (task.state === "reviewing" && task.reviewStatus === "running") {
@@ -229,12 +285,14 @@ export class TaskWorkflow {
     let blocked = false;
     try {
       for (const repo of this.store.listTaskRepositories(taskId)) {
-        const result = await orchestrator.run(task, repo);
+        signal?.throwIfAborted();
+        const result = await orchestrator.run(task, repo, signal);
         const blocking = result.comments.filter((comment) => orchestrator.isBlockingComment(comment));
         blocked ||= blocking.length > 0;
         this.sink.addEvent({ taskId, kind: "review", title: `${repo.name}: ${result.comments.length} 条评审意见`, detail: blocking.length ? `${blocking.length} 条阻断问题` : "评审通过", payload: result });
       }
     } catch (error) {
+      if (signal?.aborted) throw error;
       const message = error instanceof Error ? error.message : String(error);
       const stack = error instanceof Error && error.stack ? `\n${error.stack.split("\n").slice(0, 5).join("\n")}` : "";
       this.sink.addEvent({ taskId, kind: "error", title: "委托模式 Review 执行失败", detail: `${message}${stack}` });

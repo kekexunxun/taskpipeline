@@ -1,4 +1,5 @@
 import type { TaskCard } from "@coding-agent/core";
+import type { TaskRemovalMode } from "@/api";
 import { TaskCardView } from "./TaskCard";
 
 export function BoardColumn({
@@ -20,11 +21,11 @@ export function BoardColumn({
   removingTaskIds: ReadonlySet<string>;
   onOpen(taskId: string): void;
   onEdit?(taskId: string): void;
-  onRemove?(taskId: string): Promise<boolean>;
+  onRemove?(taskId: string, mode: TaskRemovalMode): Promise<boolean>;
 }) {
   return (
     <section
-      className="grid min-h-0 min-w-[220px] grid-rows-[32px_minmax(0,1fr)] border-l first:border-l-0"
+      className="grid h-full min-h-0 min-w-[320px] w-full grid-rows-[32px_minmax(0,1fr)] border-l first:border-l-0"
       key={id}
     >
       <header className="flex items-center justify-between gap-2 px-2.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -36,7 +37,7 @@ export function BoardColumn({
           {cards.length}
         </b>
       </header>
-      <div className="thin-scrollbar flex min-h-0 flex-col gap-1.5 overflow-y-auto px-1.5 pb-3 pt-1">
+      <div className="thin-scrollbar flex min-h-0 min-w-0 flex-col gap-1.5 overflow-y-auto px-1.5 pb-3 pt-1">
         {cards.map((task) => (
           <TaskCardView
             key={task.id}
@@ -45,11 +46,11 @@ export function BoardColumn({
             removing={removingTaskIds.has(task.id)}
             onOpen={() => onOpen(task.id)}
             onEdit={onEdit ? () => onEdit(task.id) : undefined}
-            onRemove={onRemove ? () => onRemove(task.id) : undefined}
+            onRemove={onRemove ? (mode) => onRemove(task.id, mode) : undefined}
           />
         ))}
         {cards.length === 0 && (
-          <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
+          <div className="w-full rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
             暂无任务
           </div>
         )}

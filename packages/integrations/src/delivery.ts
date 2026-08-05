@@ -53,7 +53,7 @@ export class DeliveryService {
     private readonly options: DeliveryServiceOptions = {}
   ) {}
 
-  async submitMergeRequests(taskId: string): Promise<void> {
+  async submitMergeRequests(taskId: string, signal?: AbortSignal): Promise<void> {
     let task = this.store.getTask(taskId);
     if (!task) throw new Error("Task not found");
     if (task.state !== "awaiting_commit") throw new Error("任务尚未通过 Review 或尚未准备提交");
@@ -67,6 +67,7 @@ export class DeliveryService {
     const message = task.commitMessage ?? `feat: ${task.taskKey ? `${task.taskKey} ` : ""}${task.title}`;
     try {
       for (const repo of this.store.listTaskRepositories(taskId)) {
+        signal?.throwIfAborted();
         const profile = profiles.get(repo.repositoryId);
         const remote = profile?.remoteUrl && parseGitLabRemote(profile.remoteUrl);
         if (!remote || !repo.worktreePath || !repo.featureBranch) throw new Error(`仓库 ${repo.name} 缺少 GitLab 地址或 worktree`);
@@ -75,13 +76,13 @@ export class DeliveryService {
           if (!ok) { this.sink.addEvent({ taskId, kind: "permission", title: "已拒绝 commit", detail: `${repo.name}: 用户拒绝 commit` }); this.fallbackToAwaitingCommit(taskId); return; }
         }
         this.sink.addEvent({ taskId, kind: "status", title: `${repo.name}: git add + commit (--no-verify)` });
-        const sha = await this.git.commit(repo.worktreePath, message);
+        const sha = await this.git.commit(repo.worktreePath, message, signal);
         this.sink.addEvent({ taskId, kind: "status", title: `${repo.name}: commit ${sha.slice(0, 8)} 已就绪,正在 push` });
         if (this.options.approver) {
           const ok = await this.options.approver(task, "push", `${repo.name}: push ${repo.featureBranch}`);
           if (!ok) { this.sink.addEvent({ taskId, kind: "permission", title: "已拒绝 push", detail: `${repo.name}: 用户拒绝 push` }); this.fallbackToAwaitingCommit(taskId); return; }
         }
-        await this.git.push(repo.worktreePath, repo.featureBranch, token);
+        await this.git.push(repo.worktreePath, repo.featureBranch, token, signal);
         this.sink.addEvent({ taskId, kind: "status", title: `${repo.name}: push 完成,处理 MR` });
         if (this.options.approver) {
           const ok = await this.options.approver(task, "merge_request", `${repo.name}: 创建 GitLab Merge Request`);
@@ -91,7 +92,7 @@ export class DeliveryService {
           this.store.updateTaskRepository(repo.id, { commitSha: sha, mergeRequestState: "opened", deliveryStatus: "mr_created" });
           this.sink.addEvent({ taskId, kind: "command", title: `${repo.name} 已更新 MR`, detail: repo.mergeRequestUrl });
         } else {
-          const mr = await factory(remote.baseUrl, remote.projectId).createMergeRequest({ sourceBranch: repo.featureBranch, targetBranch: repo.baseBranch, title: `${task.taskKey ? `${task.taskKey} ` : ""}${task.title}`, description: `Automated implementation for ${task.taskKey ?? taskId}.` });
+          const mr = await factory(remote.baseUrl, remote.projectId).createMergeRequest({ sourceBranch: repo.featureBranch, targetBranch: repo.baseBranch, title: `${task.taskKey ? `${task.taskKey} ` : ""}${task.title}`, description: `Automated implementation for ${task.taskKey ?? taskId}.` }, signal);
           this.store.updateTaskRepository(repo.id, { commitSha: sha, mergeRequestUrl: mr.web_url, mergeRequestIid: mr.iid, mergeRequestState: "opened", deliveryStatus: "mr_created" });
           this.sink.addEvent({ taskId, kind: "command", title: `${repo.name} 已创建 MR`, detail: mr.web_url });
         }

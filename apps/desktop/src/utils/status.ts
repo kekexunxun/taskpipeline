@@ -15,6 +15,7 @@ export const statusLabels: Record<string, string> = {
   planning: "计划中",
   awaiting_plan_approval: "等待计划确认",
   implementing: "实现中",
+  awaiting_input: "等待补充",
   validating: "校验中",
   validation_failed: "校验失败",
   failed: "执行失败",

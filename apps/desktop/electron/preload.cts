@@ -5,7 +5,7 @@ contextBridge.exposeInMainWorld("agentApi", {
   getTask: (id: string) => ipcRenderer.invoke("tasks:get", id),
   createTask: (input: unknown) => ipcRenderer.invoke("tasks:create", input),
   updateTask: (id: string, patch: unknown) => ipcRenderer.invoke("tasks:update", id, patch),
-  deleteTask: (id: string) => ipcRenderer.invoke("tasks:delete", id),
+  deleteTask: (id: string, mode?: "workspace" | "all") => ipcRenderer.invoke("tasks:delete", id, mode),
   listRepositories: () => ipcRenderer.invoke("repos:list"),
   saveRepository: (profile: unknown) => ipcRenderer.invoke("repos:save", profile),
   deleteRepository: (id: string) => ipcRenderer.invoke("repos:delete", id),

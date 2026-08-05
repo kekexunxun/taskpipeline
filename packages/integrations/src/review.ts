@@ -2,13 +2,13 @@ import { execa } from "execa";
 
 export type ReviewComment = { path?: string; line?: number; severity?: string; message?: string; [key: string]: unknown };
 export type ReviewResult = { status: string; comments: ReviewComment[]; summary?: Record<string, unknown>; warnings?: unknown[]; session_id?: string };
-export type ReviewRunner = (binary: string, args: string[], cwd: string) => Promise<{ stdout: string; stderr: string; exitCode: number; failed?: boolean; reason?: string; shortMessage?: string }>;
+export type ReviewRunner = (binary: string, args: string[], cwd: string, signal?: AbortSignal) => Promise<{ stdout: string; stderr: string; exitCode: number; failed?: boolean; reason?: string; shortMessage?: string }>;
 
 export class OpenCodeReviewService {
   constructor(
     private readonly binary = "ocr",
-    private readonly runner: ReviewRunner = async (binary, args, cwd) => {
-      const result = await execa(binary, args, { cwd, reject: false, timeout: 15 * 60_000 });
+    private readonly runner: ReviewRunner = async (binary, args, cwd, signal) => {
+      const result = await execa(binary, args, { cwd, reject: false, timeout: 15 * 60_000, cancelSignal: signal });
       return {
         stdout: result.stdout,
         stderr: result.stderr,
@@ -21,8 +21,8 @@ export class OpenCodeReviewService {
     private readonly commandPrefix: string[] = []
   ) {}
 
-  private async run(args: string[], cwd: string): Promise<string> {
-    const result = await this.runner(this.binary, [...this.commandPrefix, ...args], cwd);
+  private async run(args: string[], cwd: string, signal?: AbortSignal): Promise<string> {
+    const result = await this.runner(this.binary, [...this.commandPrefix, ...args], cwd, signal);
     if (result.exitCode !== 0) {
       const execaInfo = result.failed ? ` [execa failed=${result.failed}${result.reason ? `, reason=${result.reason}` : ""}${result.shortMessage ? `, ${result.shortMessage}` : ""}]` : "";
       const tail = result.stdout.trim() ? `\nstdout: ${result.stdout.slice(0, 500)}` : "";
@@ -31,24 +31,24 @@ export class OpenCodeReviewService {
     return result.stdout;
   }
 
-  private async runJson<T>(args: string[], cwd: string): Promise<T> {
-    const stdout = await this.run(args, cwd);
+  private async runJson<T>(args: string[], cwd: string, signal?: AbortSignal): Promise<T> {
+    const stdout = await this.run(args, cwd, signal);
     try { return JSON.parse(stdout) as T; } catch (error) {
       throw new Error(`Invalid ocr JSON (${this.binary} ${args.join(" ")}): ${(error as Error).message}; stdout: ${stdout.slice(0, 500)}`);
     }
   }
 
-  async review(cwd: string): Promise<ReviewResult> {
-    return this.runJson<ReviewResult>(["review", "--output", "json"], cwd);
+  async review(cwd: string, signal?: AbortSignal): Promise<ReviewResult> {
+    return this.runJson<ReviewResult>(["review", "--output", "json"], cwd, signal);
   }
 
   /**
    * `ocr delegate rule <paths...>` 输出是给人/Agent 读的 Markdown,
    * 不是结构化 JSON。返回原始 stdout,由调用方把它当 prompt 上下文喂给 LLM。
    */
-  async rule(cwd: string, paths: string[]): Promise<string> {
+  async rule(cwd: string, paths: string[], signal?: AbortSignal): Promise<string> {
     if (paths.length === 0) return "";
-    return this.run(["delegate", "rule", ...paths], cwd);
+    return this.run(["delegate", "rule", ...paths], cwd, signal);
   }
 }
 

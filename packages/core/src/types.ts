@@ -3,7 +3,7 @@ export type BoardColumn = (typeof BOARD_COLUMNS)[number];
 
 export const TASK_STATES = [
   "draft", "confirmed", "preparing", "planning", "awaiting_plan_approval",
-  "implementing", "validating", "validation_failed", "awaiting_review",
+  "implementing", "awaiting_input", "validating", "validation_failed", "awaiting_review",
   "reviewing", "review_blocked", "awaiting_commit", "delivering",
   "await_merge", "completed", "failed", "cancelled"
 ] as const;
@@ -67,12 +67,14 @@ export type TaskRepository = {
   mergeRequestIid?: number;
   mergeRequestState?: "opened" | "merged" | "closed";
   mergeRequestCheckedAt?: string;
-  deliveryStatus: "pending" | "changed" | "committed" | "pushed" | "mr_created" | "failed";
+  deliveryStatus: "pending" | "unchanged" | "changed" | "committed" | "pushed" | "mr_created" | "workspace_removed" | "failed";
 };
 
 export type TaskCard = Task & {
   boardColumn: BoardColumn;
-  repositories: Pick<TaskRepository, "id" | "name" | "changeSummary" | "mergeRequestUrl" | "deliveryStatus">[];
+  repositories: (Pick<TaskRepository, "id" | "name" | "changeSummary" | "mergeRequestUrl" | "deliveryStatus"> & {
+    changedFileCount?: number;
+  })[];
 };
 
 export type AgentEvent = {

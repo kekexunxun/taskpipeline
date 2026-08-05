@@ -19,6 +19,7 @@ export type CodingPageState = {
   liveEvents: TimelineItem[];
   prompt: string;
   running: boolean;
+  sending: boolean;
   search: string;
   setSelectedId(id: string | undefined): void;
   setSearch(value: string): void;
@@ -37,6 +38,7 @@ export function useTasks(): CodingPageState {
   const [liveEvents, setLiveEvents] = useState<TimelineItem[]>([]);
   const [prompt, setPrompt] = useState("");
   const [running, setRunning] = useState(false);
+  const [sending, setSending] = useState(false);
   const [search, setSearch] = useState("");
 
   const liveMessageId = useRef<string | undefined>(undefined);
@@ -97,7 +99,7 @@ export function useTasks(): CodingPageState {
         // UI request 由 UiRequestDialog 统一处理，事件通过 customEvent 广播
         window.dispatchEvent(new CustomEvent("task:ui-request", { detail: event }));
       }
-      if (event.type === "agent_start") { setRunning(true); planningRef.current = event.phase === "planning"; liveMessageId.current = crypto.randomUUID(); }
+      if (event.type === "agent_start") { setSending(false); setRunning(true); planningRef.current = event.phase === "planning"; liveMessageId.current = crypto.randomUUID(); }
       if (event.type === "task_changed") {
         const taskId = selectedId;
         window.clearTimeout(changeTimer);
@@ -107,6 +109,7 @@ export function useTasks(): CodingPageState {
         }, 100);
       }
       if (["agent_end", "agent_error", "process_exit"].includes(event.type)) {
+        setSending(false);
         setRunning(false);
         liveMessageId.current = undefined;
         if (event.phase === "planning" || planningRef.current) setLiveEvents([]);
@@ -131,6 +134,7 @@ export function useTasks(): CodingPageState {
   // 切换任务时清空 liveEvents 并加载详情
   useEffect(() => {
     setLiveEvents([]);
+    setSending(false);
     setDetail(undefined);
     if (selectedId) void api.getTask(selectedId).then(acceptDetail);
   }, [selectedId, acceptDetail]);
@@ -150,8 +154,13 @@ export function useTasks(): CodingPageState {
     if (!selected || !prompt.trim()) return;
     const text = prompt;
     setPrompt("");
+    setSending(true);
     setLiveEvents((items) => [...items, { id: crypto.randomUUID(), taskId: selected.id, kind: "message", title: "你", detail: text, createdAt: new Date().toISOString() }]);
-    await run(() => api.sendTaskMessage(selected.id, text));
+    try {
+      await run(() => api.sendTaskMessage(selected.id, text));
+    } finally {
+      setSending(false);
+    }
   }, [prompt, run, selectedId, tasks]);
 
   return {
@@ -161,6 +170,7 @@ export function useTasks(): CodingPageState {
     liveEvents,
     prompt,
     running,
+    sending,
     search,
     setSelectedId,
     setSearch,

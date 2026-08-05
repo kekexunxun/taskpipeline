@@ -6,7 +6,7 @@ electron_1.contextBridge.exposeInMainWorld("agentApi", {
     getTask: (id) => electron_1.ipcRenderer.invoke("tasks:get", id),
     createTask: (input) => electron_1.ipcRenderer.invoke("tasks:create", input),
     updateTask: (id, patch) => electron_1.ipcRenderer.invoke("tasks:update", id, patch),
-    deleteTask: (id) => electron_1.ipcRenderer.invoke("tasks:delete", id),
+    deleteTask: (id, mode) => electron_1.ipcRenderer.invoke("tasks:delete", id, mode),
     listRepositories: () => electron_1.ipcRenderer.invoke("repos:list"),
     saveRepository: (profile) => electron_1.ipcRenderer.invoke("repos:save", profile),
     deleteRepository: (id) => electron_1.ipcRenderer.invoke("repos:delete", id),

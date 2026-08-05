@@ -17,8 +17,10 @@ type Props = {
   onStop?(): void;
   disabled?: boolean;
   streaming?: boolean;
+  submitting?: boolean;
   placeholder?: string;
   leftSlot?: ReactNode;
+  rightSlot?: ReactNode;
   className?: string;
 };
 
@@ -29,8 +31,10 @@ function Controlled({
   onStop,
   disabled,
   streaming,
+  submitting,
   placeholder,
   leftSlot,
+  rightSlot,
   className
 }: Props) {
   const controller = usePromptInputController();
@@ -41,10 +45,13 @@ function Controlled({
   }, [controller, value]);
 
   const trimmed = value.trim();
-  const canSend = !disabled && !streaming && trimmed.length > 0;
+  const busy = streaming || submitting;
+  const canSend = !disabled && !busy && trimmed.length > 0;
   const showStop = streaming && onStop;
   const defaultPlaceholder = disabled
     ? "等待执行器就绪"
+    : submitting
+    ? "正在提交…"
     : streaming
     ? "正在生成回复…"
     : "输入消息，Enter 发送，Shift+Enter 换行";
@@ -53,12 +60,12 @@ function Controlled({
     <PromptInput
       className={cn(
         "w-full rounded-lg border border-border/60 bg-card/60 transition-colors focus-within:border-border/60",
-        (disabled || streaming) && "opacity-90",
+        (disabled || busy) && "opacity-90",
         className
       )}
       onSubmit={({ text }) => {
         const payload = text.trim();
-        if (!payload || disabled || streaming) return;
+        if (!payload || disabled || busy) return;
         onChange("");
         onSend(payload);
       }}
@@ -66,7 +73,7 @@ function Controlled({
       <PromptInputTextarea
         data-testid="chat-composer"
         className="min-h-10 max-h-52 px-3 py-2 text-xs! leading-5 placeholder:text-muted-foreground"
-        disabled={disabled || streaming}
+        disabled={disabled || busy}
         placeholder={placeholder ?? defaultPlaceholder}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={(event) => {
@@ -87,12 +94,14 @@ function Controlled({
         <PromptInputTools className="min-w-0 gap-1 overflow-visible">
           {leftSlot}
         </PromptInputTools>
-        <PromptInputSubmit
-          aria-label={showStop ? "停止生成" : "发送"}
-          disabled={showStop ? false : !canSend}
-          status={showStop ? "streaming" : undefined}
-          onStop={onStop}
-        />
+        {rightSlot ?? (
+          <PromptInputSubmit
+            aria-label={showStop ? "停止执行" : submitting ? "正在提交" : "发送"}
+            disabled={showStop ? false : !canSend}
+            status={showStop ? "streaming" : submitting ? "submitted" : undefined}
+            onStop={onStop}
+          />
+        )}
       </PromptInputFooter>
     </PromptInput>
   );
@@ -114,8 +123,10 @@ export function Composer({
   onStop,
   disabled,
   streaming,
+  submitting,
   placeholder,
   leftSlot,
+  rightSlot,
   className
 }: Props) {
   return (
@@ -127,8 +138,10 @@ export function Composer({
         onStop={onStop}
         disabled={disabled}
         streaming={streaming}
+        submitting={submitting}
         placeholder={placeholder}
         leftSlot={leftSlot}
+        rightSlot={rightSlot}
         className={className}
       />
     </PromptInputProvider>

@@ -1,4 +1,5 @@
 import type { TaskCard } from "@coding-agent/core";
+import type { TaskRemovalMode } from "@/api";
 import { columns } from "../../../utils/status";
 import { BoardToolbar } from "./BoardToolbar";
 import { BoardColumn as BoardColumnView } from "./BoardColumn";
@@ -23,7 +24,7 @@ export function BoardPanel({
   removingTaskIds: ReadonlySet<string>;
   onOpen(taskId: string): void;
   onEdit(taskId: string): void;
-  onRemove(taskId: string): Promise<boolean>;
+  onRemove(taskId: string, mode: TaskRemovalMode): Promise<boolean>;
   onCreate(): void;
   onFromJira(): void;
   onSyncJira(): void;
@@ -36,7 +37,7 @@ export function BoardPanel({
       .includes(q);
   });
   return (
-    <section className="grid min-h-0 min-w-0 grid-rows-[56px_minmax(0,1fr)] bg-background">
+    <section className="grid h-full min-h-0 min-w-0 grid-rows-[56px_minmax(0,1fr)] bg-background">
       <div className="flex items-center justify-between gap-4 border-b px-5">
         <div className="leading-tight">
           <h1 className="text-base font-semibold tracking-tight">任务看板</h1>
@@ -50,7 +51,7 @@ export function BoardPanel({
           onSyncJira={onSyncJira}
         />
       </div>
-      <div className="thin-scrollbar grid min-h-0 grid-cols-[repeat(4,minmax(260px,1fr))] gap-3 overflow-auto p-3 pb-4">
+      <div className="thin-scrollbar grid h-full min-h-0 min-w-0 auto-cols-[minmax(320px,1fr)] grid-flow-col gap-3 overflow-auto p-3 pb-4">
         {columns.map(({ id, title, icon }) => {
           const cards = filtered.filter((task) => task.boardColumn === id);
           return (
@@ -64,11 +65,7 @@ export function BoardPanel({
               removingTaskIds={removingTaskIds}
               onOpen={onOpen}
               onEdit={id === "todo" ? onEdit : undefined}
-              onRemove={
-                id === "todo" || id === "done"
-                  ? onRemove
-                  : undefined
-              }
+              onRemove={onRemove}
             />
           );
         })}

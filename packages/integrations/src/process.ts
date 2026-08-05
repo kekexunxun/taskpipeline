@@ -1,9 +1,9 @@
 import { execa, type ResultPromise } from "execa";
 
-export type ProcessRunner = (file: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number }) => ResultPromise;
+export type ProcessRunner = (file: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number; cancelSignal?: AbortSignal }) => ResultPromise;
 
 export const runProcess: ProcessRunner = (file, args, options) => execa(file, args, { ...options, reject: true });
-export type ShellRunner = (command: string, options?: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number }) => ResultPromise;
+export type ShellRunner = (command: string, options?: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number; cancelSignal?: AbortSignal }) => ResultPromise;
 export const runShell: ShellRunner = (command, options) => execa(command, { ...options, shell: true, reject: true });
 
 export function redactSecrets(value: string): string {

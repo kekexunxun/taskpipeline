@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { useTasks } from "./hooks/useTasks";
 import { useQoderStatusContext } from "../../hooks/useQoderStatusContext";
 import { useFeedback } from "../../hooks/useGlobalFeedback";
-import { api } from "../../api";
+import { api, type TaskRemovalMode } from "../../api";
 import { BoardPanel } from "./components/BoardPanel";
 import { DetailPanel } from "./components/DetailPanel";
 import { TaskEditorDialog } from "./components/TaskEditorDialog";
@@ -24,6 +24,7 @@ export default function CodingPage() {
   const [merging, setMerging] = useState(false);
   const [startOpen, setStartOpen] = useState(false);
   const [reimplementing, setReimplementing] = useState(false);
+  const [detailFocused, setDetailFocused] = useState(false);
   const [startingTaskId, setStartingTaskId] = useState<string>();
   const [removingTaskIds, setRemovingTaskIds] = useState<Set<string>>(() => new Set());
 
@@ -44,24 +45,27 @@ export default function CodingPage() {
   }, [tasks.refresh, tasks.loadDetail, tasks.selectedId]);
 
   const onOpenTask = useCallback((id: string) => {
+    setDetailFocused(false);
     tasks.setSelectedId(id);
     navigate(`/coding/${id}`);
   }, [navigate, tasks]);
 
   const onCloseDetail = useCallback(() => {
+    setDetailFocused(false);
     navigate("/coding");
   }, [navigate]);
 
-  const onRemove = useCallback(async (id: string) => {
+  const onRemove = useCallback(async (id: string, mode: TaskRemovalMode) => {
     setRemovingTaskIds((current) => new Set(current).add(id));
-    if (tasks.selectedId === id) {
+    if (mode === "all" && tasks.selectedId === id) {
       tasks.setSelectedId(undefined);
       navigate("/coding");
     }
     try {
-      await api.deleteTask(id);
+      await api.deleteTask(id, mode);
       await tasks.refresh();
-      showSuccess("任务已移除");
+      if (mode === "workspace" && tasks.selectedId === id) await tasks.loadDetail(id);
+      showSuccess(mode === "workspace" ? "工作区已清理，任务记录已保留" : "任务已删除");
       return true;
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason));
@@ -84,20 +88,24 @@ export default function CodingPage() {
 
   return (
     <>
-      <div className={`grid h-full min-h-0 min-w-0 ${showDetail ? "grid-cols-[minmax(0,1fr)_clamp(400px,34vw,520px)]" : "grid-cols-1"}`}>
-        <BoardPanel
-          tasks={tasks.tasks}
-          search={tasks.search}
-          onSearch={tasks.setSearch}
-          selectedId={tasks.selectedId}
-          removingTaskIds={removingTaskIds}
-          onOpen={onOpenTask}
-          onEdit={(id) => setEditingTask(id)}
-          onRemove={onRemove}
-          onCreate={() => setEditingTask("new")}
-          onFromJira={() => setJiraOpen(true)}
-          onSyncJira={() => setJiraSyncOpen(true)}
-        />
+      <div className={`grid h-full min-h-0 min-w-0 ${showDetail && !detailFocused ? "grid-cols-[minmax(0,1fr)_clamp(400px,34vw,520px)] max-[1199px]:grid-cols-1" : "grid-cols-1"}`}>
+        {(!showDetail || !detailFocused) && (
+          <div className={`h-full min-h-0 min-w-0 ${showDetail ? "max-[1199px]:hidden" : ""}`}>
+            <BoardPanel
+              tasks={tasks.tasks}
+              search={tasks.search}
+              onSearch={tasks.setSearch}
+              selectedId={tasks.selectedId}
+              removingTaskIds={removingTaskIds}
+              onOpen={onOpenTask}
+              onEdit={(id) => setEditingTask(id)}
+              onRemove={onRemove}
+              onCreate={() => setEditingTask("new")}
+              onFromJira={() => setJiraOpen(true)}
+              onSyncJira={() => setJiraSyncOpen(true)}
+            />
+          </div>
+        )}
         {showDetail && (
           <DetailPanel
             card={tasks.tasks.find((t) => t.id === tasks.selectedId)}
@@ -106,8 +114,11 @@ export default function CodingPage() {
             qoder={qoder.status}
             prompt={tasks.prompt}
             running={tasks.running}
+            sending={tasks.sending}
             starting={startingTaskId === tasks.selectedId && !tasks.running}
             merging={merging}
+            focused={detailFocused}
+            onFocusedChange={setDetailFocused}
             onClose={onCloseDetail}
             onOpenVSCode={() => { if (tasks.selectedId) api.openTaskEditor(tasks.selectedId, "vscode").catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))); }}
             onOpenQoder={() => { if (tasks.selectedId) api.openTaskEditor(tasks.selectedId, "qoder").catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))); }}

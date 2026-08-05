@@ -143,22 +143,54 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
     const last = [...event.messages].reverse().find((message: any) => message?.role === "assistant") as any;
     const plan = last?.content?.filter((block: any) => block?.type === "text").map((block: any) => block.text).join("\n").trim();
     if (!plan) return;
+    let planForApproval = plan;
     if (/"outcome"\s*:\s*"already_satisfied"|无需(?:任何)?(?:代码)?修改|代码已满足|already satisfied|no (?:code )?changes? (?:are )?required/i.test(plan)) {
-      taskWorkflow.completeWithoutChanges(task.id, plan);
-      if (toolsBeforePlanning) pi.setActiveTools(toolsBeforePlanning);
-      toolsBeforePlanning = undefined;
-      ctx.ui.notify("代码已满足任务要求，任务已自动完成", "info");
-      return;
+      try {
+        const changedGroups = await Promise.all(store.listTaskRepositories(task.id).map(async (repo) => {
+          const files = await gitService.changedFiles(repo.worktreePath ?? repo.localPath, repo.baseBranch);
+          return files.map((file) => ({ repositoryName: repo.name, ...file }));
+        }));
+        const changedFiles = changedGroups.flat();
+        if (changedFiles.length === 0) {
+          taskWorkflow.completeWithoutChanges(task.id, plan);
+          if (toolsBeforePlanning) pi.setActiveTools(toolsBeforePlanning);
+          toolsBeforePlanning = undefined;
+          ctx.ui.notify("代码已满足任务要求，任务已自动完成", "info");
+          return;
+        }
+        planForApproval = [
+          "## 需要人工确认",
+          "",
+          `Agent 判断当前代码已满足任务要求，但系统检测到 ${changedFiles.length} 个文件变化，因此任务未自动完成。`,
+          "",
+          plan,
+          "",
+          "## 检测到的文件变化",
+          "",
+          ...changedFiles.map((file) => `- ${file.repositoryName}: ${file.path} (${file.status})`)
+        ].join("\n");
+        ctx.ui.notify("Agent 结论与文件变化不一致，请人工确认", "warning");
+      } catch (error) {
+        planForApproval = [
+          "## 需要人工确认",
+          "",
+          "Agent 判断当前代码已满足任务要求，但系统无法确认工作区是否存在文件变化，因此任务未自动完成。",
+          "",
+          plan
+        ].join("\n");
+        ctx.ui.notify(`无法确认文件状态：${error instanceof Error ? error.message : String(error)}`, "warning");
+      }
     }
-    taskWorkflow.setPlan(task.id, plan);
+    taskWorkflow.setPlan(task.id, planForApproval);
+    if (planForApproval !== plan) store.updateTask(task.id, { summary: "计划结论与文件状态不一致，等待确认" });
     const choice = await ctx.ui.select("计划已生成", ["批准并开始", "补充意见并重新生成", "稍后确认"]);
     if (choice === "批准并开始") {
-      const approval = store.addApproval({ taskId: task.id, kind: "plan", context: plan });
+      const approval = store.addApproval({ taskId: task.id, kind: "plan", context: planForApproval });
       store.resolveApproval(approval.id, "approved");
       await taskWorkflow.approvePlan(task.id);
       if (toolsBeforePlanning) pi.setActiveTools(toolsBeforePlanning);
       toolsBeforePlanning = undefined;
-      pi.sendUserMessage(`按已批准计划实现任务：\n\n${plan}`, { deliverAs: "followUp" });
+      pi.sendUserMessage(`按已批准计划实现任务：\n\n${planForApproval}`, { deliverAs: "followUp" });
     } else if (choice === "补充意见并重新生成") {
       const feedback = await ctx.ui.editor("计划调整意见", "");
       if (feedback?.trim()) {

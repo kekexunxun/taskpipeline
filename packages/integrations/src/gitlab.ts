@@ -20,8 +20,8 @@ export class GitLabService {
     if (!response.ok) throw new Error(`GitLab request failed (${response.status}): ${await response.text()}`);
     return response.json() as Promise<T>;
   }
-  createMergeRequest(input: { sourceBranch: string; targetBranch: string; title: string; description: string }): Promise<GitLabMergeRequest> {
-    return this.request(`/projects/${encodeURIComponent(this.profile.projectId)}/merge_requests`, { method: "POST", body: JSON.stringify({ source_branch: input.sourceBranch, target_branch: input.targetBranch, title: input.title, description: input.description }) });
+  createMergeRequest(input: { sourceBranch: string; targetBranch: string; title: string; description: string }, signal?: AbortSignal): Promise<GitLabMergeRequest> {
+    return this.request(`/projects/${encodeURIComponent(this.profile.projectId)}/merge_requests`, { method: "POST", signal, body: JSON.stringify({ source_branch: input.sourceBranch, target_branch: input.targetBranch, title: input.title, description: input.description }) });
   }
   getMergeRequest(iid: number): Promise<GitLabMergeRequest> { return this.request(`/projects/${encodeURIComponent(this.profile.projectId)}/merge_requests/${iid}`); }
 }

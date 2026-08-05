@@ -29,10 +29,10 @@ export type DelegateReviewerInput = {
  * class 里的 `call` 方法签名能直接匹配(避免 method vs property 推断差异)。
  */
 export interface Reviewer {
-  call(input: DelegateReviewerInput, taskId: string, model?: string): Promise<string>;
+  call(input: DelegateReviewerInput, taskId: string, model?: string, signal?: AbortSignal): Promise<string>;
 }
 
-export type ReviewerFunction = (input: DelegateReviewerInput, taskId: string, model?: string) => Promise<string>;
+export type ReviewerFunction = (input: DelegateReviewerInput, taskId: string, model?: string, signal?: AbortSignal) => Promise<string>;
 
 /**
  * 把一个 function 适配成 `Reviewer` 接口,
@@ -102,7 +102,7 @@ export function parseReviewResult(text: string): ReviewResult {
  */
 export class OpenAICompatReviewer implements Reviewer {
   constructor(private readonly resolver: SettingResolver, private readonly timeoutMs: number = 3 * 60_000, private readonly fetcher: typeof fetch = fetch) {}
-  call = async (input: DelegateReviewerInput, _taskId: string, model?: string): Promise<string> => {
+  call = async (input: DelegateReviewerInput, _taskId: string, model?: string, externalSignal?: AbortSignal): Promise<string> => {
     const raw = this.resolver.get("modelProfile");
     if (!raw) throw new Error("未配置 modelProfile,无法在 OpenAI 兼容模式下做委托 Review");
     const profile = JSON.parse(raw) as { baseUrl?: string; model?: string; apiKeyEnv?: string };
@@ -115,7 +115,7 @@ export class OpenAICompatReviewer implements Reviewer {
     try {
       const response = await this.fetcher(url, {
         method: "POST",
-        signal: abort.signal,
+        signal: externalSignal ? AbortSignal.any([abort.signal, externalSignal]) : abort.signal,
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           model: model ?? profile.model,
@@ -181,13 +181,14 @@ export class ReviewOrchestrator {
     return result.comments.some((comment) => this.isBlockingComment(comment));
   }
 
-  async run(task: Task, repo: TaskRepository): Promise<ReviewResult> {
+  async run(task: Task, repo: TaskRepository, signal?: AbortSignal): Promise<ReviewResult> {
+    signal?.throwIfAborted();
     this.sink.addEvent({ taskId: task.id, kind: "status", title: `${repo.name}: review 启动` });
     const ocr = this.opts.ocr;
     const worktree = repo.worktreePath ?? repo.localPath;
     const git = this.opts.git;
     this.sink.addEvent({ taskId: task.id, kind: "status", title: `${repo.name}: 取变更文件列表 (base=${repo.baseBranch})` });
-    const files = (await git.changedFiles(worktree, repo.baseBranch)).map((f) => f.path);
+    const files = (await git.changedFiles(worktree, repo.baseBranch, signal)).map((f) => f.path);
     if (files.length === 0) {
       this.sink.addEvent({ taskId: task.id, kind: "status", title: `${repo.name}: 无可审查变更` });
       return { status: "completed", comments: [], summary: { files: 0, comments: 0 } };
@@ -198,8 +199,9 @@ export class ReviewOrchestrator {
       // 用 `<base>`(单 ref)而不是 `<base>...HEAD` 三点模式:
       // 三点模式只对比 commit,会漏掉 AI 实现阶段还没 commit 的工作区修改。
       // 单 ref 模式 `git diff <base>` 会把 working tree 相对 base 的所有差异都算进来。
-      diff = await git.diffRange(worktree, repo.baseBranch, files);
+      diff = await git.diffRange(worktree, repo.baseBranch, files, signal);
     } catch (error) {
+      if (signal?.aborted) throw error;
       this.sink.addEvent({ taskId: task.id, kind: "status", title: `${repo.name}: 未能取到 diff`, detail: error instanceof Error ? error.message : String(error) });
       return { status: "completed", comments: [], summary: { files: files.length, comments: 0 } };
     }
@@ -210,14 +212,16 @@ export class ReviewOrchestrator {
     this.sink.addEvent({ taskId: task.id, kind: "status", title: `${repo.name}: diff 长度 ${diff.length} 字符,调用 ocr delegate rule` });
     let rules = "";
     try {
-      rules = await ocr.rule(worktree, files);
+      rules = await ocr.rule(worktree, files, signal);
     } catch (error) {
+      if (signal?.aborted) throw error;
       this.sink.addEvent({ taskId: task.id, kind: "status", title: `${repo.name}: ocr rule 调用失败,继续走默认规则`, detail: error instanceof Error ? error.message : String(error) });
     }
     const redacted = redactSecrets(diff);
     this.sink.addEvent({ taskId: task.id, kind: "status", title: `${repo.name}: 调用 LLM 审查` });
     try {
-      const text = await this.opts.reviewer.call({ repo: repo.name, task: task.title, files, rules, diff: redacted }, task.id, task.qoderModel);
+      signal?.throwIfAborted();
+      const text = await this.opts.reviewer.call({ repo: repo.name, task: task.title, files, rules, diff: redacted }, task.id, task.qoderModel, signal);
       this.sink.addEvent({ taskId: task.id, kind: "status", title: `${repo.name}: LLM 审查返回` });
       return parseReviewResult(text);
     } catch (error) {

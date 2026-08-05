@@ -8,8 +8,10 @@ export function TaskComposer(props: {
   onStop?(): void;
   disabled?: boolean;
   streaming?: boolean;
+  submitting?: boolean;
   placeholder?: string;
   leftSlot?: ReactNode;
+  rightSlot?: ReactNode;
 }) {
   return <Composer {...props} />;
 }

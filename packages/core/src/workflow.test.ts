@@ -13,6 +13,9 @@ describe("task workflow", () => {
     expect(() => transitionTask("planning", "awaiting_plan_approval")).not.toThrow();
     expect(() => transitionTask("planning", "completed")).not.toThrow();
     expect(() => transitionTask("awaiting_plan_approval", "implementing")).not.toThrow();
+    expect(() => transitionTask("implementing", "awaiting_input")).not.toThrow();
+    expect(() => transitionTask("awaiting_input", "implementing")).not.toThrow();
+    expect(() => transitionTask("awaiting_input", "completed")).not.toThrow();
     expect(() => transitionTask("implementing", "validating")).not.toThrow();
     expect(() => transitionTask("validating", "validation_failed")).not.toThrow();
     expect(() => transitionTask("validation_failed", "validating")).not.toThrow();
@@ -26,6 +29,7 @@ describe("task workflow", () => {
   it("maps internal states to the four workflow lanes", () => {
     expect(boardColumnFor("draft")).toBe("todo");
     expect(boardColumnFor("implementing")).toBe("in_progress");
+    expect(boardColumnFor("awaiting_input")).toBe("in_progress");
     expect(boardColumnFor("await_merge")).toBe("in_review");
     expect(boardColumnFor("completed")).toBe("done");
   });
