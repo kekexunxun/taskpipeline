@@ -191,3 +191,39 @@ export function resolveTaskSetting(
   if (setting === "false") return false;
   return defaults;
 }
+
+// === Memory 系统(仓库级 / 用户级 / 对话级 + repowiki 文档) =====================
+
+export type MemoryScope = "user" | "repo" | "conversation";
+export type MemorySource = "manual" | "auto" | "imported";
+
+export type Memory = {
+  id: string;
+  scope: MemoryScope;
+  userId?: string;
+  repositoryId?: string;
+  conversationId?: string;
+  title: string;
+  content: string;
+  tags: string[];
+  pinned: boolean;
+  /** 0~1，越高越重要，注入排序时优先。 */
+  importance: number;
+  source: MemorySource;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RepoWikiDoc = {
+  id: string;
+  repositoryId: string;
+  path: string;
+  title: string;
+  content: string;
+  mtime?: string;
+  hash: string;
+  updatedAt: string;
+};
+
+export type MemorySearchHit = Memory & { score: number };
+export type RepoWikiSearchHit = RepoWikiDoc & { score: number };

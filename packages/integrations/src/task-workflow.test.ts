@@ -68,6 +68,41 @@ describe("TaskWorkflow cancellation", () => {
   });
 });
 
+describe("TaskWorkflow.prepare from failed state", () => {
+  it("resumes a failed task with an intact worktree without re-creating it", async () => {
+    let current: Task = { ...waitingTask, state: "failed", startMode: "direct" };
+    const store = {
+      getTask: () => current,
+      updateTask: (_id: string, patch: Partial<Task>) => (current = { ...current, ...patch }),
+      listTaskRepositories: () => [{ id: "repo-1", repositoryId: "repo", name: "repo", localPath: "/tmp/repo", baseBranch: "main", worktreePath: "/tmp/repo-worktree", featureBranch: "feature-branch" }]
+    } as unknown as TaskStore;
+    const createTaskWorktree = vi.fn(async () => ({ path: "/tmp/worktree", branch: "branch" }));
+    const workflow = new TaskWorkflow(store, { get: () => undefined, getSecret: () => undefined }, { addEvent: vi.fn() } as unknown as TaskEventSink, () => "/tmp/task-1", undefined, undefined, undefined, { createTaskWorktree } as any);
+
+    const task = await workflow.prepare(current.id);
+    expect(task.state).toBe("implementing");
+    expect(createTaskWorktree).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds a missing worktree before resuming a failed task", async () => {
+    let current: Task = { ...waitingTask, state: "failed", startMode: "direct" };
+    const updateTaskRepository = vi.fn();
+    const store = {
+      getTask: () => current,
+      updateTask: (_id: string, patch: Partial<Task>) => (current = { ...current, ...patch }),
+      updateTaskRepository,
+      listTaskRepositories: () => [{ id: "repo-1", repositoryId: "repo", name: "repo", localPath: "/tmp/repo", baseBranch: "main" }]
+    } as unknown as TaskStore;
+    const createTaskWorktree = vi.fn(async () => ({ path: "/tmp/repo-worktree", branch: "feature-branch" }));
+    const workflow = new TaskWorkflow(store, { get: () => undefined, getSecret: () => undefined }, { addEvent: vi.fn() } as unknown as TaskEventSink, () => "/tmp/task-1", undefined, undefined, undefined, { createTaskWorktree } as any);
+
+    const task = await workflow.prepare(current.id);
+    expect(task.state).toBe("implementing");
+    expect(createTaskWorktree).toHaveBeenCalledOnce();
+    expect(updateTaskRepository).toHaveBeenCalledWith("repo-1", expect.objectContaining({ worktreePath: "/tmp/repo-worktree", featureBranch: "feature-branch" }));
+  });
+});
+
 describe("TaskWorkflow test case generation state", () => {
   it("transitions implementing -> generating_tests -> implementing (task level) when begin/finish are called", () => {
     const states: Task["state"][] = [];

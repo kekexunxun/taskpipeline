@@ -38,7 +38,7 @@ const renderHeader = (task: Task, repositories: TaskRepository[] = []) => render
       onClose={noop}
       onOpenVSCode={noop}
       onOpenQoder={noop}
-      onRevealInFolder={noop}
+      onRevealWorkspace={noop}
       onMergeBackToBase={noop}
     />
   </TooltipProvider>
@@ -201,7 +201,7 @@ describe("DetailHeader", () => {
           onClose={onClose}
           onOpenVSCode={noop}
           onOpenQoder={noop}
-          onRevealInFolder={noop}
+          onRevealWorkspace={noop}
           onMergeBackToBase={noop}
         />
       </TooltipProvider>

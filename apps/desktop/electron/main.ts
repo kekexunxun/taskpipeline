@@ -17,7 +17,7 @@ import {
   type ExtensionUIDialogOptions,
   type ExtensionUIContext
 } from "@earendil-works/pi-coding-agent";
-import { TaskStore, LocalFileKeyStore, transitionTask, type AgentEvent, type SessionUsage, type SettingResolver, type Task, type TaskEventSink, type TaskRepository, type TaskStartMode, type TaskState } from "@coding-agent/core";
+import { TaskStore, LocalFileKeyStore, transitionTask, type AgentEvent, type Memory, type SessionUsage, type SettingResolver, type Task, type TaskEventSink, type TaskRepository, type TaskStartMode, type TaskState } from "@coding-agent/core";
 import {
   AtlassianClientFactory, DeliveryService, fetchJiraTasks, GitService, importJiraIssue, MergeStatusRefresher, openTaskEditor, OpenCodeReviewService,
   OpenAICompatReviewer, parseGitLabRemote, redactSecrets,
@@ -28,6 +28,10 @@ import { accessToken, query, type AccountInfo, type ModelInfo, type Query, type 
 import { parsePlanDecision, sdkResultText } from "./plan-content.js";
 import { ChatService } from "./chat/chat-service.js";
 import { JiraTaskCreationBackend } from "./chat/task-backends/jira.js";
+import { resolveChatModel, type ResolvedChatModel } from "./chat/chat-models.js";
+import type { ChatConversation } from "./chat/chat-types.js";
+import { MemoryService, renderMemoryContext } from "./memory/memory-service.js";
+import { extractMemories } from "./memory/memory-extractor.js";
 import { implementationOutcomeInstruction, isExplicitNoChangeCompletionRequest, nextStepForImplementation, nextStepForPlan, parseImplementationDecision } from "./task-readiness.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -40,6 +44,7 @@ process.env.CODING_AGENT_DATA_DIR = dataDir;
 mkdirSync(dataDir, { recursive: true });
 const store = new TaskStore(join(dataDir, "coding-agent.db"));
 const keyStore = new LocalFileKeyStore(dataDir);
+const memoryService = new MemoryService(store);
 let activeTaskId: string | undefined;
 let activeQoderQuery: Query | undefined;
 let activeQoderAbort: AbortController | undefined;
@@ -180,7 +185,7 @@ const chatService = new ChatService(store, dataDir, getQoderStatus, () => protec
   // 未来接入 GitHub / Linear 时这里按 backendId 分发。
   if (resolveDefaultBackend() === "jira") return new JiraTaskCreationBackend(atlassianFactory);
   return undefined;
-});
+}, async ({ conversationId, query }) => memoryService.buildSystemPrompt({ userId: memoryService.ensureUserId(), conversationId, query }), async ({ conversation, model }) => consolidateChatMemory(conversation, model));
 
 // === Review 实现(Qoder / OpenAI 兼容) =========================================
 
@@ -413,7 +418,9 @@ async function runQoder(taskId: string, extraPrompt?: string, signal?: AbortSign
   const abortFromTask = () => qoderAbort.abort(signal?.reason);
   signal?.throwIfAborted();
   signal?.addEventListener("abort", abortFromTask, { once: true });
+  const memoryContext = await taskMemoryContext(task, repos);
   const prompt = [
+    memoryContext ?? "",
     task.title,
     task.description,
     task.planContent ? `Approved implementation plan:\n${task.planContent}` : "",
@@ -570,7 +577,8 @@ async function runQoderPlan(taskId: string, feedback?: string, signal?: AbortSig
   activeTaskId = task.id;
   activePlanningTaskId = task.id;
   activePlanText = "";
-  const prompt = [`请只读分析以下 Coding 任务。`, `任务：${task.title}`, task.description, `验收标准：\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`, feedback ? `上一次计划的调整意见：\n${feedback}` : "", "禁止修改文件，禁止执行安装、构建或其他会改变工作区的命令。", "最终只输出一个 JSON 对象，不要输出过程说明或 Markdown 代码块。若代码已满足要求，输出 {\"outcome\":\"already_satisfied\",\"summary\":\"判断依据和验证建议\"}；否则输出 {\"outcome\":\"changes_required\",\"plan\":\"完整实施计划，包含涉及文件、实施步骤、验证方式和风险\"}。"].filter(Boolean).join("\n\n");
+  const memoryContext = await taskMemoryContext(task, repos);
+  const prompt = [memoryContext ?? "", `请只读分析以下 Coding 任务。`, `任务：${task.title}`, task.description, `验收标准：\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`, feedback ? `上一次计划的调整意见：\n${feedback}` : "", "禁止修改文件，禁止执行安装、构建或其他会改变工作区的命令。", "最终只输出一个 JSON 对象，不要输出过程说明或 Markdown 代码块。若代码已满足要求，输出 {\"outcome\":\"already_satisfied\",\"summary\":\"判断依据和验证建议\"}；否则输出 {\"outcome\":\"changes_required\",\"plan\":\"完整实施计划，包含涉及文件、实施步骤、验证方式和风险\"}。"].filter(Boolean).join("\n\n");
   const abort = new AbortController();
   const abortFromTask = () => abort.abort(signal?.reason);
   signal?.throwIfAborted();
@@ -642,6 +650,8 @@ async function finishImplementation(taskId: string, responseTexts: string[], sig
     taskWorkflow.awaitInput(taskId, decision.content || "Agent 表示当前信息不足或实现尚未完成，请补充后继续。");
     return;
   }
+  // 实现已结束（成功 / 结论待确认等），异步整理任务执行记录为记忆，不阻塞后续校验流程。
+  void consolidateTaskMemory(taskId, responseTexts);
   let changedFiles: Awaited<ReturnType<typeof taskChangedFiles>>;
   try {
     changedFiles = await taskChangedFiles(taskId, false);
@@ -895,7 +905,8 @@ async function startTask(taskId: string, options: { mode?: TaskStartMode; reposi
         activePlanningTaskId = taskId;
         activePlanText = "";
         await startPi(taskId);
-        await piSession!.prompt(`你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${task.title}\n${task.description}`, { source: "rpc" });
+        const memoryContext = await taskMemoryContext(task, store.listTaskRepositories(taskId));
+        await piSession!.prompt(`你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${memoryContext ? `${memoryContext}\n\n` : ""}${task.title}\n${task.description}`, { source: "rpc" });
         signal.throwIfAborted();
         const plan = activePlanText.trim();
         activePlanningTaskId = undefined;
@@ -912,7 +923,31 @@ async function startTask(taskId: string, options: { mode?: TaskStartMode; reposi
     signal.throwIfAborted();
     await startPi(taskId);
     if (!piSession) throw new Error("OpenAI agent session is unavailable");
-    await piSession.prompt(`${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ""}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}\n\n${implementationOutcomeInstruction}`, { source: "rpc" });
+    const memoryContext = await taskMemoryContext(task, store.listTaskRepositories(taskId));
+    await piSession.prompt(`${memoryContext ? `${memoryContext}\n\n` : ""}${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ""}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}\n\n${implementationOutcomeInstruction}`, { source: "rpc" });
+  });
+}
+
+/** 任务失败/中断后续接继续执行时,追加给 Agent 的指令:保留已完成改动,定位失败原因后继续。 */
+const resumeImplementationInstruction =
+  "任务此前执行失败/中断。请先检查当前工作区与代码状态（已完成的改动应保留），定位失败原因后继续完成剩余工作；不要重新执行已完成的部分，也不要重复安装依赖或重建环境。";
+
+async function resumeTask(taskId: string): Promise<void> {
+  const current = store.getTask(taskId);
+  if (!current || current.state !== "failed") throw new Error("只有失败的任务可以继续执行");
+  store.updateTask(taskId, { sessionUsage: undefined, failureStage: undefined });
+  // 复用 prepare 的失败恢复路径:worktree 缺失时补建,已完整时直接回到 implementing(不重跑 setup 命令)。
+  const task = await runTaskOperation(taskId, (signal) => taskWorkflow.prepare(taskId, signal));
+  if (modelProvider() === "qoder") {
+    void runTaskOperation(taskId, (signal) => runQoder(taskId, resumeImplementationInstruction, signal)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
+    return;
+  }
+  await runTaskOperation(taskId, async (signal) => {
+    signal.throwIfAborted();
+    await startPi(taskId);
+    if (!piSession) throw new Error("OpenAI agent session is unavailable");
+    const memoryContext = await taskMemoryContext(task, store.listTaskRepositories(taskId));
+    await piSession.prompt(`${resumeImplementationInstruction}\n\n${memoryContext ? `${memoryContext}\n\n` : ""}${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ""}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}\n\n${implementationOutcomeInstruction}`, { source: "rpc" });
   });
 }
 
@@ -929,7 +964,8 @@ async function approveTaskPlan(taskId: string): Promise<void> {
   await runTaskOperation(taskId, async (signal) => {
     signal.throwIfAborted();
     await startPi(taskId);
-    await piSession!.prompt(`${task.title}\n\n${task.description}\n\nApproved implementation plan:\n${task.planContent}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}\n\n${implementationOutcomeInstruction}`, { source: "rpc" });
+    const memoryContext = await taskMemoryContext(task, store.listTaskRepositories(taskId));
+    await piSession!.prompt(`${memoryContext ? `${memoryContext}\n\n` : ""}${task.title}\n\n${task.description}\n\nApproved implementation plan:\n${task.planContent}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}\n\n${implementationOutcomeInstruction}`, { source: "rpc" });
   });
 }
 
@@ -1085,6 +1121,7 @@ async function deleteTask(taskId: string, mode: TaskRemovalMode = "all"): Promis
   }
 
   store.deleteTask(taskId);
+  memoryService.deleteConversationMemories(`task:${taskId}`);
   if (activeTaskId === taskId) activeTaskId = undefined;
 }
 
@@ -1245,6 +1282,86 @@ async function getQoderStatus(): Promise<QoderStatus> {
   }
 }
 
+// === Memory 任务上下文(检索/注入/整理) ========================================
+
+function resolveTaskChatModel(): ResolvedChatModel {
+  if (modelProvider() === "qoder") {
+    return { provider: "qoder", key: store.getSetting("defaultModel") ?? "claude-sonnet-4.5" };
+  }
+  return resolveChatModel("openai:default", store, () => protectedValue("modelApiKey"));
+}
+
+async function taskMemoryContext(task: Task, repos: TaskRepository[]): Promise<string | undefined> {
+  try {
+    const { memories, wikiDocs } = await memoryService.search({
+      userId: memoryService.ensureUserId(),
+      repositoryIds: repos.map((repo) => repo.repositoryId),
+      conversationId: `task:${task.id}`,
+      query: `${task.title}\n${task.description}`
+    });
+    addTaskEvent({
+      taskId: task.id,
+      kind: "status",
+      title: "检索记忆上下文",
+      detail: `用户级 ${memories.filter((m) => m.scope === "user").length} 条、仓库级 ${memories.filter((m) => m.scope === "repo").length} 条、对话级 ${memories.filter((m) => m.scope === "conversation").length} 条、repowiki 文档 ${wikiDocs.length} 篇${memories.length + wikiDocs.length ? "" : "（未命中）"}`
+    });
+    return renderMemoryContext(memories, wikiDocs);
+  } catch (error) {
+    console.warn("[memory] task context failed:", error);
+    return undefined;
+  }
+}
+
+async function consolidateTaskMemory(taskId: string, responseTexts: string[]): Promise<void> {
+  try {
+    const task = store.getTask(taskId);
+    if (!task) return;
+    const repos = store.listTaskRepositories(taskId);
+    const events = store.listEvents(taskId);
+    const transcript = [
+      `任务：${task.title}\n${task.description}`,
+      task.planContent ? `计划：\n${task.planContent}` : "",
+      ...events.slice(-80).map((event) => `[${event.kind}] ${event.title}${event.detail ? `\n${event.detail}` : ""}`),
+      ...responseTexts.slice(-5).map((text) => `AI 输出：\n${text}`)
+    ].join("\n\n");
+    const extracted = await extractMemories({
+      model: resolveTaskChatModel(),
+      qoderToken: modelProvider() === "qoder" ? protectedValue("qoderToken") : undefined,
+      text: transcript,
+      context: "task",
+      allowedScopes: ["user", "repo"]
+    });
+    if (!extracted.length) return;
+    const saved = memoryService.consolidateMemories(extracted, repos.map((repo) => repo.repositoryId), `task:${taskId}`);
+    if (saved > 0) {
+      addTaskEvent({ taskId, kind: "status", title: "记忆整理完成", detail: `从任务执行记录中整理并保存 ${saved} 条记忆` });
+    }
+  } catch (error) {
+    console.warn("[memory] task consolidate failed:", error);
+  }
+}
+
+async function consolidateChatMemory(conversation: ChatConversation, model: ResolvedChatModel): Promise<void> {
+  try {
+    const text = conversation.messages
+      .filter((message) => message.role !== "system")
+      .map((message) => `${message.role === "user" ? "用户" : "助手"}：${message.parts.filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text").map((part) => part.text).join("")}`)
+      .join("\n\n");
+    if (!text.trim()) return;
+    const extracted = await extractMemories({
+      model,
+      qoderToken: model.provider === "qoder" ? protectedValue("qoderToken") : undefined,
+      text,
+      context: "chat",
+      allowedScopes: ["user", "conversation"]
+    });
+    if (!extracted.length) return;
+    memoryService.consolidateMemories(extracted, [], conversation.id);
+  } catch (error) {
+    console.warn("[memory] chat consolidate failed:", error);
+  }
+}
+
 // === IPC 路由(全部保留) =======================================================
 
 function registerIpc(): void {
@@ -1254,8 +1371,15 @@ function registerIpc(): void {
   ipcMain.handle("tasks:update", (_event, id: string, patch: Record<string, unknown>) => store.updateTask(id, patch));
   ipcMain.handle("tasks:delete", (_event, id: string, mode?: TaskRemovalMode) => deleteTask(id, mode));
   ipcMain.handle("repos:list", () => store.listRepositoryProfiles());
-  ipcMain.handle("repos:save", (_event, profile) => store.saveRepositoryProfile(profile));
-  ipcMain.handle("repos:delete", (_event, id: string) => store.deleteRepositoryProfile(id));
+  ipcMain.handle("repos:save", async (_event, profile) => {
+    store.saveRepositoryProfile(profile);
+    try { await memoryService.refreshRepoWiki(profile.id, profile.localPath); }
+    catch (error) { console.warn("[repowiki] index failed:", error); }
+  });
+  ipcMain.handle("repos:delete", (_event, id: string) => {
+    store.deleteRepositoryProfile(id);
+    memoryService.deleteRepoMemories(id);
+  });
   ipcMain.handle("repos:choose-folder", async () => {
     const localPath = (await dialog.showOpenDialog(mainWindow!, { properties: ["openDirectory"] })).filePaths[0];
     if (!localPath) return undefined;
@@ -1279,6 +1403,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("tasks:start", (_event, taskId: string, options?: { mode?: TaskStartMode; repositoryCommands?: RepositoryCommandMap; useAllRepositories?: boolean }) => startTask(taskId, options));
   ipcMain.handle("tasks:reimplement", (_event, taskId: string) => taskWorkflow.reimplement(taskId));
+  ipcMain.handle("tasks:resume", (_event, taskId: string) => resumeTask(taskId));
   ipcMain.handle("tasks:approve-plan", (_event, taskId: string) => approveTaskPlan(taskId));
   ipcMain.handle("tasks:revise-plan", (_event, taskId: string, feedback: string) => reviseTaskPlan(taskId, feedback));
   ipcMain.handle("tasks:retry-validation", (_event, taskId: string) => retryTaskValidation(taskId));
@@ -1292,9 +1417,12 @@ function registerIpc(): void {
   ipcMain.handle("tasks:manual-complete", (_event, taskId: string) => taskCompleter.manualComplete(taskId));
   ipcMain.handle("tasks:open-editor", (_event, taskId: string, editor: "vscode" | "qoder") => openEditorForTask(taskId, editor));
   ipcMain.handle("tasks:merge-back-to-base", (_event, taskId: string) => runTaskOperation(taskId, (signal) => mergeBackToBase(taskId, signal)));
-  ipcMain.handle("shell:reveal-in-folder", (_event, path: string) => {
-    if (typeof path !== "string" || !path) throw new Error("path 不能为空");
-    shell.showItemInFolder(path);
+  // 在系统文件管理器打开任务 workspace（所有仓库 worktree 的父目录），不区分单/多仓库。
+  ipcMain.handle("tasks:reveal-workspace", (_event, taskId: string) => {
+    if (typeof taskId !== "string" || !taskId) throw new Error("taskId 不能为空");
+    const workspace = taskWorkspace(taskId);
+    if (!existsSync(workspace)) mkdirSync(workspace, { recursive: true });
+    shell.showItemInFolder(workspace);
   });
   ipcMain.handle("tasks:list-backends", () => listTaskBackends());
   ipcMain.handle("qoder:status", () => getQoderStatus());
@@ -1321,11 +1449,28 @@ function registerIpc(): void {
   });
   ipcMain.handle("atlassian:test", async (_event, kind: "jira" | "confluence") => testAtlassianConnection(atlassianFactory.create(kind)));
   ipcMain.handle("task:ui-response", (_event, response: Record<string, unknown>) => pendingUi.get(String(response.id))?.(response));
+  // === Memory 系统(仓库级 / 用户级 / 对话级 + repowiki 文档) ==================
+  ipcMain.handle("memory:list", (_event, filter?: { scope?: Memory["scope"]; scopes?: Memory["scope"][]; repositoryId?: string; conversationId?: string }) => memoryService.listMemories(filter));
+  ipcMain.handle("memory:upsert", (_event, input: Parameters<MemoryService["upsertMemory"]>[0]) => memoryService.upsertMemory(input));
+  ipcMain.handle("memory:update", (_event, id: string, patch: Partial<Omit<Memory, "id" | "createdAt" | "updatedAt">>) => memoryService.updateMemory(id, patch));
+  ipcMain.handle("memory:delete", (_event, id: string) => memoryService.deleteMemory(id));
+  ipcMain.handle("memory:search", (_event, query: string, options?: { repositoryIds?: string[]; conversationId?: string; limit?: number }) =>
+    memoryService.search({ userId: memoryService.ensureUserId(), query, ...options }));
+  ipcMain.handle("repowiki:index", async (_event, repositoryId: string) => {
+    const profile = store.listRepositoryProfiles().find((repo) => repo.id === repositoryId);
+    if (!profile) throw new Error("仓库不存在");
+    return memoryService.refreshRepoWiki(profile.id, profile.localPath);
+  });
+  ipcMain.handle("repowiki:list", (_event, repositoryId: string) => memoryService.listRepoWikiDocs(repositoryId));
+  ipcMain.handle("repowiki:search", (_event, repositoryId: string, query: string) => memoryService.searchRepoWikiDocs(repositoryId, query));
   // === Chat 对话(Codex 样式) =================================================
   ipcMain.handle("chats:list", () => chatService.listChats());
   ipcMain.handle("chats:get", (_event, id: string) => chatService.getChat(id));
   ipcMain.handle("chats:create", (_event, model?: string) => chatService.createChat(model));
-  ipcMain.handle("chats:delete", (_event, id: string) => chatService.deleteChat(id));
+  ipcMain.handle("chats:delete", (_event, id: string) => {
+    chatService.deleteChat(id);
+    memoryService.deleteConversationMemories(id);
+  });
   ipcMain.handle("chats:list-models", () => chatService.listModels());
   ipcMain.handle("chats:start-stream", (_event, input) => {
     void chatService.startChatStream(input).catch((reason) => console.error("[chat] stream failed", reason));
@@ -1349,6 +1494,9 @@ app.whenReady().then(() => {
   }
   registerIpc();
   void createWindow();
+  for (const repo of store.listRepositoryProfiles()) {
+    void memoryService.refreshRepoWiki(repo.id, repo.localPath).catch((error) => console.warn("[repowiki] startup index failed:", error));
+  }
   const mergeTimer = setInterval(() => { void mergeRefresher.refresh(); }, 60_000);
   mergeTimer.unref();
   app.on("browser-window-focus", () => { void mergeRefresher.refresh(); });

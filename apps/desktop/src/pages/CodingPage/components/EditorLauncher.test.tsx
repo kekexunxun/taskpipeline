@@ -37,21 +37,21 @@ describe("EditorLauncher", () => {
     const onVSCode = vi.fn();
     const onQoder = vi.fn();
     const onReveal = vi.fn();
-    render(<EditorLauncher repositories={[repo({ name: "payment-service", worktreePath: "/tmp/payment-worktree" })]} onLaunchVSCode={onVSCode} onLaunchQoder={onQoder} onRevealInFolder={onReveal} />);
+    render(<EditorLauncher repositories={[repo({ name: "payment-service", worktreePath: "/tmp/payment-worktree" })]} onLaunchVSCode={onVSCode} onLaunchQoder={onQoder} onRevealWorkspace={onReveal} />);
     await openMenu("打开文件夹");
     fireEvent.click(screen.getByText("VS Code"));
     expect(onVSCode).toHaveBeenCalledTimes(1);
   });
 
-  it("offers a single repository entry in the reveal submenu for one repo", async () => {
+  it("reveals the task workspace via a single menu item", async () => {
     const onReveal = vi.fn();
-    render(<EditorLauncher repositories={[repo({ worktreePath: "/tmp/payment-worktree" })]} onLaunchVSCode={vi.fn()} onLaunchQoder={vi.fn()} onRevealInFolder={onReveal} />);
+    render(<EditorLauncher repositories={[repo({ worktreePath: "/tmp/payment-worktree" })]} onLaunchVSCode={vi.fn()} onLaunchQoder={vi.fn()} onRevealWorkspace={onReveal} />);
     await openMenu("打开文件夹");
     fireEvent.click(screen.getByText("在系统文件管理器打开"));
-    expect(onReveal).toHaveBeenCalledWith("/tmp/payment-worktree");
+    expect(onReveal).toHaveBeenCalledTimes(1);
   });
 
-  it("lists every repository when there are multiple", async () => {
+  it("keeps a single reveal item even with multiple repositories", async () => {
     const onReveal = vi.fn();
     render(
       <EditorLauncher
@@ -61,21 +61,19 @@ describe("EditorLauncher", () => {
         ]}
         onLaunchVSCode={vi.fn()}
         onLaunchQoder={vi.fn()}
-        onRevealInFolder={onReveal}
+        onRevealWorkspace={onReveal}
       />
     );
     await openMenu("打开文件夹");
-    fireEvent.click(screen.getByText("payment"));
-    expect(onReveal).toHaveBeenLastCalledWith("/tmp/payment-worktree");
-    // Radix 单选菜单：点击第一个项后菜单会关闭，验证第二个仓库再开一次。
-    await openMenu("打开文件夹");
-    fireEvent.click(screen.getByText("order"));
-    expect(onReveal).toHaveBeenLastCalledWith("/tmp/order-worktree");
-    expect(onReveal).toHaveBeenCalledTimes(2);
+    // 不再按仓库拆分子菜单，只有一条「在系统文件管理器打开」。
+    expect(screen.queryByText("payment")).toBeNull();
+    expect(screen.queryByText("order")).toBeNull();
+    fireEvent.click(screen.getByText("在系统文件管理器打开"));
+    expect(onReveal).toHaveBeenCalledTimes(1);
   });
 
   it("renders only an icon button (no text) so it fits the toolbar", () => {
-    render(<EditorLauncher repositories={[repo({ worktreePath: "/tmp/payment-worktree" })]} onLaunchVSCode={vi.fn()} onLaunchQoder={vi.fn()} onRevealInFolder={vi.fn()} />);
+    render(<EditorLauncher repositories={[repo({ worktreePath: "/tmp/payment-worktree" })]} onLaunchVSCode={vi.fn()} onLaunchQoder={vi.fn()} onRevealWorkspace={vi.fn()} />);
     const trigger = screen.getByRole("button", { name: "打开文件夹" });
     expect(trigger.querySelector("svg")).not.toBeNull();
     // 触发器应该只有图标，没有 "打开文件夹" 文字。

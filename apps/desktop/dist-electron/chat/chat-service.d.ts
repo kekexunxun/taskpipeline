@@ -1,5 +1,6 @@
 import type { BrowserWindow } from "electron";
 import type { TaskStore } from "@coding-agent/core";
+import { type ResolvedChatModel } from "./chat-models.js";
 import type { AbortChatStreamInput, ChatConversation, ChatModelGroup, StartChatStreamInput } from "./chat-types.js";
 import type { TaskCreationBackend } from "./task-backends/index.js";
 type GetQoderStatus = () => Promise<{
@@ -17,6 +18,15 @@ type GetQoderStatus = () => Promise<{
 }>;
 type TokenProvider = () => string | undefined;
 type TaskBackendFactory = () => TaskCreationBackend | undefined;
+type MemoryContextProvider = (input: {
+    conversationId: string;
+    query: string;
+}) => Promise<string | undefined>;
+type ConversationConsolidator = (input: {
+    conversation: ChatConversation;
+    model: ResolvedChatModel;
+    signal: AbortSignal;
+}) => Promise<void>;
 export declare class ChatService {
     private readonly store;
     private readonly getQoderStatus;
@@ -24,9 +34,11 @@ export declare class ChatService {
     private readonly getOpenAIKey;
     private readonly getMainWindow;
     private readonly resolveTaskBackend?;
+    private readonly memoryContext?;
+    private readonly consolidateConversation?;
     private readonly storage;
     private readonly activeStreams;
-    constructor(store: TaskStore, dataDir: string, getQoderStatus: GetQoderStatus, getQoderToken: TokenProvider, getOpenAIKey: TokenProvider, getMainWindow: () => BrowserWindow | undefined, resolveTaskBackend?: TaskBackendFactory | undefined);
+    constructor(store: TaskStore, dataDir: string, getQoderStatus: GetQoderStatus, getQoderToken: TokenProvider, getOpenAIKey: TokenProvider, getMainWindow: () => BrowserWindow | undefined, resolveTaskBackend?: TaskBackendFactory | undefined, memoryContext?: MemoryContextProvider | undefined, consolidateConversation?: ConversationConsolidator | undefined);
     listChats(): import("./chat-types.js").ChatConversationMeta[];
     getChat(id: string): ChatConversation | undefined;
     listModels(): Promise<ChatModelGroup[]>;

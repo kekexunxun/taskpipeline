@@ -323,7 +323,7 @@ export class TaskWorkflow {
   /**
    * 准备任务环境(创建 worktree、feature branch)。
    * 行为兼容 desktop 原 `prepareTask`:
-   * - `failed -> implementing`(允许从失败恢复)
+   * - `failed -> implementing`(允许从失败恢复;若 worktree 缺失则先补建)
    * - `draft -> confirmed -> preparing`
    * - `preparing` 创建 worktree,然后到 `implementing`
    * - 其他状态直接返回当前 task
@@ -331,6 +331,10 @@ export class TaskWorkflow {
   async prepare(taskId: string, signal?: AbortSignal): Promise<Task> {
     let task = this.store.getTask(taskId);
     if (!task) throw new Error("Task not found");
+    const repos = this.store.listTaskRepositories(taskId);
+    if (task.state === "failed" && repos.some((repo) => !repo.worktreePath || !repo.featureBranch)) {
+      task = this.transitionTo(taskId, "preparing");
+    }
     if (task.state === "failed") task = this.transitionTo(taskId, "implementing");
     if (["draft", "confirmed", "preparing"].includes(task.state)) task = await this.prepareWorktree(taskId, signal);
     if (task.state === "preparing") task = this.transitionTo(taskId, "implementing");

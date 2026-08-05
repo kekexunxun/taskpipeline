@@ -3,7 +3,7 @@ import type { BrowserWindow } from "electron";
 import type { TaskStore } from "@coding-agent/core";
 import type { UIMessageChunk } from "ai";
 import { ChatStorage } from "./chat-storage.js";
-import { listChatModels, resolveChatModel } from "./chat-models.js";
+import { listChatModels, resolveChatModel, type ResolvedChatModel } from "./chat-models.js";
 import { streamChat } from "./chat-llm.js";
 import type { AbortChatStreamInput, ChatConversation, ChatMessage, ChatMessageMetadata, ChatModelGroup, ChatStreamEvent, StartChatStreamInput } from "./chat-types.js";
 import type { TaskCreationBackend, TaskCreatedResult } from "./task-backends/index.js";
@@ -12,6 +12,8 @@ type GetQoderStatus = () => Promise<{ enabled: boolean; connected: boolean; runn
 type TokenProvider = () => string | undefined;
 type ActiveStream = { streamId: string; abort: AbortController };
 type TaskBackendFactory = () => TaskCreationBackend | undefined;
+type MemoryContextProvider = (input: { conversationId: string; query: string }) => Promise<string | undefined>;
+type ConversationConsolidator = (input: { conversation: ChatConversation; model: ResolvedChatModel; signal: AbortSignal }) => Promise<void>;
 
 function textOf(message: ChatMessage): string { return message.parts.filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text").map((part) => part.text).join(""); }
 function titleOf(text: string): string { return text.slice(0, 32).replace(/\s+/g, " ").trim() || "新对话"; }
@@ -36,7 +38,7 @@ export class ChatService {
   private readonly storage: ChatStorage;
   private readonly activeStreams = new Map<string, ActiveStream>();
 
-  constructor(private readonly store: TaskStore, dataDir: string, private readonly getQoderStatus: GetQoderStatus, private readonly getQoderToken: TokenProvider, private readonly getOpenAIKey: TokenProvider, private readonly getMainWindow: () => BrowserWindow | undefined, private readonly resolveTaskBackend?: TaskBackendFactory) {
+  constructor(private readonly store: TaskStore, dataDir: string, private readonly getQoderStatus: GetQoderStatus, private readonly getQoderToken: TokenProvider, private readonly getOpenAIKey: TokenProvider, private readonly getMainWindow: () => BrowserWindow | undefined, private readonly resolveTaskBackend?: TaskBackendFactory, private readonly memoryContext?: MemoryContextProvider, private readonly consolidateConversation?: ConversationConsolidator) {
     this.storage = new ChatStorage(dataDir);
   }
 
@@ -83,6 +85,7 @@ export class ChatService {
     let content = "";
     let status: ChatMessageMetadata["status"] = "done";
     let modelKey = input.model;
+    let resolvedModel: ResolvedChatModel | undefined;
     let userPersisted = false;
     const taskBackend = input.mode === "task-create" ? this.resolveTaskBackend?.() : undefined;
     let taskCreation: ChatMessageMetadata["taskCreation"];
@@ -92,10 +95,13 @@ export class ChatService {
       userPersisted = true;
       const model = resolveChatModel(input.model, this.store, this.getOpenAIKey);
       modelKey = model.key;
+      resolvedModel = model;
+      const memoryContext = await this.memoryContext?.({ conversationId: input.chatId, query: textOf(userMessage) });
+      const messagesForModel = memoryContext ? [{ id: randomUUID(), role: "system", parts: [{ type: "text", text: memoryContext }] } satisfies ChatMessage, ...messages] : messages;
       const startMetadata: ChatMessageMetadata = { createdAt: now, model: modelKey, agentMode: input.mode ?? "chat" };
       this.dispatch(input, { type: "start", messageId: assistantId, messageMetadata: startMetadata });
       this.dispatch(input, { type: "text-start", id: textPartId });
-      for await (const event of streamChat({ model, qoderToken: model.provider === "qoder" ? this.getQoderToken() : undefined, messages, signal: abort.signal, taskBackend, onCreated: (result) => {
+      for await (const event of streamChat({ model, qoderToken: model.provider === "qoder" ? this.getQoderToken() : undefined, messages: messagesForModel, signal: abort.signal, taskBackend, onCreated: (result) => {
         taskCreation = {
           backend: result.backend,
           externalKey: result.externalKey,
@@ -156,6 +162,12 @@ export class ChatService {
         }
         this.finish(input);
         if (this.activeStreams.get(input.chatId)?.streamId === input.streamId) this.activeStreams.delete(input.chatId);
+        if (status === "done" && content && resolvedModel) {
+          const conversation = this.storage.getConversation(input.chatId);
+          if (conversation) {
+            void this.consolidateConversation?.({ conversation, model: resolvedModel, signal: abort.signal }).catch((reason) => console.warn("[memory] chat consolidate failed:", reason));
+          }
+        }
       }
     }
   }

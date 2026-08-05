@@ -55,7 +55,7 @@ export function DetailHeader({
   onClose,
   onOpenVSCode,
   onOpenQoder,
-  onRevealInFolder,
+  onRevealWorkspace,
   onMergeBackToBase
 }: {
   task: Task;
@@ -65,7 +65,7 @@ export function DetailHeader({
   onClose(): void;
   onOpenVSCode(): void;
   onOpenQoder(): void;
-  onRevealInFolder(path: string): void;
+  onRevealWorkspace(): void;
   onMergeBackToBase(): void;
 }) {
   const hasRepositories = repositories.length > 0;
@@ -121,7 +121,7 @@ export function DetailHeader({
             </Tooltip>
           )}
           {hasRepositories && (
-            <EditorLauncher repositories={repositories} onLaunchVSCode={onOpenVSCode} onLaunchQoder={onOpenQoder} onRevealInFolder={onRevealInFolder} />
+            <EditorLauncher repositories={repositories} onLaunchVSCode={onOpenVSCode} onLaunchQoder={onOpenQoder} onRevealWorkspace={onRevealWorkspace} />
           )}
           <Tooltip>
             <TooltipTrigger asChild>

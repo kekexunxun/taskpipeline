@@ -5,7 +5,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu";
@@ -18,7 +17,8 @@ import {
  *
  * 包含三类操作：
  * - VS Code / Qoder：交给宿主启动（调用 `api.openTaskEditor`）。
- * - 在系统文件管理器打开：按仓库逐个调 `onRevealInFolder`；单仓库时直接调，多仓库时下拉出子菜单。
+ * - 在系统文件管理器打开：直接打开任务对应的 workspace 目录（所有仓库 worktree 的
+ *   父目录），不再按仓库拆分。
  *
  * 注意：父组件 `DetailHeader` 只在 `repositories.length > 0` 时才渲染本组件，
  * 不会出现"无仓库可打开"的空下拉。
@@ -27,14 +27,14 @@ export function EditorLauncher({
   repositories,
   onLaunchVSCode,
   onLaunchQoder,
-  onRevealInFolder
+  onRevealWorkspace
 }: {
   repositories: TaskRepository[];
   onLaunchVSCode(): void;
   onLaunchQoder(): void;
-  onRevealInFolder(path: string): void;
+  onRevealWorkspace(): void;
 }) {
-  const canReveal = repositories.some((repo) => Boolean(repo.worktreePath || repo.localPath));
+  const canReveal = repositories.length > 0;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -50,35 +50,10 @@ export function EditorLauncher({
           <TerminalIcon size={11} />Qoder
         </DropdownMenuItem>
         {canReveal && <DropdownMenuSeparator />}
-        {canReveal && repositories.length === 1 && (
-          <DropdownMenuItem
-            onSelect={() => {
-              const path = repositories[0]?.worktreePath ?? repositories[0]?.localPath;
-              if (path) onRevealInFolder(path);
-            }}
-            className="text-xs"
-          >
+        {canReveal && (
+          <DropdownMenuItem onSelect={onRevealWorkspace} className="text-xs">
             <FolderOpenIcon size={11} />在系统文件管理器打开
           </DropdownMenuItem>
-        )}
-        {canReveal && repositories.length > 1 && (
-          <>
-            <DropdownMenuLabel className="text-[10px] text-muted-foreground">在系统文件管理器打开</DropdownMenuLabel>
-            {repositories.map((repo) => {
-              const path = repo.worktreePath ?? repo.localPath;
-              if (!path) return null;
-              return (
-                <DropdownMenuItem
-                  key={repo.id}
-                  onSelect={() => onRevealInFolder(path)}
-                  className="text-xs"
-                >
-                  <FolderOpenIcon size={11} />
-                  {repo.name}
-                </DropdownMenuItem>
-              );
-            })}
-          </>
         )}
       </DropdownMenuContent>
     </DropdownMenu>

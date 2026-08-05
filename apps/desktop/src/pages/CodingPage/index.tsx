@@ -121,7 +121,7 @@ export default function CodingPage() {
             onClose={onCloseDetail}
             onOpenVSCode={() => { if (tasks.selectedId) api.openTaskEditor(tasks.selectedId, "vscode").catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))); }}
             onOpenQoder={() => { if (tasks.selectedId) api.openTaskEditor(tasks.selectedId, "qoder").catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))); }}
-            onRevealInFolder={(path) => { api.revealInFolder(path).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))); }}
+            onRevealWorkspace={() => { if (tasks.selectedId) api.revealTaskWorkspace(tasks.selectedId).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))); }}
             onMergeBackToBase={() => {
               if (!tasks.selectedId) return;
               const confirmed = window.confirm("将当前任务的 feature 分支合并到本地 base 分支。\n该操作不会推送到远端，也不会创建 Merge Request。\n\n工作区若有未提交改动会失败并提示。\n\n确定继续吗？");
@@ -163,6 +163,7 @@ export default function CodingPage() {
             }}
             onManualComplete={() => { if (tasks.selectedId) runAction(() => api.manualComplete(tasks.selectedId!)); }}
             onReimplement={() => { setReimplementing(true); setStartOpen(true); }}
+            onResume={() => { if (tasks.selectedId) runAction(() => api.resumeTask(tasks.selectedId!)); }}
             onPrompt={tasks.setPrompt}
             onSend={() => tasks.send()}
             onOpenUrl={(url) => api.openExternal(url).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)))}

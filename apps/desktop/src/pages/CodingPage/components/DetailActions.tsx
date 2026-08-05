@@ -28,7 +28,8 @@ export function DetailActions({
   onRetryValidation,
   onSubmitMR,
   onManualComplete,
-  onReimplement
+  onReimplement,
+  onResume
 }: {
   card: TaskCard;
   running: boolean;
@@ -44,6 +45,7 @@ export function DetailActions({
   onSubmitMR(): void;
   onManualComplete(): void;
   onReimplement(): void;
+  onResume(): void;
 }) {
   const state = card.state;
   const isDraft = state === "draft";
@@ -103,9 +105,14 @@ export function DetailActions({
         </Button>
       )}
       {!starting && !running && isFailed && (
-        <Button size="sm" className="gap-1 px-2" onClick={onStart}>
-          <RefreshCcwIcon size={11} />重新开始
-        </Button>
+        <>
+          <Button size="sm" className="gap-1 px-2" onClick={onResume}>
+            <PlayIcon size={11} />继续执行
+          </Button>
+          <Button size="sm" variant="ghost" className="gap-1 px-2" onClick={onStart}>
+            <RefreshCcwIcon size={11} />重新开始
+          </Button>
+        </>
       )}
       {!starting && !running && isReviewBlocked && (
         <Button size="sm" className="gap-1 px-2" onClick={onReview}>

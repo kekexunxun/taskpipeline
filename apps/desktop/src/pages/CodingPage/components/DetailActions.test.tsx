@@ -31,7 +31,8 @@ const callbacks = {
   onRetryValidation: vi.fn(),
   onSubmitMR: vi.fn(),
   onManualComplete: vi.fn(),
-  onReimplement: vi.fn()
+  onReimplement: vi.fn(),
+  onResume: vi.fn()
 };
 
 describe("DetailActions", () => {
@@ -98,5 +99,21 @@ describe("DetailActions", () => {
 
     expect(screen.getByRole("button", { name: "重新 Review" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "重置 Review" })).not.toBeInTheDocument();
+  });
+
+  it("offers resume and restart after a failed task", () => {
+    render(<DetailActions card={cardWithState("failed")} running={false} starting={false} canSubmit={false} merging={false} {...callbacks} />);
+
+    const resume = screen.getByRole("button", { name: "继续执行" });
+    const restart = screen.getByRole("button", { name: "重新开始" });
+    expect(resume).toBeEnabled();
+    expect(restart).toBeEnabled();
+
+    fireEvent.click(resume);
+    expect(callbacks.onResume).toHaveBeenCalledOnce();
+    expect(callbacks.onStart).not.toHaveBeenCalled();
+
+    fireEvent.click(restart);
+    expect(callbacks.onStart).toHaveBeenCalledOnce();
   });
 });

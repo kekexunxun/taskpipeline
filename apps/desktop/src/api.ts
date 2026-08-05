@@ -1,4 +1,4 @@
-import type { AgentEvent, Approval, RepositoryProfile, Task, TaskCard, TaskRepository, TaskStartMode } from "@coding-agent/core";
+import type { AgentEvent, Approval, Memory, MemoryScope, MemorySearchHit, RepositoryProfile, RepoWikiDoc, RepoWikiSearchHit, Task, TaskCard, TaskRepository, TaskStartMode } from "@coding-agent/core";
 import type { UIMessage, UIMessageChunk } from "ai";
 
 export type ChangedFile = { repositoryId: string; repositoryName: string; path: string; status: string };
@@ -60,18 +60,35 @@ export type StartChatStreamInput = { streamId: string; chatId: string; model: st
 export type AbortChatStreamInput = { streamId: string; chatId: string };
 export type ChatStreamEvent = { streamId: string; chatId: string; chunk?: UIMessageChunk; error?: string; done?: boolean };
 
+// === Memory API surface ===
+
+export type MemoryInput = Omit<Memory, "id" | "createdAt" | "updatedAt"> & { id?: string };
+export type MemoryListFilter = { scope?: MemoryScope; scopes?: MemoryScope[]; repositoryId?: string; conversationId?: string };
+export type MemorySearchOptions = { repositoryIds?: string[]; conversationId?: string; limit?: number };
+export type MemorySearchResult = { memories: MemorySearchHit[]; wikiDocs: RepoWikiSearchHit[] };
+export type RepoWikiIndexResult = { indexed: number; removed: number };
+
 export type AgentApi = {
   listTasks(): Promise<TaskCard[]>; getTask(id: string): Promise<TaskDetail>; createTask(input: CreateTaskInput): Promise<Task>; updateTask(id: string, patch: Partial<Task>): Promise<Task>;
   deleteTask(id: string, mode?: TaskRemovalMode): Promise<void>; listRepositories(): Promise<RepositoryProfile[]>; saveRepository(profile: RepositoryProfile): Promise<void>; deleteRepository(id: string): Promise<void>; chooseRepositoryFolder(): Promise<RepositoryFolder | undefined>; attachRepository(taskId: string, repositoryId: string): Promise<TaskRepository>; detachRepository(taskId: string, repositoryId: string): Promise<void>; updateTaskRepositoryCommands(taskId: string, repositoryId: string, commands: RepositoryCommands): Promise<TaskRepository>; getSetting(key: string): Promise<string | undefined>; setSetting(key: string, value: string, secret?: boolean): Promise<void>;
-  startTask(taskId: string, options?: StartTaskOptions): Promise<void>; reimplementTask(taskId: string): Promise<void>; approveTaskPlan(taskId: string): Promise<void>; reviseTaskPlan(taskId: string, feedback: string): Promise<void>; retryTaskValidation(taskId: string): Promise<void>; sendTaskMessage(taskId: string, message: string): Promise<void>; abortTask(): Promise<void>; runReview(taskId: string): Promise<void>; resetReview(taskId: string): Promise<void>; resetDelivery(taskId: string): Promise<void>; submitMergeRequests(taskId: string): Promise<void>; refreshMergeStatus(): Promise<MergeStatusSummary[]>; manualComplete(taskId: string): Promise<void>;
+  startTask(taskId: string, options?: StartTaskOptions): Promise<void>; reimplementTask(taskId: string): Promise<void>; resumeTask(taskId: string): Promise<void>; approveTaskPlan(taskId: string): Promise<void>; reviseTaskPlan(taskId: string, feedback: string): Promise<void>; retryTaskValidation(taskId: string): Promise<void>; sendTaskMessage(taskId: string, message: string): Promise<void>; abortTask(): Promise<void>; runReview(taskId: string): Promise<void>; resetReview(taskId: string): Promise<void>; resetDelivery(taskId: string): Promise<void>; submitMergeRequests(taskId: string): Promise<void>; refreshMergeStatus(): Promise<MergeStatusSummary[]>; manualComplete(taskId: string): Promise<void>;
   importJiraTask(keyOrUrl: string): Promise<Task>; syncJiraTasks(): Promise<JiraTaskCandidate[]>; importJiraTasks(candidates: JiraTaskCandidate[]): Promise<Task[]>; testAtlassian(kind: "jira" | "confluence"): Promise<{ ok: boolean; message: string }>;
   openTaskEditor(taskId: string, editor: "vscode" | "qoder"): Promise<void>;
   mergeBackToBase(taskId: string): Promise<void>;
-  revealInFolder(path: string): Promise<void>;
+  revealTaskWorkspace(taskId: string): Promise<void>;
   listTaskBackends(): Promise<TaskBackendInfo[]>;
   openExternal(url: string): Promise<void>;
   getQoderStatus(): Promise<QoderStatus>;
   respondTaskUi(response: unknown): Promise<void>; onTaskEvent(callback: (event: any) => void): () => void;
+  // memory
+  listMemories(filter?: MemoryListFilter): Promise<Memory[]>;
+  upsertMemory(input: MemoryInput): Promise<Memory>;
+  updateMemory(id: string, patch: Partial<Omit<Memory, "id" | "createdAt" | "updatedAt">>): Promise<Memory>;
+  deleteMemory(id: string): Promise<void>;
+  searchMemory(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult>;
+  indexRepoWiki(repositoryId: string): Promise<RepoWikiIndexResult>;
+  listRepoWikiDocs(repositoryId: string): Promise<RepoWikiDoc[]>;
+  searchRepoWiki(repositoryId: string, query: string): Promise<RepoWikiSearchHit[]>;
   // chat
   listChats(): Promise<ChatConversationMeta[]>;
   getChat(id: string): Promise<ChatConversation | undefined>;
@@ -162,7 +179,17 @@ export const api: AgentApi = window.agentApi ?? {
     demoTasks[index] = next;
     return next;
   },
-  async deleteTask(id, mode = "all") { const index = demoTasks.findIndex((item) => item.id === id); if (index < 0) return; if (mode === "workspace") { demoTasks[index] = { ...demoTasks[index]!, state: ["draft", "failed", "completed", "await_merge", "cancelled"].includes(demoTasks[index]!.state) ? demoTasks[index]!.state : "cancelled", repositories: demoTasks[index]!.repositories.map((repo) => ({ ...repo, deliveryStatus: "workspace_removed" })) }; demoTaskRepositories.set(id, (demoTaskRepositories.get(id) ?? []).map((repo) => ({ ...repo, worktreePath: undefined, featureBranch: undefined, deliveryStatus: "workspace_removed" }))); return; } demoTasks.splice(index, 1); demoTaskRepositories.delete(id); }, async listRepositories() { return demoRepositories; }, async saveRepository() {}, async deleteRepository() {}, async chooseRepositoryFolder() { return undefined; }, async attachRepository(taskId, repositoryId) { const profile = demoRepositories.find((item) => item.id === repositoryId); if (!profile) throw new Error("Repository not found"); const repo: TaskRepository = { id: makeId(), taskId, repositoryId, name: profile.name, localPath: profile.localPath, baseBranch: profile.defaultBranch, setupCommand: profile.setupCommand, lintCommand: profile.lintCommand, testCommand: profile.testCommand, buildCommand: profile.buildCommand, deliveryStatus: "pending" }; demoTaskRepositories.set(taskId, [...(demoTaskRepositories.get(taskId) ?? []), repo]); return repo; }, async detachRepository(taskId, repositoryId) { demoTaskRepositories.set(taskId, (demoTaskRepositories.get(taskId) ?? []).filter((repo) => repo.repositoryId !== repositoryId)); }, async updateTaskRepositoryCommands(taskId, repositoryId, commands) { const list = demoTaskRepositories.get(taskId) ?? []; const index = list.findIndex((repo) => repo.repositoryId === repositoryId); if (index < 0) throw new Error("Task repository not found"); const next = { ...list[index]!, ...commands }; list[index] = next; demoTaskRepositories.set(taskId, [...list]); return next; }, async getSetting() { return undefined; }, async setSetting() {}, async startTask() {}, async reimplementTask() {}, async approveTaskPlan() {}, async reviseTaskPlan() {}, async retryTaskValidation() {}, async sendTaskMessage() {}, async abortTask() {}, async runReview() {}, async resetReview() {}, async resetDelivery() {}, async submitMergeRequests() {}, async refreshMergeStatus() { return [] as MergeStatusSummary[]; }, async manualComplete() {}, async importJiraTask() { return demoTasks[1]!; }, async syncJiraTasks() { return []; }, async importJiraTasks() { return []; }, async testAtlassian() { return { ok: false, message: "Electron is required" }; }, async openTaskEditor() { throw new Error("Electron is required"); }, async mergeBackToBase() { throw new Error("Electron is required"); }, async revealInFolder(path) { try { window.open(`file://${path}`); } catch { /* 在浏览器回退模式下允许静默 */ } }, async listTaskBackends() { return [{ id: "jira", displayName: "Jira", configured: false, description: "在设置中配置 Jira 后启用" }]; }, async openExternal() {}, async getQoderStatus() { return { enabled: false, connected: false, running: false, models: [] }; }, async respondTaskUi() {}, onTaskEvent() { return () => undefined; },
+  async deleteTask(id, mode = "all") { const index = demoTasks.findIndex((item) => item.id === id); if (index < 0) return; if (mode === "workspace") { demoTasks[index] = { ...demoTasks[index]!, state: ["draft", "failed", "completed", "await_merge", "cancelled"].includes(demoTasks[index]!.state) ? demoTasks[index]!.state : "cancelled", repositories: demoTasks[index]!.repositories.map((repo) => ({ ...repo, deliveryStatus: "workspace_removed" })) }; demoTaskRepositories.set(id, (demoTaskRepositories.get(id) ?? []).map((repo) => ({ ...repo, worktreePath: undefined, featureBranch: undefined, deliveryStatus: "workspace_removed" }))); return; } demoTasks.splice(index, 1); demoTaskRepositories.delete(id); }, async listRepositories() { return demoRepositories; }, async saveRepository() {}, async deleteRepository() {}, async chooseRepositoryFolder() { return undefined; }, async attachRepository(taskId, repositoryId) { const profile = demoRepositories.find((item) => item.id === repositoryId); if (!profile) throw new Error("Repository not found"); const repo: TaskRepository = { id: makeId(), taskId, repositoryId, name: profile.name, localPath: profile.localPath, baseBranch: profile.defaultBranch, setupCommand: profile.setupCommand, lintCommand: profile.lintCommand, testCommand: profile.testCommand, buildCommand: profile.buildCommand, deliveryStatus: "pending" }; demoTaskRepositories.set(taskId, [...(demoTaskRepositories.get(taskId) ?? []), repo]); return repo; }, async detachRepository(taskId, repositoryId) { demoTaskRepositories.set(taskId, (demoTaskRepositories.get(taskId) ?? []).filter((repo) => repo.repositoryId !== repositoryId)); }, async updateTaskRepositoryCommands(taskId, repositoryId, commands) { const list = demoTaskRepositories.get(taskId) ?? []; const index = list.findIndex((repo) => repo.repositoryId === repositoryId); if (index < 0) throw new Error("Task repository not found"); const next = { ...list[index]!, ...commands }; list[index] = next; demoTaskRepositories.set(taskId, [...list]); return next; }, async getSetting() { return undefined; }, async setSetting() {}, async startTask() {}, async reimplementTask() {}, async resumeTask() {}, async approveTaskPlan() {}, async reviseTaskPlan() {}, async retryTaskValidation() {}, async sendTaskMessage() {}, async abortTask() {}, async runReview() {}, async resetReview() {}, async resetDelivery() {}, async submitMergeRequests() {}, async refreshMergeStatus() { return [] as MergeStatusSummary[]; }, async manualComplete() {}, async importJiraTask() { return demoTasks[1]!; }, async syncJiraTasks() { return []; }, async importJiraTasks() { return []; }, async testAtlassian() { return { ok: false, message: "Electron is required" }; }, async openTaskEditor() { throw new Error("Electron is required"); }, async mergeBackToBase() { throw new Error("Electron is required"); }, async revealTaskWorkspace() {}, async listTaskBackends() { return [{ id: "jira", displayName: "Jira", configured: false, description: "在设置中配置 Jira 后启用" }]; }, async openExternal() {}, async getQoderStatus() { return { enabled: false, connected: false, running: false, models: [] }; }, async respondTaskUi() {}, onTaskEvent() { return () => undefined; },
+
+  // Memory mock(浏览器回退模式无持久层)
+  async listMemories() { return []; },
+  async upsertMemory() { throw new Error("Electron is required"); },
+  async updateMemory() { throw new Error("Electron is required"); },
+  async deleteMemory() {},
+  async searchMemory() { return { memories: [], wikiDocs: [] }; },
+  async indexRepoWiki() { return { indexed: 0, removed: 0 }; },
+  async listRepoWikiDocs() { return []; },
+  async searchRepoWiki() { return []; },
 
   // Chat mock
   async listChats() { return [...memoryChats.values()].map(({ messages, ...meta }) => meta).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)); },

@@ -26,15 +26,19 @@ export class ChatService {
     getOpenAIKey;
     getMainWindow;
     resolveTaskBackend;
+    memoryContext;
+    consolidateConversation;
     storage;
     activeStreams = new Map();
-    constructor(store, dataDir, getQoderStatus, getQoderToken, getOpenAIKey, getMainWindow, resolveTaskBackend) {
+    constructor(store, dataDir, getQoderStatus, getQoderToken, getOpenAIKey, getMainWindow, resolveTaskBackend, memoryContext, consolidateConversation) {
         this.store = store;
         this.getQoderStatus = getQoderStatus;
         this.getQoderToken = getQoderToken;
         this.getOpenAIKey = getOpenAIKey;
         this.getMainWindow = getMainWindow;
         this.resolveTaskBackend = resolveTaskBackend;
+        this.memoryContext = memoryContext;
+        this.consolidateConversation = consolidateConversation;
         this.storage = new ChatStorage(dataDir);
     }
     listChats() { return this.storage.listMetas(); }
@@ -79,6 +83,7 @@ export class ChatService {
         let content = "";
         let status = "done";
         let modelKey = input.model;
+        let resolvedModel;
         let userPersisted = false;
         const taskBackend = input.mode === "task-create" ? this.resolveTaskBackend?.() : undefined;
         let taskCreation;
@@ -88,10 +93,13 @@ export class ChatService {
             userPersisted = true;
             const model = resolveChatModel(input.model, this.store, this.getOpenAIKey);
             modelKey = model.key;
+            resolvedModel = model;
+            const memoryContext = await this.memoryContext?.({ conversationId: input.chatId, query: textOf(userMessage) });
+            const messagesForModel = memoryContext ? [{ id: randomUUID(), role: "system", parts: [{ type: "text", text: memoryContext }] }, ...messages] : messages;
             const startMetadata = { createdAt: now, model: modelKey, agentMode: input.mode ?? "chat" };
             this.dispatch(input, { type: "start", messageId: assistantId, messageMetadata: startMetadata });
             this.dispatch(input, { type: "text-start", id: textPartId });
-            for await (const event of streamChat({ model, qoderToken: model.provider === "qoder" ? this.getQoderToken() : undefined, messages, signal: abort.signal, taskBackend, onCreated: (result) => {
+            for await (const event of streamChat({ model, qoderToken: model.provider === "qoder" ? this.getQoderToken() : undefined, messages: messagesForModel, signal: abort.signal, taskBackend, onCreated: (result) => {
                     taskCreation = {
                         backend: result.backend,
                         externalKey: result.externalKey,
@@ -164,6 +172,12 @@ export class ChatService {
                 this.finish(input);
                 if (this.activeStreams.get(input.chatId)?.streamId === input.streamId)
                     this.activeStreams.delete(input.chatId);
+                if (status === "done" && content && resolvedModel) {
+                    const conversation = this.storage.getConversation(input.chatId);
+                    if (conversation) {
+                        void this.consolidateConversation?.({ conversation, model: resolvedModel, signal: abort.signal }).catch((reason) => console.warn("[memory] chat consolidate failed:", reason));
+                    }
+                }
             }
         }
     }

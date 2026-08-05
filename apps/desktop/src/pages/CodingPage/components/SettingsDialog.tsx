@@ -1,18 +1,21 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
+  ChevronRightIcon,
   ExternalLinkIcon,
   GitBranchIcon,
   KeyRoundIcon,
   Loader2Icon,
   PencilIcon,
   PlusIcon,
+  RefreshCwIcon,
   ServerIcon,
   Trash2Icon
 } from "lucide-react";
 import type { QoderStatus } from "@/api";
-import type { RepositoryProfile } from "@coding-agent/core";
+import type { Memory, MemoryScope, RepositoryProfile } from "@coding-agent/core";
 import { api } from "@/api";
 import { useFeedback } from "@/hooks/useGlobalFeedback";
+import { cn } from "@/lib/utils";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -41,6 +44,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ModelBadges } from "@/components/ModelBadges";
 import { RepositoryDialog, TestButton, type RepoDraft } from "./RepositoryDialog";
+import { MemoryDialog } from "./MemoryDialog";
 import {
   OpenAIProfileDialog,
   OpenAIProfileTrigger,
@@ -100,6 +104,7 @@ const secretKeys = [
   "confluenceToken",
   "modelApiKey"
 ] as const;
+const MANAGED_MEMORY_SCOPES: MemoryScope[] = ["user", "repo"];
 
 function Section({
   title,
@@ -183,6 +188,70 @@ function RepositoryCard({
 }
 
 /**
+ * 记忆卡片：标题可点击展开内容，操作按钮靠右悬浮。
+ */
+function MemoryCard({
+  memory,
+  expanded,
+  onToggle,
+  onEdit,
+  onDelete
+}: {
+  memory: Memory;
+  expanded: boolean;
+  onToggle(): void;
+  onEdit(): void;
+  onDelete(): void;
+}) {
+  return (
+    <article className="group rounded-md border bg-card">
+      <div className="flex items-center gap-1.5 px-2.5 py-2">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={expanded}
+          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+        >
+          <ChevronRightIcon size={12} className={cn("shrink-0 text-muted-foreground transition-transform", expanded && "rotate-90")} />
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              {memory.pinned && <Badge variant="muted" className="text-[9px]">置顶</Badge>}
+              <h4 className="truncate text-xs font-semibold text-foreground">{memory.title}</h4>
+            </div>
+          </div>
+        </button>
+        <div className="flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label={`编辑记忆 ${memory.title}`}
+            onClick={onEdit}
+          >
+            <PencilIcon size={11} />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label={`删除记忆 ${memory.title}`}
+            onClick={onDelete}
+          >
+            <Trash2Icon size={11} />
+          </Button>
+        </div>
+      </div>
+      {expanded && (
+        <div className="border-t px-3 pb-2.5 pt-2">
+          <p className="whitespace-pre-wrap text-[11px] leading-5 text-muted-foreground">{memory.content}</p>
+          {memory.tags.length > 0 && (
+            <p className="mt-1.5 text-[10px] text-muted-foreground/70">#{memory.tags.join(" #")}</p>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
+/**
  * Qoder 模型卡片：复用 ModelBadges 保持与 ChatModelSelector 展示一致。
  */
 function QoderModelCard({
@@ -227,6 +296,13 @@ export function SettingsDialog({
     initial?: RepoDraft;
   }>({ open: false });
   const [deleteRepository, setDeleteRepository] = useState<RepositoryProfile | undefined>(undefined);
+  const [memories, setMemories] = useState<Memory[]>([]);
+  const [wikiCounts, setWikiCounts] = useState<Record<string, number>>({});
+  const [memoryDialog, setMemoryDialog] = useState<{ open: boolean; initial?: Partial<Memory> & { id?: string } }>({ open: false });
+  const [deleteMemory, setDeleteMemory] = useState<Memory | undefined>(undefined);
+  const [rebuildingWiki, setRebuildingWiki] = useState<string | undefined>(undefined);
+  const [activeMemoryTab, setActiveMemoryTab] = useState<string>("user");
+  const [expandedMemoryId, setExpandedMemoryId] = useState<string | undefined>(undefined);
   const [openAIDraft, setOpenAIDraft] = useState<OpenAIDraft | null>(null);
   const [openAIDialog, setOpenAIDialog] = useState<{ open: boolean; mode: "create" | "edit" }>({
     open: false,
@@ -242,7 +318,12 @@ export function SettingsDialog({
       const next = { ...defaults };
       for (const [key, value] of entries) if (value !== undefined) next[key] = value;
       setSettings(next);
-      setRepositories(await api.listRepositories());
+      const repositoryList = await api.listRepositories();
+      setRepositories(repositoryList);
+      setMemories(await api.listMemories({ scopes: MANAGED_MEMORY_SCOPES }));
+      const counts: Record<string, number> = {};
+      for (const repository of repositoryList) counts[repository.id] = (await api.listRepoWikiDocs(repository.id)).length;
+      setWikiCounts(counts);
       const profile = await api.getSetting("modelProfile");
       if (profile) {
         try {
@@ -349,7 +430,42 @@ export function SettingsDialog({
       showError(reason instanceof Error ? reason.message : String(reason));
     }
   };
+  const refreshMemories = async () => {
+    try {
+      setMemories(await api.listMemories({ scopes: MANAGED_MEMORY_SCOPES }));
+    } catch (reason) {
+      showError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+  const removeMemory = async () => {
+    if (!deleteMemory) return;
+    try {
+      await api.deleteMemory(deleteMemory.id);
+      setDeleteMemory(undefined);
+      await refreshMemories();
+    } catch (reason) {
+      showError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+  const rebuildRepoWiki = async (repositoryId: string) => {
+    setRebuildingWiki(repositoryId);
+    try {
+      const result = await api.indexRepoWiki(repositoryId);
+      const docs = await api.listRepoWikiDocs(repositoryId);
+      setWikiCounts((current) => ({ ...current, [repositoryId]: docs.length }));
+      showSuccess(`索引完成：新增 ${result.indexed}，移除 ${result.removed}`);
+    } catch (reason) {
+      showError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRebuildingWiki(undefined);
+    }
+  };
   const openAIConfigured = Boolean(openAIDraft?.baseUrl && openAIDraft?.model);
+  const userMemories = memories.filter((memory) => memory.scope === "user");
+  const openMemoryCreate = () => {
+    const activeRepo = repositories.find((repository) => repository.id === activeMemoryTab);
+    setMemoryDialog({ open: true, initial: activeRepo ? { scope: "repo", repositoryId: activeRepo.id } : { scope: "user" } });
+  };
   const openAIInitial: OpenAIProfile | undefined = openAIDraft
     ? {
         baseUrl: openAIDraft.baseUrl,
@@ -384,6 +500,7 @@ export function SettingsDialog({
                 <TabsTrigger className="justify-start h-7 px-2 text-xs!" value="general">通用</TabsTrigger>
                 <TabsTrigger className="justify-start h-7 px-2 text-xs!" value="atlassian">Atlassian</TabsTrigger>
                 <TabsTrigger className="justify-start h-7 px-2 text-xs!" value="repositories">仓库</TabsTrigger>
+                <TabsTrigger className="justify-start h-7 px-2 text-xs!" value="memory">记忆</TabsTrigger>
                 <TabsTrigger className="justify-start h-7 px-2 text-xs!" value="model">模型</TabsTrigger>
               </TabsList>
               <div className="thin-scrollbar min-h-0 space-y-5 overflow-y-auto p-6">
@@ -537,6 +654,89 @@ export function SettingsDialog({
                     </div>
                   )}
                 </TabsContent>
+                <TabsContent value="memory" className="space-y-5">
+                  <Section title="记忆管理" description="用户级与仓库级长期记忆会注入到对话与任务执行上下文，可在此新增、修正或删除。">
+                    <div className="flex items-start justify-between gap-2.5">
+                      <div>
+                        <h3 className="text-xs font-semibold">记忆</h3>
+                        <p className="mt-0.5 text-xs text-muted-foreground">共 {memories.length} 条</p>
+                      </div>
+                      <Button size="sm" onClick={openMemoryCreate}>
+                        <PlusIcon size={11} />
+                        新增记忆
+                      </Button>
+                    </div>
+                    <Tabs value={activeMemoryTab} onValueChange={setActiveMemoryTab}>
+                      <TabsList className="h-7 justify-start gap-0.5 rounded-md border bg-card/40 p-0.5">
+                        <TabsTrigger value="user" className="h-6 px-2.5 text-xs!">用户</TabsTrigger>
+                        {repositories.map((repository) => (
+                          <TabsTrigger key={repository.id} value={repository.id} className="h-6 max-w-36 px-2.5 text-xs!">
+                            <span className="truncate">{repository.name}</span>
+                          </TabsTrigger>
+                        ))}
+                      </TabsList>
+                      <TabsContent value="user" className="mt-2.5 space-y-1.5">
+                        {userMemories.length ? (
+                          userMemories.map((memory) => (
+                            <MemoryCard
+                              key={memory.id}
+                              memory={memory}
+                              expanded={expandedMemoryId === memory.id}
+                              onToggle={() => setExpandedMemoryId((current) => (current === memory.id ? undefined : memory.id))}
+                              onEdit={() => setMemoryDialog({ open: true, initial: memory })}
+                              onDelete={() => setDeleteMemory(memory)}
+                            />
+                          ))
+                        ) : (
+                          <div className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
+                            还没有用户级记忆
+                          </div>
+                        )}
+                      </TabsContent>
+                      {repositories.map((repository) => {
+                        const repoMemories = memories.filter((memory) => memory.scope === "repo" && memory.repositoryId === repository.id);
+                        return (
+                          <TabsContent key={repository.id} value={repository.id} className="mt-2.5 space-y-1.5">
+                            <div className="flex items-center justify-between rounded-md border bg-card/40 px-3 py-2">
+                              <p className="text-[11px] text-muted-foreground">
+                                repowiki 索引 {wikiCounts[repository.id] ?? 0} 篇
+                              </p>
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                disabled={rebuildingWiki === repository.id}
+                                onClick={() => void rebuildRepoWiki(repository.id)}
+                              >
+                                {rebuildingWiki === repository.id ? (
+                                  <Loader2Icon className="animate-spin-slow" size={11} />
+                                ) : (
+                                  <RefreshCwIcon size={11} />
+                                )}
+                                {rebuildingWiki === repository.id ? "索引中" : "重建索引"}
+                              </Button>
+                            </div>
+                            {repoMemories.length ? (
+                              repoMemories.map((memory) => (
+                                <MemoryCard
+                                  key={memory.id}
+                                  memory={memory}
+                                  expanded={expandedMemoryId === memory.id}
+                                  onToggle={() => setExpandedMemoryId((current) => (current === memory.id ? undefined : memory.id))}
+                                  onEdit={() => setMemoryDialog({ open: true, initial: memory })}
+                                  onDelete={() => setDeleteMemory(memory)}
+                                />
+                              ))
+                            ) : (
+                              <div className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
+                                该仓库还没有记忆
+                              </div>
+                            )}
+                          </TabsContent>
+                        );
+                      })}
+                    </Tabs>
+                  </Section>
+                </TabsContent>
                 <TabsContent value="model" className="space-y-5">
                   <Section title="Qoder 模型" description="可用模型由 Qoder 连接状态提供，徽章与对话面板保持一致。">
                     <FieldGroup className="gap-2.5">
@@ -644,6 +844,40 @@ export function SettingsDialog({
         onDeleted={() => void deleteOpenAIProfile()}
         onError={(reason) => showError(reason instanceof Error ? reason.message : String(reason))}
       />
+      <MemoryDialog
+        open={memoryDialog.open}
+        initial={memoryDialog.initial}
+        repositories={repositories}
+        onOpenChange={(next) =>
+          setMemoryDialog((current) => ({ ...current, open: next }))
+        }
+        onError={(reason) => showError(reason instanceof Error ? reason.message : String(reason))}
+        onSaved={async () => {
+          setMemoryDialog({ open: false });
+          await refreshMemories();
+        }}
+      />
+      <AlertDialog
+        open={Boolean(deleteMemory)}
+        onOpenChange={(next) => {
+          if (!next) setDeleteMemory(undefined);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除记忆？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将永久删除「{deleteMemory?.title}」，删除后无法恢复。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void removeMemory()}>
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <AlertDialog
         open={Boolean(deleteRepository)}
         onOpenChange={(next) => {

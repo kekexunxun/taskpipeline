@@ -38,7 +38,7 @@ type Props = {
   onClose(): void;
   onOpenVSCode(): void;
   onOpenQoder(): void;
-  onRevealInFolder(path: string): void;
+  onRevealWorkspace(): void;
   onMergeBackToBase(): void;
   onChangeModel(value: string | undefined): void;
   onStart(): void;
@@ -52,6 +52,7 @@ type Props = {
   onSubmitMR(): void;
   onManualComplete(): void;
   onReimplement(): void;
+  onResume(): void;
   onPrompt(value: string): void;
   onSend(): void;
   onOpenUrl(url: string): void;
@@ -72,7 +73,7 @@ export function DetailPanel({
   onClose,
   onOpenVSCode,
   onOpenQoder,
-  onRevealInFolder,
+  onRevealWorkspace,
   onMergeBackToBase,
   onChangeModel,
   onStart,
@@ -86,6 +87,7 @@ export function DetailPanel({
   onSubmitMR,
   onManualComplete,
   onReimplement,
+  onResume,
   onPrompt,
   onSend,
   onOpenUrl
@@ -142,7 +144,7 @@ export function DetailPanel({
         onClose={onClose}
         onOpenVSCode={onOpenVSCode}
         onOpenQoder={onOpenQoder}
-        onRevealInFolder={onRevealInFolder}
+        onRevealWorkspace={onRevealWorkspace}
         onMergeBackToBase={onMergeBackToBase}
       />
       <DetailActions
@@ -160,7 +162,19 @@ export function DetailPanel({
         onSubmitMR={onSubmitMR}
         onManualComplete={onManualComplete}
         onReimplement={onReimplement}
+        onResume={onResume}
       />
+      {showUsage && (
+        <UsageSection
+          task={task}
+          card={card}
+          model={task.qoderModel}
+          onChangeModel={onChangeModel}
+          modelGroups={modelGroups}
+          running={running || starting}
+          hasModelSelector={hasModelSelector}
+        />
+      )}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 flex-1 flex-col gap-0">
         <TabsList className="h-9 w-full shrink-0 justify-start gap-0 rounded-none bg-transparent px-3 py-0">
           {hasPlan && <TabsTrigger value="plan" data-detail-tab className={detailTabClass}>
@@ -173,7 +187,7 @@ export function DetailPanel({
             <FileDiffIcon size={12} />文件{totalFiles > 0 && <Badge variant="secondary" className="h-4 min-w-4 px-1 text-[10px]">{totalFiles}</Badge>}
           </TabsTrigger>
           <TabsTrigger value="delivery" data-detail-tab className={detailTabClass}>
-            <GitMergeIcon size={12} />交付{mergeRequestCount > 0 && <Badge variant="secondary" className="h-4 min-w-4 px-1 text-[10px]">{mergeRequestCount}</Badge>}
+            <GitMergeIcon size={12} />MR{mergeRequestCount > 0 && <Badge variant="secondary" className="h-4 min-w-4 px-1 text-[10px]">{mergeRequestCount}</Badge>}
           </TabsTrigger>
         </TabsList>
         {hasPlan && <TabsContent value="plan" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -184,17 +198,6 @@ export function DetailPanel({
           />
         </TabsContent>}
         <TabsContent value="activity" className="thin-scrollbar mt-0 min-h-0 flex-1 overflow-y-auto">
-          {showUsage && (
-            <UsageSection
-              task={task}
-              card={card}
-              model={task.qoderModel}
-              onChangeModel={onChangeModel}
-              modelGroups={modelGroups}
-              running={running || starting}
-              hasModelSelector={hasModelSelector}
-            />
-          )}
           <Timeline items={executionEvents} />
         </TabsContent>
         <TabsContent value="files" className="thin-scrollbar mt-0 min-h-0 flex-1 overflow-y-auto">
