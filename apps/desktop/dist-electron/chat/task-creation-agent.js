@@ -1,77 +1,78 @@
 import { mcpPayload } from "@coding-agent/integrations";
-const BSADAPT_SCHEMA = {
-    source: "har-fallback",
-    project: { id: "12321", key: "BSADAPT344", name: "百胜Adaptor全网通中间件软件V1.0" },
-    issueTypes: [
-        { id: "10000", name: "Epic" },
-        { id: "10001", name: "故事" },
-        { id: "10900", name: "需求提单" },
-        { id: "10202", name: "技术支持单" },
-        { id: "10002", name: "任务", default: true },
-        { id: "10901", name: "Bug提单" },
-        { id: "10502", name: "测试用例" },
-        { id: "10503", name: "测试计划" },
-        { id: "10201", name: "提单" },
-        { id: "11311", name: "集成版本发布" },
-        { id: "11002", name: "故障" },
-        { id: "11400", name: "Hotfix补丁版本" }
-    ],
-    fields: {
-        summary: { name: "概要", required: true, type: "string" },
-        description: { name: "描述", required: false, type: "string" },
-        components: {
-            name: "模块",
-            required: false,
-            type: "array",
-            allowedValues: [
-                { id: "51004", value: "2026年度Adaptor产品安全测试" },
-                { id: "12459", value: "Adaptor" },
-                { id: "12458", value: "Adaptor内部运营后台（胜券运营平台）" },
-                { id: "42906", value: "Adaptor发票通" },
-                { id: "32314", value: "Adaptor商品通" },
-                { id: "43212", value: "Adaptor商家后台" },
-                { id: "42905", value: "Adaptor支付通" },
-                { id: "12457", value: "Adaptor物流通" },
-                { id: "12456", value: "Adaptor用户后台功能" },
-                { id: "12460", value: "Adaptor订单通" },
-                { id: "12455", value: "Adaptor运维能力（监控与管理）" },
-                { id: "49946", value: "AI智能应用" },
-                { id: "45597", value: "安全" },
-                { id: "53638", value: "订单" }
+// 创建模板按“要创建的 Jira 问题类型”注册，而不是按项目 Key 特判。
+// 后续新增其他类型的模板，只需向 TASK_TEMPLATES 追加一条记录；
+// 未注册的问题类型走 GENERIC_SCHEMA 兜底。
+const TASK_TEMPLATES = [
+    {
+        issueTypeId: "10002",
+        issueTypeName: "任务",
+        confirmedCustomFields: ["customfield_10500", "customfield_12505", "customfield_10004"],
+        schema: {
+            source: "template:任务",
+            issueType: { id: "10002", name: "任务" },
+            fields: {
+                summary: { name: "概要", required: true, type: "string" },
+                description: { name: "描述", required: false, type: "string" },
+                components: {
+                    name: "模块",
+                    required: false,
+                    type: "array",
+                    allowedValues: [
+                        { id: "51004", value: "2026年度Adaptor产品安全测试" },
+                        { id: "12459", value: "Adaptor" },
+                        { id: "12458", value: "Adaptor内部运营后台（胜券运营平台）" },
+                        { id: "42906", value: "Adaptor发票通" },
+                        { id: "32314", value: "Adaptor商品通" },
+                        { id: "43212", value: "Adaptor商家后台" },
+                        { id: "42905", value: "Adaptor支付通" },
+                        { id: "12457", value: "Adaptor物流通" },
+                        { id: "12456", value: "Adaptor用户后台功能" },
+                        { id: "12460", value: "Adaptor订单通" },
+                        { id: "12455", value: "Adaptor运维能力（监控与管理）" },
+                        { id: "49946", value: "AI智能应用" },
+                        { id: "45597", value: "安全" },
+                        { id: "53638", value: "订单" }
+                    ]
+                },
+                priority: {
+                    name: "优先级",
+                    required: false,
+                    defaultValue: { id: "3", value: "Medium" },
+                    allowedValues: ["1:Highest", "2:High", "3:Medium", "4:Low", "5:Lowest"]
+                },
+                customfield_10500: {
+                    name: "任务级别",
+                    required: false,
+                    defaultValue: { id: "10602", value: "低" },
+                    allowedValues: ["10600:高", "10601:中", "10602:低", "10702:微"]
+                },
+                customfield_12505: {
+                    name: "任务类型（区别于 Jira 问题类型）",
+                    required: false,
+                    allowedValues: [
+                        "69237:方案设计", "69238:集成测试", "69239:测试用例", "97369:性能优化",
+                        "147805:测试联调任务", "147806:架构改造优化", "147807:技术预研沟通",
+                        "269503:代码冲突处理", "186523:功能测试", "186524:安全测试",
+                        "186525:自动化测试", "186526:性能测试", "186527:专题测试",
+                        "186528:测试工具开发", "186529:赋能及支持"
+                    ]
+                },
+                customfield_10004: { name: "Sprint", required: false, dynamic: true },
+                timetracking: { name: "时间跟踪", required: false, format: "例如 8h、2d" }
+            },
+            notes: [
+                "issueTypeId=10002 是 Jira 问题类型“任务”；customfield_12505 是另一个可选业务字段，不要混淆。",
+                "Sprint ID 是动态值，除非用户明确指定且已查询到有效 Sprint，否则不要提交。",
+                "模块和工时不是固定默认值，应从用户描述推断；无法可靠判断时先询问。"
             ]
-        },
-        priority: {
-            name: "优先级",
-            required: false,
-            defaultValue: { id: "3", value: "Medium" },
-            allowedValues: ["1:Highest", "2:High", "3:Medium", "4:Low", "5:Lowest"]
-        },
-        customfield_10500: {
-            name: "任务级别",
-            required: false,
-            defaultValue: { id: "10602", value: "低" },
-            allowedValues: ["10600:高", "10601:中", "10602:低", "10702:微"]
-        },
-        customfield_12505: {
-            name: "任务类型（区别于 Jira 问题类型）",
-            required: false,
-            allowedValues: [
-                "69237:方案设计", "69238:集成测试", "69239:测试用例", "97369:性能优化",
-                "147805:测试联调任务", "147806:架构改造优化", "147807:技术预研沟通",
-                "269503:代码冲突处理", "186523:功能测试", "186524:安全测试",
-                "186525:自动化测试", "186526:性能测试", "186527:专题测试",
-                "186528:测试工具开发", "186529:赋能及支持"
-            ]
-        },
-        customfield_10004: { name: "Sprint", required: false, dynamic: true },
-        timetracking: { name: "时间跟踪", required: false, format: "例如 8h、2d" }
-    },
-    notes: [
-        "issueTypeId=10002 是 Jira 问题类型“任务”；customfield_12505 是另一个可选业务字段，不要混淆。",
-        "Sprint ID 是动态值，除非用户明确指定且已查询到有效 Sprint，否则不要提交。",
-        "模块和工时不是固定默认值，应从用户描述推断；无法可靠判断时先询问。"
-    ]
-};
+        }
+    }
+];
+function resolveTemplate(issueTypeId, issueTypeName) {
+    const id = issueTypeId?.trim();
+    const name = issueTypeName?.trim();
+    return TASK_TEMPLATES.find((template) => (id && template.issueTypeId === id) || (name && template.issueTypeName === name));
+}
 const GENERIC_SCHEMA = {
     source: "generic-fallback",
     fields: {
@@ -80,7 +81,7 @@ const GENERIC_SCHEMA = {
         summary: { required: true },
         description: { required: false }
     },
-    notes: ["当前 Jira MCP 未暴露创建元数据工具。只能安全提交通用字段；遇到 Jira 字段校验错误时应向用户补充询问，不要编造 customfield ID。"]
+    notes: ["未找到该问题类型的创建模板（或 Jira MCP 未暴露创建元数据工具）。只能安全提交通用字段；遇到 Jira 字段校验错误时应向用户补充询问，不要编造 customfield ID。"]
 };
 function toolName(tool) { return typeof tool.name === "string" ? tool.name : ""; }
 function inputProperties(tool) { return tool.inputSchema?.properties ?? {}; }
@@ -144,7 +145,7 @@ export class JiraTaskCreationAgent {
     get systemPrompt() {
         return [
             "你是企业内部 Jira 任务创建 Agent。你的唯一目标是帮助用户把即将开展的工作整理并创建为 Jira Issue。",
-            "必须先调用 get_jira_creation_schema，再决定 Jira 问题类型和字段。不要把 Jira 问题类型与名为“任务类型”的自定义字段混淆。",
+            "创建前必须确认 Jira 项目 Key 与要创建的问题类型（如 任务、故事、Bug提单、故障），再调用 get_jira_creation_schema 获取该类型对应的创建模板与字段。不要把 Jira 问题类型与名为“任务类型”的自定义字段混淆。",
             "根据语义谨慎选择任务、故事、Bug提单、故障等问题类型；无法可靠判断时先向用户确认。",
             "概要应简洁明确；描述应包含背景、目标、范围和可验证结果。不要编造项目 Key、自定义字段 ID、选项 ID、Sprint 或经办人。",
             "Confluence 仅用于补充确有必要的内部背景，使用前说明检索目的；不得修改 Confluence。",
@@ -157,16 +158,19 @@ export class JiraTaskCreationAgent {
     async getCreationSchema(input) {
         if (!this.jiraConfigured)
             return { available: false, message: "未配置 Jira MCP，请先在设置中配置 Jira Host 与 Token。" };
-        if (!input.projectKey?.trim()) {
+        if (!input.issueTypeId?.trim() && !input.issueTypeName?.trim()) {
             return {
                 available: true,
-                requiresProjectKey: true,
-                message: "创建前必须确认 Jira 项目 Key，不得根据单个历史样本擅自选择项目。",
-                knownProjectExample: BSADAPT_SCHEMA.project
+                requiresIssueType: true,
+                message: "创建前必须明确 Jira 问题类型（如 任务、故事、Bug提单、故障），创建模板按问题类型匹配，不得根据单个历史样本擅自选择。",
+                knownIssueTypeExample: TASK_TEMPLATES[0] && { id: TASK_TEMPLATES[0].issueTypeId, name: TASK_TEMPLATES[0].issueTypeName }
             };
         }
         const tools = await this.getJiraTools();
-        const metadataTool = firstTool(tools, ["jira_get_create_issue_metadata", "jira_get_create_metadata", "jira_get_issue_create_metadata"]);
+        // 元数据工具按项目查询；未提供项目 Key 时无法查询，直接走模板/通用兜底。
+        const metadataTool = input.projectKey?.trim()
+            ? firstTool(tools, ["jira_get_create_issue_metadata", "jira_get_create_metadata", "jira_get_issue_create_metadata"])
+            : undefined;
         if (metadataTool) {
             const properties = inputProperties(metadataTool);
             const args = {};
@@ -179,11 +183,12 @@ export class JiraTaskCreationAgent {
             this.schemaLoaded = true;
             return { available: true, source: `mcp:${toolName(metadataTool)}`, schema: compactPayload(payload) };
         }
-        if (input.projectKey.toUpperCase() === "BSADAPT344") {
-            for (const key of ["customfield_10500", "customfield_12505", "customfield_10004"])
+        const template = resolveTemplate(input.issueTypeId, input.issueTypeName);
+        if (template) {
+            for (const key of template.confirmedCustomFields)
                 this.confirmedCustomFields.add(key);
             this.schemaLoaded = true;
-            return { available: true, ...BSADAPT_SCHEMA, requestedIssueType: input.issueTypeId ?? input.issueTypeName };
+            return { available: true, ...template.schema, requestedIssueType: input.issueTypeId ?? input.issueTypeName };
         }
         this.schemaLoaded = true;
         return { available: true, projectKey: input.projectKey, ...GENERIC_SCHEMA };
@@ -227,22 +232,25 @@ export class JiraTaskCreationAgent {
             throw new Error("Jira 概要不能为空");
         if (!input.issueTypeName.trim() && !input.issueTypeId?.trim())
             throw new Error("必须选择 Jira 问题类型");
-        if (projectKey === "BSADAPT344") {
-            const issueType = BSADAPT_SCHEMA.issueTypes.find((item) => item.id === input.issueTypeId || item.name === input.issueTypeName.trim());
-            if (!issueType)
-                throw new Error(`BSADAPT344 不支持问题类型 ${input.issueTypeName || input.issueTypeId}`);
-            if (input.issueTypeId && issueType.id !== input.issueTypeId)
+        const template = resolveTemplate(input.issueTypeId, input.issueTypeName);
+        if (template) {
+            const fields = template.schema.fields;
+            if (input.issueTypeId?.trim() && input.issueTypeName?.trim()
+                && !(input.issueTypeId.trim() === template.issueTypeId && input.issueTypeName.trim() === template.issueTypeName)) {
                 throw new Error("Jira 问题类型名称与 ID 不匹配");
-            const components = BSADAPT_SCHEMA.fields.components.allowedValues;
+            }
+            const components = (fields.components?.allowedValues ?? []);
             if (input.componentId && !components.some((item) => item.id === input.componentId))
                 throw new Error(`未知模块 ID：${input.componentId}`);
             if (input.componentName && !components.some((item) => item.value === input.componentName))
                 throw new Error(`未知模块：${input.componentName}`);
             if (input.priorityId && !["1", "2", "3", "4", "5"].includes(input.priorityId))
                 throw new Error(`未知优先级 ID：${input.priorityId}`);
-            if (input.taskLevelId && !["10600", "10601", "10602", "10702"].includes(input.taskLevelId))
+            const taskLevelValues = (fields.customfield_10500?.allowedValues ?? []);
+            if (input.taskLevelId && !taskLevelValues.some((item) => item.startsWith(`${input.taskLevelId}:`)))
                 throw new Error(`未知任务级别 ID：${input.taskLevelId}`);
-            if (input.taskCategoryId && !BSADAPT_SCHEMA.fields.customfield_12505.allowedValues.some((item) => item.startsWith(`${input.taskCategoryId}:`)))
+            const taskCategoryValues = (fields.customfield_12505?.allowedValues ?? []);
+            if (input.taskCategoryId && !taskCategoryValues.some((item) => item.startsWith(`${input.taskCategoryId}:`)))
                 throw new Error(`未知业务任务类型 ID：${input.taskCategoryId}`);
         }
         const extra = { ...(input.additionalFields ?? {}) };
@@ -262,8 +270,11 @@ export class JiraTaskCreationAgent {
             throw new Error("Sprint 字段未出现在本次创建 Schema 中");
         if (input.taskLevelId)
             extra.customfield_10500 = { id: input.taskLevelId };
-        else if (projectKey === "BSADAPT344" && (input.issueTypeId === "10002" || input.issueTypeName.trim() === "任务"))
-            extra.customfield_10500 = { id: "10602" };
+        else if (template
+            && (input.issueTypeId?.trim() === template.issueTypeId || input.issueTypeName.trim() === template.issueTypeName)
+            && template.schema.fields.customfield_10500?.defaultValue) {
+            extra.customfield_10500 = { id: template.schema.fields.customfield_10500.defaultValue.id };
+        }
         if (input.taskCategoryId)
             extra.customfield_12505 = { id: input.taskCategoryId };
         if (input.sprintId !== undefined)

@@ -23,13 +23,30 @@ function setup(options: { configured?: boolean; tools?: unknown[]; result?: unkn
 }
 
 describe("JiraTaskCreationAgent", () => {
-  it("returns the HAR fallback schema when MCP has no create-metadata tool", async () => {
+  it("returns the 任务 type template when MCP has no create-metadata tool", async () => {
     const { agent } = setup();
     await expect(agent.getCreationSchema({ projectKey: "BSADAPT344", issueTypeId: "10002" })).resolves.toMatchObject({
       available: true,
-      source: "har-fallback",
-      project: { key: "BSADAPT344" },
+      source: "template:任务",
+      issueType: { id: "10002", name: "任务" },
       requestedIssueType: "10002"
+    });
+  });
+
+  it("requires the issue type before resolving a template", async () => {
+    const { agent } = setup();
+    await expect(agent.getCreationSchema({ projectKey: "BSADAPT344" })).resolves.toMatchObject({
+      available: true,
+      requiresIssueType: true,
+      knownIssueTypeExample: { id: "10002", name: "任务" }
+    });
+  });
+
+  it("falls back to the generic schema for issue types without a registered template", async () => {
+    const { agent } = setup();
+    await expect(agent.getCreationSchema({ projectKey: "PAY", issueTypeName: "故事" })).resolves.toMatchObject({
+      available: true,
+      source: "generic-fallback"
     });
   });
 
