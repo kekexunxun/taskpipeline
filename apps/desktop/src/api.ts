@@ -14,16 +14,18 @@ export type JiraTaskCandidate = Pick<Task, "taskKey" | "source" | "sourceUrl" | 
 export type RepositoryFolder = Omit<RepositoryProfile, "id">;
 export type MergeRepoStatus = { repoId: string; repoName: string; mergeRequestIid: number; mergeRequestUrl?: string; state: "opened" | "merged" | "closed" | "error"; error?: string };
 export type MergeStatusSummary = { taskId: string; taskTitle: string; repos: MergeRepoStatus[]; allMerged: boolean; taskCompleted: boolean };
-export type CreateTaskInput = Pick<Task, "title" | "description"> & Partial<Pick<Task, "keywords" | "acceptanceCriteria">>;
+export type CreateTaskInput = Pick<Task, "title" | "description"> & Partial<Pick<Task, "keywords" | "acceptanceCriteria" | "openCodeReviewEnabled" | "autoCreateMergeRequests" | "createTestCasesEnabled">>;
 export type RepositoryCommands = Partial<Pick<TaskRepository, "setupCommand" | "lintCommand" | "testCommand" | "buildCommand">>;
-export type StartTaskOptions = { mode: TaskStartMode; repositoryCommands?: Record<string, RepositoryCommands> };
+export type StartTaskOptions = { mode: TaskStartMode; repositoryCommands?: Record<string, RepositoryCommands>; useAllRepositories?: boolean };
 export type TaskRemovalMode = "workspace" | "all";
+export type TaskBackendId = "jira" | "github" | "linear";
+export type TaskBackendInfo = { id: TaskBackendId; displayName: string; configured: boolean; description?: string };
 
 // === Chat API surface ===
 
 export type ChatMessageStatus = "done" | "error" | "aborted";
 export type ChatAgentMode = "chat" | "task-create";
-export type ChatTaskCreationResult = { taskKey?: string; jiraKey?: string; summary: string; projectKey: string; issueType: string };
+export type ChatTaskCreationResult = { backend: "jira" | "github" | "linear"; externalKey: string; summary: string; projectKey: string; issueType: string };
 export type ChatMessageMetadata = { createdAt: string; model?: string; status?: ChatMessageStatus; agentMode?: ChatAgentMode; taskCreation?: ChatTaskCreationResult };
 export type ChatMessage = UIMessage<ChatMessageMetadata>;
 
@@ -60,10 +62,13 @@ export type ChatStreamEvent = { streamId: string; chatId: string; chunk?: UIMess
 
 export type AgentApi = {
   listTasks(): Promise<TaskCard[]>; getTask(id: string): Promise<TaskDetail>; createTask(input: CreateTaskInput): Promise<Task>; updateTask(id: string, patch: Partial<Task>): Promise<Task>;
-  deleteTask(id: string, mode?: TaskRemovalMode): Promise<void>; listRepositories(): Promise<RepositoryProfile[]>; saveRepository(profile: RepositoryProfile): Promise<void>; deleteRepository(id: string): Promise<void>; chooseRepositoryFolder(): Promise<RepositoryFolder | undefined>; attachRepository(taskId: string, repositoryId: string): Promise<TaskRepository>; detachRepository(taskId: string, repositoryId: string): Promise<void>; getSetting(key: string): Promise<string | undefined>; setSetting(key: string, value: string, secret?: boolean): Promise<void>;
+  deleteTask(id: string, mode?: TaskRemovalMode): Promise<void>; listRepositories(): Promise<RepositoryProfile[]>; saveRepository(profile: RepositoryProfile): Promise<void>; deleteRepository(id: string): Promise<void>; chooseRepositoryFolder(): Promise<RepositoryFolder | undefined>; attachRepository(taskId: string, repositoryId: string): Promise<TaskRepository>; detachRepository(taskId: string, repositoryId: string): Promise<void>; updateTaskRepositoryCommands(taskId: string, repositoryId: string, commands: RepositoryCommands): Promise<TaskRepository>; getSetting(key: string): Promise<string | undefined>; setSetting(key: string, value: string, secret?: boolean): Promise<void>;
   startTask(taskId: string, options?: StartTaskOptions): Promise<void>; reimplementTask(taskId: string): Promise<void>; approveTaskPlan(taskId: string): Promise<void>; reviseTaskPlan(taskId: string, feedback: string): Promise<void>; retryTaskValidation(taskId: string): Promise<void>; sendTaskMessage(taskId: string, message: string): Promise<void>; abortTask(): Promise<void>; runReview(taskId: string): Promise<void>; resetReview(taskId: string): Promise<void>; resetDelivery(taskId: string): Promise<void>; submitMergeRequests(taskId: string): Promise<void>; refreshMergeStatus(): Promise<MergeStatusSummary[]>; manualComplete(taskId: string): Promise<void>;
   importJiraTask(keyOrUrl: string): Promise<Task>; syncJiraTasks(): Promise<JiraTaskCandidate[]>; importJiraTasks(candidates: JiraTaskCandidate[]): Promise<Task[]>; testAtlassian(kind: "jira" | "confluence"): Promise<{ ok: boolean; message: string }>;
   openTaskEditor(taskId: string, editor: "vscode" | "qoder"): Promise<void>;
+  mergeBackToBase(taskId: string): Promise<void>;
+  revealInFolder(path: string): Promise<void>;
+  listTaskBackends(): Promise<TaskBackendInfo[]>;
   openExternal(url: string): Promise<void>;
   getQoderStatus(): Promise<QoderStatus>;
   respondTaskUi(response: unknown): Promise<void>; onTaskEvent(callback: (event: any) => void): () => void;
@@ -84,19 +89,25 @@ const demoTasks: TaskCard[] = [
   { id: "demo-1", taskKey: "PAY-1842", source: "jira", title: "修复结算页优惠券并发校验", description: "优惠券并发使用时偶发重复核销。补充幂等保护与回归测试。", keywords: ["payment", "concurrency"], acceptanceCriteria: ["并发请求只核销一次"], state: "awaiting_plan_approval", startMode: "plan", planRevision: 2, planContent: "## 目标\n\n为优惠券核销流程增加幂等保护，保证相同业务请求在并发情况下只执行一次。\n\n## 实施步骤\n\n1. 梳理结算服务到优惠券服务的调用链，确认业务幂等键的生成位置和传递方式。\n2. 在核销入口增加原子占位与结果复用逻辑，区分处理中、成功和失败三种状态。\n3. 将重复请求统一返回首次核销结果，避免重复写入订单优惠明细。\n4. 为超时与异常场景补充状态清理策略，确保可重试错误不会永久占用幂等键。\n5. 增加并发单元测试、集成测试和回归用例，覆盖成功、冲突、超时及重试。\n\n## 验证\n\n- 并发发起 20 次相同核销请求，只产生一条核销记录。\n- 不同订单或不同优惠券的请求互不阻塞。\n- 执行支付服务完整测试与构建。", reviewStatus: "pending", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "in_progress", summary: "实施计划已生成，等待确认", repositories: [{ id: "r1", name: "payment-service", deliveryStatus: "pending" }] },
   { id: "demo-2", taskKey: "OPS-938", source: "jira", title: "订单导出增加审计字段", description: "从 Jira 同步的待办任务。", keywords: ["export", "audit"], acceptanceCriteria: [], state: "draft", reviewStatus: "pending", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "todo", repositories: [{ id: "r2", name: "order-console", deliveryStatus: "pending" }] },
   { id: "demo-3", taskKey: "CORE-417", source: "jira", title: "升级事件重试策略", description: "MR 已提交，等待合并。", keywords: ["events"], acceptanceCriteria: [], state: "await_merge", reviewStatus: "passed", commitMessage: "fix: CORE-417 improve retry backoff", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "in_review", repositories: [{ id: "r3", name: "event-core", changeSummary: "3 files +74 -18", deliveryStatus: "mr_created", mergeRequestUrl: "#" }] },
-  { id: "demo-4", taskKey: "WEB-206", source: "jira", title: "修复控制台权限展示", description: "MR 已合并。", keywords: ["console"], acceptanceCriteria: [], state: "completed", reviewStatus: "passed", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "done", repositories: [{ id: "r4", name: "web-console", deliveryStatus: "mr_created", mergeRequestUrl: "#" }] }
+  { id: "demo-4", taskKey: "WEB-206", source: "jira", title: "修复控制台权限展示", description: "MR 已合并。", keywords: ["console"], acceptanceCriteria: [], state: "completed", reviewStatus: "passed", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "done", repositories: [{ id: "r4", name: "web-console", deliveryStatus: "mr_created", mergeRequestUrl: "#" }] },
+  { id: "demo-5", taskKey: "INFRA-22", source: "jira", title: "示例：跳过 Review 的任务", description: "演示任务级 openCodeReviewEnabled=false：实现完成后直接进入 awaiting_commit。", keywords: ["infra", "demo"], acceptanceCriteria: [], state: "await_merge", reviewStatus: "waived", commitMessage: "chore: skip review for INFRA-22", openCodeReviewEnabled: false, autoCreateMergeRequests: true, createTestCasesEnabled: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), boardColumn: "in_review", repositories: [{ id: "r5", name: "infra-scripts", deliveryStatus: "mr_created", mergeRequestUrl: "#" }] }
 ];
 
 const demoRepositories: RepositoryProfile[] = [
   { id: "repo-payment", name: "payment-service", localPath: "/demo/payment-service", defaultBranch: "main", setupCommand: "npm install", lintCommand: "npm run lint", testCommand: "npm test", buildCommand: "npm run build" },
   { id: "repo-order", name: "order-console", localPath: "/demo/order-console", defaultBranch: "main", setupCommand: "npm install", lintCommand: "npm run lint", testCommand: "npm test", buildCommand: "npm run build" },
   { id: "repo-events", name: "event-core", localPath: "/demo/event-core", defaultBranch: "main" },
-  { id: "repo-web", name: "web-console", localPath: "/demo/web-console", defaultBranch: "main" }
+  { id: "repo-web", name: "web-console", localPath: "/demo/web-console", defaultBranch: "main" },
+  { id: "repo-infra", name: "infra-scripts", localPath: "/demo/infra-scripts", defaultBranch: "main" }
 ];
 
-const demoTaskRepositories = new Map<string, TaskRepository[]>(demoTasks.map((task, index) => {
-  const profile = demoRepositories[index]!;
-  const cardRepo = task.repositories[0]!;
+const demoTaskRepositories = new Map<string, TaskRepository[]>(demoTasks.map((task) => {
+  // demo 数据中 task.repositories[0].name 已经是真实仓库名；为它造一个 RepositoryProfile 兼容。
+  const cardRepo = task.repositories[0];
+  if (!cardRepo) return [task.id, []];
+  const profile: RepositoryProfile = demoRepositories.find((repo) => repo.name === cardRepo.name) ?? {
+    id: `repo-${cardRepo.name}`, name: cardRepo.name, localPath: `/demo/${cardRepo.name}`, defaultBranch: "main"
+  };
   return [task.id, [{
     id: cardRepo.id,
     taskId: task.id,
@@ -151,7 +162,7 @@ export const api: AgentApi = window.agentApi ?? {
     demoTasks[index] = next;
     return next;
   },
-  async deleteTask(id, mode = "all") { const index = demoTasks.findIndex((item) => item.id === id); if (index < 0) return; if (mode === "workspace") { demoTasks[index] = { ...demoTasks[index]!, state: ["draft", "failed", "completed", "await_merge", "cancelled"].includes(demoTasks[index]!.state) ? demoTasks[index]!.state : "cancelled", repositories: demoTasks[index]!.repositories.map((repo) => ({ ...repo, deliveryStatus: "workspace_removed" })) }; demoTaskRepositories.set(id, (demoTaskRepositories.get(id) ?? []).map((repo) => ({ ...repo, worktreePath: undefined, featureBranch: undefined, deliveryStatus: "workspace_removed" }))); return; } demoTasks.splice(index, 1); demoTaskRepositories.delete(id); }, async listRepositories() { return demoRepositories; }, async saveRepository() {}, async deleteRepository() {}, async chooseRepositoryFolder() { return undefined; }, async attachRepository(taskId, repositoryId) { const profile = demoRepositories.find((item) => item.id === repositoryId); if (!profile) throw new Error("Repository not found"); const repo: TaskRepository = { id: makeId(), taskId, repositoryId, name: profile.name, localPath: profile.localPath, baseBranch: profile.defaultBranch, setupCommand: profile.setupCommand, lintCommand: profile.lintCommand, testCommand: profile.testCommand, buildCommand: profile.buildCommand, deliveryStatus: "pending" }; demoTaskRepositories.set(taskId, [...(demoTaskRepositories.get(taskId) ?? []), repo]); return repo; }, async detachRepository(taskId, repositoryId) { demoTaskRepositories.set(taskId, (demoTaskRepositories.get(taskId) ?? []).filter((repo) => repo.repositoryId !== repositoryId)); }, async getSetting() { return undefined; }, async setSetting() {}, async startTask() {}, async reimplementTask() {}, async approveTaskPlan() {}, async reviseTaskPlan() {}, async retryTaskValidation() {}, async sendTaskMessage() {}, async abortTask() {}, async runReview() {}, async resetReview() {}, async resetDelivery() {}, async submitMergeRequests() {}, async refreshMergeStatus() { return [] as MergeStatusSummary[]; }, async manualComplete() {}, async importJiraTask() { return demoTasks[1]!; }, async syncJiraTasks() { return []; }, async importJiraTasks() { return []; }, async testAtlassian() { return { ok: false, message: "Electron is required" }; }, async openTaskEditor() { throw new Error("Electron is required"); }, async openExternal() {}, async getQoderStatus() { return { enabled: false, connected: false, running: false, models: [] }; }, async respondTaskUi() {}, onTaskEvent() { return () => undefined; },
+  async deleteTask(id, mode = "all") { const index = demoTasks.findIndex((item) => item.id === id); if (index < 0) return; if (mode === "workspace") { demoTasks[index] = { ...demoTasks[index]!, state: ["draft", "failed", "completed", "await_merge", "cancelled"].includes(demoTasks[index]!.state) ? demoTasks[index]!.state : "cancelled", repositories: demoTasks[index]!.repositories.map((repo) => ({ ...repo, deliveryStatus: "workspace_removed" })) }; demoTaskRepositories.set(id, (demoTaskRepositories.get(id) ?? []).map((repo) => ({ ...repo, worktreePath: undefined, featureBranch: undefined, deliveryStatus: "workspace_removed" }))); return; } demoTasks.splice(index, 1); demoTaskRepositories.delete(id); }, async listRepositories() { return demoRepositories; }, async saveRepository() {}, async deleteRepository() {}, async chooseRepositoryFolder() { return undefined; }, async attachRepository(taskId, repositoryId) { const profile = demoRepositories.find((item) => item.id === repositoryId); if (!profile) throw new Error("Repository not found"); const repo: TaskRepository = { id: makeId(), taskId, repositoryId, name: profile.name, localPath: profile.localPath, baseBranch: profile.defaultBranch, setupCommand: profile.setupCommand, lintCommand: profile.lintCommand, testCommand: profile.testCommand, buildCommand: profile.buildCommand, deliveryStatus: "pending" }; demoTaskRepositories.set(taskId, [...(demoTaskRepositories.get(taskId) ?? []), repo]); return repo; }, async detachRepository(taskId, repositoryId) { demoTaskRepositories.set(taskId, (demoTaskRepositories.get(taskId) ?? []).filter((repo) => repo.repositoryId !== repositoryId)); }, async updateTaskRepositoryCommands(taskId, repositoryId, commands) { const list = demoTaskRepositories.get(taskId) ?? []; const index = list.findIndex((repo) => repo.repositoryId === repositoryId); if (index < 0) throw new Error("Task repository not found"); const next = { ...list[index]!, ...commands }; list[index] = next; demoTaskRepositories.set(taskId, [...list]); return next; }, async getSetting() { return undefined; }, async setSetting() {}, async startTask() {}, async reimplementTask() {}, async approveTaskPlan() {}, async reviseTaskPlan() {}, async retryTaskValidation() {}, async sendTaskMessage() {}, async abortTask() {}, async runReview() {}, async resetReview() {}, async resetDelivery() {}, async submitMergeRequests() {}, async refreshMergeStatus() { return [] as MergeStatusSummary[]; }, async manualComplete() {}, async importJiraTask() { return demoTasks[1]!; }, async syncJiraTasks() { return []; }, async importJiraTasks() { return []; }, async testAtlassian() { return { ok: false, message: "Electron is required" }; }, async openTaskEditor() { throw new Error("Electron is required"); }, async mergeBackToBase() { throw new Error("Electron is required"); }, async revealInFolder(path) { try { window.open(`file://${path}`); } catch { /* 在浏览器回退模式下允许静默 */ } }, async listTaskBackends() { return [{ id: "jira", displayName: "Jira", configured: false, description: "在设置中配置 Jira 后启用" }]; }, async openExternal() {}, async getQoderStatus() { return { enabled: false, connected: false, running: false, models: [] }; }, async respondTaskUi() {}, onTaskEvent() { return () => undefined; },
 
   // Chat mock
   async listChats() { return [...memoryChats.values()].map(({ messages, ...meta }) => meta).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)); },
@@ -174,8 +185,8 @@ export const api: AgentApi = window.agentApi ?? {
     if (conv.messages.filter((item) => item.role === "user").length === 1) conv.title = defaultTitle(messageText(message));
     conv.model = model; conv.messageCount = conv.messages.length; conv.updatedAt = createdAt;
     const assistantId = makeId(); const textId = `text-${assistantId}`;
-    const demoCreation = mode === "task-create" ? { taskKey: "BSADAPT344-36525", summary: messageText(message).slice(0, 32), projectKey: "BSADAPT344", issueType: "任务" } : undefined;
-    const reply = demoCreation ? `已创建 Jira 任务 ${demoCreation.taskKey}。是否需要立即执行？` : `（演示模式）收到：${messageText(message).slice(0, 80)}`;
+    const demoCreation = mode === "task-create" ? { backend: "jira" as const, externalKey: "BSADAPT344-36525", summary: messageText(message).slice(0, 32), projectKey: "BSADAPT344", issueType: "任务" } : undefined;
+    const reply = demoCreation ? `已创建 Jira 任务 ${demoCreation.externalKey}。是否需要立即执行？` : `（演示模式）收到：${messageText(message).slice(0, 80)}`;
     const emit = (chunk?: UIMessageChunk, done?: boolean) => memoryListeners.forEach((callback) => callback({ streamId, chatId, chunk, done }));
     emit({ type: "start", messageId: assistantId, messageMetadata: { createdAt, model: "demo" } }); emit({ type: "text-start", id: textId });
     let index = 0;

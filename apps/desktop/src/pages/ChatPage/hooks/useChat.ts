@@ -15,6 +15,7 @@ export function useChat() {
   const [modelGroups, setModelGroups] = useState<ChatModelGroup[]>([]);
   const [model, setModel] = useState<string>();
   const [taskCreationEnabled, setTaskCreationEnabled] = useState(false);
+  const [taskBackend, setTaskBackend] = useState<{ id: string; displayName: string; configured: boolean }>();
   /**
    * 缓存最新消息的 ref，避免 useEffect 因 `ai` 引用变化而抖动。
    * useAiChat 内部对 messages 用 useSyncExternalStore 订阅；这里只是为了给消费方
@@ -67,6 +68,15 @@ export function useChat() {
         setModel((current) => current ?? preferred?.value);
       })
       .catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)));
+    // 拉取后端列表，决定任务创建 Agent 默认显示的 backend 名称。
+    // 这里失败也静默：没有后端时 UI 仍然可用，只是 tooltip 会显示通用文案。
+    void api
+      .listTaskBackends()
+      .then((backends) => {
+        const firstConfigured = backends.find((item) => item.configured) ?? backends[0];
+        setTaskBackend(firstConfigured);
+      })
+      .catch(() => undefined);
   }, [refreshMetas, showError]);
 
   // 切换会话时把已加载的消息灌入 ai；流式中短路以免回退丢字。
@@ -196,6 +206,7 @@ export function useChat() {
       modelGroups,
       model,
       taskCreationEnabled,
+      taskBackend,
       setDraft,
       setModel,
       setTaskCreationEnabled,
@@ -216,6 +227,7 @@ export function useChat() {
       modelGroups,
       model,
       taskCreationEnabled,
+      taskBackend,
       setDraft,
       setModel,
       select,

@@ -12,7 +12,7 @@ describe("ChatMessageView task creation action", () => {
       metadata: {
         createdAt: new Date().toISOString(),
         status: "done",
-        taskCreation: { taskKey: "BSADAPT344-42", summary: "Agent", projectKey: "BSADAPT344", issueType: "任务" }
+        taskCreation: { backend: "jira", externalKey: "BSADAPT344-42", summary: "Agent", projectKey: "BSADAPT344", issueType: "任务" }
       },
       parts: [{ type: "text", text: "回复中没有 Jira Key" }]
     };
@@ -29,7 +29,7 @@ describe("ChatMessageView task creation action", () => {
       metadata: {
         createdAt: new Date().toISOString(),
         status: "done",
-        taskCreation: { jiraKey: "LEGACY-7", summary: "Legacy", projectKey: "LEGACY", issueType: "任务" }
+        taskCreation: { backend: "jira", externalKey: "LEGACY-7", summary: "Legacy", projectKey: "LEGACY", issueType: "任务" }
       },
       parts: [{ type: "text", text: "历史消息" }]
     };

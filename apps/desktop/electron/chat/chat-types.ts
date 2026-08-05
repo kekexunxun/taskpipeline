@@ -3,8 +3,8 @@ import type { UIMessage, UIMessageChunk } from "ai";
 export type ChatMessageStatus = "done" | "error" | "aborted";
 export type ChatAgentMode = "chat" | "task-create";
 export type ChatTaskCreationResult = {
-  taskKey?: string;
-  jiraKey?: string;
+  backend: "jira" | "github" | "linear";
+  externalKey: string;
   summary: string;
   projectKey: string;
   issueType: string;

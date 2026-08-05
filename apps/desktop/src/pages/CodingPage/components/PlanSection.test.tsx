@@ -62,6 +62,40 @@ describe("PlanSection", () => {
     expect(screen.getByText(/当前仍展示第 1 版供参考/)).toBeInTheDocument();
   });
 
+  it("shows a shimmer placeholder with dynamic dots before the first plan arrives", () => {
+    const { container } = render(
+      <PlanSection
+        task={{ ...task, planContent: undefined, state: "planning" }}
+        events={[]}
+      />
+    );
+
+    expect(screen.getByText("正在生成计划")).toBeInTheDocument();
+    expect(container.querySelector(".plan-shimmer-overlay")).toBeInTheDocument();
+    expect(container.querySelectorAll(".plan-dot")).toHaveLength(3);
+  });
+
+  it("applies staggered entry animation to plan adjustment records", () => {
+    const { container } = render(
+      <PlanSection
+        task={{ ...task, state: "planning", planRevision: 1 }}
+        events={[
+          { id: "fb-1", taskId: task.id, kind: "message", title: "计划调整意见", detail: "第一条", createdAt: "2026-08-04T08:30:00.000Z" },
+          { id: "fb-2", taskId: task.id, kind: "message", title: "计划调整意见", detail: "第二条", createdAt: "2026-08-04T08:31:00.000Z" },
+          { id: "fb-3", taskId: task.id, kind: "message", title: "计划调整意见", detail: "第三条", createdAt: "2026-08-04T08:32:00.000Z" }
+        ]}
+      />
+    );
+
+    const items = container.querySelectorAll("[data-plan-feedback] .animate-plan-fade-up");
+    expect(items).toHaveLength(3);
+    // JSDOM 会把 0ms 折叠为 ""，因此用 getAttribute 读取原始串；只要第 2、3 条都带递增 delay 即可。
+    const delays = Array.from(items).map((node) => (node as HTMLElement).getAttribute("style") ?? "");
+    expect(delays[0]?.includes("0ms") || delays[0] === "").toBe(true);
+    expect(delays[1]).toContain("60ms");
+    expect(delays[2]).toContain("120ms");
+  });
+
   it("shows a recoverable error instead of rendering a coerced object", () => {
     render(<PlanSection task={{ ...task, planContent: "[object Object]" }} />);
     expect(screen.getByText(/计划内容格式异常/)).toBeInTheDocument();

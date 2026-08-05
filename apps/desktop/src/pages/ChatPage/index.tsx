@@ -126,6 +126,7 @@ function ChatPageInner() {
                   selected={chat.taskCreationEnabled}
                   disabled={chat.streaming}
                   onChange={chat.setTaskCreationEnabled}
+                  backendLabel={chat.taskBackend?.displayName}
                 />
               </>
             }

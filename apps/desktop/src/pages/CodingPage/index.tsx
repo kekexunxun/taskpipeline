@@ -10,7 +10,6 @@ import { TaskEditorDialog } from "./components/TaskEditorDialog";
 import { JiraDialog } from "./components/JiraDialog";
 import { JiraSyncDialog } from "./components/JiraSyncDialog";
 import { UiRequestDialog } from "./components/UiRequestDialog";
-import { TaskStartDialog } from "./components/TaskStartDialog";
 
 export default function CodingPage() {
   const navigate = useNavigate();
@@ -122,6 +121,13 @@ export default function CodingPage() {
             onClose={onCloseDetail}
             onOpenVSCode={() => { if (tasks.selectedId) api.openTaskEditor(tasks.selectedId, "vscode").catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))); }}
             onOpenQoder={() => { if (tasks.selectedId) api.openTaskEditor(tasks.selectedId, "qoder").catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))); }}
+            onRevealInFolder={(path) => { api.revealInFolder(path).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason))); }}
+            onMergeBackToBase={() => {
+              if (!tasks.selectedId) return;
+              const confirmed = window.confirm("将当前任务的 feature 分支合并到本地 base 分支。\n该操作不会推送到远端，也不会创建 Merge Request。\n\n工作区若有未提交改动会失败并提示。\n\n确定继续吗？");
+              if (!confirmed) return;
+              api.mergeBackToBase(tasks.selectedId).catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)));
+            }}
             onChangeModel={(value) => {
               if (!tasks.selectedId) return;
               api.updateTask(tasks.selectedId, { qoderModel: value }).then(async () => {
@@ -164,6 +170,7 @@ export default function CodingPage() {
         )}
       </div>
       <TaskEditorDialog
+        mode="edit"
         open={Boolean(editingTask)}
         task={editing}
         onOpenChange={(open) => { if (!open) setEditingTask(undefined); }}
@@ -172,13 +179,15 @@ export default function CodingPage() {
       <JiraDialog open={jiraOpen} onOpenChange={setJiraOpen} onImported={tasks.refresh} />
       <JiraSyncDialog open={jiraSyncOpen} onOpenChange={setJiraSyncOpen} onImported={tasks.refresh} />
       <UiRequestDialog />
-      <TaskStartDialog
+      <TaskEditorDialog
+        mode="start"
         open={startOpen}
         taskId={tasks.selectedId}
         reimplement={reimplementing}
         onOpenChange={(open) => { setStartOpen(open); if (!open) setReimplementing(false); }}
         onStarting={setStartingTaskId}
         onStarted={async () => { setStartingTaskId(undefined); setReimplementing(false); await tasks.refresh(); if (tasks.selectedId) await tasks.loadDetail(tasks.selectedId); }}
+        onSaved={async () => { /* start 模式不调用 onSaved */ }}
       />
     </>
   );

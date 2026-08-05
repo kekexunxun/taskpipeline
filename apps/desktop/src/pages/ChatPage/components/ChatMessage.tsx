@@ -50,7 +50,8 @@ function ChatMessageImpl({
   const isError = metaStatus === "error";
   const isStreaming = Boolean(isAnimating) && !isAborted && !isError;
   const taskCreation = message.metadata?.taskCreation;
-  const taskKey = taskCreation?.taskKey ?? taskCreation?.jiraKey;
+  const taskKey = taskCreation?.externalKey;
+  const taskBackend = taskCreation?.backend;
   const containerClass = isUser ? "justify-end" : "justify-start";
   const widthClass = isUser ? "max-w-[78%]" : "max-w-[88%]";
   const alignClass = isUser ? "items-end" : "items-start";

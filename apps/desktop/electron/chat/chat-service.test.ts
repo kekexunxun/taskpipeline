@@ -62,14 +62,14 @@ describe("ChatService", () => {
   it("persists a structured Jira creation result in assistant metadata", async () => {
     streamChatMock.mockImplementation(async function* () {
       yield { type: "delta", delta: "已创建任务。" };
-      yield { type: "task-created", task: { taskKey: "BSADAPT344-42", summary: "Agent", projectKey: "BSADAPT344", issueType: "任务" } };
+      yield { type: "task-created", task: { backend: "jira", externalKey: "BSADAPT344-42", summary: "Agent", projectKey: "BSADAPT344", issueType: "任务" } };
       yield { type: "done" };
     });
     const { service, conversation, input } = setup();
     await service.startChatStream({ ...input, mode: "task-create" });
     expect(service.getChat(conversation.id)?.messages[1]?.metadata).toMatchObject({
       agentMode: "task-create",
-      taskCreation: { taskKey: "BSADAPT344-42" }
+      taskCreation: { backend: "jira", externalKey: "BSADAPT344-42" }
     });
   });
 

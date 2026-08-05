@@ -59,6 +59,7 @@ type Settings = {
   confluenceToken: string;
   autoCreateMergeRequests: string;
   openCodeReviewEnabled: string;
+  createTestCasesEnabled: string;
   // modelApiKey 不再在通用设置中展示，由 OpenAI-Compatible 弹窗维护
   modelApiKey?: string;
 };
@@ -79,7 +80,8 @@ const defaults: Settings = {
   confluenceEmail: "",
   confluenceToken: "",
   autoCreateMergeRequests: "false",
-  openCodeReviewEnabled: "false"
+  openCodeReviewEnabled: "false",
+  createTestCasesEnabled: "false"
 };
 const ordinaryKeys = [
   "defaultModel",
@@ -88,7 +90,8 @@ const ordinaryKeys = [
   "confluenceUrl",
   "confluenceEmail",
   "autoCreateMergeRequests",
-  "openCodeReviewEnabled"
+  "openCodeReviewEnabled",
+  "createTestCasesEnabled"
 ] as const;
 const secretKeys = [
   "qoderToken",
@@ -417,7 +420,7 @@ export function SettingsDialog({
                       </SettingField>
                     </FieldGroup>
                   </Section>
-                  <Section title="任务自动化" description="控制实现完成后的 Review 与 MR 提交流程。">
+                  <Section title="任务自动化" description="控制实现完成后的 Review / 测试用例生成 / MR 提交流程。">
                     <div className="space-y-2.5">
                       <label className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
                         <span className="min-w-0">
@@ -427,6 +430,16 @@ export function SettingsDialog({
                         <Switch
                           checked={settings.openCodeReviewEnabled === "true"}
                           onCheckedChange={(checked) => update("openCodeReviewEnabled", checked ? "true" : "false")}
+                        />
+                      </label>
+                      <label className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
+                        <span className="min-w-0">
+                          <span className="block text-xs font-medium text-foreground">生成测试用例</span>
+                          <span className="mt-0.5 block text-[11px] text-muted-foreground">实现完成后、Review 之前自动生成最小测试集；不修改业务逻辑。</span>
+                        </span>
+                        <Switch
+                          checked={settings.createTestCasesEnabled === "true"}
+                          onCheckedChange={(checked) => update("createTestCasesEnabled", checked ? "true" : "false")}
                         />
                       </label>
                       <label className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">

@@ -3,7 +3,7 @@ export type BoardColumn = (typeof BOARD_COLUMNS)[number];
 
 export const TASK_STATES = [
   "draft", "confirmed", "preparing", "planning", "awaiting_plan_approval",
-  "implementing", "awaiting_input", "validating", "validation_failed", "awaiting_review",
+  "implementing", "awaiting_input", "generating_tests", "validating", "validation_failed", "awaiting_review",
   "reviewing", "review_blocked", "awaiting_commit", "delivering",
   "await_merge", "completed", "failed", "cancelled"
 ] as const;
@@ -32,6 +32,17 @@ export type Task = {
   piSessionPath?: string;
   qoderModel?: string;
   sessionUsage?: SessionUsage;
+  /**
+   * 任务级覆盖：实现完成后是否自动跑 Code Review。
+   * `undefined` 表示沿用系统设置；显式布尔值在任务执行期间独立生效。
+   */
+  openCodeReviewEnabled?: boolean;
+  /** 任务级覆盖：Review 通过后是否自动提交 Merge Request。 */
+  autoCreateMergeRequests?: boolean;
+  /** 任务级覆盖：实现完成后是否先生成最小测试集，再进入校验/Review。 */
+  createTestCasesEnabled?: boolean;
+  /** 最近一次测试用例生成的摘要，用于 Timeline 展示。 */
+  testsGenerated?: { files: string[]; commitSha?: string; finishedAt: string };
   createdAt: string;
   updatedAt: string;
 };
@@ -152,5 +163,31 @@ export function boardColumnFor(state: TaskState): BoardColumn {
   if (["completed", "cancelled"].includes(state)) return "done";
   if (state === "draft") return "todo";
   if (["awaiting_review", "reviewing", "review_blocked", "awaiting_commit", "delivering", "await_merge"].includes(state)) return "in_review";
+  // generating_tests 与实现阶段同列，避免卡片在看板里来回跳动。
   return "in_progress";
+}
+
+/**
+ * 把任务级覆盖与系统级设置合并成一个布尔结果。
+ *
+ * - task 字段为 `true` / `false` 时直接返回（任务级优先）。
+ * - task 字段为 `undefined` 时回退到 `resolver.get(key) === "true"`。
+ * - resolver 未配置时回退到 `defaults`。
+ *
+ * 业务编排模块（TaskWorkflow / DeliveryService 等）应通过此 helper
+ * 而非直接读设置，确保任务级覆盖真正生效。
+ */
+export function resolveTaskSetting(
+  task: Pick<Task, "openCodeReviewEnabled" | "autoCreateMergeRequests" | "createTestCasesEnabled"> | undefined,
+  taskKey: "openCodeReviewEnabled" | "autoCreateMergeRequests" | "createTestCasesEnabled",
+  resolver: { get(key: string): string | undefined },
+  settingKey: string,
+  defaults: boolean
+): boolean {
+  const taskValue = task?.[taskKey];
+  if (typeof taskValue === "boolean") return taskValue;
+  const setting = resolver.get(settingKey);
+  if (setting === "true") return true;
+  if (setting === "false") return false;
+  return defaults;
 }

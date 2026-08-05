@@ -1,7 +1,7 @@
 import type { BrowserWindow } from "electron";
 import type { TaskStore } from "@coding-agent/core";
 import type { AbortChatStreamInput, ChatConversation, ChatModelGroup, StartChatStreamInput } from "./chat-types.js";
-import type { JiraTaskCreationAgent } from "./task-creation-agent.js";
+import type { TaskCreationBackend } from "./task-backends/index.js";
 type GetQoderStatus = () => Promise<{
     enabled: boolean;
     connected: boolean;
@@ -16,16 +16,17 @@ type GetQoderStatus = () => Promise<{
     }>;
 }>;
 type TokenProvider = () => string | undefined;
+type TaskBackendFactory = () => TaskCreationBackend | undefined;
 export declare class ChatService {
     private readonly store;
     private readonly getQoderStatus;
     private readonly getQoderToken;
     private readonly getOpenAIKey;
     private readonly getMainWindow;
-    private readonly createTaskAgent?;
+    private readonly resolveTaskBackend?;
     private readonly storage;
     private readonly activeStreams;
-    constructor(store: TaskStore, dataDir: string, getQoderStatus: GetQoderStatus, getQoderToken: TokenProvider, getOpenAIKey: TokenProvider, getMainWindow: () => BrowserWindow | undefined, createTaskAgent?: (() => JiraTaskCreationAgent) | undefined);
+    constructor(store: TaskStore, dataDir: string, getQoderStatus: GetQoderStatus, getQoderToken: TokenProvider, getOpenAIKey: TokenProvider, getMainWindow: () => BrowserWindow | undefined, resolveTaskBackend?: TaskBackendFactory | undefined);
     listChats(): import("./chat-types.js").ChatConversationMeta[];
     getChat(id: string): ChatConversation | undefined;
     listModels(): Promise<ChatModelGroup[]>;

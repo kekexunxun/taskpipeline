@@ -1,13 +1,21 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { RepositoryProfile, SettingResolver, Task, TaskEventSink, TaskRepository, TaskStartMode, TaskState, TaskStore } from "@coding-agent/core";
-import { isReviewable, transitionTask } from "@coding-agent/core";
+import { isReviewable, resolveTaskSetting, transitionTask } from "@coding-agent/core";
 import { GitService } from "./git.js";
 import { runShell, type ShellRunner } from "./process.js";
 import type { ReviewOrchestrator } from "./review-orchestrator.js";
 
 export type RepositoryCommandOverrides = Partial<Pick<TaskRepository, "setupCommand" | "lintCommand" | "testCommand" | "buildCommand">>;
 export type RepositoryCommandMap = Record<string, RepositoryCommandOverrides>;
+
+/**
+ * 生成测试用例的执行器接口。
+ *
+ * 由宿主（desktop 端）注入。可跑 Qoder / OpenAI Agent，
+ * 提示词要求只写测试文件，不改业务逻辑。
+ */
+export type TestCaseGenerator = (task: Task, signal?: AbortSignal) => Promise<{ files: string[]; commitSha?: string; summary: string }>;
 
 /**
  * 任务工作流封装。
@@ -28,7 +36,17 @@ export class TaskWorkflow {
     private readonly reviewEnabled: () => boolean = () => this.resolver.get("openCodeReviewEnabled") === "true",
     private readonly autoCreateMergeRequests: () => boolean = () => this.resolver.get("autoCreateMergeRequests") === "true",
     private readonly shell: ShellRunner = runShell,
-    private readonly git: GitService = new GitService()
+    private readonly git: GitService = new GitService(),
+    /**
+     * 仅在「系统设置 / 任务级覆盖」需要直接读取布尔时使用。
+     * 大多数情况下应通过 `shouldGenerateTestCasesFor(task)` 走任务级优先 + 系统级兜底。
+     */
+    private readonly testCasesEnabled: () => boolean = () => this.resolver.get("createTestCasesEnabled") === "true",
+    /**
+     * 测试用例生成执行器。宿主（desktop 端）注入。
+     * 保留可选；不传时 `beginTestCaseGeneration` 仍然可以走状态，但需要宿主自己跑 LLM。
+     */
+    private readonly testCaseGenerator?: TestCaseGenerator
   ) {}
 
   /** 状态机辅助:推进到指定 state,内部用 `transitionTask` 校验。 */
@@ -204,7 +222,7 @@ export class TaskWorkflow {
 
   async runValidation(taskId: string, signal?: AbortSignal): Promise<Task> {
     const task = this.store.getTask(taskId);
-    if (!task || !["implementing", "validating", "validation_failed"].includes(task.state)) throw new Error("当前任务不能运行校验");
+    if (!task || !["implementing", "validating", "validation_failed", "generating_tests"].includes(task.state)) throw new Error("当前任务不能运行校验");
     this.transitionTo(taskId, "validating");
     try {
       await this.runCommands(taskId, "validation", signal);
@@ -216,6 +234,66 @@ export class TaskWorkflow {
       this.store.updateTask(taskId, { failureStage: "validating" });
       return this.transitionTo(taskId, "validation_failed");
     }
+  }
+
+  /**
+   * 进入"生成测试用例"阶段。
+   *
+   * 行为：
+   * - 仅当任务处于 `implementing` 时才允许进入。
+   * - 状态机:`implementing -> generating_tests`。
+   * - 实际生成由注入的 `testCaseGenerator` 执行（宿主 desktop 端实现）。
+   * - 生成成功后由调用方在主进程里推进到 `validating`。
+   * - 失败由调用方在主进程里回 `failed`。
+   *
+   * 注意：本方法只负责状态推进和事件写入，不直接调用 LLM。
+   * 这样保证 `TaskWorkflow` 不依赖 Qoder SDK，方便在 pi-package 等其他宿主复用。
+   */
+  beginTestCaseGeneration(taskId: string): Task {
+    const task = this.store.getTask(taskId);
+    if (!task || task.state !== "implementing") throw new Error("当前任务不能生成测试用例");
+    return this.transitionTo(taskId, "generating_tests");
+  }
+
+  /**
+   * 测试用例生成成功后的回调：写 `testsGenerated` 字段并退到 `implementing`，
+   * 由调用方继续推进到 `runValidation`。
+   */
+  finishTestCaseGeneration(taskId: string, info: { files: string[]; commitSha?: string; summary: string }): Task {
+    const task = this.store.getTask(taskId);
+    if (!task || task.state !== "generating_tests") throw new Error("当前任务不在生成测试用例状态");
+    this.store.updateTask(taskId, {
+      testsGenerated: { files: info.files, commitSha: info.commitSha, finishedAt: new Date().toISOString() }
+    });
+    this.sink.addEvent({
+      taskId,
+      kind: "status",
+      title: `已生成 ${info.files.length} 个测试用例`,
+      detail: info.commitSha ? `commit ${info.commitSha.slice(0, 8)}` : info.summary || undefined
+    });
+    return this.transitionTo(taskId, "implementing");
+  }
+
+  /**
+   * 任务级开关辅助：实现完成后是否进入「生成测试用例」阶段。
+   * 顺序为 task 字段 → system setting → defaults。
+   */
+  shouldGenerateTestCases(task: Task | undefined): boolean {
+    return resolveTaskSetting(task, "createTestCasesEnabled", this.resolver, "createTestCasesEnabled", false);
+  }
+
+  /**
+   * 任务级开关辅助：是否在 Review 完成后自动提交 Merge Request。
+   */
+  shouldAutoCreateMergeRequestsFor(task: Task | undefined): boolean {
+    return resolveTaskSetting(task, "autoCreateMergeRequests", this.resolver, "autoCreateMergeRequests", false);
+  }
+
+  /**
+   * 任务级开关辅助：是否在实现完成后进入 Review。
+   */
+  isReviewEnabledFor(task: Task | undefined): boolean {
+    return resolveTaskSetting(task, "openCodeReviewEnabled", this.resolver, "openCodeReviewEnabled", false);
   }
 
   private async runCommands(taskId: string, phase: "setup" | "validation", signal?: AbortSignal): Promise<void> {
@@ -371,4 +449,5 @@ export class TaskWorkflow {
 
   isReviewEnabled(): boolean { return this.reviewEnabled(); }
   shouldAutoCreateMergeRequests(): boolean { return this.autoCreateMergeRequests(); }
+  shouldGenerateTestCasesFromSetting(): boolean { return this.testCasesEnabled(); }
 }

@@ -3,15 +3,25 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
+/**
+ * 「任务创建 Agent」开关。
+ *
+ * 文案/aria 全部使用通用术语，避免在 UI 上把产品钉死到 Jira。
+ * 当前后端显示名通过 `backendLabel` 传入（默认空字符串时退回到"任务创建"），后端切换后
+ * Tooltip 文案会跟着变，演示多 backend 选择时不会让用户以为产品只能做一件事。
+ */
 export function TaskCreationTool({
   selected,
   disabled,
-  onChange
+  onChange,
+  backendLabel
 }: {
   selected: boolean;
   disabled?: boolean;
   onChange(selected: boolean): void;
+  backendLabel?: string;
 }) {
+  const backend = backendLabel?.trim() || "任务创建";
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -33,7 +43,7 @@ export function TaskCreationTool({
         </Button>
       </TooltipTrigger>
       <TooltipContent side="top">
-        {selected ? "关闭 Jira 任务创建 Agent" : "使用 Jira 任务创建 Agent"}
+        {selected ? `关闭 ${backend} Agent` : `使用 ${backend} Agent`}
       </TooltipContent>
     </Tooltip>
   );

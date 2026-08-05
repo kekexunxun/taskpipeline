@@ -5,21 +5,23 @@ import { z } from "zod";
 import type { SdkMcpToolDefinition } from "@qoder-ai/qoder-agent-sdk";
 import type { ChatMessage } from "./chat-types.js";
 import type { ResolvedChatModel } from "./chat-models.js";
-import type { JiraTaskCreationAgent } from "./task-creation-agent.js";
+import type { TaskCreationBackend, TaskCreatedResult } from "./task-backends/index.js";
+import type { JiraTaskCreationBackend } from "./task-backends/jira.js";
 
 export type TextStreamEvent =
   | { type: "delta"; delta: string }
-  | { type: "task-created"; task: NonNullable<JiraTaskCreationAgent["createdTask"]> }
+  | { type: "task-created"; task: TaskCreatedResult }
   | { type: "done" };
 
 function messageText(message: ChatMessage): string {
   return message.parts.filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text").map((part) => part.text).join("");
 }
 
-export async function* streamChat(options: { model: ResolvedChatModel; qoderToken?: string; messages: ChatMessage[]; signal: AbortSignal; taskAgent?: JiraTaskCreationAgent }): AsyncGenerator<TextStreamEvent> {
-  if (options.model.provider === "qoder") yield* streamQoder({ model: options.model, qoderToken: options.qoderToken, messages: options.messages, signal: options.signal, taskAgent: options.taskAgent });
-  else yield* streamOpenAICompatible({ model: options.model, messages: options.messages, signal: options.signal, taskAgent: options.taskAgent });
-  if (options.taskAgent?.createdTask) yield { type: "task-created", task: options.taskAgent.createdTask };
+export async function* streamChat(options: { model: ResolvedChatModel; qoderToken?: string; messages: ChatMessage[]; signal: AbortSignal; taskBackend?: TaskCreationBackend; onCreated?: (result: TaskCreatedResult) => void }): AsyncGenerator<TextStreamEvent> {
+  if (options.model.provider === "qoder") yield* streamQoder({ model: options.model, qoderToken: options.qoderToken, messages: options.messages, signal: options.signal, taskBackend: options.taskBackend, onCreated: options.onCreated });
+  else yield* streamOpenAICompatible({ model: options.model, messages: options.messages, signal: options.signal, taskBackend: options.taskBackend, onCreated: options.onCreated });
+  // 任务创建结果在工具执行回调里通过 onTaskCreated 通道传出（见 streamOpenAICompatible / streamQoder）。
+  yield { type: "done" };
 }
 
 const creationSchemaShape = {
@@ -51,7 +53,16 @@ function modelToolResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
 }
 
-function openAITaskTools(agent: JiraTaskCreationAgent) {
+/**
+ * 拿后端 jiraAgent；非 Jira 后端返回 null，工具集会自动收窄。
+ */
+function getJiraAgent(backend: TaskCreationBackend): JiraTaskCreationBackend["jiraAgent"] | null {
+  return backend.id === "jira" ? (backend as JiraTaskCreationBackend).jiraAgent : null;
+}
+
+function openAITaskTools(backend: TaskCreationBackend, onCreated: (result: TaskCreatedResult) => void) {
+  const agent = getJiraAgent(backend);
+  if (!agent) return {};
   return {
     get_jira_creation_schema: aiTool({
       description: "创建 Jira 前必须调用。获取项目、问题类型、必填字段、选项 ID 和注意事项。",
@@ -61,7 +72,18 @@ function openAITaskTools(agent: JiraTaskCreationAgent) {
     create_jira_issue: aiTool({
       description: "信息完整且用户确实要创建时调用。程序会校验字段，并通过已配置的 Jira MCP 创建 Issue。",
       inputSchema: z.object(createIssueShape),
-      execute: (input) => agent.createJiraIssue(input)
+      execute: async (input) => {
+        const created = await agent.createJiraIssue(input);
+        const result: TaskCreatedResult = {
+          backend: "jira",
+          externalKey: created.taskKey,
+          summary: created.summary,
+          projectKey: created.projectKey,
+          issueType: created.issueType
+        };
+        onCreated(result);
+        return result;
+      }
     }),
     ...(agent.confluenceConfigured ? {
       search_confluence: aiTool({
@@ -78,10 +100,23 @@ function openAITaskTools(agent: JiraTaskCreationAgent) {
   };
 }
 
-function qoderTaskServer(agent: JiraTaskCreationAgent) {
+function qoderTaskServer(backend: TaskCreationBackend, onCreated: (result: TaskCreatedResult) => void) {
+  const agent = getJiraAgent(backend);
+  if (!agent) return createSdkMcpServer({ name: "task-creation", version: "1.0.0", tools: [] });
   const tools: SdkMcpToolDefinition<any>[] = [
     qoderTool("get_jira_creation_schema", "创建 Jira 前必须调用。获取项目、问题类型、必填字段、选项 ID 和注意事项。", creationSchemaShape, async (input) => modelToolResult(await agent.getCreationSchema(input)), { annotations: { readOnlyHint: true }, permissionPolicy: "always_allow" }),
-    qoderTool("create_jira_issue", "信息完整且用户确实要创建时调用。程序会校验字段，并通过已配置的 Jira MCP 创建 Issue。", createIssueShape, async (input) => modelToolResult(await agent.createJiraIssue(input)), { annotations: { destructiveHint: true, openWorldHint: true }, permissionPolicy: "always_allow" })
+    qoderTool("create_jira_issue", "信息完整且用户确实要创建时调用。程序会校验字段，并通过已配置的 Jira MCP 创建 Issue。", createIssueShape, async (input) => {
+      const created = await agent.createJiraIssue(input);
+      const result: TaskCreatedResult = {
+        backend: "jira",
+        externalKey: created.taskKey,
+        summary: created.summary,
+        projectKey: created.projectKey,
+        issueType: created.issueType
+      };
+      onCreated(result);
+      return modelToolResult(result);
+    }, { annotations: { destructiveHint: true, openWorldHint: true }, permissionPolicy: "always_allow" })
   ];
   if (agent.confluenceConfigured) {
     tools.push(
@@ -92,14 +127,14 @@ function qoderTaskServer(agent: JiraTaskCreationAgent) {
   return createSdkMcpServer({ name: "task-creation", version: "1.0.0", tools });
 }
 
-async function* streamOpenAICompatible({ model, messages, signal, taskAgent }: { model: Extract<ResolvedChatModel, { provider: "openai" }>; messages: ChatMessage[]; signal: AbortSignal; taskAgent?: JiraTaskCreationAgent }): AsyncGenerator<TextStreamEvent> {
+async function* streamOpenAICompatible({ model, messages, signal, taskBackend, onCreated }: { model: Extract<ResolvedChatModel, { provider: "openai" }>; messages: ChatMessage[]; signal: AbortSignal; taskBackend?: TaskCreationBackend; onCreated?: (result: TaskCreatedResult) => void }): AsyncGenerator<TextStreamEvent> {
   const provider = createOpenAICompatible({ name: "desktop-openai-compatible", baseURL: model.baseUrl.replace(/\/$/, ""), apiKey: model.apiKey });
-  const tools = taskAgent ? openAITaskTools(taskAgent) : undefined;
+  const tools = taskBackend ? openAITaskTools(taskBackend, (result) => onCreated?.(result)) : undefined;
   const result = streamText({
     model: provider.chatModel(model.key),
     messages: await convertToModelMessages(messages, tools ? { tools } : undefined),
     abortSignal: signal,
-    ...(taskAgent ? { system: taskAgent.systemPrompt, tools, stopWhen: stepCountIs(10) } : {})
+    ...(taskBackend ? { system: taskBackend.systemPrompt(), tools, stopWhen: stepCountIs(10) } : {})
   });
   for await (const delta of result.textStream) {
     if (signal.aborted) return;
@@ -108,14 +143,16 @@ async function* streamOpenAICompatible({ model, messages, signal, taskAgent }: {
   yield { type: "done" };
 }
 
-async function* streamQoder({ model, qoderToken, messages, signal, taskAgent }: { model: Extract<ResolvedChatModel, { provider: "qoder" }>; qoderToken?: string; messages: ChatMessage[]; signal: AbortSignal; taskAgent?: JiraTaskCreationAgent }): AsyncGenerator<TextStreamEvent> {
+async function* streamQoder({ model, qoderToken, messages, signal, taskBackend, onCreated }: { model: Extract<ResolvedChatModel, { provider: "qoder" }>; qoderToken?: string; messages: ChatMessage[]; signal: AbortSignal; taskBackend?: TaskCreationBackend; onCreated?: (result: TaskCreatedResult) => void }): AsyncGenerator<TextStreamEvent> {
   if (!qoderToken) throw new Error("请先在设置中配置 Qoder Token");
   const prompt = `${messages.map((message) => `${message.role === "user" ? "Human" : message.role === "assistant" ? "Assistant" : "System"}: ${messageText(message)}`).join("\n\n")}\n\nAssistant:`;
   const abortController = new AbortController();
   signal.addEventListener("abort", () => abortController.abort(), { once: true });
-  const taskServer = taskAgent ? qoderTaskServer(taskAgent) : undefined;
-  const taskToolNames = taskAgent
-    ? ["mcp__task_creation__get_jira_creation_schema", "mcp__task_creation__create_jira_issue", ...(taskAgent.confluenceConfigured ? ["mcp__task_creation__search_confluence", "mcp__task_creation__get_confluence_page"] : [])]
+  const taskServer = taskBackend ? qoderTaskServer(taskBackend, (result) => onCreated?.(result)) : undefined;
+  const isJira = taskBackend?.id === "jira";
+  const jiraAgent = isJira ? (taskBackend as JiraTaskCreationBackend).jiraAgent : null;
+  const taskToolNames = isJira
+    ? ["mcp__task_creation__get_jira_creation_schema", "mcp__task_creation__create_jira_issue", ...(jiraAgent?.confluenceConfigured ? ["mcp__task_creation__search_confluence", "mcp__task_creation__get_confluence_page"] : [])]
     : [];
   const session = query({
     prompt,
@@ -127,8 +164,8 @@ async function* streamQoder({ model, qoderToken, messages, signal, taskAgent }: 
       permissionMode: "default",
       controlRequestTimeoutMs: 15_000,
       model: model.key,
-      ...(taskAgent ? {
-        systemPrompt: taskAgent.systemPrompt,
+      ...(taskBackend ? {
+        systemPrompt: taskBackend.systemPrompt(),
         tools: [],
         mcpServers: { task_creation: taskServer! },
         allowedMcpServerNames: ["task_creation"],

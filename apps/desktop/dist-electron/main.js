@@ -10,7 +10,7 @@ import { resolveBundledOcrBinary, resolveOcrBinary, createOcrRunner } from "./oc
 import { accessToken, query } from "@qoder-ai/qoder-agent-sdk";
 import { parsePlanDecision, sdkResultText } from "./plan-content.js";
 import { ChatService } from "./chat/chat-service.js";
-import { JiraTaskCreationAgent } from "./chat/task-creation-agent.js";
+import { JiraTaskCreationBackend } from "./chat/task-backends/jira.js";
 import { implementationOutcomeInstruction, isExplicitNoChangeCompletionRequest, nextStepForImplementation, nextStepForPlan, parseImplementationDecision } from "./task-readiness.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow;
@@ -30,7 +30,7 @@ let activePlanText = "";
 const activeTaskOperations = new Map();
 const taskStateLabels = {
     draft: "待处理", confirmed: "已确认", preparing: "准备环境", implementing: "实现中",
-    planning: "计划中", awaiting_plan_approval: "等待计划确认", awaiting_input: "等待补充", validating: "校验中", validation_failed: "校验失败",
+    planning: "计划中", awaiting_plan_approval: "等待计划确认", awaiting_input: "等待补充", generating_tests: "生成测试用例中", validating: "校验中", validation_failed: "校验失败",
     awaiting_review: "等待 Review", reviewing: "Review 中", review_blocked: "Review 阻断",
     awaiting_commit: "等待提交 MR", delivering: "提交 MR 中", await_merge: "等待合并",
     completed: "已完成", failed: "执行失败", cancelled: "已取消"
@@ -144,7 +144,13 @@ const deliveryService = new DeliveryService(store, gitService, desktopResolver, 
 const mergeRefresher = new MergeStatusRefresher(store, desktopResolver, desktopSink);
 const taskCompleter = new TaskCompleter(store, desktopSink);
 const atlassianFactory = new AtlassianClientFactory(desktopResolver);
-const chatService = new ChatService(store, dataDir, getQoderStatus, () => protectedValue("qoderToken"), () => protectedValue("modelApiKey"), () => mainWindow, () => new JiraTaskCreationAgent(atlassianFactory));
+const chatService = new ChatService(store, dataDir, getQoderStatus, () => protectedValue("qoderToken"), () => protectedValue("modelApiKey"), () => mainWindow, () => {
+    // 任务创建 Agent：按 system setting 选 backend；目前仅 Jira 后端可用。
+    // 未来接入 GitHub / Linear 时这里按 backendId 分发。
+    if (resolveDefaultBackend() === "jira")
+        return new JiraTaskCreationBackend(atlassianFactory);
+    return undefined;
+});
 // === Review 实现(Qoder / OpenAI 兼容) =========================================
 async function callQoderReviewer(prompt, taskId, model, signal) {
     const token = protectedValue("qoderToken");
@@ -426,6 +432,94 @@ async function runQoder(taskId, extraPrompt, signal) {
         emitPi({ type: "agent_end", provider: "qoder", taskId, phase: "implementation" });
     }
 }
+const TEST_CASE_GENERATION_PROMPT = [
+    "你是一个测试用例生成 Agent，专为当前 Coding 任务生成最小测试集。",
+    "硬性约束：",
+    "1. 不得修改任何业务逻辑文件、不得重构、不得调整非测试相关的配置。",
+    "2. 仅为本次改动产出可被现有 testCommand 跑通的最小测试集（单元测试为主，必要时一个集成测试）。",
+    "3. 若现有 testCommand 不存在或无法识别测试文件，请按仓库常见约定新增。",
+    "4. 所有新增文件必须以 _test.* / .test.* / .spec.* 结尾，并放到合理的测试目录。",
+    "5. 完成后请把测试相关的修改 commit 到当前 feature 分支（一个 commit 即可），commit message 形如 `test: <简短说明>`。",
+    "",
+    "请在最后输出一个 JSON 对象（不要输出额外说明）：",
+    "{\"files\":[\"path/to/test1\", \"path/to/test2\"], \"commitSha\":\"<短 sha 或全 sha>\", \"summary\":\"<一句话概述>\"}",
+    "若没有任何可测试的逻辑面，输出 {\"files\":[], \"summary\":\"<解释原因>\"}。"
+].join("\n");
+function parseTestCaseGeneration(texts) {
+    for (const text of [...texts].reverse()) {
+        const start = text.indexOf("{");
+        const end = text.lastIndexOf("}");
+        if (start < 0 || end <= start)
+            continue;
+        try {
+            const value = JSON.parse(text.slice(start, end + 1));
+            const files = Array.isArray(value.files) ? value.files.filter((item) => typeof item === "string") : [];
+            const summary = typeof value.summary === "string" ? value.summary : "";
+            return { files, commitSha: typeof value.commitSha === "string" ? value.commitSha : undefined, summary };
+        }
+        catch { /* fallthrough */ }
+    }
+    return { files: [], summary: "Agent 未返回有效测试用例 JSON" };
+}
+async function runQoderTestCases(taskId, signal) {
+    const task = store.getTask(taskId);
+    const token = protectedValue("qoderToken");
+    if (!task || task.state !== "generating_tests")
+        throw new Error("当前任务不能生成测试用例");
+    if (!token)
+        throw new Error("请先配置 Qoder Token");
+    const repos = store.listTaskRepositories(task.id);
+    if (repos.length === 0)
+        throw new Error("任务未关联代码仓库");
+    activeTaskId = task.id;
+    addTaskEvent({ taskId, kind: "status", title: "正在生成测试用例" });
+    // 复用实现阶段的 query 资源管理：先关闭上一轮（避免与即将启动的 runValidation 抢资源）。
+    activeQoderAbort?.abort();
+    const qoderAbort = new AbortController();
+    activeQoderAbort = qoderAbort;
+    const abortFromTask = () => qoderAbort.abort(signal?.reason);
+    signal?.throwIfAborted();
+    signal?.addEventListener("abort", abortFromTask, { once: true });
+    const prompt = [
+        task.title,
+        task.description,
+        task.planContent ? `Approved implementation plan:\n${task.planContent}` : "",
+        TEST_CASE_GENERATION_PROMPT
+    ].filter(Boolean).join("\n\n");
+    const q = query({
+        prompt,
+        options: {
+            auth: accessToken(token),
+            cwd: repos[0].worktreePath ?? repos[0].localPath,
+            additionalDirectories: repos.slice(1).map((repo) => repo.worktreePath ?? repo.localPath),
+            abortController: qoderAbort,
+            includePartialMessages: true,
+            permissionMode: "acceptEdits",
+            persistSession: true,
+            ...(task.qoderModel ? { model: task.qoderModel } : {})
+        }
+    });
+    activeQoderQuery = q;
+    emitPi({ type: "agent_start", provider: "qoder", taskId, phase: "test_generation" });
+    const logFile = qoderLogFile(task.id);
+    const responseTexts = [];
+    try {
+        for await (const message of q) {
+            logQoderMessage(logFile, message);
+            const text = qoderText(message);
+            if ((message.type === "assistant" || message.type === "result") && text)
+                responseTexts.push(text);
+            recordQoderMessage(task.id, message);
+        }
+        return parseTestCaseGeneration(responseTexts);
+    }
+    finally {
+        signal?.removeEventListener("abort", abortFromTask);
+        activeQoderQuery = undefined;
+        activeQoderAbort = undefined;
+        emitPi({ type: "agent_end", provider: "qoder", taskId, phase: "test_generation" });
+    }
+}
 async function runQoderPlan(taskId, feedback, signal) {
     const task = store.getTask(taskId);
     const token = protectedValue("qoderToken");
@@ -436,6 +530,25 @@ async function runQoderPlan(taskId, feedback, signal) {
     const repos = store.listTaskRepositories(task.id);
     if (repos.length === 0)
         throw new Error("任务未关联代码仓库");
+    // === 二次执行计划卡死的关键修复 ============================
+    // 1) 把上一个 activeQoderQuery 立即释放（最多等 5s），避免 SDK 内部残留会话；
+    // 2) 上一轮的 AbortController 先 abort，保证旧 for-await 能退出；
+    // 3) 新 AbortController 在旧资源完全释放后再替换 activeQoderAbort。
+    // 否则第二次 runQoderPlan 进入 for-await 之后，新旧两路 stream 同时打 recordQoderMessage，
+    // 且 finally 里的 close 会无限阻塞，导致任务一直停在"计划中"。
+    const previousQuery = activeQoderQuery;
+    const previousAbort = activeQoderAbort;
+    activeQoderQuery = undefined;
+    activeQoderAbort = undefined;
+    previousAbort?.abort();
+    if (previousQuery) {
+        try {
+            await previousQuery.interrupt();
+        }
+        catch { /* may already be closed */ }
+        await closeQoderQuerySafely(previousQuery, 5_000);
+    }
+    // ============================================================
     activeTaskId = task.id;
     activePlanningTaskId = task.id;
     activePlanText = "";
@@ -449,26 +562,45 @@ async function runQoderPlan(taskId, feedback, signal) {
     activeQoderQuery = q;
     emitPi({ type: "agent_start", provider: "qoder", taskId, phase: "planning" });
     const planMessages = [];
+    // 10 分钟硬超时：避免再次出现"永不返回"卡死。即便 SDK 真的泄漏，UI 也能在 10min 内看到 failed。
+    const HARD_TIMEOUT_MS = 10 * 60 * 1000;
+    let hardTimer;
+    const hardTimeout = new Promise((_, reject) => {
+        hardTimer = setTimeout(() => reject(new Error("计划生成超时(>10min)，已强制中止当前 query")), HARD_TIMEOUT_MS);
+    });
     try {
-        for await (const message of q) {
-            recordQoderMessage(task.id, message, false);
-            const text = qoderText(message);
-            if ((message.type === "assistant" || message.type === "result") && text)
-                planMessages.push(text);
-        }
-        await savePlanDecision(taskId, planMessages);
+        await Promise.race([
+            (async () => {
+                for await (const message of q) {
+                    recordQoderMessage(task.id, message, false);
+                    const text = qoderText(message);
+                    if ((message.type === "assistant" || message.type === "result") && text)
+                        planMessages.push(text);
+                }
+                await savePlanDecision(taskId, planMessages);
+            })(),
+            hardTimeout
+        ]);
     }
     catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        addTaskEvent({ taskId, kind: "error", title: "计划生成失败", detail });
+        abort.abort();
+        await closeQoderQuerySafely(q, 5_000);
         const current = store.getTask(taskId);
         if (current?.state === "planning")
             updateState(current, "failed");
         throw error;
     }
     finally {
+        if (hardTimer)
+            clearTimeout(hardTimer);
         signal?.removeEventListener("abort", abortFromTask);
+        if (activeQoderQuery === q)
+            activeQoderQuery = undefined;
+        if (activeQoderAbort === abort)
+            activeQoderAbort = undefined;
         activePlanningTaskId = undefined;
-        activeQoderQuery = undefined;
-        activeQoderAbort = undefined;
         emitPi({ type: "agent_end", provider: "qoder", taskId, phase: "planning" });
     }
 }
@@ -476,7 +608,9 @@ async function advanceAfterValidation(taskId, state, signal) {
     if (state !== "awaiting_review")
         return;
     signal?.throwIfAborted();
-    if (taskWorkflow.isReviewEnabled()) {
+    const task = store.getTask(taskId);
+    // 任务级覆盖优先于系统级设置。
+    if (taskWorkflow.isReviewEnabledFor(task)) {
         await taskWorkflow.runReview(taskId, buildReviewOrchestrator(), signal);
     }
     else {
@@ -485,8 +619,9 @@ async function advanceAfterValidation(taskId, state, signal) {
         addTaskEvent({ taskId, kind: "status", title: "已跳过 Review,等待提交 MR" });
     }
     const updated = store.getTask(taskId);
-    if (updated?.state === "awaiting_commit" && taskWorkflow.shouldAutoCreateMergeRequests())
+    if (updated?.state === "awaiting_commit" && taskWorkflow.shouldAutoCreateMergeRequestsFor(updated)) {
         await deliveryService.submitMergeRequests(taskId, signal);
+    }
 }
 async function finishImplementation(taskId, responseTexts, signal) {
     const task = store.getTask(taskId);
@@ -524,6 +659,29 @@ async function finishImplementation(taskId, responseTexts, signal) {
                 ? "Agent 未明确说明实现是否完成，任务不会自动进入校验或 Review。"
                 : "Agent 结论与文件改动状态不一致，任务不会自动推进。"
         });
+        return;
+    }
+    // 若任务级/系统级开关打开，则在实现完成后、runValidation 之前先生成测试用例。
+    if (taskWorkflow.shouldGenerateTestCases(task)) {
+        await runTestCaseGenerationThenValidate(taskId, signal);
+        return;
+    }
+    const validated = await taskWorkflow.runValidation(taskId, signal);
+    await advanceAfterValidation(taskId, validated.state, signal);
+}
+async function runTestCaseGenerationThenValidate(taskId, signal) {
+    try {
+        taskWorkflow.beginTestCaseGeneration(taskId);
+        const result = await runQoderTestCases(taskId, signal);
+        taskWorkflow.finishTestCaseGeneration(taskId, result);
+    }
+    catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        addTaskEvent({ taskId, kind: "error", title: "测试用例生成失败", detail });
+        // 回退到 implementing 让用户可以重试，而不是直接失败整个任务。
+        const current = store.getTask(taskId);
+        if (current?.state === "generating_tests")
+            updateState(current, "implementing");
         return;
     }
     const validated = await taskWorkflow.runValidation(taskId, signal);
@@ -717,6 +875,19 @@ async function startPi(taskId) {
 }
 async function startTask(taskId, options = {}) {
     const current = store.getTask(taskId);
+    // 任务启动时可空选仓库：若 `useAllRepositories=true` 且任务当前没有 attach 任何仓库，
+    // 先把 system 配的全部仓库 attach 上去，再走原来的 begin 路径。
+    if (options.useAllRepositories && current) {
+        const existing = store.listTaskRepositories(taskId);
+        if (existing.length === 0) {
+            const all = store.listRepositoryProfiles();
+            for (const profile of all) {
+                const exists = existing.find((repo) => repo.repositoryId === profile.id);
+                if (!exists)
+                    store.attachRepository(taskId, profile.id);
+            }
+        }
+    }
     if (modelProvider() === "qoder" && current && ["draft", "failed"].includes(current.state))
         store.updateTask(taskId, { sessionUsage: undefined });
     const mode = options.mode ?? "direct";
@@ -773,7 +944,13 @@ async function reviseTaskPlan(taskId, feedback) {
     const task = taskWorkflow.revisePlan(taskId);
     addTaskEvent({ taskId, kind: "message", title: "计划调整意见", detail: feedback });
     if (modelProvider() === "qoder") {
-        void runTaskOperation(taskId, (signal) => runQoderPlan(taskId, feedback, signal)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
+        try {
+            await runTaskOperation(taskId, (signal) => runQoderPlan(taskId, feedback, signal));
+        }
+        catch (error) {
+            // 错误已在 runQoderPlan 内部写 event + 推 failed，这里只把消息转发给 UI 通道。
+            emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) });
+        }
         return;
     }
     await runTaskOperation(taskId, async (signal) => {
@@ -825,7 +1002,7 @@ async function stopTaskOperations(taskId, markFailed) {
     const operation = activeTaskOperations.get(taskId);
     operation?.controller.abort(new Error(markFailed ? "任务已停止" : "任务已删除"));
     const task = store.getTask(taskId);
-    if (markFailed && task && ["planning", "implementing", "validating"].includes(task.state))
+    if (markFailed && task && ["planning", "implementing", "validating", "generating_tests"].includes(task.state))
         updateState(task, "failed");
     if (activeTaskId === taskId) {
         const qoderAbort = activeQoderAbort;
@@ -841,16 +1018,43 @@ async function stopTaskOperations(taskId, markFailed) {
             await qoderQuery?.interrupt();
         }
         catch { /* The query may already be closed. */ }
-        try {
-            await qoderQuery?.close();
-        }
-        catch { /* The query may already be closed. */ }
+        // close 自身在 Qoder SDK 内部可能因为子进程/会话未释放而卡死，加 5s 超时。
+        await closeQoderQuerySafely(qoderQuery, 5_000);
         await stopPi();
     }
     try {
         await operation?.promise;
     }
     catch { /* Cancellation is expected while removing a task. */ }
+}
+/**
+ * 安全关闭 Qoder query：5 秒内未完成则放弃等待。
+ *
+ * 背景：pi-coding-agent / qoder-agent-sdk 的 query.close() 在子进程未完全退出时
+ *  会无限阻塞，进而导致二次执行计划（runQoderPlan 复用同一个 session）时
+ *  整个主流程卡在 finally 块。强制超时并清理 activeQoderQuery 至少能保证
+ *  下一次执行能正常启动新的 query。
+ */
+async function closeQoderQuerySafely(q, timeoutMs) {
+    if (!q)
+        return;
+    let timer;
+    const closePromise = Promise.resolve().then(async () => {
+        try {
+            await q.close();
+        }
+        catch { /* already closed or interrupted */ }
+    });
+    try {
+        await Promise.race([
+            closePromise,
+            new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); })
+        ]);
+    }
+    finally {
+        if (timer)
+            clearTimeout(timer);
+    }
 }
 async function removeTaskWorkspace(taskId, repositories) {
     const git = gitService;
@@ -951,6 +1155,93 @@ async function openEditorForTask(taskId, editor) {
     const paths = store.listTaskRepositories(taskId).map((repo) => repo.worktreePath ?? repo.localPath);
     await openTaskEditor(editor, paths);
 }
+/**
+ * 手动把任务的 feature 分支合并到本地 base 分支（不推送远端、不建 MR）。
+ *
+ * 触发：用户在任务详情点击「合并到 base」按钮。
+ * 行为（每个仓库顺序执行）：
+ *   1) 在 worktree 中 `git status --porcelain` 检查是否有未提交改动；
+ *      有则拒绝并提示先 commit 或 stash。
+ *   2) `git checkout <baseBranch>`。
+ *   3) `git merge --no-ff <featureBranch> -m "merge: <taskId> <title>"`。
+ *   4) 成功后 `git checkout <featureBranch>`，保持 worktree 习惯。
+ *   5) 任何步骤失败：把 stderr 写入 task event；回滚到 feature 分支；抛错给 UI。
+ *
+ * 安全约束：
+ *   - 任一仓库的 worktree 路径未设置或未生成 feature branch 时拒绝。
+ */
+async function mergeBackToBase(taskId, signal) {
+    const task = store.getTask(taskId);
+    if (!task)
+        throw new Error("任务不存在");
+    const repos = store.listTaskRepositories(taskId);
+    if (repos.length === 0)
+        throw new Error("任务未关联代码仓库");
+    addTaskEvent({ taskId, kind: "status", title: "开始合并 feature 分支到 base" });
+    for (const repo of repos) {
+        if (!repo.worktreePath) {
+            addTaskEvent({ taskId, kind: "error", title: `仓库 ${repo.name} 缺少 worktree 路径`, detail: "请先完成「准备工作」创建 worktree。" });
+            throw new Error(`仓库 ${repo.name} 缺少 worktree 路径`);
+        }
+        if (!repo.featureBranch) {
+            addTaskEvent({ taskId, kind: "error", title: `仓库 ${repo.name} 未生成 feature 分支`, detail: "请先完成实现再合并。" });
+            throw new Error(`仓库 ${repo.name} 未生成 feature 分支`);
+        }
+        const cwd = repo.worktreePath;
+        signal?.throwIfAborted();
+        try {
+            const status = (await gitService.status(cwd)).trim();
+            if (status) {
+                addTaskEvent({ taskId, kind: "error", title: `仓库 ${repo.name} 工作区不干净`, detail: `请先 commit 或 stash 当前改动。\n${status}` });
+                throw new Error(`仓库 ${repo.name} 工作区存在未提交改动`);
+            }
+            addTaskEvent({ taskId, kind: "command", title: `git checkout ${repo.baseBranch}`, detail: `工作目录: ${cwd}` });
+            await gitService.checkout(cwd, repo.baseBranch, signal);
+            const message = `merge: ${task.taskKey ?? task.id} ${task.title.slice(0, 60)}`;
+            addTaskEvent({ taskId, kind: "command", title: `git merge --no-ff ${repo.featureBranch}`, detail: message });
+            await gitService.mergeNoFF(cwd, repo.featureBranch, message, signal);
+            addTaskEvent({ taskId, kind: "status", title: `仓库 ${repo.name} 已合并 ${repo.featureBranch} -> ${repo.baseBranch}` });
+            addTaskEvent({ taskId, kind: "command", title: `git checkout ${repo.featureBranch}`, detail: "合并完成后切回 feature 分支，保持 worktree 习惯" });
+            await gitService.checkout(cwd, repo.featureBranch, signal);
+        }
+        catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            // 失败时尝试切回 feature 分支，避免把 worktree 留在 base。
+            try {
+                await gitService.checkout(cwd, repo.featureBranch, signal);
+            }
+            catch { /* 静默：原始错误更重要 */ }
+            addTaskEvent({ taskId, kind: "error", title: `仓库 ${repo.name} 合并失败`, detail });
+            throw error;
+        }
+    }
+    addTaskEvent({ taskId, kind: "status", title: "已合并所有仓库的 feature 分支到 base（未推送远端）" });
+}
+/**
+ * 列出所有可用的「任务创建」后端。
+ *
+ * - Jira 后端的"configured" 取决于 JIRA_BASE_URL / JIRA_EMAIL / JIRA_API_TOKEN 是否齐全。
+ * - GitHub / Linear 后端本期未实现，显示但 configured=false，方便 UI 提示用户。
+ */
+function listTaskBackends() {
+    const jiraConfigured = !!(desktopResolver.get("jiraBaseUrl") && desktopResolver.get("jiraEmail") && desktopResolver.get("jiraApiToken"));
+    // 计划内的占位项：实际接入由后续任务负责。
+    return [
+        { id: "jira", displayName: "Jira", configured: jiraConfigured },
+        { id: "github", displayName: "GitHub Issues", configured: false },
+        { id: "linear", displayName: "Linear", configured: false }
+    ];
+}
+/**
+ * 根据系统设置解析当前默认后端。任务创建 Agent 在 `chat-service` 启动时使用。
+ */
+function resolveDefaultBackend() {
+    const hint = desktopResolver.get("taskCreationBackend");
+    if (hint === "jira" || hint === "github" || hint === "linear")
+        return hint;
+    // 默认回退到 Jira（保持现有行为）。
+    return "jira";
+}
 async function* holdQoderProbe(signal) {
     if (signal.aborted)
         return;
@@ -1016,6 +1307,13 @@ function registerIpc() {
     });
     ipcMain.handle("tasks:attach-repo", (_event, taskId, repositoryId) => store.attachRepository(taskId, repositoryId));
     ipcMain.handle("tasks:detach-repo", (_event, taskId, repositoryId) => store.detachRepository(taskId, repositoryId));
+    // 编辑任务时持久化每个已关联仓库的命令配置（setup / lint / test / build）。
+    ipcMain.handle("tasks:update-repo-commands", (_event, taskId, repositoryId, commands) => {
+        const repo = store.listTaskRepositories(taskId).find((item) => item.repositoryId === repositoryId);
+        if (!repo)
+            throw new Error(`任务仓库不存在: ${repositoryId}`);
+        return store.updateTaskRepository(repo.id, commands);
+    });
     ipcMain.handle("settings:get", (_event, key) => ["jiraToken", "confluenceToken", "qoderToken", "modelApiKey", "gitlabToken"].includes(key) ? (store.getSetting(key) ? "__configured__" : undefined) : store.getSetting(key));
     ipcMain.handle("settings:set", (_event, key, value, secret = false) => {
         store.setSetting(key, secret ? keyStore.protect(value, key) : value);
@@ -1036,6 +1334,13 @@ function registerIpc() {
     ipcMain.handle("tasks:refresh-merge-status", () => mergeRefresher.refresh());
     ipcMain.handle("tasks:manual-complete", (_event, taskId) => taskCompleter.manualComplete(taskId));
     ipcMain.handle("tasks:open-editor", (_event, taskId, editor) => openEditorForTask(taskId, editor));
+    ipcMain.handle("tasks:merge-back-to-base", (_event, taskId) => runTaskOperation(taskId, (signal) => mergeBackToBase(taskId, signal)));
+    ipcMain.handle("shell:reveal-in-folder", (_event, path) => {
+        if (typeof path !== "string" || !path)
+            throw new Error("path 不能为空");
+        shell.showItemInFolder(path);
+    });
+    ipcMain.handle("tasks:list-backends", () => listTaskBackends());
     ipcMain.handle("qoder:status", () => getQoderStatus());
     // 用系统默认浏览器打开 URL(避免在 Electron 内嵌窗口中 target=_blank 开新 BrowserWindow)。
     // 只放行 http(s),防止被注入 file:// / 命令协议等本地 scheme。

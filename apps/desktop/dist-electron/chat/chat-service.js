@@ -4,22 +4,37 @@ import { listChatModels, resolveChatModel } from "./chat-models.js";
 import { streamChat } from "./chat-llm.js";
 function textOf(message) { return message.parts.filter((part) => part.type === "text").map((part) => part.text).join(""); }
 function titleOf(text) { return text.slice(0, 32).replace(/\s+/g, " ").trim() || "新对话"; }
+/**
+ * 渲染"已创建任务"提示。
+ *
+ * 后端无关：根据 backend id 切到对应的展示文案，未来接入 GitHub / Linear 时只需在此处加分支。
+ */
+function describeCreatedTask(result) {
+    switch (result.backend) {
+        case "jira":
+            return `已创建 Jira 任务 ${result.externalKey}。是否需要立即执行？`;
+        case "github":
+            return `已创建 GitHub Issue ${result.externalKey}。是否需要立即执行？`;
+        case "linear":
+            return `已创建 Linear Issue ${result.externalKey}。是否需要立即执行？`;
+    }
+}
 export class ChatService {
     store;
     getQoderStatus;
     getQoderToken;
     getOpenAIKey;
     getMainWindow;
-    createTaskAgent;
+    resolveTaskBackend;
     storage;
     activeStreams = new Map();
-    constructor(store, dataDir, getQoderStatus, getQoderToken, getOpenAIKey, getMainWindow, createTaskAgent) {
+    constructor(store, dataDir, getQoderStatus, getQoderToken, getOpenAIKey, getMainWindow, resolveTaskBackend) {
         this.store = store;
         this.getQoderStatus = getQoderStatus;
         this.getQoderToken = getQoderToken;
         this.getOpenAIKey = getOpenAIKey;
         this.getMainWindow = getMainWindow;
-        this.createTaskAgent = createTaskAgent;
+        this.resolveTaskBackend = resolveTaskBackend;
         this.storage = new ChatStorage(dataDir);
     }
     listChats() { return this.storage.listMetas(); }
@@ -65,7 +80,7 @@ export class ChatService {
         let status = "done";
         let modelKey = input.model;
         let userPersisted = false;
-        const taskAgent = input.mode === "task-create" ? this.createTaskAgent?.() : undefined;
+        const taskBackend = input.mode === "task-create" ? this.resolveTaskBackend?.() : undefined;
         let taskCreation;
         try {
             const title = conversation.messages.some((message) => message.role === "user") ? conversation.title : titleOf(textOf(userMessage));
@@ -76,18 +91,34 @@ export class ChatService {
             const startMetadata = { createdAt: now, model: modelKey, agentMode: input.mode ?? "chat" };
             this.dispatch(input, { type: "start", messageId: assistantId, messageMetadata: startMetadata });
             this.dispatch(input, { type: "text-start", id: textPartId });
-            for await (const event of streamChat({ model, qoderToken: model.provider === "qoder" ? this.getQoderToken() : undefined, messages, signal: abort.signal, taskAgent })) {
+            for await (const event of streamChat({ model, qoderToken: model.provider === "qoder" ? this.getQoderToken() : undefined, messages, signal: abort.signal, taskBackend, onCreated: (result) => {
+                    taskCreation = {
+                        backend: result.backend,
+                        externalKey: result.externalKey,
+                        summary: result.summary,
+                        projectKey: result.projectKey ?? "",
+                        issueType: result.issueType ?? ""
+                    };
+                    if (!content.trim()) {
+                        const fallback = describeCreatedTask(result);
+                        content = fallback;
+                        this.dispatch(input, { type: "text-delta", id: textPartId, delta: fallback });
+                    }
+                } })) {
                 if (event.type === "delta") {
                     content += event.delta;
                     this.dispatch(input, { type: "text-delta", id: textPartId, delta: event.delta });
                 }
                 else if (event.type === "task-created") {
-                    taskCreation = event.task;
-                    if (!content.trim()) {
-                        const fallback = `已创建 Jira 任务 ${event.task.taskKey}。是否需要立即执行？`;
-                        content = fallback;
-                        this.dispatch(input, { type: "text-delta", id: textPartId, delta: fallback });
-                    }
+                    // 兼容老路径：工具执行已经在 onCreated 里走完，这里不再重复处理。
+                    // 留个空分支，避免 if-else 类型收窄报错。
+                    taskCreation = {
+                        backend: event.task.backend,
+                        externalKey: event.task.externalKey,
+                        summary: event.task.summary,
+                        projectKey: event.task.projectKey ?? "",
+                        issueType: event.task.issueType ?? ""
+                    };
                 }
             }
             if (abort.signal.aborted)
@@ -123,7 +154,7 @@ export class ChatService {
                 this.dispatch(input, { type: "error", errorText: `保存聊天失败：${message}` });
             }
             finally {
-                taskAgent?.close();
+                taskBackend?.close();
                 if (status === "aborted")
                     this.dispatch(input, { type: "abort", reason: "用户已停止生成" });
                 else {

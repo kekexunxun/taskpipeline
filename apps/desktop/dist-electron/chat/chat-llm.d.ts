@@ -1,12 +1,12 @@
 import type { ChatMessage } from "./chat-types.js";
 import type { ResolvedChatModel } from "./chat-models.js";
-import type { JiraTaskCreationAgent } from "./task-creation-agent.js";
+import type { TaskCreationBackend, TaskCreatedResult } from "./task-backends/index.js";
 export type TextStreamEvent = {
     type: "delta";
     delta: string;
 } | {
     type: "task-created";
-    task: NonNullable<JiraTaskCreationAgent["createdTask"]>;
+    task: TaskCreatedResult;
 } | {
     type: "done";
 };
@@ -15,5 +15,6 @@ export declare function streamChat(options: {
     qoderToken?: string;
     messages: ChatMessage[];
     signal: AbortSignal;
-    taskAgent?: JiraTaskCreationAgent;
+    taskBackend?: TaskCreationBackend;
+    onCreated?: (result: TaskCreatedResult) => void;
 }): AsyncGenerator<TextStreamEvent>;

@@ -184,4 +184,20 @@ export class GitService {
   }
   removeWorktree(repoPath: string, worktreePath: string): Promise<string> { return this.run(["worktree", "remove", "--force", worktreePath], repoPath); }
   pruneWorktrees(repoPath: string): Promise<string> { return this.run(["worktree", "prune"], repoPath); }
+
+  /**
+   * 在 `cwd` 中执行 `git checkout <targetBranch>`。
+   * 用于「合并到 base 分支」工作流：先把 worktree 切到 base branch。
+   */
+  checkout(cwd: string, targetBranch: string, signal?: AbortSignal): Promise<string> {
+    return this.run(["checkout", targetBranch], cwd, undefined, signal);
+  }
+
+  /**
+   * 在 `cwd` 中执行 `git merge --no-ff <featureBranch> -m <message>`。
+   * 用于「合并到 base 分支」工作流：保留合并记录，便于审计。
+   */
+  mergeNoFF(cwd: string, featureBranch: string, message: string, signal?: AbortSignal): Promise<string> {
+    return this.run(["merge", "--no-ff", featureBranch, "-m", message], cwd, undefined, signal);
+  }
 }

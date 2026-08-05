@@ -46,6 +46,9 @@
   --animate-slide-out-to-left: slide-out-to-left 160ms ease-in;
   --animate-slide-out-to-right: slide-out-to-right 160ms ease-in;
   --animate-spin-slow: spin 800ms linear infinite;
+  --animate-plan-shimmer: plan-shimmer 1.6s linear infinite;
+  --animate-plan-breathe: plan-breathe 1.8s ease-in-out infinite;
+  --animate-plan-fade-up: plan-fade-up 320ms ease-out both;
 }
 
 :root {
@@ -103,6 +106,10 @@ input:focus-visible, textarea:focus-visible { outline: none; }
 @keyframes slide-out-to-right { from { transform: translateX(0); opacity: 1; } to { transform: translateX(8px); opacity: 0; } }
 @keyframes global-feedback-in { from { transform: translateY(-10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 @keyframes caret-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+@keyframes plan-shimmer { 0% { background-position: -220% 0; } 100% { background-position: 220% 0; } }
+@keyframes plan-breathe { 0%, 100% { opacity: .35; } 50% { opacity: .9; } }
+@keyframes plan-dot-bounce { 0%, 80%, 100% { transform: translateY(0); opacity: .4; } 40% { transform: translateY(-3px); opacity: 1; } }
+@keyframes plan-fade-up { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
 /* ---------- Animation utilities (compat with Radix/tailwindcss-animate) ---------- */
 .animate-in { animation: var(--animate-fade-in); }
@@ -121,6 +128,41 @@ input:focus-visible, textarea:focus-visible { outline: none; }
 .slide-out-to-right-2 { --tw-exit-translate-x: 8px; }
 .animate-spin-slow { animation: var(--animate-spin-slow); }
 .animate-caret-blink { animation: caret-blink 1s steps(1) infinite; }
+.animate-plan-shimmer { animation: var(--animate-plan-shimmer); }
+.animate-plan-breathe { animation: var(--animate-plan-breathe); }
+.animate-plan-fade-up { animation: var(--animate-plan-fade-up); }
+.plan-shimmer-overlay {
+  background-image: linear-gradient(
+    100deg,
+    transparent 0%,
+    transparent 35%,
+    color-mix(in srgb, var(--primary) 22%, transparent) 50%,
+    transparent 65%,
+    transparent 100%
+  );
+  background-size: 220% 100%;
+  background-repeat: no-repeat;
+}
+.plan-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: plan-dot-bounce 1.2s ease-in-out infinite;
+}
+.plan-dot:nth-child(2) { animation-delay: .15s; }
+.plan-dot:nth-child(3) { animation-delay: .3s; }
+
+/* 折叠态：底部淡出，提示下方还有内容。 */
+.mask-fade-bottom {
+  -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+}
+.mask-fade-bottom-soft {
+  -webkit-mask-image: linear-gradient(to bottom, #000 75%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 75%, transparent 100%);
+}
 
 [data-state="open"].animate-in,
 [data-state="closed"].animate-out { animation-fill-mode: both; }

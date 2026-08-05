@@ -58,6 +58,8 @@ const callbacks = {
   onClose: vi.fn(),
   onOpenVSCode: vi.fn(),
   onOpenQoder: vi.fn(),
+  onRevealInFolder: vi.fn(),
+  onMergeBackToBase: vi.fn(),
   onChangeModel: vi.fn(),
   onStart: vi.fn(),
   onAbort: vi.fn(),

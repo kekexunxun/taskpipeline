@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ActivityIcon, FileDiffIcon, FileTextIcon, GitMergeIcon, MessageSquareTextIcon, PlayIcon, RotateCcwIcon } from "lucide-react";
-import type { Task, TaskCard } from "@coding-agent/core";
+import type { Task, TaskCard, TaskRepository } from "@coding-agent/core";
 import type { ChatModelGroup, QoderStatus, TaskDetail, ChangedFile } from "../../../api";
 import { DetailHeader } from "./DetailHeader";
 import { UsageSection } from "./UsageSection";
@@ -38,6 +38,8 @@ type Props = {
   onClose(): void;
   onOpenVSCode(): void;
   onOpenQoder(): void;
+  onRevealInFolder(path: string): void;
+  onMergeBackToBase(): void;
   onChangeModel(value: string | undefined): void;
   onStart(): void;
   onAbort(): void;
@@ -70,6 +72,8 @@ export function DetailPanel({
   onClose,
   onOpenVSCode,
   onOpenQoder,
+  onRevealInFolder,
+  onMergeBackToBase,
   onChangeModel,
   onStart,
   onAbort,
@@ -87,6 +91,7 @@ export function DetailPanel({
   onOpenUrl
 }: Props) {
   const task = detail?.task;
+  const repositories = detail?.repositories ?? card?.repositories ?? [];
   const [activeTab, setActiveTab] = useState("activity");
   const [planFeedback, setPlanFeedback] = useState("");
   const groups = useMemo(() => {
@@ -131,11 +136,14 @@ export function DetailPanel({
     <section className="flex min-h-0 min-w-0 flex-col overflow-hidden border-l bg-card/50 max-[1199px]:border-l-0">
       <DetailHeader
         task={task}
+        repositories={(detail?.repositories ?? []) as TaskRepository[]}
         focused={focused}
         onFocusedChange={onFocusedChange}
         onClose={onClose}
         onOpenVSCode={onOpenVSCode}
         onOpenQoder={onOpenQoder}
+        onRevealInFolder={onRevealInFolder}
+        onMergeBackToBase={onMergeBackToBase}
       />
       <DetailActions
         card={card}

@@ -67,3 +67,49 @@ describe("TaskWorkflow cancellation", () => {
     expect(current.state).toBe("validating");
   });
 });
+
+describe("TaskWorkflow test case generation state", () => {
+  it("transitions implementing -> generating_tests -> implementing (task level) when begin/finish are called", () => {
+    const states: Task["state"][] = [];
+    let current: Task = { ...waitingTask, state: "implementing", createTestCasesEnabled: true };
+    const store = {
+      getTask: () => current,
+      updateTask: (_id: string, patch: Partial<Task>) => (current = { ...current, ...patch })
+    } as unknown as TaskStore;
+    const sink = { addEvent: vi.fn() } as unknown as TaskEventSink;
+    const workflow = new TaskWorkflow(store, { get: () => "true", getSecret: () => undefined }, sink, () => "/tmp/task-1");
+
+    expect(workflow.shouldGenerateTestCases(current)).toBe(true);
+    states.push(workflow.beginTestCaseGeneration(current.id).state);
+    states.push((workflow.finishTestCaseGeneration(current.id, { files: ["src/foo.test.ts"], commitSha: "abc1234", summary: "ok" }).state));
+    expect(states).toEqual(["generating_tests", "implementing"]);
+    expect(current.testsGenerated).toMatchObject({ files: ["src/foo.test.ts"], commitSha: "abc1234" });
+    expect(sink.addEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "status", title: "已生成 1 个测试用例" }));
+  });
+
+  it("falls back to system setting when task-level override is undefined", () => {
+    const current: Task = { ...waitingTask, state: "implementing" };
+    const store = { getTask: () => current, updateTask: vi.fn() } as unknown as TaskStore;
+    const sink = { addEvent: vi.fn() } as unknown as TaskEventSink;
+    const enabledWorkflow = new TaskWorkflow(store, { get: (key) => key === "createTestCasesEnabled" ? "true" : undefined, getSecret: () => undefined }, sink, () => "/tmp/task-1");
+    expect(enabledWorkflow.shouldGenerateTestCases(current)).toBe(true);
+    const disabledWorkflow = new TaskWorkflow(store, { get: (key) => key === "createTestCasesEnabled" ? "false" : undefined, getSecret: () => undefined }, sink, () => "/tmp/task-1");
+    expect(disabledWorkflow.shouldGenerateTestCases(current)).toBe(false);
+  });
+
+  it("task-level explicit override wins over system setting", () => {
+    const current: Task = { ...waitingTask, state: "implementing", createTestCasesEnabled: false };
+    const store = { getTask: () => current, updateTask: vi.fn() } as unknown as TaskStore;
+    const sink = { addEvent: vi.fn() } as unknown as TaskEventSink;
+    const workflow = new TaskWorkflow(store, { get: (key) => key === "createTestCasesEnabled" ? "true" : undefined, getSecret: () => undefined }, sink, () => "/tmp/task-1");
+    expect(workflow.shouldGenerateTestCases(current)).toBe(false);
+  });
+
+  it("rejects beginTestCaseGeneration when not in implementing", () => {
+    const current: Task = { ...waitingTask, state: "reviewing" };
+    const store = { getTask: () => current, updateTask: vi.fn() } as unknown as TaskStore;
+    const sink = { addEvent: vi.fn() } as unknown as TaskEventSink;
+    const workflow = new TaskWorkflow(store, { get: () => "true", getSecret: () => undefined }, sink, () => "/tmp/task-1");
+    expect(() => workflow.beginTestCaseGeneration(current.id)).toThrow("当前任务不能生成测试用例");
+  });
+});

@@ -5,8 +5,11 @@ const transitions: Record<TaskState, TaskState[]> = {
   draft: ["confirmed", "cancelled"], confirmed: ["preparing", "cancelled"], preparing: ["planning", "implementing", "failed", "cancelled"],
   planning: ["awaiting_plan_approval", "completed", "failed", "cancelled"],
   awaiting_plan_approval: ["planning", "implementing", "failed", "cancelled"],
-  implementing: ["awaiting_input", "validating", "awaiting_review", "failed", "cancelled"],
+  implementing: ["awaiting_input", "generating_tests", "validating", "awaiting_review", "failed", "cancelled"],
   awaiting_input: ["implementing", "completed", "failed", "cancelled"],
+  // generating_tests 是新引入的中间态：实现完成后、validation/review 之前。
+  // 允许退到 validating（正常路径）/ implementing（重做）/ failed（生成失败）。
+  generating_tests: ["validating", "implementing", "failed", "cancelled"],
   validating: ["awaiting_review", "validation_failed", "failed", "cancelled"],
   validation_failed: ["validating", "implementing", "cancelled"],
   awaiting_review: ["reviewing", "awaiting_commit", "implementing", "completed", "cancelled"], reviewing: ["review_blocked", "awaiting_commit", "implementing", "completed", "failed"],
