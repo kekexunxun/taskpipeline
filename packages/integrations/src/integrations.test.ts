@@ -230,6 +230,7 @@ describe("process integrations", () => {
 
   it("combines committed and working-tree changed files", async () => {
     const git = new GitService(async (args) => {
+      if (args[0] === "rev-parse") return "abc123\n";
       if (args[0] === "diff") return "M\0src/changed.ts\0R100\0src/old.ts\0src/renamed.ts\0";
       if (args[0] === "status") return " M src/changed.ts\0?? src/new.ts\0";
       return "";
@@ -239,6 +240,30 @@ describe("process integrations", () => {
       { path: "src/new.ts", status: "??" },
       { path: "src/renamed.ts", status: "R" }
     ]);
+  });
+
+  it("diffs against the remote base ref when it exists to avoid local-branch drift noise", async () => {
+    const calls: string[][] = [];
+    const git = new GitService(async (args) => {
+      calls.push(args);
+      if (args[0] === "rev-parse") return "abc123\n";
+      if (args[0] === "diff") return "M\0src/changed.ts\0";
+      return "";
+    });
+    await git.changedFiles("/repo", "main");
+    expect(calls.some((args) => args[0] === "diff" && args[3] === "refs/remotes/origin/main...HEAD")).toBe(true);
+  });
+
+  it("falls back to the local base branch when the remote ref is missing", async () => {
+    const calls: string[][] = [];
+    const git = new GitService(async (args) => {
+      calls.push(args);
+      if (args[0] === "rev-parse") throw new Error("ref not found");
+      if (args[0] === "diff") return "M\0src/changed.ts\0";
+      return "";
+    });
+    await git.changedFiles("/repo", "main");
+    expect(calls.some((args) => args[0] === "diff" && args[3] === "main...HEAD")).toBe(true);
   });
 
   it("bypasses local pre-commit / commit-msg hooks when staging, committing and reading HEAD", async () => {

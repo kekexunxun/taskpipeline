@@ -10,7 +10,13 @@ export type QoderStatus = {
   models: Array<{ value: string; displayName: string; description: string; isDefault?: boolean; isEnabled?: boolean; isReasoning?: boolean; isVl?: boolean; priceFactor?: number }>;
   error?: string;
 };
-export type JiraTaskCandidate = Pick<Task, "taskKey" | "source" | "sourceUrl" | "title" | "description" | "keywords" | "acceptanceCriteria"> & { taskKey: string };
+export type JiraTaskCandidate = Pick<Task, "taskKey" | "source" | "sourceUrl" | "title" | "description" | "keywords" | "acceptanceCriteria"> & {
+  taskKey: string;
+  /** 本地系统中是否已存在同 Key 任务。 */
+  existing?: boolean;
+  /** 已存在且不在 TODO 列，导入会覆盖其内容，需要用户确认。 */
+  conflict?: boolean;
+};
 export type RepositoryFolder = Omit<RepositoryProfile, "id">;
 export type MergeRepoStatus = { repoId: string; repoName: string; mergeRequestIid: number; mergeRequestUrl?: string; state: "opened" | "merged" | "closed" | "error"; error?: string };
 export type MergeStatusSummary = { taskId: string; taskTitle: string; repos: MergeRepoStatus[]; allMerged: boolean; taskCompleted: boolean };

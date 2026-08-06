@@ -102,7 +102,29 @@ export class GitService {
     if (paths?.length) args.push("--", ...paths);
     return this.run(args, cwd);
   }
-  async changedFiles(cwd: string, baseRef: string, signal?: AbortSignal): Promise<GitChangedFile[]> {
+  /**
+   * 选择 diff 基准 ref:
+   * worktree 是基于 `origin/<base>` 创建的。若本地 `base` 分支与远程分叉(本地领先或落后),
+   * 用本地分支名做 `git diff <base>...HEAD` 会算出一堆"本地分支独有提交"的假差异,
+   * 导致初始化项目就显示大量变更文件。优先用远程 ref(与 worktree 创建基准一致),
+   * 无远程(纯本地仓库)时回退本地分支名。
+   */
+  private async resolveDiffBase(cwd: string, baseBranch: string, signal?: AbortSignal): Promise<string> {
+    const normalized = baseBranch.trim()
+      .replace(/^refs\/heads\//, "")
+      .replace(/^refs\/remotes\/origin\//, "")
+      .replace(/^origin\//, "");
+    const remoteRef = `refs/remotes/origin/${normalized}`;
+    try {
+      await this.run(["rev-parse", "--verify", "--quiet", `${remoteRef}^{commit}`], cwd, undefined, signal);
+      return remoteRef;
+    } catch {
+      return normalized;
+    }
+  }
+
+  async changedFiles(cwd: string, baseBranch: string, signal?: AbortSignal): Promise<GitChangedFile[]> {
+    const baseRef = await this.resolveDiffBase(cwd, baseBranch, signal);
     const files = new Map<string, GitChangedFile>();
     try {
       for (const file of parseNameStatus(await this.run(["diff", "--name-status", "-z", `${baseRef}...HEAD`], cwd, undefined, signal))) files.set(file.path, file);

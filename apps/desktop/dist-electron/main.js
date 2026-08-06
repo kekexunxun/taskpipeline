@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentSession, DefaultResourceLoader, getAgentDir, hasTrustRequiringProjectResources, ModelRuntime, ProjectTrustStore, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { TaskStore, LocalFileKeyStore, transitionTask } from "@coding-agent/core";
+import { TaskStore, LocalFileKeyStore, boardColumnFor, transitionTask } from "@coding-agent/core";
 import { AtlassianClientFactory, DeliveryService, fetchJiraTasks, GitService, importJiraIssue, MergeStatusRefresher, openTaskEditor, OpenCodeReviewService, OpenAICompatReviewer, redactSecrets, ReviewOrchestrator, TaskCompleter, TaskWorkflow, testAtlassianConnection, asReviewer } from "@coding-agent/integrations";
 import { resolveBundledOcrBinary, resolveOcrBinary, createOcrRunner } from "./ocr.js";
 import { accessToken, query } from "@qoder-ai/qoder-agent-sdk";
@@ -373,7 +373,7 @@ function logQoderMessage(file, message) {
     }
     catch { /* 日志写不进去不能影响主流程 */ }
 }
-async function runQoder(taskId, extraPrompt, signal) {
+async function runQoder(taskId, extraPrompt, signal, resumeSessionId) {
     const task = await taskWorkflow.prepare(taskId, signal);
     const token = protectedValue("qoderToken");
     if (!token)
@@ -390,25 +390,31 @@ async function runQoder(taskId, extraPrompt, signal) {
     signal?.throwIfAborted();
     signal?.addEventListener("abort", abortFromTask, { once: true });
     const memoryContext = await taskMemoryContext(task, repos);
-    const prompt = [
-        memoryContext ?? "",
-        task.title,
-        task.description,
-        task.planContent ? `Approved implementation plan:\n${task.planContent}` : "",
-        `Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`,
-        extraPrompt ? `Additional request:\n${extraPrompt}` : "",
-        implementationOutcomeInstruction
-    ].filter(Boolean).join("\n\n");
-    const q = query({ prompt, options: { auth: accessToken(token), cwd: repos[0].worktreePath ?? repos[0].localPath, additionalDirectories: repos.slice(1).map((repo) => repo.worktreePath ?? repo.localPath), abortController: qoderAbort, includePartialMessages: true, permissionMode: "acceptEdits", persistSession: true, ...(task.qoderModel ? { model: task.qoderModel } : {}) } });
+    // 续接执行时按 session_id 恢复原会话：不再重复注入完整任务上下文，避免上下文错乱，
+    // 直接把"继续指令"作为新消息追加到历史会话里。
+    const prompt = resumeSessionId
+        ? (extraPrompt ?? "任务此前执行失败/中断，请基于当前会话上下文继续完成剩余工作。")
+        : [
+            memoryContext ?? "",
+            task.title,
+            task.description,
+            task.planContent ? `Approved implementation plan:\n${task.planContent}` : "",
+            `Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`,
+            extraPrompt ? `Additional request:\n${extraPrompt}` : "",
+            implementationOutcomeInstruction
+        ].filter(Boolean).join("\n\n");
+    const q = query({ prompt, options: { auth: accessToken(token), cwd: repos[0].worktreePath ?? repos[0].localPath, additionalDirectories: repos.slice(1).map((repo) => repo.worktreePath ?? repo.localPath), abortController: qoderAbort, includePartialMessages: true, permissionMode: "acceptEdits", persistSession: true, ...(resumeSessionId ? { resume: resumeSessionId } : {}), ...(task.qoderModel ? { model: task.qoderModel } : {}) } });
     activeQoderQuery = q;
     emitPi({ type: "agent_start", provider: "qoder", taskId, phase: "implementation" });
     const logFile = qoderLogFile(task.id);
     const responseTexts = [];
+    // 从消息流捕获本次会话的 session_id，持久化供失败后续接按 ID 恢复。
+    let currentSessionId = resumeSessionId;
     if (logFile) {
         try {
             appendFileSync(logFile, JSON.stringify({
                 t: new Date().toISOString(), kind: "meta", taskId: task.id, prompt,
-                options: { cwd: repos[0].worktreePath ?? repos[0].localPath, model: task.qoderModel, additionalDirectories: repos.slice(1).map((repo) => repo.worktreePath ?? repo.localPath) }
+                options: { cwd: repos[0].worktreePath ?? repos[0].localPath, model: task.qoderModel, additionalDirectories: repos.slice(1).map((repo) => repo.worktreePath ?? repo.localPath), resume: resumeSessionId }
             }) + "\n", "utf8");
         }
         catch { /* 忽略 */ }
@@ -416,6 +422,9 @@ async function runQoder(taskId, extraPrompt, signal) {
     try {
         for await (const message of q) {
             logQoderMessage(logFile, message);
+            const sid = message.session_id;
+            if (sid)
+                currentSessionId = sid;
             const text = qoderText(message);
             if ((message.type === "assistant" || message.type === "result") && text)
                 responseTexts.push(text);
@@ -432,6 +441,8 @@ async function runQoder(taskId, extraPrompt, signal) {
         emitPi({ type: "agent_error", taskId, message: detail });
     }
     finally {
+        if (currentSessionId)
+            store.updateTask(task.id, { qoderSessionId: currentSessionId });
         signal?.removeEventListener("abort", abortFromTask);
         activeQoderQuery = undefined;
         activeQoderAbort = undefined;
@@ -569,11 +580,11 @@ async function runQoderPlan(taskId, feedback, signal) {
     activeQoderQuery = q;
     emitPi({ type: "agent_start", provider: "qoder", taskId, phase: "planning" });
     const planMessages = [];
-    // 10 分钟硬超时：避免再次出现"永不返回"卡死。即便 SDK 真的泄漏，UI 也能在 10min 内看到 failed。
-    const HARD_TIMEOUT_MS = 10 * 60 * 1000;
+    // 5 分钟硬超时：避免再次出现"永不返回"卡死。即便 SDK 真的泄漏，UI 也能在 5min 内看到 failed。
+    const HARD_TIMEOUT_MS = 5 * 60 * 1000;
     let hardTimer;
     const hardTimeout = new Promise((_, reject) => {
-        hardTimer = setTimeout(() => reject(new Error("计划生成超时(>10min)，已强制中止当前 query")), HARD_TIMEOUT_MS);
+        hardTimer = setTimeout(() => reject(new Error("计划生成超时(>5min)，已强制中止当前 query")), HARD_TIMEOUT_MS);
     });
     try {
         await Promise.race([
@@ -595,8 +606,10 @@ async function runQoderPlan(taskId, feedback, signal) {
         abort.abort();
         await closeQoderQuerySafely(q, 5_000);
         const current = store.getTask(taskId);
-        if (current?.state === "planning")
+        if (current?.state === "planning") {
+            store.updateTask(taskId, { failureStage: "planning" });
             updateState(current, "failed");
+        }
         throw error;
     }
     finally {
@@ -940,11 +953,38 @@ async function resumeTask(taskId) {
     const current = store.getTask(taskId);
     if (!current || current.state !== "failed")
         throw new Error("只有失败的任务可以继续执行");
-    store.updateTask(taskId, { sessionUsage: undefined, failureStage: undefined });
-    // 复用 prepare 的失败恢复路径:worktree 缺失时补建,已完整时直接回到 implementing(不重跑 setup 命令)。
+    store.updateTask(taskId, { sessionUsage: undefined });
+    // 计划阶段失败(计划尚未生成成功)时继续生成计划;其它失败继续实现流程。
+    // `failureStage === "planning"` 由 runQoderPlan 失败路径标记;`startMode === "plan" && !planContent` 兼容历史存量数据。
+    const failedDuringPlanning = current.failureStage === "planning" || (current.startMode === "plan" && !current.planContent);
+    store.updateTask(taskId, { failureStage: undefined });
+    if (failedDuringPlanning) {
+        const task = await runTaskOperation(taskId, (signal) => taskWorkflow.begin(taskId, "plan", undefined, signal));
+        if (modelProvider() === "qoder") {
+            void runTaskOperation(taskId, (signal) => runQoderPlan(taskId, undefined, signal)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
+            return;
+        }
+        await runTaskOperation(taskId, async (signal) => {
+            signal.throwIfAborted();
+            activePlanningTaskId = taskId;
+            activePlanText = "";
+            await startPi(taskId);
+            if (!piSession)
+                throw new Error("OpenAI agent session is unavailable");
+            const memoryContext = await taskMemoryContext(task, store.listTaskRepositories(taskId));
+            await piSession.prompt(`你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${memoryContext ? `${memoryContext}\n\n` : ""}${task.title}\n${task.description}`, { source: "rpc" });
+            signal.throwIfAborted();
+            const plan = activePlanText.trim();
+            activePlanningTaskId = undefined;
+            if (plan)
+                await savePlanDecision(taskId, [plan]);
+        });
+        return;
+    }
+    // 实现阶段失败:复用 prepare 的失败恢复路径(worktree 缺失时补建,已完整时直接回到 implementing,不重跑 setup 命令)。
     const task = await runTaskOperation(taskId, (signal) => taskWorkflow.prepare(taskId, signal));
     if (modelProvider() === "qoder") {
-        void runTaskOperation(taskId, (signal) => runQoder(taskId, resumeImplementationInstruction, signal)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
+        void runTaskOperation(taskId, (signal) => runQoder(taskId, resumeImplementationInstruction, signal, task.qoderSessionId)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
         return;
     }
     await runTaskOperation(taskId, async (signal) => {
@@ -1492,7 +1532,19 @@ function registerIpc() {
         await shell.openExternal(parsed.toString());
     });
     ipcMain.handle("jira:import", async (_event, keyOrUrl) => safeAtlassianCall("导入 Jira Issue", () => importJiraIssue(atlassianFactory.create("jira"), keyOrUrl, store)));
-    ipcMain.handle("jira:sync", async () => safeAtlassianCall("同步 Jira 任务", () => fetchJiraTasks(atlassianFactory.create("jira"))));
+    ipcMain.handle("jira:sync", async () => safeAtlassianCall("同步 Jira 任务", async () => {
+        const candidates = await fetchJiraTasks(atlassianFactory.create("jira"));
+        // 标注每个候选项在本地系统中的状态:已存在(existing)且不在 TODO 列(conflict)时,
+        // 前端导入需要用户确认覆盖。
+        return candidates.map((candidate) => {
+            const existing = candidate.taskKey ? store.getTaskBySourceKey("jira", candidate.taskKey) : undefined;
+            return {
+                ...candidate,
+                existing: Boolean(existing),
+                conflict: Boolean(existing && boardColumnFor(existing.state) !== "todo")
+            };
+        });
+    }));
     ipcMain.handle("jira:import-many", (_event, candidates) => {
         const tasks = candidates.flatMap((candidate) => {
             const taskKey = typeof candidate.taskKey === "string" ? candidate.taskKey.trim().toUpperCase() : "";

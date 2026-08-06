@@ -31,6 +31,8 @@ export type Task = {
   commitMessage?: string;
   piSessionPath?: string;
   qoderModel?: string;
+  /** Qoder Agent SDK 最近一次执行会话的 session_id，用于失败后续接时按 ID 恢复对话上下文。 */
+  qoderSessionId?: string;
   sessionUsage?: SessionUsage;
   /**
    * 任务级覆盖：实现完成后是否自动跑 Code Review。
