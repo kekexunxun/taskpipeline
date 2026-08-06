@@ -119,7 +119,7 @@ function ChatPageInner() {
                 <ChatModelSelector
                   groups={chat.modelGroups}
                   value={chat.model}
-                  onChange={chat.setModel}
+                  onChange={chat.setModelAndDriver}
                   disabled={chat.streaming}
                 />
                 <TaskCreationTool

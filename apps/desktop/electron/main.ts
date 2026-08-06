@@ -27,12 +27,17 @@ import { resolveBundledOcrBinary, resolveOcrBinary, createOcrRunner } from "./oc
 import { accessToken, query, type AccountInfo, type ModelInfo, type Query, type SDKMessage, type UsageInfo } from "@qoder-ai/qoder-agent-sdk";
 import { parsePlanDecision, sdkResultText } from "./plan-content.js";
 import { ChatService } from "./chat/chat-service.js";
+import { ChatDriverRegistry } from "./chat/drivers/driver-registry.js";
+import { QoderChatDriver } from "./chat/drivers/qoder-chat-driver.js";
+import { OpenAIChatDriver } from "./chat/drivers/openai-chat-driver.js";
 import { JiraTaskCreationBackend } from "./chat/task-backends/jira.js";
-import { resolveChatModel, type ResolvedChatModel } from "./chat/chat-models.js";
-import type { ChatConversation } from "./chat/chat-types.js";
+import type { ChatDriverId, ChatModelInfo as ChatDriverModelInfo, ChatConversation } from "./chat/chat-types.js";
 import { MemoryService, renderMemoryContext } from "./memory/memory-service.js";
 import { extractMemories } from "./memory/memory-extractor.js";
 import { implementationOutcomeInstruction, isExplicitNoChangeCompletionRequest, nextStepForImplementation, nextStepForPlan, parseImplementationDecision } from "./task-readiness.js";
+import { QoderTaskAgentDriver, type QoderTaskAgentDeps } from "./task-agent/qoder-task-agent.js";
+import { closeQoderQuerySafely, logQoderMessage, qoderLogFile, qoderText, recordQoderMessage } from "./task-agent/log.js";
+import { parseTestCaseGeneration } from "./task-agent/parsers/test-case-parser.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | undefined;
@@ -180,12 +185,61 @@ const deliveryService = new DeliveryService(store, gitService, desktopResolver, 
 const mergeRefresher = new MergeStatusRefresher(store, desktopResolver, desktopSink);
 const taskCompleter = new TaskCompleter(store, desktopSink);
 const atlassianFactory = new AtlassianClientFactory(desktopResolver);
-const chatService = new ChatService(store, dataDir, getQoderStatus, () => protectedValue("qoderToken"), () => protectedValue("modelApiKey"), () => mainWindow, () => {
+
+// Chat driver registry — 统一装 Qoder / OpenAI 两份 driver；后续接入更多 driver 仅需改此处。
+const chatDriverRegistry = new ChatDriverRegistry();
+chatDriverRegistry.register(new QoderChatDriver(() => protectedValue("qoderToken"), getQoderStatus));
+chatDriverRegistry.register(new OpenAIChatDriver(store, () => protectedValue("modelApiKey")));
+
+const chatService = new ChatService(store, dataDir, chatDriverRegistry, () => mainWindow, () => {
   // 任务创建 Agent：按 system setting 选 backend；目前仅 Jira 后端可用。
   // 未来接入 GitHub / Linear 时这里按 backendId 分发。
   if (resolveDefaultBackend() === "jira") return new JiraTaskCreationBackend(atlassianFactory);
   return undefined;
-}, async ({ conversationId, query }) => memoryService.buildSystemPrompt({ userId: memoryService.ensureUserId(), conversationId, query }), async ({ conversation, model }) => consolidateChatMemory(conversation, model));
+}, async ({ conversationId, query }) => memoryService.buildSystemPrompt({ userId: memoryService.ensureUserId(), conversationId, query }), consolidateChatMemory);
+
+// Task agent driver — 负责"任务执行"路径(plan / implementation / test_generation)。
+// 当前只注册 Qoder；接口已经摆好，后续接入其它 agent 运行时仅需 add() 一行。
+function createQoderTaskAgent(): QoderTaskAgentDriver {
+  return new QoderTaskAgentDriver({
+    store,
+    qoderTokenProvider: () => protectedValue("qoderToken"),
+    dataDir,
+    addTaskEvent,
+    emitPi,
+    emit: (event) => {
+      // TaskAgentEvent 透传给 UI 通道(以及失败后续接 session id 持久化)。
+      if (event.type === "agent_session" && activeTaskId) {
+        store.updateTask(activeTaskId, { qoderSessionId: event.sessionId });
+      }
+      // agent_start / agent_end 仍走 emitPi,让 task:event 通道能识别阶段。
+      if (event.type === "agent_start" || event.type === "agent_end") {
+        emitPi({ type: event.type, provider: "qoder", taskId: activeTaskId, phase: event.phase });
+        return;
+      }
+      if (event.type === "agent_text" && activeTaskId) {
+        addTaskEvent({ taskId: activeTaskId, kind: "message", title: "Qoder Agent", detail: event.text });
+        return;
+      }
+      if (event.type === "agent_error" && activeTaskId) {
+        addTaskEvent({ taskId: activeTaskId, kind: "error", title: "Qoder Agent 错误", detail: event.message });
+        return;
+      }
+    },
+    resolveMemoryContext: taskMemoryContext,
+    resolveModel: (task) => task.qoderModel,
+    onQueryStarted: (q, abort) => {
+      // 把 driver 起的 query 暴露给顶层 abort 流程(stopTaskOperations 仍能 interrupt)。
+      activeQoderQuery = q;
+      activeQoderAbort = abort;
+    },
+    onQueryFinished: (q) => {
+      if (activeQoderQuery === q) activeQoderQuery = undefined;
+      if (activeQoderAbort?.signal === undefined) activeQoderAbort = undefined;
+    }
+  });
+}
+
 
 // === Review 实现(Qoder / OpenAI 兼容) =========================================
 
@@ -221,7 +275,7 @@ async function callQoderReviewer(prompt: string, taskId: string, model?: string,
       (async () => {
         let text = "";
         for await (const message of q) {
-          recordQoderMessage(taskId, message);
+          recordQoderMessage(store, taskId, message, { recordText: true, addTaskEvent, emitPi });
           if (message.type === "assistant") {
             const content = (message as unknown as { message?: { content?: Array<{ type: string; text?: string }> } }).message?.content;
             if (Array.isArray(content)) text += content.filter((c) => c?.type === "text" && c.text).map((c) => c.text).join("\n");
@@ -273,14 +327,6 @@ function buildReviewPromptForQoder(input: Parameters<OpenAICompatReviewer["call"
 
 // === Qoder 集成(留在 desktop) ==================================================
 
-function qoderText(message: SDKMessage): string | undefined {
-  const record = message as unknown as Record<string, any>;
-  if (message.type === "result") return sdkResultText(record.result, record.errors);
-  if (message.type !== "assistant") return undefined;
-  const content = record.message?.content;
-  if (!Array.isArray(content)) return undefined;
-  return content.filter((item: any) => item?.type === "text").map((item: any) => item.text).filter(Boolean).join("\n") || undefined;
-}
 
 async function savePlanDecision(taskId: string, texts: string[]): Promise<Task> {
   const decision = parsePlanDecision(texts);
@@ -333,129 +379,24 @@ async function savePlanDecision(taskId: string, texts: string[]): Promise<Task> 
   return pending;
 }
 
-function recordQoderMessage(taskId: string, message: SDKMessage, recordText = true): void {
-  const text = qoderText(message);
-  const current = store.getTask(taskId)?.sessionUsage;
-  const previous = current?.provider === "qoder" ? current : undefined;
 
-  if (message.type === "assistant") {
-    const u = (message as unknown as {
-      message?: { usage?: { input_tokens?: number | null; output_tokens?: number | null; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null } };
-    }).message?.usage;
-    if (u) {
-      const inputTokens  = (previous?.inputTokens ?? 0) + (u.input_tokens ?? 0);
-      const outputTokens = (previous?.outputTokens ?? 0) + (u.output_tokens ?? 0);
-      const cacheRead    = (previous?.cacheReadTokens ?? 0) + (u.cache_read_input_tokens ?? 0);
-      const cacheWrite   = (previous?.cacheWriteTokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-      store.updateTask(taskId, { sessionUsage: {
-        provider: "qoder",
-        inputTokens, outputTokens,
-        cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite,
-        totalTokens: inputTokens + outputTokens + cacheRead + cacheWrite,
-        costUsd: previous?.costUsd, durationMs: previous?.durationMs, turns: previous?.turns
-      } });
-    }
-  }
-
-  if (message.type === "result") {
-    const result = message as unknown as {
-      duration_ms: number; num_turns: number; total_cost_usd?: number;
-      modelUsage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; costUSD: number }>;
-      usage?: { input_tokens?: number | null; output_tokens?: number | null; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null };
-    };
-    const models = Object.values(result.modelUsage ?? {});
-    const sum = (k: "inputTokens" | "outputTokens" | "cacheReadInputTokens" | "cacheCreationInputTokens" | "costUSD") =>
-      models.reduce((s, m) => s + ((m?.[k] as number) ?? 0), 0);
-    const mIn = sum("inputTokens"), mOut = sum("outputTokens"), mRd = sum("cacheReadInputTokens"), mWr = sum("cacheCreationInputTokens"), mCost = sum("costUSD");
-    const uIn = result.usage?.input_tokens ?? 0, uOut = result.usage?.output_tokens ?? 0, uRd = result.usage?.cache_read_input_tokens ?? 0, uWr = result.usage?.cache_creation_input_tokens ?? 0;
-    const pick = (mv: number, uv: number, prev: number | undefined) => mv > 0 ? mv : uv > 0 ? uv : (prev ?? 0);
-    const inputTokens = pick(mIn, uIn, previous?.inputTokens);
-    const outputTokens = pick(mOut, uOut, previous?.outputTokens);
-    const cacheRead = pick(mRd, uRd, previous?.cacheReadTokens);
-    const cacheWrite = pick(mWr, uWr, previous?.cacheWriteTokens);
-    const cost = mCost > 0 ? mCost : (result.total_cost_usd ?? 0);
-    const usage: SessionUsage = {
-      provider: "qoder",
-      inputTokens, outputTokens,
-      cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite,
-      totalTokens: inputTokens + outputTokens + cacheRead + cacheWrite,
-      costUsd: (previous?.costUsd ?? 0) + cost,
-      durationMs: (previous?.durationMs ?? 0) + result.duration_ms,
-      turns: (previous?.turns ?? 0) + result.num_turns
-    };
-    store.updateTask(taskId, { sessionUsage: usage });
-  }
-  if (text && recordText) addTaskEvent({ taskId, kind: "message", title: "Qoder Agent", detail: text });
-  else if (message.type === "system") addTaskEvent({ taskId, kind: "status", title: `Qoder ${message.subtype}`, detail: JSON.stringify(message).slice(0, 2000) });
-  emitPi({ type: "qoder_event", taskId, message });
-}
-
-function qoderLogFile(taskId: string): string | undefined {
-  if (process.env.CODING_AGENT_QODER_LOG !== "1") return undefined;
-  const dir = join(dataDir, "logs", "qoder");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return join(dir, `${taskId}-${stamp}.jsonl`);
-}
-
-function logQoderMessage(file: string | undefined, message: SDKMessage): void {
-  if (!file) return;
-  try { appendFileSync(file, JSON.stringify({ t: new Date().toISOString(), msg: message }) + "\n", "utf8"); }
-  catch { /* 日志写不进去不能影响主流程 */ }
-}
 
 async function runQoder(taskId: string, extraPrompt?: string, signal?: AbortSignal, resumeSessionId?: string): Promise<void> {
   const task = await taskWorkflow.prepare(taskId, signal);
-  const token = protectedValue("qoderToken");
-  if (!token) throw new Error("请先配置 Qoder Token");
   const repos = store.listTaskRepositories(task.id);
   if (repos.length === 0) throw new Error("任务未关联代码仓库");
   activeTaskId = task.id;
-  addTaskEvent({ taskId, kind: "status", title: "执行环境:Qoder Agent SDK", detail: "使用应用随附运行时,并在已配置仓库目录中执行" });
   activeQoderAbort?.abort();
   const qoderAbort = new AbortController();
   activeQoderAbort = qoderAbort;
   const abortFromTask = () => qoderAbort.abort(signal?.reason);
   signal?.throwIfAborted();
   signal?.addEventListener("abort", abortFromTask, { once: true });
-  const memoryContext = await taskMemoryContext(task, repos);
-  // 续接执行时按 session_id 恢复原会话：不再重复注入完整任务上下文，避免上下文错乱，
-  // 直接把"继续指令"作为新消息追加到历史会话里。
-  const prompt = resumeSessionId
-    ? (extraPrompt ?? "任务此前执行失败/中断，请基于当前会话上下文继续完成剩余工作。")
-    : [
-      memoryContext ?? "",
-      task.title,
-      task.description,
-      task.planContent ? `Approved implementation plan:\n${task.planContent}` : "",
-      `Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`,
-      extraPrompt ? `Additional request:\n${extraPrompt}` : "",
-      implementationOutcomeInstruction
-    ].filter(Boolean).join("\n\n");
-  const q = query({ prompt, options: { auth: accessToken(token), cwd: repos[0]!.worktreePath ?? repos[0]!.localPath, additionalDirectories: repos.slice(1).map((repo) => repo.worktreePath ?? repo.localPath), abortController: qoderAbort, includePartialMessages: true, permissionMode: "acceptEdits", persistSession: true, ...(resumeSessionId ? { resume: resumeSessionId } : {}), ...(task.qoderModel ? { model: task.qoderModel } : {}) } });
-  activeQoderQuery = q;
-  emitPi({ type: "agent_start", provider: "qoder", taskId, phase: "implementation" });
-  const logFile = qoderLogFile(task.id);
-  const responseTexts: string[] = [];
-  // 从消息流捕获本次会话的 session_id，持久化供失败后续接按 ID 恢复。
-  let currentSessionId: string | undefined = resumeSessionId;
-  if (logFile) {
-    try {
-      appendFileSync(logFile, JSON.stringify({
-        t: new Date().toISOString(), kind: "meta", taskId: task.id, prompt,
-        options: { cwd: repos[0]!.worktreePath ?? repos[0]!.localPath, model: task.qoderModel, additionalDirectories: repos.slice(1).map((repo) => repo.worktreePath ?? repo.localPath), resume: resumeSessionId }
-      }) + "\n", "utf8");
-    } catch { /* 忽略 */ }
-  }
+  addTaskEvent({ taskId, kind: "status", title: "执行环境:Qoder Agent SDK", detail: "使用应用随附运行时,并在已配置仓库目录中执行" });
+  const agent = createQoderTaskAgent();
   try {
-    for await (const message of q) {
-      logQoderMessage(logFile, message);
-      const sid = (message as { session_id?: string }).session_id;
-      if (sid) currentSessionId = sid;
-      const text = qoderText(message);
-      if ((message.type === "assistant" || message.type === "result") && text) responseTexts.push(text);
-      recordQoderMessage(task.id, message);
-    }
+    await agent.runImplementation({ task, repos, signal, ...(resumeSessionId ? { resumeSessionId } : {}), ...(extraPrompt ? { extraPrompt } : {}) });
+    const { responseTexts } = agent.collectResult("implementation");
     await finishImplementation(task.id, responseTexts, signal);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -464,114 +405,51 @@ async function runQoder(taskId: string, extraPrompt?: string, signal?: AbortSign
     if (["implementing", "validating"].includes(current?.state ?? "")) updateState(current!, "failed");
     emitPi({ type: "agent_error", taskId, message: detail });
   } finally {
-    if (currentSessionId) store.updateTask(task.id, { qoderSessionId: currentSessionId });
     signal?.removeEventListener("abort", abortFromTask);
-    activeQoderQuery = undefined;
     activeQoderAbort = undefined;
-    emitPi({ type: "agent_end", provider: "qoder", taskId, phase: "implementation" });
+    activeQoderQuery = undefined;
   }
 }
 
-const TEST_CASE_GENERATION_PROMPT = [
-  "你是一个测试用例生成 Agent，专为当前 Coding 任务生成最小测试集。",
-  "硬性约束：",
-  "1. 不得修改任何业务逻辑文件、不得重构、不得调整非测试相关的配置。",
-  "2. 仅为本次改动产出可被现有 testCommand 跑通的最小测试集（单元测试为主，必要时一个集成测试）。",
-  "3. 若现有 testCommand 不存在或无法识别测试文件，请按仓库常见约定新增。",
-  "4. 所有新增文件必须以 _test.* / .test.* / .spec.* 结尾，并放到合理的测试目录。",
-  "5. 完成后请把测试相关的修改 commit 到当前 feature 分支（一个 commit 即可），commit message 形如 `test: <简短说明>`。",
-  "",
-  "请在最后输出一个 JSON 对象（不要输出额外说明）：",
-  "{\"files\":[\"path/to/test1\", \"path/to/test2\"], \"commitSha\":\"<短 sha 或全 sha>\", \"summary\":\"<一句话概述>\"}",
-  "若没有任何可测试的逻辑面，输出 {\"files\":[], \"summary\":\"<解释原因>\"}。"
-].join("\n");
+
 
 type TestCaseGenerationResult = { files: string[]; commitSha?: string; summary: string };
 
-function parseTestCaseGeneration(texts: string[]): TestCaseGenerationResult {
-  for (const text of [...texts].reverse()) {
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
-    if (start < 0 || end <= start) continue;
-    try {
-      const value = JSON.parse(text.slice(start, end + 1)) as { files?: unknown; commitSha?: unknown; summary?: unknown };
-      const files = Array.isArray(value.files) ? value.files.filter((item): item is string => typeof item === "string") : [];
-      const summary = typeof value.summary === "string" ? value.summary : "";
-      return { files, commitSha: typeof value.commitSha === "string" ? value.commitSha : undefined, summary };
-    } catch { /* fallthrough */ }
-  }
-  return { files: [], summary: "Agent 未返回有效测试用例 JSON" };
-}
-
 async function runQoderTestCases(taskId: string, signal?: AbortSignal): Promise<TestCaseGenerationResult> {
   const task = store.getTask(taskId);
-  const token = protectedValue("qoderToken");
   if (!task || task.state !== "generating_tests") throw new Error("当前任务不能生成测试用例");
-  if (!token) throw new Error("请先配置 Qoder Token");
   const repos = store.listTaskRepositories(task.id);
   if (repos.length === 0) throw new Error("任务未关联代码仓库");
   activeTaskId = task.id;
   addTaskEvent({ taskId, kind: "status", title: "正在生成测试用例" });
-  // 复用实现阶段的 query 资源管理：先关闭上一轮（避免与即将启动的 runValidation 抢资源）。
   activeQoderAbort?.abort();
   const qoderAbort = new AbortController();
   activeQoderAbort = qoderAbort;
   const abortFromTask = () => qoderAbort.abort(signal?.reason);
   signal?.throwIfAborted();
   signal?.addEventListener("abort", abortFromTask, { once: true });
-  const prompt = [
-    task.title,
-    task.description,
-    task.planContent ? `Approved implementation plan:\n${task.planContent}` : "",
-    TEST_CASE_GENERATION_PROMPT
-  ].filter(Boolean).join("\n\n");
-  const q = query({
-    prompt,
-    options: {
-      auth: accessToken(token),
-      cwd: repos[0]!.worktreePath ?? repos[0]!.localPath,
-      additionalDirectories: repos.slice(1).map((repo) => repo.worktreePath ?? repo.localPath),
-      abortController: qoderAbort,
-      includePartialMessages: true,
-      permissionMode: "acceptEdits",
-      persistSession: true,
-      ...(task.qoderModel ? { model: task.qoderModel } : {})
-    }
-  });
-  activeQoderQuery = q;
-  emitPi({ type: "agent_start", provider: "qoder", taskId, phase: "test_generation" });
-  const logFile = qoderLogFile(task.id);
-  const responseTexts: string[] = [];
+  const agent = createQoderTaskAgent();
   try {
-    for await (const message of q) {
-      logQoderMessage(logFile, message);
-      const text = qoderText(message);
-      if ((message.type === "assistant" || message.type === "result") && text) responseTexts.push(text);
-      recordQoderMessage(task.id, message);
-    }
+    await agent.runTestGeneration({ task, repos, signal });
+    const { responseTexts } = agent.collectResult("test");
     return parseTestCaseGeneration(responseTexts);
   } finally {
     signal?.removeEventListener("abort", abortFromTask);
-    activeQoderQuery = undefined;
     activeQoderAbort = undefined;
-    emitPi({ type: "agent_end", provider: "qoder", taskId, phase: "test_generation" });
+    activeQoderQuery = undefined;
   }
 }
 
 async function runQoderPlan(taskId: string, feedback?: string, signal?: AbortSignal): Promise<void> {
   const task = store.getTask(taskId);
-  const token = protectedValue("qoderToken");
   if (!task || task.state !== "planning") throw new Error("当前任务不能生成计划");
-  if (!token) throw new Error("请先配置 Qoder Token");
   const repos = store.listTaskRepositories(task.id);
   if (repos.length === 0) throw new Error("任务未关联代码仓库");
 
   // === 二次执行计划卡死的关键修复 ============================
-  // 1) 把上一个 activeQoderQuery 立即释放（最多等 5s），避免 SDK 内部残留会话；
-  // 2) 上一轮的 AbortController 先 abort，保证旧 for-await 能退出；
+  // 1) 把上一个 activeQoderQuery 立即释放(最多等 5s),避免 SDK 内部残留会话;
+  // 2) 上一轮的 AbortController 先 abort,保证旧 for-await 能退出;
   // 3) 新 AbortController 在旧资源完全释放后再替换 activeQoderAbort。
-  // 否则第二次 runQoderPlan 进入 for-await 之后，新旧两路 stream 同时打 recordQoderMessage，
-  // 且 finally 里的 close 会无限阻塞，导致任务一直停在"计划中"。
   const previousQuery = activeQoderQuery;
   const previousAbort = activeQoderAbort;
   activeQoderQuery = undefined;
@@ -586,40 +464,20 @@ async function runQoderPlan(taskId: string, feedback?: string, signal?: AbortSig
   activeTaskId = task.id;
   activePlanningTaskId = task.id;
   activePlanText = "";
-  const memoryContext = await taskMemoryContext(task, repos);
-  const prompt = [memoryContext ?? "", `请只读分析以下 Coding 任务。`, `任务：${task.title}`, task.description, `验收标准：\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`, feedback ? `上一次计划的调整意见：\n${feedback}` : "", "禁止修改文件，禁止执行安装、构建或其他会改变工作区的命令。", "最终只输出一个 JSON 对象，不要输出过程说明或 Markdown 代码块。若代码已满足要求，输出 {\"outcome\":\"already_satisfied\",\"summary\":\"判断依据和验证建议\"}；否则输出 {\"outcome\":\"changes_required\",\"plan\":\"完整实施计划，包含涉及文件、实施步骤、验证方式和风险\"}。"].filter(Boolean).join("\n\n");
   const abort = new AbortController();
   const abortFromTask = () => abort.abort(signal?.reason);
   signal?.throwIfAborted();
   signal?.addEventListener("abort", abortFromTask, { once: true });
   activeQoderAbort = abort;
-  const q = query({ prompt, options: { auth: accessToken(token), cwd: repos[0]!.worktreePath ?? repos[0]!.localPath, additionalDirectories: repos.slice(1).map((repo) => repo.worktreePath ?? repo.localPath), abortController: abort, includePartialMessages: true, permissionMode: "plan", persistSession: true, ...(task.qoderModel ? { model: task.qoderModel } : {}) } });
-  activeQoderQuery = q;
-  emitPi({ type: "agent_start", provider: "qoder", taskId, phase: "planning" });
-  const planMessages: string[] = [];
-  // 5 分钟硬超时：避免再次出现"永不返回"卡死。即便 SDK 真的泄漏，UI 也能在 5min 内看到 failed。
-  const HARD_TIMEOUT_MS = 5 * 60 * 1000;
-  let hardTimer: NodeJS.Timeout | undefined;
-  const hardTimeout = new Promise<never>((_, reject) => {
-    hardTimer = setTimeout(() => reject(new Error("计划生成超时(>5min)，已强制中止当前 query")), HARD_TIMEOUT_MS);
-  });
+  const agent = createQoderTaskAgent();
   try {
-    await Promise.race([
-      (async () => {
-        for await (const message of q) {
-          recordQoderMessage(task.id, message, false);
-          const text = qoderText(message);
-          if ((message.type === "assistant" || message.type === "result") && text) planMessages.push(text);
-        }
-        await savePlanDecision(taskId, planMessages);
-      })(),
-      hardTimeout
-    ]);
+    await agent.runPlan({ task, repos, signal, ...(feedback ? { feedback } : {}) });
+    const { responseTexts } = agent.collectResult("plan");
+    await savePlanDecision(taskId, responseTexts);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     addTaskEvent({ taskId, kind: "error", title: "计划生成失败", detail });
     abort.abort();
-    await closeQoderQuerySafely(q, 5_000);
     const current = store.getTask(taskId);
     if (current?.state === "planning") {
       store.updateTask(taskId, { failureStage: "planning" });
@@ -627,14 +485,13 @@ async function runQoderPlan(taskId: string, feedback?: string, signal?: AbortSig
     }
     throw error;
   } finally {
-    if (hardTimer) clearTimeout(hardTimer);
     signal?.removeEventListener("abort", abortFromTask);
-    if (activeQoderQuery === q) activeQoderQuery = undefined;
     if (activeQoderAbort === abort) activeQoderAbort = undefined;
+    activeQoderQuery = undefined;
     activePlanningTaskId = undefined;
-    emitPi({ type: "agent_end", provider: "qoder", taskId, phase: "planning" });
   }
 }
+
 
 async function advanceAfterValidation(taskId: string, state: TaskState, signal?: AbortSignal): Promise<void> {
   if (state !== "awaiting_review") return;
@@ -1080,7 +937,7 @@ async function stopTaskOperations(taskId: string, markFailed: boolean): Promise<
     qoderAbort?.abort(new Error(markFailed ? "任务已停止" : "任务已删除"));
     try { await qoderQuery?.interrupt(); } catch { /* The query may already be closed. */ }
     // close 自身在 Qoder SDK 内部可能因为子进程/会话未释放而卡死，加 5s 超时。
-    await closeQoderQuerySafely(qoderQuery, 5_000);
+    if (qoderQuery) await closeQoderQuerySafely(qoderQuery, 5_000);
     await stopPi();
   }
   try { await operation?.promise; } catch { /* Cancellation is expected while removing a task. */ }
@@ -1094,21 +951,6 @@ async function stopTaskOperations(taskId: string, markFailed: boolean): Promise<
  *  整个主流程卡在 finally 块。强制超时并清理 activeQoderQuery 至少能保证
  *  下一次执行能正常启动新的 query。
  */
-async function closeQoderQuerySafely(q: Query | undefined, timeoutMs: number): Promise<void> {
-  if (!q) return;
-  let timer: NodeJS.Timeout | undefined;
-  const closePromise = Promise.resolve().then(async () => {
-    try { await q.close(); } catch { /* already closed or interrupted */ }
-  });
-  try {
-    await Promise.race([
-      closePromise,
-      new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); })
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
 
 type TaskRemovalMode = "workspace" | "all";
 
@@ -1321,11 +1163,16 @@ async function getQoderStatus(): Promise<QoderStatus> {
 
 // === Memory 任务上下文(检索/注入/整理) ========================================
 
-function resolveTaskChatModel(): ResolvedChatModel {
-  if (modelProvider() === "qoder") {
-    return { provider: "qoder", key: store.getSetting("defaultModel") ?? "claude-sonnet-4.5" };
+/**
+ * 选择当前任务执行(consolidate memory)用的 chat 模型:固定跟随系统 modelProfile 决定 driver。
+ * - driverId = "qoder" / "openai"
+ * - model 是 OpenAI 协议下的具体模型名(Qoder 模式下不使用,driver 内部自己拿默认)
+ */
+function resolveTaskChatModel(): { driverId: ChatDriverId; model: string } {
+  if (modelProvider() === "openai") {
+    return { driverId: "openai", model: store.getSetting("defaultOpenAIModel") ?? "gpt-4o" };
   }
-  return resolveChatModel("openai:default", store, () => protectedValue("modelApiKey"));
+  return { driverId: "qoder", model: store.getSetting("defaultModel") ?? "claude-sonnet-4.5" };
 }
 
 async function taskMemoryContext(task: Task, repos: TaskRepository[]): Promise<string | undefined> {
@@ -1361,9 +1208,13 @@ async function consolidateTaskMemory(taskId: string, responseTexts: string[]): P
       ...events.slice(-80).map((event) => `[${event.kind}] ${event.title}${event.detail ? `\n${event.detail}` : ""}`),
       ...responseTexts.slice(-5).map((text) => `AI 输出：\n${text}`)
     ].join("\n\n");
+    const { driverId, model } = resolveTaskChatModel();
+    const driver = chatDriverRegistry.tryGet(driverId);
+    if (!driver) return;
     const extracted = await extractMemories({
-      model: resolveTaskChatModel(),
-      qoderToken: modelProvider() === "qoder" ? protectedValue("qoderToken") : undefined,
+      driver,
+      driverId,
+      model,
       text: transcript,
       context: "task",
       allowedScopes: ["user", "repo"]
@@ -1378,22 +1229,39 @@ async function consolidateTaskMemory(taskId: string, responseTexts: string[]): P
   }
 }
 
-async function consolidateChatMemory(conversation: ChatConversation, model: ResolvedChatModel): Promise<void> {
+/**
+ * 把会话文本喂给 memory extraction,提取长期记忆。
+ *
+ * 协议:
+ *  - conversation 来自 ChatService,messages 是 StoredMessageRecord(无 parts),
+ *    所以这里直接用 driver.deserializeMessage 拼出 parts,提取 text。
+ *  - driverId 由 conversation.driverId 决定(单会话切换 driver 时仍用最后选定的 driver 来 extract)。
+ */
+async function consolidateChatMemory(input: { conversation: ChatConversation; signal: AbortSignal; driverId: ChatDriverId; model: string }): Promise<void> {
   try {
-    const text = conversation.messages
+    const driver = chatDriverRegistry.tryGet(input.driverId);
+    const text = input.conversation.messages
       .filter((message) => message.role !== "system")
-      .map((message) => `${message.role === "user" ? "用户" : "助手"}：${message.parts.filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text").map((part) => part.text).join("")}`)
+      .map((message) => {
+        const record = message;
+        const parts = driver ? driver.deserializeMessage(record).parts : [];
+        const messageText = parts.filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text").map((part) => part.text).join("");
+        return `${message.role === "user" ? "用户" : "助手"}：${messageText}`;
+      })
       .join("\n\n");
     if (!text.trim()) return;
+    if (!driver) return;
     const extracted = await extractMemories({
-      model,
-      qoderToken: model.provider === "qoder" ? protectedValue("qoderToken") : undefined,
+      driver,
+      driverId: input.driverId,
+      model: input.model,
       text,
       context: "chat",
-      allowedScopes: ["user", "conversation"]
+      allowedScopes: ["user", "conversation"],
+      signal: input.signal
     });
     if (!extracted.length) return;
-    memoryService.consolidateMemories(extracted, [], conversation.id);
+    memoryService.consolidateMemories(extracted, [], input.conversation.id);
   } catch (error) {
     console.warn("[memory] chat consolidate failed:", error);
   }
@@ -1515,7 +1383,7 @@ function registerIpc(): void {
   // === Chat 对话(Codex 样式) =================================================
   ipcMain.handle("chats:list", () => chatService.listChats());
   ipcMain.handle("chats:get", (_event, id: string) => chatService.getChat(id));
-  ipcMain.handle("chats:create", (_event, model?: string) => chatService.createChat(model));
+  ipcMain.handle("chats:create", (_event, input?: { driverId?: ChatDriverId; model?: string }) => chatService.createChat(input?.driverId, input?.model));
   ipcMain.handle("chats:delete", (_event, id: string) => {
     chatService.deleteChat(id);
     memoryService.deleteConversationMemories(id);

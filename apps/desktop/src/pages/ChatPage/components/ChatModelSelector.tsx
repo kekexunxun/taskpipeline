@@ -33,7 +33,7 @@ export function ChatModelSelector({
 }) {
   const [open, setOpen] = useState(false);
   const flat = groups.flatMap((group) =>
-    group.models.map((model) => ({ ...model, provider: group.displayName }))
+    group.models.map((model) => ({ ...model, driverId: group.driverId, driverDisplayName: group.displayName }))
   );
   const current = flat.find((model) => model.value === value) ?? flat.find((model) => model.isDefault);
   const hasModels = flat.length > 0;
@@ -62,10 +62,10 @@ export function ChatModelSelector({
           <ModelSelectorEmpty>未找到匹配的模型</ModelSelectorEmpty>
           {groups.map((group) => (
             <ModelSelectorGroup
-              key={group.provider}
+              key={group.driverId}
               heading={
                 <span className="inline-flex items-center gap-1">
-                  {group.provider === "qoder" ? <SparklesIcon size={10} /> : <CpuIcon size={10} />}
+                  {group.driverId === "qoder" ? <SparklesIcon size={10} /> : <CpuIcon size={10} />}
                   {group.displayName}
                 </span>
               }

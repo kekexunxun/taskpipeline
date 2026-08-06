@@ -6,14 +6,19 @@
  *  整个 systemPrompt 和 UI 文案都是 Jira 视角。后续要扩展到 GitHub Issues / Linear 时，
  *  每一个后端都要改一长串代码。
  *
- * 设计：
- *  - 定义 `TaskCreationBackend` 接口，对外只暴露 3 个能力：systemPrompt、createTask、close。
+ * 设计（重构后）：
+ *  - 定义 `TaskCreationBackend` 接口，对外暴露 4 个能力：toToolSource / createTask / close。
  *  - 每个后端（jira / github / linear）放在独立文件中，实现这个接口。
  *  - `listTaskBackends()` 返回所有可用后端（含未实现的占位），UI 据此展示。
  *  - `resolveTaskBackend(settings, id)` 根据设置或默认策略挑一个后端。
+ *  - **`toToolSource()`** 把后端的"工具集"以 driver-agnostic 形态暴露:
+ *    通用 systemPrompt + 通用 ToolDeclaration[] + describeResult。
+ *    各 chat driver (Qoder / OpenAI) 自行把 ToolDeclaration 翻译成自己 SDK 的 tool 协议。
  *
  * 注意：本目录是 ChatService 唯一允许访问任务创建后端的地方。其他模块请勿直接 import 具体后端。
  */
+
+import type { ToolSource } from "../drivers/tool-source.js";
 
 export type TaskBackendId = "jira" | "github" | "linear";
 
@@ -38,16 +43,17 @@ export type TaskCreatedResult = {
  *
  * - `id` / `displayName`：UI 识别用，固定不变。
  * - `configured`：当前是否已配置完成（true 时 UI 可启用）。
- * - `systemPrompt`：注入到 Chat Agent 的系统提示词，必须明确说明该后端的创建规则。
- * - `createTask(input)`：在 LLM 决定好字段后，真正向后端发请求创建任务。
- *   input 里的 `payload` 已经是后端特定的形状（由 LLM 在 systemPrompt 引导下产出）。
+ * - `toToolSource()`：把后端的工具集以 driver-agnostic 形态暴露给 chat driver。
+ *   ChatService 在 streamChat 时把它注入 `ToolSource`。
+ * - `createTask(input)`：当前主要给测试 / 显式调用预留。chat 路径上由 driver 通过
+ *   工具执行触发,执行结果经 `ToolSource.describeResult` 转换。
  * - `close()`：释放该后端持有的资源（mcp client / http pool 等）。
  */
 export interface TaskCreationBackend {
   readonly id: TaskBackendId;
   readonly displayName: string;
   readonly configured: boolean;
-  systemPrompt(): string;
+  toToolSource(): ToolSource;
   createTask(input: { payload: Record<string, unknown> }): Promise<TaskCreatedResult>;
   close(): void;
 }

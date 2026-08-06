@@ -8,6 +8,7 @@ import {
 } from "@coding-agent/integrations";
 import { DockerToolRouter } from "./sandbox.js";
 import { evaluatePermission } from "./permission.js";
+import { PiAgentPlanModeProvider } from "./plan-mode.js";
 
 const dataDir = process.env.CODING_AGENT_DATA_DIR ?? join(homedir(), ".internal-coding-agent");
 const store = new TaskStore(join(dataDir, "coding-agent.db"));
@@ -102,7 +103,16 @@ async function approve(task: Task, kind: Parameters<TaskStore["addApproval"]>[0]
 }
 
 export default function codingAgentExtension(pi: ExtensionAPI) {
-  let toolsBeforePlanning: string[] | undefined;
+  // L3: 先注册 --subagent-nonce flag,让 pi CLI parser 知道怎么解析
+  // (父进程会传 --subagent-nonce <nonce> + CODING_AGENT_SUBAGENT_NONCE env,
+  // 子进程能同步读到,身份才能对上)
+  pi.registerFlag("subagent-nonce", {
+    description: "由 spawn 子进程时注入,守卫三重身份校验",
+    type: "string"
+  });
+  // 三重身份校验:env + ppid + flag nonce 三者一致才认是合法子进程。
+  // 子进程需要跳过 sandbox 注册 / 拦戠器 / 命令注册等整套 setup。
+  if (isSubagentProcess(pi)) return;
   sandboxRouter.register(pi, process.cwd());
   pi.on("session_start", async (_event, ctx) => {
     const mode = await sandboxRouter.check();
@@ -120,10 +130,6 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     const input = event.input as Record<string, unknown>;
     const task = selectedTask("");
-    if (task?.state === "planning" && event.toolName === "bash") {
-      const command = String(input.command ?? "").trim();
-      if (!/^(pwd|ls|find|rg|grep|sed|head|tail|cat|wc|git\s+(status|diff|log|show|branch|rev-parse)\b)/.test(command)) return { block: true, reason: "计划模式只允许只读命令" };
-    }
     const roots = task ? store.listTaskRepositories(task.id).map((repo) => resolvePath(repo.worktreePath ?? repo.localPath)) : [];
     const decision = evaluatePermission(event.toolName, input, roots, sandboxRouter.activeCwd(process.cwd()));
     if (decision.action === "allow") return undefined;
@@ -135,69 +141,6 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
     if (!allowed) return { block: true, reason: "用户拒绝执行" };
     if (task) store.addEvent({ taskId: task.id, kind: "permission", title: "已批准受保护命令", detail: command });
     return undefined;
-  });
-
-  pi.on("agent_end", async (event, ctx) => {
-    const task = selectedTask("");
-    if (!task || task.state !== "planning") return;
-    const last = [...event.messages].reverse().find((message: any) => message?.role === "assistant") as any;
-    const plan = last?.content?.filter((block: any) => block?.type === "text").map((block: any) => block.text).join("\n").trim();
-    if (!plan) return;
-    let planForApproval = plan;
-    if (/"outcome"\s*:\s*"already_satisfied"|无需(?:任何)?(?:代码)?修改|代码已满足|already satisfied|no (?:code )?changes? (?:are )?required/i.test(plan)) {
-      try {
-        const changedGroups = await Promise.all(store.listTaskRepositories(task.id).map(async (repo) => {
-          const files = await gitService.changedFiles(repo.worktreePath ?? repo.localPath, repo.baseBranch);
-          return files.map((file) => ({ repositoryName: repo.name, ...file }));
-        }));
-        const changedFiles = changedGroups.flat();
-        if (changedFiles.length === 0) {
-          taskWorkflow.completeWithoutChanges(task.id, plan);
-          if (toolsBeforePlanning) pi.setActiveTools(toolsBeforePlanning);
-          toolsBeforePlanning = undefined;
-          ctx.ui.notify("代码已满足任务要求，任务已自动完成", "info");
-          return;
-        }
-        planForApproval = [
-          "## 需要人工确认",
-          "",
-          `Agent 判断当前代码已满足任务要求，但系统检测到 ${changedFiles.length} 个文件变化，因此任务未自动完成。`,
-          "",
-          plan,
-          "",
-          "## 检测到的文件变化",
-          "",
-          ...changedFiles.map((file) => `- ${file.repositoryName}: ${file.path} (${file.status})`)
-        ].join("\n");
-        ctx.ui.notify("Agent 结论与文件变化不一致，请人工确认", "warning");
-      } catch (error) {
-        planForApproval = [
-          "## 需要人工确认",
-          "",
-          "Agent 判断当前代码已满足任务要求，但系统无法确认工作区是否存在文件变化，因此任务未自动完成。",
-          "",
-          plan
-        ].join("\n");
-        ctx.ui.notify(`无法确认文件状态：${error instanceof Error ? error.message : String(error)}`, "warning");
-      }
-    }
-    taskWorkflow.setPlan(task.id, planForApproval);
-    if (planForApproval !== plan) store.updateTask(task.id, { summary: "计划结论与文件状态不一致，等待确认" });
-    const choice = await ctx.ui.select("计划已生成", ["批准并开始", "补充意见并重新生成", "稍后确认"]);
-    if (choice === "批准并开始") {
-      const approval = store.addApproval({ taskId: task.id, kind: "plan", context: planForApproval });
-      store.resolveApproval(approval.id, "approved");
-      await taskWorkflow.approvePlan(task.id);
-      if (toolsBeforePlanning) pi.setActiveTools(toolsBeforePlanning);
-      toolsBeforePlanning = undefined;
-      pi.sendUserMessage(`按已批准计划实现任务：\n\n${planForApproval}`, { deliverAs: "followUp" });
-    } else if (choice === "补充意见并重新生成") {
-      const feedback = await ctx.ui.editor("计划调整意见", "");
-      if (feedback?.trim()) {
-        taskWorkflow.revisePlan(task.id);
-        pi.sendUserMessage(`根据以下意见重新生成完整计划，仍然禁止修改文件：\n\n${feedback.trim()}`, { deliverAs: "followUp" });
-      }
-    }
   });
 
   pi.registerCommand("tasks", {
@@ -248,10 +191,68 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
       catch (error) { store.releaseLease(task.id, owner); return ctx.ui.notify(`准备环境失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
       store.setSetting("activeTaskId", task.id);
       if (mode === "plan") {
-        toolsBeforePlanning = pi.getActiveTools();
-        pi.setActiveTools(toolsBeforePlanning.filter((name) => !["write", "edit", "apply_patch", "notebookedit"].includes(name.toLowerCase())));
-        pi.sendUserMessage(`只读分析任务，禁止修改文件或执行会改变工作区的命令。最终只输出 JSON：无需修改时输出 {"outcome":"already_satisfied","summary":"判断依据"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${task.title}\n\n${task.description}`, { deliverAs: "followUp" });
-        ctx.ui.notify("已进入计划模式", "info");
+        // plan 阶段:走子 agent 隔离,spawn 一个只读工具集的子 pi 进程跑 planner。
+        // 主 session 的 active tools / hook 完全不动,plan 结束后也不需要还原。
+        const planProvider = new PiAgentPlanModeProvider();
+        const primaryRepo = store.listTaskRepositories(task.id)[0]!;
+        const cwd = primaryRepo.worktreePath ?? primaryRepo.localPath;
+        ctx.ui.notify("正在生成计划…", "info");
+        let parsed;
+        try {
+          parsed = await planProvider.runPlan(
+            { task, feedback: undefined },
+            { cwd, hardTimeoutMs: 5 * 60_000 }
+          );
+        } catch (error) {
+          store.releaseLease(task.id, owner);
+          return ctx.ui.notify(`生成计划失败：${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+
+        let planForApproval: string;
+        if (parsed.outcome === "unparsed") {
+          store.releaseLease(task.id, owner);
+          return ctx.ui.notify("planner 输出无法解析为 plan", "error");
+        } else if (parsed.outcome === "already_satisfied") {
+          const changedGroups = await Promise.all(store.listTaskRepositories(task.id).map(async (repo) => {
+            const files = await gitService.changedFiles(repo.worktreePath ?? repo.localPath, repo.baseBranch);
+            return files.map((file) => ({ repositoryName: repo.name, ...file }));
+          }));
+          const changedFiles = changedGroups.flat();
+          if (changedFiles.length === 0) {
+            taskWorkflow.completeWithoutChanges(task.id, parsed.summary);
+            store.releaseLease(task.id, owner);
+            ctx.ui.notify("代码已满足任务要求，任务已自动完成", "info");
+            return;
+          }
+          planForApproval = [
+            "## 需要人工确认",
+            "",
+            `Agent 判断当前代码已满足任务要求，但系统检测到 ${changedFiles.length} 个文件变化，因此任务未自动完成。`,
+            "",
+            parsed.summary,
+            "",
+            "## 检测到的文件变化",
+            "",
+            ...changedFiles.map((file) => `- ${file.repositoryName}: ${file.path} (${file.status})`)
+          ].join("\n");
+          store.updateTask(task.id, { summary: "计划结论与文件状态不一致，等待确认" });
+        } else {
+          planForApproval = parsed.plan;
+        }
+        taskWorkflow.setPlan(task.id, planForApproval);
+        const choice = await ctx.ui.select("计划已生成", ["批准并开始", "补充意见并重新生成", "稍后确认"]);
+        if (choice === "批准并开始") {
+          const approval = store.addApproval({ taskId: task.id, kind: "plan", context: planForApproval });
+          store.resolveApproval(approval.id, "approved");
+          await taskWorkflow.approvePlan(task.id);
+          pi.sendUserMessage(`按已批准计划实现任务：\n\n${planForApproval}`, { deliverAs: "followUp" });
+        } else if (choice === "补充意见并重新生成") {
+          const feedback = await ctx.ui.editor("计划调整意见", "");
+          if (feedback?.trim()) {
+            taskWorkflow.revisePlan(task.id);
+            pi.sendUserMessage(`根据以下意见重新生成完整计划，仍然禁止修改文件：\n\n${feedback.trim()}`, { deliverAs: "followUp" });
+          }
+        }
       } else {
         pi.sendUserMessage(`开始实现任务：\n\n${task.title}\n\n${task.description}`, { deliverAs: "followUp" });
         ctx.ui.notify("worktree 与准备命令已完成，开始实现。", "info");
@@ -402,4 +403,25 @@ function gitlabProfileFromStore(): { baseUrl: string; tokenEnv?: string } | unde
   const raw = store.getSetting("gitlabProfile");
   if (!raw) return undefined;
   return JSON.parse(raw) as { baseUrl: string; tokenEnv?: string };
+}
+
+// === 子进程守卫 ==============================================================
+
+/**
+ * 三重身份校验:子进程守卫(防子进程重走 setup / 拦截器 / 命令注册)。
+ * - L5 env 标记:`CODING_AGENT_SUBAGENT === "1"`,由 spawn 注入
+ * - L6 ppid 检查:`process.ppid > 1` — ppid ≤ 1 表示被 init/reaper 收养
+ *   (独立启动 / 孤儿进程) ,不应被认可为合法子进程
+ * - L7 flag nonce 校验:从 `--subagent-nonce` 读出,必须与 env 中注入的
+ *   `CODING_AGENT_SUBAGENT_NONCE` 严格相等(防 env 手动 set 绕过)
+ *
+ * 只要其中任何一项不通过,就返回 false,extension 会按正常主会话逻辑走。
+ */
+export function isSubagentProcess(pi: ExtensionAPI): boolean {
+  if (process.env.CODING_AGENT_SUBAGENT !== "1") return false;
+  if (process.ppid <= 1) return false;
+  const expected = process.env.CODING_AGENT_SUBAGENT_NONCE;
+  if (!expected) return false;
+  const flagNonce = pi.getFlag("subagent-nonce");
+  return typeof flagNonce === "string" && flagNonce === expected;
 }

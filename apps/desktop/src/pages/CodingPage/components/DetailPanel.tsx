@@ -126,7 +126,7 @@ export function DetailPanel({
   const mergeRequestCount = detail?.repositories.filter((repo) => repo.mergeRequestUrl).length ?? 0;
   const canChat = ["implementing", "awaiting_input"].includes(task.state) || inReviewStates.has(task.state) || ["failed", "validation_failed"].includes(task.state) || running;
   const modelGroups: ChatModelGroup[] = qoder?.enabled && qoder.connected && qoder.models.length > 0
-    ? [{ provider: "qoder", displayName: "Qoder Agent SDK", models: qoder.models }]
+    ? [{ driverId: "qoder", displayName: "Qoder Agent SDK", models: qoder.models.map((model) => ({ value: `qoder:${model.value}`, displayName: model.displayName, isDefault: model.isDefault, isReasoning: model.isReasoning, isVl: model.isVl, priceFactor: model.priceFactor })) }]
     : [];
   const hasModelSelector = modelGroups.length > 0;
   const showUsage = hasModelSelector || running || Boolean(task.sessionUsage || card.sessionUsage);

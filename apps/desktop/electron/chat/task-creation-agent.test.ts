@@ -1,6 +1,7 @@
 import type { AtlassianClientFactory, McpClient } from "@coding-agent/integrations";
 import { describe, expect, it, vi } from "vitest";
 import { JiraTaskCreationAgent } from "./task-creation-agent.js";
+import { JiraTaskCreationBackend } from "./task-backends/jira.js";
 
 function setup(options: { configured?: boolean; tools?: unknown[]; result?: unknown } = {}) {
   const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
@@ -93,5 +94,104 @@ describe("JiraTaskCreationAgent", () => {
     const { agent } = setup({ configured: false });
     await expect(agent.getCreationSchema({ projectKey: "BSADAPT344" })).resolves.toMatchObject({ available: false });
     await expect(agent.createJiraIssue({ projectKey: "BSADAPT344", issueTypeName: "任务", summary: "x" })).rejects.toThrow("未配置 Jira MCP");
+  });
+});
+
+/**
+ * JiraTaskCreationBackend 是 driver 视角的入口。`toToolSource()` 把后端能力以 driver-agnostic
+ * 形态暴露给 chat driver（Qoder / OpenAI）,driver 自行翻译成自己的 SDK 协议。
+ *
+ * 这些断言确保 4 个工具声明完整、Confluence 工具条件性出现、describeResult 能从 agent 输出
+ * 识别出"任务已创建"事件。
+ */
+describe("JiraTaskCreationBackend.toToolSource()", () => {
+  function backendWith(overrides: { configured?: boolean; withConfluence?: boolean } = {}) {
+    const factory = {
+      isConfigured: vi.fn((kind: string) => {
+        if (kind === "jira") return overrides.configured !== false;
+        if (kind === "confluence") return !!overrides.withConfluence;
+        return false;
+      }),
+      create: vi.fn(() => ({
+        listTools: vi.fn(async () => [{
+          name: "jira_create_issue",
+          inputSchema: { type: "object", properties: { project_key: {}, summary: {}, issue_type: {} } }
+        }]),
+        callTool: vi.fn(async () => ({ content: [{ type: "text", text: JSON.stringify({ issueKey: "BSADAPT344-7" }) }] })),
+        close: vi.fn()
+      }))
+    } as unknown as AtlassianClientFactory;
+    return new JiraTaskCreationBackend(factory);
+  }
+
+  it("exposes the 2 core Jira tools when Confluence is not configured", () => {
+    const backend = backendWith();
+    const source = backend.toToolSource();
+    const tools = source.tools();
+    const names = tools.map((t) => t.name);
+    expect(names).toContain("get_jira_creation_schema");
+    expect(names).toContain("create_jira_issue");
+    expect(names).not.toContain("search_confluence");
+    expect(names).not.toContain("get_confluence_page");
+  });
+
+  it("exposes the 4 tools including Confluence when Confluence is configured", () => {
+    // 直接用 backendWith({ withConfluence: true }),driver 走 toToolSource().tools() 时会包出 4 个
+    const backend = backendWith({ withConfluence: true });
+    const names = backend.toToolSource().tools().map((t) => t.name);
+    expect(names).toContain("get_jira_creation_schema");
+    expect(names).toContain("create_jira_issue");
+    expect(names).toContain("search_confluence");
+    expect(names).toContain("get_confluence_page");
+  });
+
+  it("tools carry a zod schema and annotations", () => {
+    const backend = backendWith();
+    const tools = backend.toToolSource().tools();
+    const create = tools.find((t) => t.name === "create_jira_issue");
+    expect(create).toBeDefined();
+    // schema 是单层 zod record
+    expect(create!.schema).toBeDefined();
+    expect(typeof create!.schema.projectKey).toBe("object");
+    expect(create!.annotations?.destructiveHint).toBe(true);
+  });
+
+  it("describeResult identifies a created task from the agent's return shape", () => {
+    const backend = backendWith();
+    const source = backend.toToolSource();
+    const created = source.describeResult({
+      taskKey: "BSADAPT344-42",
+      summary: "demo",
+      projectKey: "BSADAPT344",
+      issueType: "任务"
+    });
+    expect(created).toEqual({
+      backend: "jira",
+      externalKey: "BSADAPT344-42",
+      summary: "demo",
+      projectKey: "BSADAPT344",
+      issueType: "任务"
+    });
+  });
+
+  it("describeResult walks MCP-style { content: [{ type: 'text', text: '...' }] } envelope", () => {
+    const backend = backendWith();
+    const created = backend.toToolSource().describeResult({
+      content: [{ type: "text", text: JSON.stringify({ taskKey: "BSADAPT344-99", summary: "from mcp", projectKey: "BSADAPT344", issueType: "任务" }) }]
+    });
+    expect(created?.externalKey).toBe("BSADAPT344-99");
+  });
+
+  it("describeResult returns undefined for non-task outputs", () => {
+    const backend = backendWith();
+    expect(backend.toToolSource().describeResult({ unrelated: "value" })).toBeUndefined();
+    expect(backend.toToolSource().describeResult(null)).toBeUndefined();
+  });
+
+  it("configured flag reflects Jira availability", () => {
+    const on = backendWith();
+    const off = backendWith({ configured: false });
+    expect(on.configured).toBe(true);
+    expect(off.configured).toBe(false);
   });
 });

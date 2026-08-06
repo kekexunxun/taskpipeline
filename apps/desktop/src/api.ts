@@ -1,5 +1,4 @@
 import type { AgentEvent, Approval, Memory, MemoryScope, MemorySearchHit, RepositoryProfile, RepoWikiDoc, RepoWikiSearchHit, Task, TaskCard, TaskRepository, TaskStartMode } from "@coding-agent/core";
-import type { UIMessage, UIMessageChunk } from "ai";
 
 export type ChangedFile = { repositoryId: string; repositoryName: string; path: string; status: string };
 export type TaskDetail = { task?: Task; repositories: TaskRepository[]; events: AgentEvent[]; approvals: Approval[]; changedFiles: ChangedFile[] };
@@ -29,11 +28,44 @@ export type TaskBackendInfo = { id: TaskBackendId; displayName: string; configur
 
 // === Chat API surface ===
 
+/** Chat driver 标识,跨主进程 / IPC / 前端保持一致。 */
+export type ChatDriverId = "qoder" | "openai";
+
+/** Driver 推给上层的"消息片"统一外壳。 */
+export type DriverPart =
+  | { driverId: "qoder"; type: "qoder.session"; sessionId: string }
+  | { driverId: "qoder"; type: "qoder.thinking"; text: string; signature?: string }
+  | { driverId: "qoder"; type: "qoder.tool-use"; toolCallId: string; name: string; input: unknown }
+  | { driverId: "qoder"; type: "qoder.tool-result"; toolCallId: string; output: unknown; isError?: boolean }
+  | { driverId: "openai"; type: "openai.tool-call"; toolCallId: string; name: string; input: unknown }
+  | { driverId: "openai"; type: "openai.tool-result"; toolCallId: string; output: unknown }
+  | { driverId: ChatDriverId; type: "text"; text: string };
+
+/** 持久化形态: driver 自己的 raw + 共用元数据。 */
+export type StoredMessageRecord = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  createdAt: string;
+  driverId: ChatDriverId;
+  /** driver 自己的序列化形态,任意 JSON。 */
+  raw: unknown;
+};
+
+/** 运行时消息: 在 `StoredMessageRecord` 基础上多一份 `parts` 供 UI 渲染。 */
+export type StoredMessage = StoredMessageRecord & {
+  parts: DriverPart[];
+};
+
+/** 前端别名 —— 历史 / UI 一律用 `ChatMessage`。 */
+export type ChatMessage = StoredMessage & {
+  /** UI 渲染用,主进程 chat service 在 start/task-created/done 事件里拼装,不持久化。 */
+  metadata?: ChatMessageMetadata;
+};
+
 export type ChatMessageStatus = "done" | "error" | "aborted";
 export type ChatAgentMode = "chat" | "task-create";
 export type ChatTaskCreationResult = { backend: "jira" | "github" | "linear"; externalKey: string; summary: string; projectKey: string; issueType: string };
 export type ChatMessageMetadata = { createdAt: string; model?: string; status?: ChatMessageStatus; agentMode?: ChatAgentMode; taskCreation?: ChatTaskCreationResult };
-export type ChatMessage = UIMessage<ChatMessageMetadata>;
 
 export type ChatConversationMeta = {
   id: string;
@@ -41,11 +73,11 @@ export type ChatConversationMeta = {
   createdAt: string;
   updatedAt: string;
   model?: string;
-  provider?: "qoder" | "openai";
+  driverId?: ChatDriverId;
   messageCount: number;
 };
 
-export type ChatConversation = ChatConversationMeta & { messages: ChatMessage[] };
+export type ChatConversation = ChatConversationMeta & { messages: StoredMessageRecord[] };
 
 export type ChatModelInfo = {
   value: string;
@@ -57,14 +89,32 @@ export type ChatModelInfo = {
 };
 
 export type ChatModelGroup = {
-  provider: "qoder" | "openai";
+  driverId: ChatDriverId;
   displayName: string;
   models: ChatModelInfo[];
 };
 
-export type StartChatStreamInput = { streamId: string; chatId: string; model: string; message: ChatMessage; mode?: ChatAgentMode };
+export type StartChatStreamInput = {
+  streamId: string;
+  chatId: string;
+  driverId: ChatDriverId;
+  model: string;
+  /** 用户当前输入(未持久化),ChatService 会按 driverId 调 `driver.serializeUserMessage` 包成 record。 */
+  message: { id: string; text: string; createdAt: string };
+  mode?: ChatAgentMode;
+};
 export type AbortChatStreamInput = { streamId: string; chatId: string };
-export type ChatStreamEvent = { streamId: string; chatId: string; chunk?: UIMessageChunk; error?: string; done?: boolean };
+
+/** driver 流式过程事件(主进程 → 前端,跨 driver 透传)。 */
+export type ChatStreamChunk =
+  | { type: "start"; messageId: string; messageMetadata?: ChatMessageMetadata }
+  | { type: "part"; part: DriverPart }
+  | { type: "model"; model: string }
+  | { type: "task-created"; result: ChatTaskCreationResult }
+  | { type: "error"; message: string }
+  | { type: "done"; status: ChatMessageStatus };
+
+export type ChatStreamEvent = { streamId: string; chatId: string; driverId: ChatDriverId; chunk?: ChatStreamChunk; error?: string; done?: boolean };
 
 // === Memory API surface ===
 
@@ -97,8 +147,8 @@ export type AgentApi = {
   searchRepoWiki(repositoryId: string, query: string): Promise<RepoWikiSearchHit[]>;
   // chat
   listChats(): Promise<ChatConversationMeta[]>;
-  getChat(id: string): Promise<ChatConversation | undefined>;
-  createChat(model?: string): Promise<ChatConversation>;
+  getChat(id: string): Promise<{ conversation: ChatConversation; messages: ChatMessage[] } | undefined>;
+  createChat(input?: { driverId?: ChatDriverId; model?: string }): Promise<ChatConversation>;
   deleteChat(id: string): Promise<void>;
   listChatModels(): Promise<ChatModelGroup[]>;
   startChatStream(input: StartChatStreamInput): Promise<void>;
@@ -155,7 +205,7 @@ const memoryListeners = new Set<(event: ChatStreamEvent) => void>();
 const memoryStreamTimers = new Map<string, number>();
 const defaultModelGroups: ChatModelGroup[] = [
   {
-    provider: "qoder",
+    driverId: "qoder",
     displayName: "Qoder Agent SDK",
     models: [
       { value: "qoder:claude-sonnet-4.5", displayName: "Claude Sonnet 4.5", isDefault: true, isReasoning: false, isVl: true, priceFactor: 1 },
@@ -167,7 +217,17 @@ const defaultModelGroups: ChatModelGroup[] = [
 function nowIso() { return new Date().toISOString(); }
 function makeId() { return crypto.randomUUID(); }
 function defaultTitle(text: string) { return text.slice(0, 32).replace(/\s+/g, " ").trim() || "新对话"; }
-function messageText(message: ChatMessage) { return message.parts.filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text").map((part) => part.text).join(""); }
+/** 从记录中提取 user 输入文本(供 mock / 标题生成等不需要 parts 的场景使用)。 */
+function messageText(record: { raw: unknown; role: string; parts?: DriverPart[] }): string {
+  const textParts = record.parts?.filter((p): p is Extract<DriverPart, { type: "text" }> => p.type === "text") ?? [];
+  if (textParts.length) return textParts.map((p) => p.text).join("");
+  // 兼容 mock 中可能尚未填充 parts 的 record
+  if (record.raw && typeof record.raw === "object") {
+    const raw = record.raw as { kind?: string; text?: string };
+    if (typeof raw.text === "string") return raw.text;
+  }
+  return "";
+}
 
 export const api: AgentApi = window.agentApi ?? {
   async listTasks() { return demoTasks; },
@@ -199,42 +259,88 @@ export const api: AgentApi = window.agentApi ?? {
 
   // Chat mock
   async listChats() { return [...memoryChats.values()].map(({ messages, ...meta }) => meta).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)); },
-  async getChat(id) { return memoryChats.get(id); },
-  async createChat(model) {
+  async getChat(id) {
+    const conversation = memoryChats.get(id);
+    if (!conversation) return undefined;
+    const messages: ChatMessage[] = conversation.messages.map((record) => ({ ...record, parts: [{ driverId: record.driverId, type: "text", text: messageText(record) }] }));
+    return { conversation, messages };
+  },
+  async createChat(input) {
     const existing = [...memoryChats.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).find((item) => item.messages.length === 0);
     if (existing) return existing;
     const id = makeId();
-    const conv: ChatConversation = { id, title: "新对话", createdAt: nowIso(), updatedAt: nowIso(), messageCount: 0, model, messages: [] };
+    const conv: ChatConversation = {
+      id,
+      title: "新对话",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      messageCount: 0,
+      model: input?.model,
+      driverId: input?.driverId,
+      messages: []
+    };
     memoryChats.set(id, conv);
     return conv;
   },
   async deleteChat(id) { memoryChats.delete(id); },
   async listChatModels() { return defaultModelGroups; },
-  async startChatStream({ streamId, chatId, model, message, mode }) {
-    const conv = memoryChats.get(chatId); if (!conv) throw new Error("Chat not found");
+  async startChatStream({ streamId, chatId, driverId, model, message, mode }) {
+    const conv = memoryChats.get(chatId);
+    if (!conv) throw new Error("Chat not found");
     const createdAt = nowIso();
-    const userMessage: ChatMessage = { ...message, metadata: { createdAt, status: "done" } };
+    const userMessage: StoredMessageRecord = {
+      id: message.id,
+      role: "user",
+      createdAt,
+      driverId,
+      raw: { kind: "user", text: message.text }
+    };
     conv.messages = [...conv.messages.filter((item) => item.id !== message.id), userMessage];
-    if (conv.messages.filter((item) => item.role === "user").length === 1) conv.title = defaultTitle(messageText(message));
-    conv.model = model; conv.messageCount = conv.messages.length; conv.updatedAt = createdAt;
-    const assistantId = makeId(); const textId = `text-${assistantId}`;
-    const demoCreation = mode === "task-create" ? { backend: "jira" as const, externalKey: "BSADAPT344-36525", summary: messageText(message).slice(0, 32), projectKey: "BSADAPT344", issueType: "任务" } : undefined;
-    const reply = demoCreation ? `已创建 Jira 任务 ${demoCreation.externalKey}。是否需要立即执行？` : `（演示模式）收到：${messageText(message).slice(0, 80)}`;
-    const emit = (chunk?: UIMessageChunk, done?: boolean) => memoryListeners.forEach((callback) => callback({ streamId, chatId, chunk, done }));
-    emit({ type: "start", messageId: assistantId, messageMetadata: { createdAt, model: "demo" } }); emit({ type: "text-start", id: textId });
+    if (conv.messages.filter((item) => item.role === "user").length === 1) conv.title = defaultTitle(messageText(userMessage));
+    conv.model = model;
+    if (!conv.driverId) conv.driverId = driverId;
+    conv.messageCount = conv.messages.length;
+    conv.updatedAt = createdAt;
+    const assistantId = makeId();
+    const demoCreation = mode === "task-create" ? { backend: "jira" as const, externalKey: "BSADAPT344-36525", summary: messageText(userMessage).slice(0, 32), projectKey: "BSADAPT344", issueType: "任务" } : undefined;
+    const reply = demoCreation ? `已创建 Jira 任务 ${demoCreation.externalKey}。是否需要立即执行？` : `（演示模式）收到：${messageText(userMessage).slice(0, 80)}`;
+    const emit = (chunk?: ChatStreamChunk, done?: boolean) => memoryListeners.forEach((callback) => callback({ streamId, chatId, driverId, chunk, done }));
+    emit({ type: "start", messageId: assistantId, messageMetadata: { createdAt, model: "demo" } });
+    const metadata: ChatMessageMetadata = { createdAt, model: "demo", status: "done", agentMode: mode ?? "chat", ...(demoCreation ? { taskCreation: demoCreation } : {}) };
+    const assistantRecord: StoredMessageRecord = {
+      id: assistantId,
+      role: "assistant",
+      createdAt,
+      driverId,
+      raw: { kind: "assistant", parts: [{ driverId, type: "text", text: reply }], ...(demoCreation ? { taskCreation: demoCreation } : {}) }
+    };
+    const parts: DriverPart[] = [{ driverId, type: "text", text: "" }];
     let index = 0;
     const timer = window.setInterval(() => {
-      const delta = reply.slice(index, index + 4); index += delta.length;
-      if (delta) emit({ type: "text-delta", id: textId, delta });
+      const delta = reply.slice(index, index + 4);
+      index += delta.length;
+      const textPart = parts[0];
+      if (textPart && textPart.type === "text") textPart.text = reply.slice(0, index);
+      if (delta) emit({ type: "part", part: { driverId, type: "text", text: reply.slice(0, index) } });
       if (index >= reply.length) {
-        window.clearInterval(timer); memoryStreamTimers.delete(streamId);
-        const metadata: ChatMessageMetadata = { createdAt, model: "demo", status: "done", agentMode: mode ?? "chat", ...(demoCreation ? { taskCreation: demoCreation } : {}) };
-        emit({ type: "text-end", id: textId }); emit({ type: "finish", finishReason: "stop", messageMetadata: metadata }); emit(undefined, true);
-        conv.messages.push({ id: assistantId, role: "assistant", metadata, parts: [{ type: "text", text: reply, state: "done" }] }); conv.messageCount = conv.messages.length; conv.updatedAt = nowIso();
+        window.clearInterval(timer);
+        memoryStreamTimers.delete(streamId);
+        if (demoCreation) emit({ type: "task-created", result: demoCreation });
+        emit({ type: "done", status: "done" });
+        emit(undefined, true);
+        conv.messages.push(assistantRecord);
+        conv.messageCount = conv.messages.length;
+        conv.updatedAt = nowIso();
       }
     }, 45);
     memoryStreamTimers.set(streamId, timer);
   },
-  async abortChat({ streamId, chatId }) { const timer = memoryStreamTimers.get(streamId); if (timer !== undefined) window.clearInterval(timer); memoryStreamTimers.delete(streamId); memoryListeners.forEach((callback) => callback({ streamId, chatId, chunk: { type: "abort", reason: "用户已停止生成" }, done: true })); },
-  onChatStreamEvent(callback) { memoryListeners.add(callback); return () => memoryListeners.delete(callback); }
+  async abortChat({ streamId, chatId }) {
+    const timer = memoryStreamTimers.get(streamId);
+    if (timer !== undefined) window.clearInterval(timer);
+    memoryStreamTimers.delete(streamId);
+    const driverId = memoryChats.get(chatId)?.driverId ?? "qoder";
+    memoryListeners.forEach((callback) => callback({ streamId, chatId, driverId, chunk: { type: "done", status: "aborted" }, done: true }));
+  },
+  onChatStreamEvent(callback) { memoryListeners.add(callback); return () => { memoryListeners.delete(callback); }; }
 };

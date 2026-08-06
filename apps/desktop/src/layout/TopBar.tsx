@@ -9,7 +9,7 @@ export function TopBar({ onOpenSettings }: { onOpenSettings(): void }) {
         <span className="grid size-6 place-items-center rounded-md border border-border bg-muted text-foreground">
           <Code2Icon size={13} />
         </span>
-        <strong className="font-semibold">Forge Agent</strong>
+        <strong className="font-semibold">CodeArc</strong>
       </div>
       <div className="window-no-drag">
         <Tooltip>

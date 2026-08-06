@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { streamChat } from "../chat/chat-llm.js";
-import type { ResolvedChatModel } from "../chat/chat-models.js";
-import type { ChatMessage } from "../chat/chat-types.js";
+import type { ChatDriver } from "../chat/drivers/chat-driver.js";
+import type { ChatDriverId, StoredMessage, StoredMessageRecord } from "../chat/chat-types.js";
 
 export type ExtractedMemoryDraft = { scope: "user" | "repo" | "conversation"; title: string; content: string; tags: string[] };
 
@@ -11,25 +10,33 @@ function extractionPrompt(allowedScopes: ExtractedMemoryDraft["scope"][]): strin
   return [
     "你是记忆整理助手。请从下面的记录中提炼出值得长期保存的记忆。",
     "",
-    "只保留满足任一条件的条目：",
+    "只保留满足任一条件的条目:",
     "- 用户明确的偏好、习惯、常用命令、工作方式或沟通风格",
     "- 项目中值得沉淀的工程约定、架构决策、关键路径、踩坑经验",
     "- 本次对话/任务中达成的明确结论、关键决定或后续待办",
-    "忽略：寒暄、过程性对话、一次性操作、与项目无关的内容。数量宁少勿多，避免重复。",
+    "忽略:寒暄、过程性对话、一次性操作、与项目无关的内容。数量宁少勿多,避免重复。",
     "",
-    `允许的作用域(scope)只能是：${allowedScopes.map((scope) => `"${scope}"`).join("、")}`,
-    allowedScopes.includes("repo") ? "- \"repo\"：工程约定、项目信息、任务总结等值得沉淀到仓库的内容" : "",
-    allowedScopes.includes("user") ? "- \"user\"：用户偏好、习惯、工作方式" : "",
-    allowedScopes.includes("conversation") ? "- \"conversation\"：本次对话的临时结论或待办" : "",
+    `允许的作用域(scope)只能是:${allowedScopes.map((scope) => `"${scope}"`).join("、")}`,
+    allowedScopes.includes("repo") ? "- \"repo\":工程约定、项目信息、任务总结等值得沉淀到仓库的内容" : "",
+    allowedScopes.includes("user") ? "- \"user\":用户偏好、习惯、工作方式" : "",
+    allowedScopes.includes("conversation") ? "- \"conversation\":本次对话的临时结论或待办" : "",
     "",
-    "只输出一个 JSON 对象，不要输出任何其他内容或 Markdown 代码块：",
+    "只输出一个 JSON 对象,不要输出任何其他内容或 Markdown 代码块:",
     '{"memories":[{"scope":"user","title":"简短标题(不超过20字)","content":"一句话到三句话的完整描述","tags":["标签"]}]}'
   ].filter(Boolean).join("\n");
 }
 
+/**
+ * 跑一次 chat driver 让 LLM 总结记忆。
+ *
+ * 设计:memory extraction 是一次性"非流式"任务,所以用 driver 自带的 streamChat 收集
+ * 全部 text part 后退出。driver 的流式事件只关心 `text` / `error` 两种,其它 (thinking /
+ * tool-use / tool-result) 不参与这里,只让 text 拼起来。
+ */
 export async function extractMemories(input: {
-  model: ResolvedChatModel;
-  qoderToken?: string;
+  driver: ChatDriver;
+  driverId: ChatDriverId;
+  model: string;
   text: string;
   context: "chat" | "task";
   allowedScopes: ExtractedMemoryDraft["scope"][];
@@ -38,15 +45,23 @@ export async function extractMemories(input: {
   const abort = new AbortController();
   const forwardAbort = () => abort.abort();
   input.signal?.addEventListener("abort", forwardAbort, { once: true });
-  const messages: ChatMessage[] = [{
-    id: randomUUID(),
-    role: "user",
-    parts: [{ type: "text", text: [extractionPrompt(input.allowedScopes), "", "待整理的记录(已截断):", input.text.slice(0, MAX_TRANSCRIPT_CHARS)].join("\n\n") }]
-  }];
+  const userText = [extractionPrompt(input.allowedScopes), "", "待整理的记录(已截断):", input.text.slice(0, MAX_TRANSCRIPT_CHARS)].join("\n\n");
+  const userRecord = input.driver.serializeUserMessage({ id: randomUUID(), text: userText, createdAt: new Date().toISOString() });
+  const history: StoredMessage[] = [input.driver.deserializeMessage(userRecord)];
   let result = "";
   try {
-    for await (const event of streamChat({ model: input.model, qoderToken: input.qoderToken, messages, signal: abort.signal })) {
-      if (event.type === "delta") result += event.delta;
+    for await (const chunk of input.driver.streamChat({
+      conversationId: `memory-extract-${input.context}`,
+      model: input.model,
+      history,
+      userInput: { id: userRecord.id, text: userText, createdAt: userRecord.createdAt },
+      signal: abort.signal
+    })) {
+      if (chunk.type === "part" && chunk.part.type === "text") {
+        result += chunk.part.text;
+      } else if (chunk.type === "error") {
+        console.warn("[memory] extract llm error:", chunk.message);
+      }
     }
   } catch (error) {
     console.warn("[memory] extract llm failed:", error);

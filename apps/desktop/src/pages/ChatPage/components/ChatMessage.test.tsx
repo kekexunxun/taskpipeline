@@ -9,12 +9,15 @@ describe("ChatMessageView task creation action", () => {
     const message: ChatMessage = {
       id: "assistant-1",
       role: "assistant",
+      driverId: "qoder",
+      createdAt: new Date().toISOString(),
+      raw: { kind: "assistant", parts: [] },
       metadata: {
         createdAt: new Date().toISOString(),
         status: "done",
         taskCreation: { backend: "jira", externalKey: "BSADAPT344-42", summary: "Agent", projectKey: "BSADAPT344", issueType: "任务" }
       },
-      parts: [{ type: "text", text: "回复中没有 Jira Key" }]
+      parts: [{ driverId: "qoder", type: "text", text: "回复中没有 Jira Key" }]
     };
     render(<ChatMessageView message={message} onExecuteJira={onExecuteJira} />);
     fireEvent.click(screen.getByRole("button", { name: "立即执行" }));
@@ -26,12 +29,15 @@ describe("ChatMessageView task creation action", () => {
     const message: ChatMessage = {
       id: "assistant-legacy",
       role: "assistant",
+      driverId: "qoder",
+      createdAt: new Date().toISOString(),
+      raw: { kind: "assistant", parts: [] },
       metadata: {
         createdAt: new Date().toISOString(),
         status: "done",
         taskCreation: { backend: "jira", externalKey: "LEGACY-7", summary: "Legacy", projectKey: "LEGACY", issueType: "任务" }
       },
-      parts: [{ type: "text", text: "历史消息" }]
+      parts: [{ driverId: "qoder", type: "text", text: "历史消息" }]
     };
     render(<ChatMessageView message={message} onExecuteJira={onExecuteJira} />);
     fireEvent.click(screen.getByRole("button", { name: "立即执行" }));

@@ -3,49 +3,112 @@ import { api, type ChatStreamEvent } from "@/api";
 import { ElectronChatTransport } from "./chat-transport";
 
 const original = { start: api.startChatStream, abort: api.abortChat, listen: api.onChatStreamEvent };
-afterEach(() => { api.startChatStream = original.start; api.abortChat = original.abort; api.onChatStreamEvent = original.listen; vi.restoreAllMocks(); });
+afterEach(() => {
+  api.startChatStream = original.start;
+  api.abortChat = original.abort;
+  api.onChatStreamEvent = original.listen;
+  vi.restoreAllMocks();
+});
 
 describe("ElectronChatTransport", () => {
   it("subscribes before starting, filters foreign events, and closes on done", async () => {
-    const order: string[] = []; let listener: ((event: ChatStreamEvent) => void) | undefined;
-    api.onChatStreamEvent = (callback) => { order.push("subscribe"); listener = callback; return () => order.push("unsubscribe"); };
-    api.startChatStream = vi.fn(async (input) => { order.push("start"); listener?.({ streamId: "foreign", chatId: input.chatId, chunk: { type: "text-delta", id: "text", delta: "bad" } }); listener?.({ streamId: input.streamId, chatId: input.chatId, chunk: { type: "text-delta", id: "text", delta: "ok" } }); listener?.({ streamId: input.streamId, chatId: input.chatId, done: true }); });
-    const stream = await new ElectronChatTransport().sendMessages({ trigger: "submit-message", chatId: "chat-a", messageId: undefined, messages: [{ id: "u1", role: "user", parts: [{ type: "text", text: "hello" }] }], body: { model: "qoder:test" }, abortSignal: undefined });
-    const reader = stream.getReader(); expect(await reader.read()).toMatchObject({ value: { type: "text-delta", delta: "ok" } }); expect((await reader.read()).done).toBe(true); expect(order).toEqual(["subscribe", "start", "unsubscribe"]);
+    const order: string[] = [];
+    let listener: ((event: ChatStreamEvent) => void) | undefined;
+    api.onChatStreamEvent = (callback) => {
+      order.push("subscribe");
+      listener = callback;
+      return () => order.push("unsubscribe");
+    };
+    api.startChatStream = vi.fn(async (input) => {
+      order.push("start");
+      listener?.({ streamId: "foreign", chatId: input.chatId, driverId: input.driverId, chunk: { type: "part", part: { driverId: "qoder", type: "text", text: "bad" } } });
+      listener?.({ streamId: input.streamId, chatId: input.chatId, driverId: input.driverId, chunk: { type: "part", part: { driverId: "qoder", type: "text", text: "ok" } } });
+      listener?.({ streamId: input.streamId, chatId: input.chatId, driverId: input.driverId, done: true });
+    });
+    const events: ChatStreamEvent[] = [];
+    const session = new ElectronChatTransport().start({
+      streamId: "stream-1",
+      chatId: "chat-a",
+      driverId: "qoder",
+      model: "qoder:test",
+      message: { id: "u1", text: "hello", createdAt: new Date().toISOString() },
+      onEvent: (event) => events.push(event)
+    });
+    await session.closed;
+    expect(order).toEqual(["subscribe", "start", "unsubscribe"]);
+    // 第一个 part (foreign streamId) 被过滤,只剩 "ok" part + done
+    expect(events.map((e) => e.chunk?.type)).toEqual(["part", undefined]);
+    // 确认留下来的是 "ok" 文本
+    const okEvent = events[0];
+    expect(okEvent?.chunk?.type).toBe("part");
+    if (okEvent?.chunk?.type === "part" && okEvent.chunk.part.type === "text") {
+      expect(okEvent.chunk.part.text).toBe("ok");
+    }
   });
 
-  it("aborts the matching stream when the signal is cancelled", async () => {
-    let listener: ((event: ChatStreamEvent) => void) | undefined; api.onChatStreamEvent = (callback) => { listener = callback; return () => undefined; }; api.startChatStream = vi.fn(async () => undefined); api.abortChat = vi.fn(async () => undefined);
-    const abort = new AbortController(); const stream = await new ElectronChatTransport().sendMessages({ trigger: "submit-message", chatId: "chat-a", messageId: undefined, messages: [{ id: "u1", role: "user", parts: [{ type: "text", text: "hello" }] }], body: { model: "qoder:test" }, abortSignal: abort.signal });
-    abort.abort(); expect((await stream.getReader().read()).done).toBe(true); expect(api.abortChat).toHaveBeenCalledWith(expect.objectContaining({ chatId: "chat-a" })); expect(listener).toBeDefined();
-  });
-
-  it("unsubscribes immediately when the consumer cancels the stream", async () => {
-    const unsubscribe = vi.fn();
-    api.onChatStreamEvent = () => unsubscribe;
+  it("aborts the matching stream when session.abort is called", async () => {
+    let listener: ((event: ChatStreamEvent) => void) | undefined;
+    api.onChatStreamEvent = (callback) => {
+      listener = callback;
+      return () => undefined;
+    };
     api.startChatStream = vi.fn(async () => undefined);
     api.abortChat = vi.fn(async () => undefined);
-    const stream = await new ElectronChatTransport().sendMessages({ trigger: "submit-message", chatId: "chat-a", messageId: undefined, messages: [{ id: "u1", role: "user", parts: [{ type: "text", text: "hello" }] }], body: { model: "qoder:test" }, abortSignal: undefined });
-    await stream.cancel();
-    expect(unsubscribe).toHaveBeenCalledOnce();
+    const session = new ElectronChatTransport().start({
+      streamId: "stream-2",
+      chatId: "chat-a",
+      driverId: "qoder",
+      model: "qoder:test",
+      message: { id: "u1", text: "hello", createdAt: new Date().toISOString() },
+      onEvent: () => undefined
+    });
+    session.abort();
     expect(api.abortChat).toHaveBeenCalledWith(expect.objectContaining({ chatId: "chat-a" }));
+    // 主动 abort 后没有 done 事件,关闭通过我们手动 close
+    void listener;
   });
 
   it("forwards task creation mode to the Electron agent", async () => {
     let listener: ((event: ChatStreamEvent) => void) | undefined;
-    api.onChatStreamEvent = (callback) => { listener = callback; return () => undefined; };
-    api.startChatStream = vi.fn(async (input) => { listener?.({ streamId: input.streamId, chatId: input.chatId, done: true }); });
-    const stream = await new ElectronChatTransport().sendMessages({ trigger: "submit-message", chatId: "chat-a", messageId: undefined, messages: [{ id: "u1", role: "user", parts: [{ type: "text", text: "create" }] }], body: { model: "qoder:test", mode: "task-create" }, abortSignal: undefined });
-    await stream.getReader().read();
+    api.onChatStreamEvent = (callback) => {
+      listener = callback;
+      return () => undefined;
+    };
+    api.startChatStream = vi.fn(async (input) => {
+      listener?.({ streamId: input.streamId, chatId: input.chatId, driverId: input.driverId, done: true });
+    });
+    const session = new ElectronChatTransport().start({
+      streamId: "stream-3",
+      chatId: "chat-a",
+      driverId: "qoder",
+      model: "qoder:test",
+      message: { id: "u1", text: "create", createdAt: new Date().toISOString() },
+      mode: "task-create",
+      onEvent: () => undefined
+    });
+    await session.closed;
     expect(api.startChatStream).toHaveBeenCalledWith(expect.objectContaining({ mode: "task-create" }));
   });
 
-  it("uses the newly created conversation id supplied in the request body", async () => {
+  it("surfaces stream errors via onError callback", async () => {
     let listener: ((event: ChatStreamEvent) => void) | undefined;
-    api.onChatStreamEvent = (callback) => { listener = callback; return () => undefined; };
-    api.startChatStream = vi.fn(async (input) => { listener?.({ streamId: input.streamId, chatId: input.chatId, done: true }); });
-    const stream = await new ElectronChatTransport().sendMessages({ trigger: "submit-message", chatId: "no-active-chat", messageId: undefined, messages: [{ id: "u1", role: "user", parts: [{ type: "text", text: "hello" }] }], body: { model: "qoder:test", chatId: "created-chat" }, abortSignal: undefined });
-    await stream.getReader().read();
-    expect(api.startChatStream).toHaveBeenCalledWith(expect.objectContaining({ chatId: "created-chat" }));
+    api.onChatStreamEvent = (callback) => {
+      listener = callback;
+      return () => undefined;
+    };
+    api.startChatStream = vi.fn(async () => undefined);
+    const errors: Error[] = [];
+    const session = new ElectronChatTransport().start({
+      streamId: "stream-err",
+      chatId: "chat-a",
+      driverId: "qoder",
+      model: "qoder:test",
+      message: { id: "u1", text: "hi", createdAt: new Date().toISOString() },
+      onEvent: () => undefined,
+      onError: (e) => errors.push(e)
+    });
+    listener?.({ streamId: "stream-err", chatId: "chat-a", driverId: "qoder", error: "boom" });
+    await session.closed;
+    expect(errors.map((e) => e.message)).toEqual(["boom"]);
   });
 });
