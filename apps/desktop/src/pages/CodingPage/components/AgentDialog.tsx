@@ -110,6 +110,9 @@ export function AgentDialog({
         repositoryIds: draft.repositoryIds,
         wikiIncludePaths: draft.wikiIncludePaths?.length ? draft.wikiIncludePaths : undefined,
         enabled: draft.enabled,
+        // 保留 builtin 标记：编辑系统角色时必须回写，否则下次 list() 反序列化后
+        // builtin 会变成 undefined，丢失「内置」语义（任务级下拉就过滤不掉了）。
+        builtin: builtin ? true : initial?.builtin,
         createdAt: initial?.createdAt ?? new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };

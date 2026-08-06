@@ -203,7 +203,9 @@ function TaskAgentOverrideField({
   onChange(next: string | undefined): void;
 }) {
   const choice = value === undefined ? "follow" : value === AGENT_TASK_DISABLED ? "disabled" : "custom";
-  const selected = agents.find((agent) => agent.id === value);
+  // 任务级指定：只允许选用户自建/自定义 Agent；系统 builtin Agent 由仓库白名单自动解析，不开放覆盖。
+  const selectableAgents = agents.filter((agent) => !agent.builtin);
+  const selected = selectableAgents.find((agent) => agent.id === value);
   return (
     <Field label={<span className="text-xs font-medium">执行 Agent</span>}>
       <div className="space-y-1.5">
@@ -224,8 +226,8 @@ function TaskAgentOverrideField({
               variant={choice === "custom" ? "default" : "ghost"}
               size="sm"
               className="h-6 px-2"
-              disabled={agents.length === 0}
-              onClick={() => onChange(agents[0]?.id)}
+              disabled={selectableAgents.length === 0}
+              onClick={() => onChange(selectableAgents[0]?.id)}
               aria-pressed={choice === "custom"}
             >
               指定
@@ -247,7 +249,7 @@ function TaskAgentOverrideField({
                 <SelectValue placeholder="选择 Agent" />
               </SelectTrigger>
               <SelectContent>
-                {agents.map((agent) => (
+                {selectableAgents.map((agent) => (
                   <SelectItem key={agent.id} value={agent.id} className="text-xs">
                     {agent.name}
                   </SelectItem>
@@ -356,41 +358,41 @@ function RepositoryCommandPanel({
   agents: AgentProfile[];
   onAgentChange(agentId: string | undefined): void;
 }) {
-  const summary = summarizeCommands(commands);
-  const selectedAgent = agents.find((a) => a.id === agentId);
+  // const summary = summarizeCommands(commands);
+  // const selectedAgent = agents.find((a) => a.id === agentId);
   return (
     <section className="overflow-hidden rounded-md border bg-card/40">
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={isOpen}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-foreground/[0.02] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="flex w-full justify-between items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-foreground/[0.02] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
         <div className="flex items-center gap-1.5">
           <span className="text-xs font-medium">{profile.name}</span>
           {isNewlyAttached && <span className="text-[10.5px] text-muted-foreground/80">· 新关联</span>}
           <span className="mx-1 h-3 w-px bg-border/60" />
           <Select value={agentId ?? "__none__"} onValueChange={(value) => onAgentChange(value === "__none__" ? undefined : value)}>
-            <SelectTrigger className="h-5 w-auto gap-0.5 border-0 bg-transparent p-0 text-[10.5px] text-muted-foreground hover:text-foreground focus:ring-0 [&_svg]:h-3 [&_svg]:w-3" aria-label="选择执行 Agent">
+            <SelectTrigger className="h-5 w-auto gap-0.5 border-0 bg-transparent p-0 text-[10.5px]! text-muted-foreground hover:text-foreground focus:ring-0 [&_svg]:h-3 [&_svg]:w-3" aria-label="选择执行 Agent">
               <SelectValue placeholder={<span className="text-muted-foreground/60">默认 Agent</span>} />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className="text-xs">
               <SelectItem value="__none__" className="text-xs">默认 Agent（跟随仓库绑定）</SelectItem>
-              {agents.map((agent) => (
+              {agents.filter((agent) => !agent.builtin).map((agent) => (
                 <SelectItem key={agent.id} value={agent.id} className="text-xs">
                   {agent.name}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
-          {selectedAgent && <span className="text-[10px] text-foreground/70">{selectedAgent.name}</span>}
+          {/* {selectedAgent && <span className="text-[10px] text-foreground/70">{selectedAgent.name}</span>} */}
         </div>
-        <span className={cn("flex-1 truncate text-[10.5px]", summary.configured > 0 ? "text-muted-foreground" : "text-muted-foreground/60")}>
+        {/* <span className={cn("flex-1 truncate text-[10.5px]", summary.configured > 0 ? "text-muted-foreground" : "text-muted-foreground/60")}>
           {summary.text}
         </span>
         <span className="text-[10px] text-muted-foreground/70">
           {summary.configured}/4
-        </span>
+        </span> */}
         <ChevronDownIcon
           size={11}
           className={cn("transition-transform duration-200", isOpen && "rotate-180")}
@@ -410,18 +412,21 @@ function RepositoryCommandPanel({
               <Input
                 value={commands?.lintCommand ?? ""}
                 onChange={(event) => onChange("lintCommand", event.target.value)}
+                placeholder="例如 npm run lint"
               />
             </Field>
             <Field label="Test">
               <Input
                 value={commands?.testCommand ?? ""}
                 onChange={(event) => onChange("testCommand", event.target.value)}
+                placeholder="例如 npm test"
               />
             </Field>
             <Field className="col-span-2" label="Build">
               <Input
                 value={commands?.buildCommand ?? ""}
                 onChange={(event) => onChange("buildCommand", event.target.value)}
+                placeholder="例如 npm run build"
               />
             </Field>
           </FieldGroup>

@@ -19,6 +19,7 @@ import type { AgentTemplate, QoderStatus } from "@/api";
 import type { AgentProfile, Memory, MemoryScope, RepositoryProfile } from "@coding-agent/core";
 import { api } from "@/api";
 import { useFeedback } from "@/hooks/useGlobalFeedback";
+import { useAgents } from "@/hooks/useAgents";
 import { cn } from "@/lib/utils";
 import {
   AlertDialog,
@@ -397,7 +398,7 @@ export function SettingsDialog({
   const [rebuildingWiki, setRebuildingWiki] = useState<string | undefined>(undefined);
   const [activeMemoryTab, setActiveMemoryTab] = useState<string>("user");
   const [expandedMemoryId, setExpandedMemoryId] = useState<string | undefined>(undefined);
-  const [agents, setAgents] = useState<AgentProfile[]>([]);
+  const { agents, refresh: refreshAgents } = useAgents();
   const [agentTab, setAgentTab] = useState<"system" | "custom">("system");
   const [agentTemplates, setAgentTemplates] = useState<AgentTemplate[]>([]);
   const [agentDialog, setAgentDialog] = useState<{ open: boolean; initial?: AgentProfile }>({ open: false });
@@ -420,7 +421,7 @@ export function SettingsDialog({
       const repositoryList = await api.listRepositories();
       setRepositories(repositoryList);
       setMemories(await api.listMemories({ scopes: MANAGED_MEMORY_SCOPES }));
-      setAgents(await api.listAgents());
+      await refreshAgents();
       setAgentTemplates(await api.listAgentTemplates());
       const counts: Record<string, number> = {};
       for (const repository of repositoryList) counts[repository.id] = (await api.listRepoWikiDocs(repository.id)).length;
@@ -555,13 +556,6 @@ export function SettingsDialog({
       showError(reason instanceof Error ? reason.message : String(reason));
     }
   };
-  const refreshAgents = async () => {
-    try {
-      setAgents(await api.listAgents());
-    } catch (reason) {
-      showError(reason instanceof Error ? reason.message : String(reason));
-    }
-  };
   const toggleAgentEnabled = async (agent: AgentProfile, enabled: boolean) => {
     try {
       await api.saveAgent({ ...agent, enabled, updatedAt: new Date().toISOString() });
@@ -592,7 +586,7 @@ export function SettingsDialog({
     try {
       const next = await api.importAgents();
       if (next) {
-        setAgents(next);
+        await refreshAgents();
         showSuccess(`已导入 ${next.length} 个 Agent`);
       }
     } catch (reason) {

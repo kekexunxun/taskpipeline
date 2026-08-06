@@ -80,6 +80,21 @@ describe("AgentService CRUD", () => {
     expect(list.filter((a) => !a.builtin)).toEqual([]);
     expect(list.filter((a) => a.builtin)).toHaveLength(3);
   });
+
+  it("backfills builtin=true for role agents whose persisted profile is missing the flag", () => {
+    // 模拟历史脏数据：settings 中持久化的角色 agent 缺 builtin 字段（前端 AgentDialog
+    // 旧版 save() 不回写 builtin）。后端 list() 必须强制补齐，否则前端任务级
+    // agent 下拉会把角色 agent 当成可选 Agent 暴露。
+    const dirtyProfiles = [
+      { id: "builtin-reviewer", name: "代码审查员", description: "", systemPrompt: "x", repositoryIds: [], enabled: true, createdAt: "2024-01-01T00:00:00Z", updatedAt: "2024-01-01T00:00:00Z" },
+      { id: "custom-1", name: "Java", description: "", systemPrompt: "", repositoryIds: [], enabled: true, createdAt: "2024-01-01T00:00:00Z", updatedAt: "2024-01-01T00:00:00Z" }
+    ];
+    const service = makeService(dirtyProfiles);
+    const list = service.list();
+    expect(list.find((a) => a.id === "builtin-reviewer")?.builtin).toBe(true);
+    // 自定义 agent 的 builtin 仍为 undefined，filter 仍能正确识别
+    expect(list.find((a) => a.id === "custom-1")?.builtin).toBeUndefined();
+  });
 });
 
 describe("AgentService resolveAgentFor", () => {

@@ -146,6 +146,11 @@ export class AgentService {
         profiles.push(createRoleAgent(op));
       }
     }
+    // 补齐 builtin 标记：历史 settings 中保存的角色 Agent 可能因前端 AgentDialog
+    // save() 不回写 builtin 字段导致字段丢失（builtin === undefined）。
+    // 角色 Agent 的"内置"语义是后端数据契约的一部分，必须在服务端保证可靠。
+    const roleIds = new Set([ROLE_AGENT_DEFAULTS.review.id, ROLE_AGENT_DEFAULTS.test.id, ROLE_AGENT_DEFAULTS.mr.id]);
+    profiles = profiles.map((profile) => roleIds.has(profile.id) ? { ...profile, builtin: true } : profile);
     return profiles;
   }
 
