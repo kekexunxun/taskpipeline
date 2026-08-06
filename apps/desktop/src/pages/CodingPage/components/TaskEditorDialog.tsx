@@ -358,8 +358,6 @@ function RepositoryCommandPanel({
   agents: AgentProfile[];
   onAgentChange(agentId: string | undefined): void;
 }) {
-  // const summary = summarizeCommands(commands);
-  // const selectedAgent = agents.find((a) => a.id === agentId);
   return (
     <section className="overflow-hidden rounded-md border bg-card/40">
       <button
@@ -385,14 +383,7 @@ function RepositoryCommandPanel({
               ))}
             </SelectContent>
           </Select>
-          {/* {selectedAgent && <span className="text-[10px] text-foreground/70">{selectedAgent.name}</span>} */}
         </div>
-        {/* <span className={cn("flex-1 truncate text-[10.5px]", summary.configured > 0 ? "text-muted-foreground" : "text-muted-foreground/60")}>
-          {summary.text}
-        </span>
-        <span className="text-[10px] text-muted-foreground/70">
-          {summary.configured}/4
-        </span> */}
         <ChevronDownIcon
           size={11}
           className={cn("transition-transform duration-200", isOpen && "rotate-180")}
@@ -434,21 +425,6 @@ function RepositoryCommandPanel({
       )}
     </section>
   );
-}
-
-/**
- * 把 4 个命令的"是否已配置"压成一段单行摘要。
- * 返回 `{ text, configured }`：`text` 用作标题行的展示，`configured` 用来显示 N/4 计数。
- */
-function summarizeCommands(cmds?: RepositoryCommands): { text: string; configured: number } {
-  const parts: string[] = [];
-  let configured = 0;
-  if (cmds?.setupCommand?.trim()) { parts.push(`准备 ${cmds.setupCommand}`); configured += 1; }
-  if (cmds?.lintCommand?.trim()) { parts.push(`lint ${cmds.lintCommand}`); configured += 1; }
-  if (cmds?.testCommand?.trim()) { parts.push(`test ${cmds.testCommand}`); configured += 1; }
-  if (cmds?.buildCommand?.trim()) { parts.push(`build ${cmds.buildCommand}`); configured += 1; }
-  if (configured === 0) return { text: "未配置命令（点击展开）", configured: 0 };
-  return { text: parts.join(" · "), configured };
 }
 
 export function TaskEditorDialog({

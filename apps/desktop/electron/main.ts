@@ -1,7 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -109,7 +108,6 @@ const desktopResolver = new DesktopSettingResolver();
 
 // === 通用工具 =================================================================
 
-function settingFlag(key: string): boolean { return store.getSetting(key) === "true"; }
 function protectedValue(key: string): string | undefined { return keyStore.resolve(store.getSetting(key), key); }
 function taskWorkspace(taskId: string): string { return join(dataDir, "workspaces", taskId); }
 function sendTaskEvent(event: Record<string, unknown>): void {
@@ -135,12 +133,6 @@ function updatePiUsage(taskId: string): void {
     turns: stats.assistantMessages
   } });
   emitTaskChanged(taskId);
-}
-function workspaceEntry(name: string, repositoryId: string, used: Set<string>): string {
-  const base = name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-|-$/g, "") || "repository";
-  const entry = used.has(base) ? `${base}-${repositoryId.slice(0, 8)}` : base;
-  used.add(entry);
-  return entry;
 }
 function updateState(task: Task, state: Task["state"]): Task {
   if (task.state !== state) transitionTask(task.state, state);

@@ -74,13 +74,6 @@ export class TaskStore {
       "ALTER TABLE task_repositories ADD COLUMN merge_request_state TEXT",
       "ALTER TABLE task_repositories ADD COLUMN merge_request_checked_at TEXT"
     ]) { try { this.db.exec(statement); } catch { /* Existing databases may already contain the column. */ } }
-    // 2026-08 优化：移除「合并到 base 分支（手动）」任务级控制，连带把历史库中遗留的
-    // `merge_back_to_base_enabled` 列删掉。SQLite ≥ 3.35 支持 DROP COLUMN。
-    try { this.db.exec("ALTER TABLE tasks DROP COLUMN merge_back_to_base_enabled"); } catch { /* 历史库未含该列时直接跳过。 */ }
-    const taskColumns = new Set((this.db.pragma("table_info(tasks)") as Array<{ name: string }>).map(({ name }) => name));
-    if (taskColumns.has("jira_key")) {
-      this.db.exec("UPDATE tasks SET task_key = COALESCE(task_key, jira_key), source = CASE WHEN task_key IS NULL AND jira_key IS NOT NULL AND jira_key != '' THEN 'jira' ELSE source END");
-    }
   }
 
   close(): void { this.db.close(); }
