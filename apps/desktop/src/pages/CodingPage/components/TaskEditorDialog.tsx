@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { CheckIcon, ChevronDownIcon, Loader2Icon, PlayIcon, SaveIcon, SlidersHorizontalIcon, SparklesIcon, WandSparklesIcon } from "lucide-react";
-import type { RepositoryProfile, Task, TaskRepository, TaskStartMode } from "@coding-agent/core";
+import type { AgentProfile, RepositoryProfile, Task, TaskRepository, TaskStartMode } from "@coding-agent/core";
+// 与 packages/core/src/types.ts 的 AGENT_TASK_DISABLED 保持一致；
+// 前端不得 import core 运行值（会拖入 better-sqlite3，导致 vite 预打包在浏览器环境崩溃）
+const AGENT_TASK_DISABLED = "__disabled__";
 import { api, type RepositoryCommands, type StartTaskOptions } from "@/api";
 import { useFeedback } from "@/hooks/useGlobalFeedback";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Dialog,
   DialogClose,
@@ -183,6 +187,87 @@ function AutomationOverrideField({
 }
 
 /**
+ * 任务级 Agent 覆盖的三态控件（与 AutomationOverrideField 同视觉语言）：
+ *
+ * -「跟随仓库」= `undefined`：按仓库白名单解析（默认），保存时不写 task 字段。
+ * -「指定」= 具体 Agent id：强制使用该 Agent，不受仓库绑定限制。
+ * -「禁用」= `AGENT_TASK_DISABLED`：本任务不注入 Agent 上下文，模型跟随系统设置。
+ */
+function TaskAgentOverrideField({
+  agents,
+  value,
+  onChange
+}: {
+  agents: AgentProfile[];
+  value: string | undefined;
+  onChange(next: string | undefined): void;
+}) {
+  const choice = value === undefined ? "follow" : value === AGENT_TASK_DISABLED ? "disabled" : "custom";
+  const selected = agents.find((agent) => agent.id === value);
+  return (
+    <Field label={<span className="text-xs font-medium">执行 Agent</span>}>
+      <div className="space-y-1.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex h-7 items-center gap-0.5 rounded-md border bg-card/40 p-0.5 text-[11px]">
+            <Button
+              type="button"
+              variant={choice === "follow" ? "default" : "ghost"}
+              size="sm"
+              className="h-6 px-2"
+              onClick={() => onChange(undefined)}
+              aria-pressed={choice === "follow"}
+            >
+              跟随仓库
+            </Button>
+            <Button
+              type="button"
+              variant={choice === "custom" ? "default" : "ghost"}
+              size="sm"
+              className="h-6 px-2"
+              disabled={agents.length === 0}
+              onClick={() => onChange(agents[0]?.id)}
+              aria-pressed={choice === "custom"}
+            >
+              指定
+            </Button>
+            <Button
+              type="button"
+              variant={choice === "disabled" ? "default" : "ghost"}
+              size="sm"
+              className="h-6 px-2"
+              onClick={() => onChange(AGENT_TASK_DISABLED)}
+              aria-pressed={choice === "disabled"}
+            >
+              禁用
+            </Button>
+          </div>
+          {choice === "custom" && (
+            <Select value={value} onValueChange={(next) => onChange(next)}>
+              <SelectTrigger className="h-7 w-44 text-xs" aria-label="指定执行 Agent">
+                <SelectValue placeholder="选择 Agent" />
+              </SelectTrigger>
+              <SelectContent>
+                {agents.map((agent) => (
+                  <SelectItem key={agent.id} value={agent.id} className="text-xs">
+                    {agent.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          任务执行时注入哪个 Agent 的指引并按其实例路由模型。
+          {choice === "custom" && selected && <span className="ml-1 text-foreground/70">实际生效：{selected.name}（任务独立指定）</span>}
+          {choice === "follow" && <span className="ml-1 text-foreground/70">实际生效：按仓库白名单解析</span>}
+          {choice === "disabled" && <span className="ml-1 text-foreground/70">实际生效：禁用注入，模型跟随系统设置</span>}
+        </p>
+      </div>
+    </Field>
+  );
+}
+
+/**
  * 任务正文：标题 / 描述 / 关键词 / 验收标准 的输入字段。
  *
  * 两种模式都使用此组件并允许编辑。start 模式下用户改完后会随"开始实现"一起持久化，
@@ -256,7 +341,10 @@ function RepositoryCommandPanel({
   isOpen,
   onToggle,
   commands,
-  onChange
+  onChange,
+  agentId,
+  agents,
+  onAgentChange
 }: {
   profile: RepositoryProfile;
   isNewlyAttached: boolean;
@@ -264,8 +352,12 @@ function RepositoryCommandPanel({
   onToggle(): void;
   commands: RepositoryCommands | undefined;
   onChange(key: keyof RepositoryCommands, value: string): void;
+  agentId?: string;
+  agents: AgentProfile[];
+  onAgentChange(agentId: string | undefined): void;
 }) {
   const summary = summarizeCommands(commands);
+  const selectedAgent = agents.find((a) => a.id === agentId);
   return (
     <section className="overflow-hidden rounded-md border bg-card/40">
       <button
@@ -277,6 +369,21 @@ function RepositoryCommandPanel({
         <div className="flex items-center gap-1.5">
           <span className="text-xs font-medium">{profile.name}</span>
           {isNewlyAttached && <span className="text-[10.5px] text-muted-foreground/80">· 新关联</span>}
+          <span className="mx-1 h-3 w-px bg-border/60" />
+          <Select value={agentId ?? "__none__"} onValueChange={(value) => onAgentChange(value === "__none__" ? undefined : value)}>
+            <SelectTrigger className="h-5 w-auto gap-0.5 border-0 bg-transparent p-0 text-[10.5px] text-muted-foreground hover:text-foreground focus:ring-0 [&_svg]:h-3 [&_svg]:w-3" aria-label="选择执行 Agent">
+              <SelectValue placeholder={<span className="text-muted-foreground/60">默认 Agent</span>} />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__" className="text-xs">默认 Agent（跟随仓库绑定）</SelectItem>
+              {agents.map((agent) => (
+                <SelectItem key={agent.id} value={agent.id} className="text-xs">
+                  {agent.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {selectedAgent && <span className="text-[10px] text-foreground/70">{selectedAgent.name}</span>}
         </div>
         <span className={cn("flex-1 truncate text-[10.5px]", summary.configured > 0 ? "text-muted-foreground" : "text-muted-foreground/60")}>
           {summary.text}
@@ -378,6 +485,11 @@ export function TaskEditorDialog({
   const [systemFlags, setSystemFlags] = useState<{ openCodeReviewEnabled: boolean; createTestCasesEnabled: boolean; autoCreateMergeRequests: boolean }>({ openCodeReviewEnabled: false, createTestCasesEnabled: false, autoCreateMergeRequests: false });
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  // === 任务级 Agent 覆盖：undefined=跟随仓库 | AGENT_TASK_DISABLED=禁用 | 其它=指定 Agent id ===
+  const [agents, setAgents] = useState<AgentProfile[]>([]);
+  const [agentProfileId, setAgentProfileId] = useState<string | undefined>(undefined);
+  // 逐仓库 Agent 覆盖
+  const [repoAgentIds, setRepoAgentIds] = useState<Record<string, string>>({});
 
   // === start 专用：启动方式 / 仓库命令（默认折叠） / reimplement 标记 ===
   const [startMode, setStartMode] = useState<TaskStartMode>("direct");
@@ -406,7 +518,11 @@ export function TaskEditorDialog({
     // 任务级覆盖：显式 boolean 才写入 task 字段；undefined 视为"沿用系统设置"（后端 patch 会清掉字段）。
     openCodeReviewEnabled: overrides.openCodeReviewEnabled,
     createTestCasesEnabled: overrides.createTestCasesEnabled,
-    autoCreateMergeRequests: overrides.autoCreateMergeRequests
+    autoCreateMergeRequests: overrides.autoCreateMergeRequests,
+    // 任务级 Agent：undefined=跟随仓库（不写入）；AGENT_TASK_DISABLED / id 为显式覆盖。
+    agentProfileId,
+    // 逐仓库 Agent 覆盖
+    repoAgentIds: Object.keys(repoAgentIds).length > 0 ? repoAgentIds : undefined
   });
 
   // 同步仓库关联：edit / start 共用。
@@ -435,6 +551,7 @@ export function TaskEditorDialog({
       setKeywords(task?.keywords.join(", ") ?? "");
       setAcceptance(task?.acceptanceCriteria.join("\n") ?? "");
       setAdvancedOpen(false);
+      setAgentProfileId(task?.agentProfileId ?? undefined);
     } else {
       // start 模式：标题等数据由下面的 fetch effect 填充；这里只清 start 专用状态。
       reimplementedRef.current = false;
@@ -469,9 +586,15 @@ export function TaskEditorDialog({
       readSetting("autoCreateMergeRequests")
     ]);
 
-    Promise.all([repoPromise, detailPromise, systemFlagsPromise])
-      .then(([repos, detail, flags]) => {
+    const agentsPromise = api.listAgents().catch((reason) => {
+      showError(reason instanceof Error ? reason.message : String(reason));
+      return [] as AgentProfile[];
+    });
+
+    Promise.all([repoPromise, detailPromise, systemFlagsPromise, agentsPromise])
+      .then(([repos, detail, flags, agentList]) => {
         if (cancelled) return;
+        setAgents(agentList);
         const attached = detail?.repositories ?? [];
         const merged = mergeRepositoryOptions(repos, attached);
         setRepositories(merged);
@@ -484,12 +607,16 @@ export function TaskEditorDialog({
           setDescription(detail.task.description);
           setKeywords(detail.task.keywords.join(", "));
           setAcceptance(detail.task.acceptanceCriteria.join("\n"));
+          setAgentProfileId(detail.task.agentProfileId);
+          setRepoAgentIds(detail.task.repoAgentIds ?? {});
           setOverrides({
             openCodeReviewEnabled: detail.task.openCodeReviewEnabled,
             createTestCasesEnabled: detail.task.createTestCasesEnabled,
             autoCreateMergeRequests: detail.task.autoCreateMergeRequests
           });
         } else if (task) {
+          setAgentProfileId(task.agentProfileId);
+          setRepoAgentIds(task.repoAgentIds ?? {});
           setOverrides({
             openCodeReviewEnabled: task.openCodeReviewEnabled,
             createTestCasesEnabled: task.createTestCasesEnabled,
@@ -565,7 +692,7 @@ export function TaskEditorDialog({
         await api.reimplementTask(taskId);
         reimplementedRef.current = true;
       }
-      const startOptions: StartTaskOptions = { mode: startMode, repositoryCommands, ...(useAllRepositories ? { useAllRepositories: true } : {}) };
+      const startOptions: StartTaskOptions = { mode: startMode, repositoryCommands, repoAgentIds: Object.keys(repoAgentIds).length > 0 ? repoAgentIds : undefined, ...(useAllRepositories ? { useAllRepositories: true } : {}) };
       await api.startTask(taskId, startOptions);
       await onStarted?.();
     } catch (reason) {
@@ -656,6 +783,9 @@ export function TaskEditorDialog({
                   onToggle={() => setCommandPanelsOpen((prev) => ({ ...prev, [profile.id]: !prev[profile.id] }))}
                   commands={commands[profile.id]}
                   onChange={(key, value) => setCommands((current) => ({ ...current, [profile.id]: { ...current[profile.id], [key]: value } }))}
+                  agentId={repoAgentIds[profile.id]}
+                  agents={agents}
+                  onAgentChange={(agentId) => setRepoAgentIds((prev) => ({ ...prev, [profile.id]: agentId ?? "" }))}
                 />
               );
             })}
@@ -680,6 +810,11 @@ export function TaskEditorDialog({
               {advancedOpen && (
                 <div id="task-advanced-section" className="space-y-3 border-t p-3">
                   <p className="text-[11px] text-muted-foreground">默认沿用系统设置；如需本任务独立配置，请选择「开启 / 关闭」。修改系统设置不会回写到已创建的任务。</p>
+                  <TaskAgentOverrideField
+                    agents={agents}
+                    value={agentProfileId}
+                    onChange={setAgentProfileId}
+                  />
                   <AutomationOverrideField
                     label="CodeReview"
                     helper="实现完成后是否自动跑 Review。"

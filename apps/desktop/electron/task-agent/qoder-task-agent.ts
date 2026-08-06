@@ -35,6 +35,11 @@ export type QoderTaskAgentDeps = TaskAgentDeps & {
   /** 切换 driver 时给上层信号,让 main.ts 把 activeQoderQuery 状态清掉。 */
   onQueryStarted?: (query: Query, abort: AbortController) => void;
   onQueryFinished?: (query: Query) => void;
+  /**
+   * 测试用例生成阶段的 Agent 上下文（角色定义 + 领域指引）。
+   * 存在时优先使用，回退现有 resolveAgentContext。
+   */
+  resolveTestContext?: (task: Task, repos: TaskRepository[]) => Promise<{ sections: string[] }>;
 };
 
 const TEST_CASE_GENERATION_PROMPT = [
@@ -77,8 +82,12 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     const buffers: PhaseBuffers = { responseTexts: [] };
     this.buffers.set("planning", buffers);
 
-    const memoryContext = await this.deps.resolveMemoryContext?.(task, repos);
+    const [agentContext, memoryContext] = await Promise.all([
+      this.deps.resolveAgentContext?.(task, repos),
+      this.deps.resolveMemoryContext?.(task, repos)
+    ]);
     const prompt = [
+      ...(agentContext?.sections ?? []),
       memoryContext ?? "",
       "请只读分析以下 Coding 任务。",
       `任务:${task.title}`,
@@ -109,10 +118,17 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     const buffers: PhaseBuffers = { responseTexts: [] };
     this.buffers.set("implementation", buffers);
 
-    const memoryContext = resumeSessionId ? undefined : await this.deps.resolveMemoryContext?.(task, repos);
+    // resume 走 Qoder 真实续接：会话上下文已包含原 Agent 指引，不重新拼（与 memoryContext 一致）。
+    const [agentContext, memoryContext] = resumeSessionId
+      ? [undefined, undefined]
+      : await Promise.all([
+          this.deps.resolveAgentContext?.(task, repos),
+          this.deps.resolveMemoryContext?.(task, repos)
+        ]);
     const prompt = resumeSessionId
       ? (extraPrompt ?? "任务此前执行失败/中断，请基于当前会话上下文继续完成剩余工作。")
       : [
+          ...(agentContext?.sections ?? []),
           memoryContext ?? "",
           task.title,
           task.description,
@@ -142,14 +158,19 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     const { task, repos, signal } = input;
     const buffers: PhaseBuffers = { responseTexts: [] };
     this.buffers.set("test_generation", buffers);
-
+  
+    // 优先使用角色 Agent 的测试上下文（角色定义 + 领域指引），回退通用 resolveAgentContext
+    const agentContext = this.deps.resolveTestContext
+      ? await this.deps.resolveTestContext(task, repos)
+      : await this.deps.resolveAgentContext?.(task, repos);
     const prompt = [
+      ...(agentContext?.sections ?? []),
       task.title,
       task.description,
       task.planContent ? `Approved implementation plan:\n${task.planContent}` : "",
       TEST_CASE_GENERATION_PROMPT
     ].filter(Boolean).join("\n\n");
-
+  
     await this.runQuery({
       phase: "test_generation",
       task,

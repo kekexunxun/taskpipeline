@@ -17,7 +17,7 @@ import {
   type ExtensionUIDialogOptions,
   type ExtensionUIContext
 } from "@earendil-works/pi-coding-agent";
-import { TaskStore, LocalFileKeyStore, boardColumnFor, transitionTask, type AgentEvent, type Memory, type SessionUsage, type SettingResolver, type Task, type TaskEventSink, type TaskRepository, type TaskStartMode, type TaskState } from "@coding-agent/core";
+import { TaskStore, LocalFileKeyStore, boardColumnFor, transitionTask, type AgentEvent, type AgentProfile, type Memory, type SessionUsage, type SettingResolver, type Task, type TaskEventSink, type TaskRepository, type TaskStartMode, type TaskState } from "@coding-agent/core";
 import {
   AtlassianClientFactory, DeliveryService, fetchJiraTasks, GitService, importJiraIssue, MergeStatusRefresher, openTaskEditor, OpenCodeReviewService,
   OpenAICompatReviewer, parseGitLabRemote, redactSecrets,
@@ -38,6 +38,8 @@ import { implementationOutcomeInstruction, isExplicitNoChangeCompletionRequest, 
 import { QoderTaskAgentDriver, type QoderTaskAgentDeps } from "./task-agent/qoder-task-agent.js";
 import { closeQoderQuerySafely, logQoderMessage, qoderLogFile, qoderText, recordQoderMessage } from "./task-agent/log.js";
 import { parseTestCaseGeneration } from "./task-agent/parsers/test-case-parser.js";
+import { AgentService, type OperationKind } from "./agents/agent-service.js";
+import { AGENT_TEMPLATES } from "./agents/templates.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | undefined;
@@ -50,6 +52,12 @@ mkdirSync(dataDir, { recursive: true });
 const store = new TaskStore(join(dataDir, "coding-agent.db"));
 const keyStore = new LocalFileKeyStore(dataDir);
 const memoryService = new MemoryService(store);
+// Agent 体系：可配置多 Agent + 仓库白名单绑定 + 模型路由（配置存 settings key `agentProfiles`）。
+const agentService = new AgentService(
+  (key) => store.getSetting(key),
+  (key, value) => store.setSetting(key, value),
+  (repositoryId) => memoryService.listRepoWikiDocs(repositoryId)
+);
 let activeTaskId: string | undefined;
 let activeQoderQuery: Query | undefined;
 let activeQoderAbort: AbortController | undefined;
@@ -172,6 +180,43 @@ function modelProvider(): "qoder" | "openai" {
   try { return JSON.parse(raw).provider === "qoder" ? "qoder" : "openai"; } catch { return "qoder"; }
 }
 
+/**
+ * 任务级执行路径：primary 仓库 Agent 的 preferredProvider 优先，未配置时跟随系统 modelProfile。
+ * 优先级链：任务显式 task.qoderModel > Agent.preferredProvider > 系统全局。
+ */
+function runtimeProvider(task: Task): "qoder" | "openai" {
+  const runtime = agentService.resolveRuntime(task, store.listTaskRepositories(task.id));
+  return runtime.provider ?? modelProvider();
+}
+
+/** 任务级 provider（usage 统计等场景）；任务不存在时跟随系统。 */
+function providerForTask(taskId: string | undefined): "qoder" | "openai" {
+  const task = taskId ? store.getTask(taskId) : undefined;
+  return task ? runtimeProvider(task) : modelProvider();
+}
+
+/**
+ * piSession 路径的完整 prompt 组装：Agent 指引段在最前，其次 memoryContext，最后任务正文。
+ * OpenAI 路径的 resume 是重新 prompt（新会话无原上下文），因此与 Qoder 路径不同，需要注入。
+ */
+async function buildAgentPrompt(task: Task, body: string): Promise<string> {
+  const repos = store.listTaskRepositories(task.id);
+  const [agentContext, memoryContext] = await Promise.all([
+    agentService.resolveAgentContext(task, repos),
+    taskMemoryContext(task, repos)
+  ]);
+  const sections = agentContext.sections;
+  if (sections.length) addTaskEvent({ taskId: task.id, kind: "status", title: "注入 Agent 上下文", detail: sections.join("\n\n") });
+  return `${sections.length ? `${sections.join("\n\n")}\n\n` : ""}${memoryContext ? `${memoryContext}\n\n` : ""}${body}`;
+}
+
+/** 启动校验：路由到 qoder 但未配置 Token 时明确报错，不静默切换执行路径。 */
+function qoderTokenGuard(task: Task): void {
+  if (runtimeProvider(task) !== "qoder" || protectedValue("qoderToken")) return;
+  const agent = agentService.resolveAgentFor(store.listTaskRepositories(task.id)[0]?.repositoryId ?? "", task.agentProfileId, task.repoAgentIds?.[store.listTaskRepositories(task.id)[0]?.repositoryId ?? ""]);
+  throw new Error(agent ? `Agent「${agent.name}」指定了 Qoder 模型，请先配置 Qoder Token` : "任务路由到 Qoder 路径，请先配置 Qoder Token");
+}
+
 // === 下沉模块实例(整个进程单例) ===============================================
 
 const ocrService = new OpenCodeReviewService(resolveOcrBinary(), createOcrRunner());
@@ -181,7 +226,23 @@ function buildReviewOrchestrator(): ReviewOrchestrator {
   return new ReviewOrchestrator({ ocr: ocrService, git: gitService, reviewer: asReviewer(callQoderOrOpenAIReviewer) }, desktopSink);
 }
 const taskWorkflow = new TaskWorkflow(store, desktopResolver, desktopSink, taskWorkspace);
-const deliveryService = new DeliveryService(store, gitService, desktopResolver, desktopSink);
+const deliveryService = new DeliveryService(store, gitService, desktopResolver, desktopSink, {
+  describeMergeRequest: async (task, repo, signal) => {
+    const repos = store.listTaskRepositories(task.id);
+    const body = [
+      `## 任务信息\n${task.title}\n${task.description}`,
+      `## 仓库\n${repo.name}`,
+      `## 变更文件统计\n${repo.featureBranch ? `分支: ${repo.featureBranch} -> ${repo.baseBranch}` : ""}`,
+      "请根据任务信息与变更内容生成清晰的 Merge Request 描述。",
+      "输出严格 JSON：",
+      '{"commitMessage":"<可选>如果未达 commit 标准可以不填","title":"<MR 标题，简洁概括>","description":"<MR 描述，说明改动背景、内容与影响>"}',
+      "description 使用中文。"
+    ].join("\n\n");
+    const text = await runOperationAgent(task.id, "mr", body, signal);
+    if (!text) throw new Error("MR 描述生成返回空");
+    return JSON.parse(text);
+  }
+});
 const mergeRefresher = new MergeStatusRefresher(store, desktopResolver, desktopSink);
 const taskCompleter = new TaskCompleter(store, desktopSink);
 const atlassianFactory = new AtlassianClientFactory(desktopResolver);
@@ -227,7 +288,22 @@ function createQoderTaskAgent(): QoderTaskAgentDriver {
       }
     },
     resolveMemoryContext: taskMemoryContext,
-    resolveModel: (task) => task.qoderModel,
+    // Agent 指引段：非 resume 场景注入 prompt 最前；Qoder 真实续接时由 runImplementation 不调用。
+    resolveAgentContext: async (task, repos) => {
+      const context = await agentService.resolveAgentContext(task, repos);
+      if (context.sections.length) addTaskEvent({ taskId: task.id, kind: "status", title: "注入 Agent 上下文", detail: context.sections.join("\n\n") });
+      return context;
+    },
+    resolveModel: (task) => agentService.resolveModelForTask(task, store.listTaskRepositories(task.id)),
+    // 测试用例生成阶段注入 Test Writer Agent 角色定义 + 上下文
+    resolveTestContext: async (task, repos) => {
+      const { roleBody, contextBody } = agentService.resolveOperationAgent("test", task, repos);
+      const sections: string[] = [];
+      if (roleBody) sections.push(roleBody);
+      if (contextBody) sections.push(contextBody);
+      if (sections.length) addTaskEvent({ taskId: task.id, kind: "status", title: "注入测试 Agent 上下文", detail: sections.join("\n\n") });
+      return { sections };
+    },
     onQueryStarted: (q, abort) => {
       // 把 driver 起的 query 暴露给顶层 abort 流程(stopTaskOperations 仍能 interrupt)。
       activeQoderQuery = q;
@@ -297,13 +373,26 @@ async function callQoderReviewer(prompt: string, taskId: string, model?: string,
 }
 
 function callQoderOrOpenAIReviewer(input: Parameters<OpenAICompatReviewer["call"]>[0], taskId: string, model?: string, signal?: AbortSignal): Promise<string> {
-  if (modelProvider() === "qoder") return callQoderReviewer(buildReviewPromptForQoder(input), taskId, model, signal);
-  return openAIReviewer.call(input, taskId, model, signal);
+  // 取 CodeReview 角色 Agent 的 systemPrompt 替换固定角色段落
+  const task = store.getTask(taskId);
+  const repos = task ? store.listTaskRepositories(taskId) : [];
+  const { roleBody } = agentService.resolveOperationAgent("review", task ?? undefined, repos);
+  const prompt = buildReviewPromptForQoder(input, roleBody);
+  if (providerForTask(taskId) !== "qoder") return openAIReviewer.call(input, taskId, model, signal, prompt);
+  // Review 逐仓库执行：按 input.repo 匹配仓库，注入该仓库 Agent 的指引（领域约定）。
+  let finalPrompt = prompt;
+  if (task) {
+    const target = repos.find((repo) => repo.name === input.repo);
+    const agent = target ? agentService.resolveAgentFor(target.repositoryId, task.agentProfileId, task.repoAgentIds?.[target.repositoryId]) : undefined;
+    const body = [agent?.systemPrompt, agent?.engineeringGuidelines].filter(Boolean).join("\n\n");
+    if (body) finalPrompt = `## Agent 指引 — 仓库 ${input.repo}\n${body}\n\n${prompt}`;
+  }
+  return callQoderReviewer(finalPrompt, taskId, model, signal);
 }
 
-function buildReviewPromptForQoder(input: Parameters<OpenAICompatReviewer["call"]>[0]): string {
+function buildReviewPromptForQoder(input: Parameters<OpenAICompatReviewer["call"]>[0], roleBody?: string): string {
   return [
-    "You are a code reviewer. Follow the rules below as a checklist.",
+    roleBody || "You are a code reviewer. Follow the rules below as a checklist.",
     "Review the diff carefully. Report only actionable findings.",
     "Severity: critical (data loss / security / crash) | high (bug) | medium (perf / missing error handling) | low (style).",
     "Drop low unless genuinely valuable.",
@@ -323,6 +412,60 @@ function buildReviewPromptForQoder(input: Parameters<OpenAICompatReviewer["call"
     "Respond with strict JSON only (no prose, no code fence). Write each `message` value in Chinese (zh-CN):",
     '{"status":"completed","comments":[{"path":"...","line":<number|null>,"severity":"critical|high|medium|low","message":"..."}],"summary":{"files":<number>,"comments":<number>}}'
   ].join("\n");
+}
+
+/**
+ * OpenAI 兼容路径的纯 prompt 调用（无 DelegateReviewerInput 包装）。
+ * 用于 runOperationAgent 等不需要 Review 输入结构的场景。
+ */
+async function callOpenAIForPrompt(prompt: string, _taskId: string, model?: string, signal?: AbortSignal): Promise<string> {
+  const raw = store.getSetting("modelProfile");
+  if (!raw) throw new Error("未配置 modelProfile");
+  const profile = JSON.parse(raw) as ModelProfile;
+  if (!profile.baseUrl || !profile.model) throw new Error("modelProfile 缺少 baseUrl 或 model");
+  const apiKey = (profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : undefined) ?? desktopResolver.getSecret("modelApiKey");
+  if (!apiKey) throw new Error("未配置 modelApiKey");
+  const url = `${profile.baseUrl.replace(/\/$/, "")}/chat/completions`;
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(new Error(`OpenAI 兼容请求在 180s 内未返回,主动 abort`)), 180_000);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      signal: signal ? AbortSignal.any([abort.signal, signal]) : abort.signal,
+      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: model ?? profile.model,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0
+      })
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`OpenAI 兼容请求失败 ${response.status}: ${errText.slice(0, 300)}`);
+    }
+    const json = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    return json.choices?.[0]?.message?.content ?? "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 统一操作子 agent 执行器。
+ * 取角色 Agent 的 systemPrompt + 领域指引 + body，按 providerForTask 路由到 Qoder SDK 或 OpenAI 兼容路径。
+ * 角色 Agent 禁用/不存在时返回空字符串。
+ */
+async function runOperationAgent(taskId: string, operation: OperationKind, body: string, signal?: AbortSignal): Promise<string> {
+  const task = store.getTask(taskId);
+  if (!task) return "";
+  const repos = store.listTaskRepositories(taskId);
+  const { roleAgent, roleBody, contextBody } = agentService.resolveOperationAgent(operation, task, repos);
+  if (!roleAgent || !roleBody) return "";
+  const prompt = [roleBody, contextBody, body].filter(Boolean).join("\n\n");
+  if (providerForTask(taskId) !== "qoder") {
+    return callOpenAIForPrompt(prompt, taskId, roleAgent.preferredModel, signal);
+  }
+  return callQoderReviewer(prompt, taskId, roleAgent.preferredModel, signal);
 }
 
 // === Qoder 集成(留在 desktop) ==================================================
@@ -511,6 +654,42 @@ async function advanceAfterValidation(taskId: string, state: TaskState, signal?:
   }
 }
 
+/**
+ * LLM 驱动的测试覆盖检测：在生成测试用例之前，先让 Test Writer Agent 判断当前改动是否已有测试覆盖。
+ * 检测调用失败或返回 false 时不跳过（保守：照常生成测试）。
+ */
+async function runTestCoverageCheck(taskId: string, signal?: AbortSignal): Promise<boolean> {
+  const task = store.getTask(taskId);
+  if (!task) return false;
+  let changedFiles: Awaited<ReturnType<typeof taskChangedFiles>>;
+  try {
+    changedFiles = await taskChangedFiles(taskId, true);
+  } catch { return false; }
+  if (changedFiles.length === 0) return false;
+  const fileList = changedFiles.map((f) => `${f.path} (${f.status})`).join("\n");
+  const body = [
+    `## 任务信息\n${task.title}\n${task.description}`,
+    `## 改动文件\n${fileList}`,
+    "请判断当前改动是否已有充分的测试覆盖。",
+    "输出严格 JSON（不要额外说明）：",
+    '{"covered": true|false, "reason": "..."}',
+    "covered=true 表示已有测试覆盖，无需生成新测试；covered=false 表示需要生成测试。"
+  ].join("\n\n");
+  try {
+    const text = await runOperationAgent(taskId, "test", body, signal);
+    if (!text) return false;
+    const json = JSON.parse(text.trim());
+    if (json.covered === true) {
+      addTaskEvent({ taskId, kind: "status", title: "检测到已有测试覆盖，跳过生成", detail: json.reason || "" });
+      return true;
+    }
+    return false;
+  } catch (error) {
+    addTaskEvent({ taskId, kind: "error", title: "测试覆盖检测失败，将继续生成测试用例", detail: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
+}
+
 async function finishImplementation(taskId: string, responseTexts: string[], signal?: AbortSignal): Promise<void> {
   const task = store.getTask(taskId);
   if (!task || task.state !== "implementing") return;
@@ -549,9 +728,16 @@ async function finishImplementation(taskId: string, responseTexts: string[], sig
     });
     return;
   }
-  // 若任务级/系统级开关打开，则在实现完成后、runValidation 之前先生成测试用例。
+  // 若任务级/系统级开关打开，则在实现完成后、runValidation 之前先检测测试覆盖。
   if (taskWorkflow.shouldGenerateTestCases(task)) {
-    await runTestCaseGenerationThenValidate(taskId, signal);
+    const covered = await runTestCoverageCheck(taskId, signal);
+    if (covered) {
+      // 已有测试覆盖，跳过生成，直接进入校验
+      const validated = await taskWorkflow.runValidation(taskId, signal);
+      await advanceAfterValidation(taskId, validated.state, signal);
+    } else {
+      await runTestCaseGenerationThenValidate(taskId, signal);
+    }
     return;
   }
   const validated = await taskWorkflow.runValidation(taskId, signal);
@@ -611,10 +797,10 @@ function emitPi(event: unknown): void {
     if (update?.type === "text_delta" && update.delta) activePlanText += update.delta;
   }
   if (activePlanningTaskId) record.phase = "planning";
-  if (activeTaskId && modelProvider() === "openai" && ["message_end", "agent_end"].includes(String(record.type))) updatePiUsage(activeTaskId);
+  if (activeTaskId && providerForTask(activeTaskId) === "openai" && ["message_end", "agent_end"].includes(String(record.type))) updatePiUsage(activeTaskId);
   if (activeTaskId && record.type === "tool_execution_end") emitTaskChanged(activeTaskId);
   sendTaskEvent(typeof record.taskId === "string" || !activeTaskId ? record : { ...record, taskId: activeTaskId });
-  if (record.type === "agent_end" && activeTaskId && !activePlanningTaskId && modelProvider() === "openai") {
+  if (record.type === "agent_end" && activeTaskId && !activePlanningTaskId && providerForTask(activeTaskId) === "openai") {
     const taskId = activeTaskId;
     const responseTexts = Array.isArray(record.messages)
       ? record.messages.flatMap((message: any) => message?.role === "assistant" && Array.isArray(message.content)
@@ -749,8 +935,9 @@ async function startPi(taskId: string): Promise<void> {
   emitPi({ type: "session_ready", sessionId: session.sessionId, sessionFile: session.sessionFile, diagnostics: created.extensionsResult.errors });
 }
 
-async function startTask(taskId: string, options: { mode?: TaskStartMode; repositoryCommands?: RepositoryCommandMap; useAllRepositories?: boolean } = {}): Promise<void> {
+async function startTask(taskId: string, options: { mode?: TaskStartMode; repositoryCommands?: RepositoryCommandMap; useAllRepositories?: boolean; repoAgentIds?: Record<string, string> } = {}): Promise<void> {
   const current = store.getTask(taskId);
+  if (current) qoderTokenGuard(current);
   // 任务启动时可空选仓库：若 `useAllRepositories=true` 且任务当前没有 attach 任何仓库，
   // 先把 system 配的全部仓库 attach 上去，再走原来的 begin 路径。
   if (options.useAllRepositories && current) {
@@ -763,19 +950,21 @@ async function startTask(taskId: string, options: { mode?: TaskStartMode; reposi
       }
     }
   }
-  if (modelProvider() === "qoder" && current && ["draft", "failed"].includes(current.state)) store.updateTask(taskId, { sessionUsage: undefined });
+  if (options.repoAgentIds && Object.keys(options.repoAgentIds).length > 0) {
+    store.updateTask(taskId, { repoAgentIds: options.repoAgentIds });
+  }
+  if (current && ["draft", "failed"].includes(current.state) && runtimeProvider(current) === "qoder") store.updateTask(taskId, { sessionUsage: undefined });
   const mode = options.mode ?? "direct";
   const task = await runTaskOperation(taskId, (signal) => taskWorkflow.begin(taskId, mode, options.repositoryCommands, signal));
   if (mode === "plan") {
-    if (modelProvider() === "qoder") void runTaskOperation(taskId, (signal) => runQoderPlan(taskId, undefined, signal)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
+    if (runtimeProvider(task) === "qoder") void runTaskOperation(taskId, (signal) => runQoderPlan(taskId, undefined, signal)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
     else {
       await runTaskOperation(taskId, async (signal) => {
         signal.throwIfAborted();
         activePlanningTaskId = taskId;
         activePlanText = "";
         await startPi(taskId);
-        const memoryContext = await taskMemoryContext(task, store.listTaskRepositories(taskId));
-        await piSession!.prompt(`你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${memoryContext ? `${memoryContext}\n\n` : ""}${task.title}\n${task.description}`, { source: "rpc" });
+        await piSession!.prompt(await buildAgentPrompt(task, `你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${task.title}\n${task.description}`), { source: "rpc" });
         signal.throwIfAborted();
         const plan = activePlanText.trim();
         activePlanningTaskId = undefined;
@@ -784,7 +973,7 @@ async function startTask(taskId: string, options: { mode?: TaskStartMode; reposi
     }
     return;
   }
-  if (modelProvider() === "qoder") {
+  if (runtimeProvider(task) === "qoder") {
     void runTaskOperation(taskId, (signal) => runQoder(taskId, undefined, signal)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
     return;
   }
@@ -792,8 +981,7 @@ async function startTask(taskId: string, options: { mode?: TaskStartMode; reposi
     signal.throwIfAborted();
     await startPi(taskId);
     if (!piSession) throw new Error("OpenAI agent session is unavailable");
-    const memoryContext = await taskMemoryContext(task, store.listTaskRepositories(taskId));
-    await piSession.prompt(`${memoryContext ? `${memoryContext}\n\n` : ""}${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ""}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}\n\n${implementationOutcomeInstruction}`, { source: "rpc" });
+    await piSession!.prompt(await buildAgentPrompt(task, `${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ""}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}\n\n${implementationOutcomeInstruction}`), { source: "rpc" });
   });
 }
 
@@ -804,6 +992,7 @@ const resumeImplementationInstruction =
 async function resumeTask(taskId: string): Promise<void> {
   const current = store.getTask(taskId);
   if (!current || current.state !== "failed") throw new Error("只有失败的任务可以继续执行");
+  qoderTokenGuard(current);
   store.updateTask(taskId, { sessionUsage: undefined });
   // 计划阶段失败(计划尚未生成成功)时继续生成计划;其它失败继续实现流程。
   // `failureStage === "planning"` 由 runQoderPlan 失败路径标记;`startMode === "plan" && !planContent` 兼容历史存量数据。
@@ -811,7 +1000,7 @@ async function resumeTask(taskId: string): Promise<void> {
   store.updateTask(taskId, { failureStage: undefined });
   if (failedDuringPlanning) {
     const task = await runTaskOperation(taskId, (signal) => taskWorkflow.begin(taskId, "plan", undefined, signal));
-    if (modelProvider() === "qoder") {
+    if (runtimeProvider(task) === "qoder") {
       void runTaskOperation(taskId, (signal) => runQoderPlan(taskId, undefined, signal)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
       return;
     }
@@ -821,8 +1010,7 @@ async function resumeTask(taskId: string): Promise<void> {
       activePlanText = "";
       await startPi(taskId);
       if (!piSession) throw new Error("OpenAI agent session is unavailable");
-      const memoryContext = await taskMemoryContext(task, store.listTaskRepositories(taskId));
-      await piSession.prompt(`你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${memoryContext ? `${memoryContext}\n\n` : ""}${task.title}\n${task.description}`, { source: "rpc" });
+      await piSession!.prompt(await buildAgentPrompt(task, `你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${task.title}\n${task.description}`), { source: "rpc" });
       signal.throwIfAborted();
       const plan = activePlanText.trim();
       activePlanningTaskId = undefined;
@@ -832,7 +1020,7 @@ async function resumeTask(taskId: string): Promise<void> {
   }
   // 实现阶段失败:复用 prepare 的失败恢复路径(worktree 缺失时补建,已完整时直接回到 implementing,不重跑 setup 命令)。
   const task = await runTaskOperation(taskId, (signal) => taskWorkflow.prepare(taskId, signal));
-  if (modelProvider() === "qoder") {
+  if (runtimeProvider(task) === "qoder") {
     void runTaskOperation(taskId, (signal) => runQoder(taskId, resumeImplementationInstruction, signal, task.qoderSessionId)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
     return;
   }
@@ -840,8 +1028,7 @@ async function resumeTask(taskId: string): Promise<void> {
     signal.throwIfAborted();
     await startPi(taskId);
     if (!piSession) throw new Error("OpenAI agent session is unavailable");
-    const memoryContext = await taskMemoryContext(task, store.listTaskRepositories(taskId));
-    await piSession.prompt(`${resumeImplementationInstruction}\n\n${memoryContext ? `${memoryContext}\n\n` : ""}${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ""}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}\n\n${implementationOutcomeInstruction}`, { source: "rpc" });
+    await piSession!.prompt(await buildAgentPrompt(task, `${resumeImplementationInstruction}\n\n${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ""}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}\n\n${implementationOutcomeInstruction}`), { source: "rpc" });
   });
 }
 
@@ -851,22 +1038,21 @@ async function approveTaskPlan(taskId: string): Promise<void> {
   const approval = store.addApproval({ taskId, kind: "plan", context: before.planContent });
   store.resolveApproval(approval.id, "approved");
   const task = await runTaskOperation(taskId, (signal) => taskWorkflow.approvePlan(taskId, signal));
-  if (modelProvider() === "qoder") {
+  if (runtimeProvider(task) === "qoder") {
     void runTaskOperation(taskId, (signal) => runQoder(taskId, undefined, signal)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
     return;
   }
   await runTaskOperation(taskId, async (signal) => {
     signal.throwIfAborted();
     await startPi(taskId);
-    const memoryContext = await taskMemoryContext(task, store.listTaskRepositories(taskId));
-    await piSession!.prompt(`${memoryContext ? `${memoryContext}\n\n` : ""}${task.title}\n\n${task.description}\n\nApproved implementation plan:\n${task.planContent}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}\n\n${implementationOutcomeInstruction}`, { source: "rpc" });
+    await piSession!.prompt(await buildAgentPrompt(task, `${task.title}\n\n${task.description}\n\nApproved implementation plan:\n${task.planContent}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}\n\n${implementationOutcomeInstruction}`), { source: "rpc" });
   });
 }
 
 async function reviseTaskPlan(taskId: string, feedback: string): Promise<void> {
   const task = taskWorkflow.revisePlan(taskId);
   addTaskEvent({ taskId, kind: "message", title: "计划调整意见", detail: feedback });
-  if (modelProvider() === "qoder") {
+  if (runtimeProvider(task) === "qoder") {
     try {
       await runTaskOperation(taskId, (signal) => runQoderPlan(taskId, feedback, signal));
     } catch (error) {
@@ -880,7 +1066,7 @@ async function reviseTaskPlan(taskId: string, feedback: string): Promise<void> {
     activePlanningTaskId = taskId;
     activePlanText = "";
     await startPi(taskId);
-    await piSession!.prompt(`你处于只读计划模式。根据调整意见重新判断，禁止修改文件。最终只输出 JSON：无需修改时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n任务：${task.title}\n${task.description}\n\n上一版计划：\n${task.planContent ?? ""}\n\n调整意见：\n${feedback}`, { source: "rpc" });
+    await piSession!.prompt(await buildAgentPrompt(task, `你处于只读计划模式。根据调整意见重新判断，禁止修改文件。最终只输出 JSON：无需修改时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n任务：${task.title}\n${task.description}\n\n上一版计划：\n${task.planContent ?? ""}\n\n调整意见：\n${feedback}`), { source: "rpc" });
     signal.throwIfAborted();
     const plan = activePlanText.trim();
     activePlanningTaskId = undefined;
@@ -907,7 +1093,7 @@ async function sendTaskMessage(taskId: string, message: string): Promise<void> {
   if (task.state === "awaiting_input") task = taskWorkflow.resumeImplementation(taskId);
   else if (task.state !== "implementing") task = updateState(task, "implementing");
   store.updateTask(task.id, { reviewStatus: "pending" });
-  if (modelProvider() === "qoder") {
+  if (runtimeProvider(task) === "qoder") {
     void runTaskOperation(taskId, (signal) => runQoder(taskId, message, signal)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
     return;
   }
@@ -1284,6 +1470,9 @@ function registerIpc(): void {
   ipcMain.handle("repos:delete", (_event, id: string) => {
     store.deleteRepositoryProfile(id);
     memoryService.deleteRepoMemories(id);
+    // 同步解绑所有绑定该仓库的 Agent，避免 repositoryIds 残留死引用
+    const removedAgents = agentService.detachRepository(id);
+    return { removedAgents };
   });
   ipcMain.handle("repos:choose-folder", async () => {
     const localPath = (await dialog.showOpenDialog(mainWindow!, { properties: ["openDirectory"] })).filePaths[0];
@@ -1306,7 +1495,7 @@ function registerIpc(): void {
     store.setSetting(key, secret ? keyStore.protect(value, key) : value);
     if (key === "modelProfile") syncPiModelConfig(value);
   });
-  ipcMain.handle("tasks:start", (_event, taskId: string, options?: { mode?: TaskStartMode; repositoryCommands?: RepositoryCommandMap; useAllRepositories?: boolean }) => startTask(taskId, options));
+  ipcMain.handle("tasks:start", (_event, taskId: string, options?: { mode?: TaskStartMode; repositoryCommands?: RepositoryCommandMap; useAllRepositories?: boolean; repoAgentIds?: Record<string, string> }) => startTask(taskId, options));
   ipcMain.handle("tasks:reimplement", (_event, taskId: string) => taskWorkflow.reimplement(taskId));
   ipcMain.handle("tasks:resume", (_event, taskId: string) => resumeTask(taskId));
   ipcMain.handle("tasks:approve-plan", (_event, taskId: string) => approveTaskPlan(taskId));
@@ -1380,6 +1569,42 @@ function registerIpc(): void {
   });
   ipcMain.handle("repowiki:list", (_event, repositoryId: string) => memoryService.listRepoWikiDocs(repositoryId));
   ipcMain.handle("repowiki:search", (_event, repositoryId: string, query: string) => memoryService.searchRepoWikiDocs(repositoryId, query));
+  // === Agent 配置 =========================================================
+  ipcMain.handle("agents:list", () => agentService.list());
+  ipcMain.handle("agents:save", (_event, profile: AgentProfile) => {
+    agentService.save(profile);
+    return agentService.list();
+  });
+  ipcMain.handle("agents:delete", (_event, id: string) => {
+    agentService.delete(id);
+    return agentService.list();
+  });
+  ipcMain.handle("agents:templates", () => AGENT_TEMPLATES);
+  ipcMain.handle("agents:export", async () => {
+    const window = mainWindow;
+    if (!window) throw new Error("窗口不可用");
+    const { canceled, filePath } = await dialog.showSaveDialog(window, {
+      title: "导出 Agent 配置",
+      defaultPath: join(app.getPath("downloads"), `agents-${new Date().toISOString().slice(0, 10)}.json`),
+      filters: [{ name: "JSON", extensions: ["json"] }]
+    });
+    if (canceled || !filePath) return undefined;
+    writeFileSync(filePath, `${JSON.stringify(agentService.list(), null, 2)}\n`, "utf8");
+    return filePath;
+  });
+  ipcMain.handle("agents:import", async () => {
+    const window = mainWindow;
+    if (!window) throw new Error("窗口不可用");
+    const { canceled, filePaths } = await dialog.showOpenDialog(window, {
+      title: "导入 Agent 配置",
+      properties: ["openFile"],
+      filters: [{ name: "JSON", extensions: ["json"] }]
+    });
+    if (canceled || filePaths.length === 0) return undefined;
+    const parsed = JSON.parse(readFileSync(filePaths[0]!, "utf8")) as unknown;
+    if (!Array.isArray(parsed)) throw new Error("导入文件必须是 Agent 数组（导出的 JSON 可直接导入）");
+    return agentService.importAll(parsed as AgentProfile[]);
+  });
   // === Chat 对话(Codex 样式) =================================================
   ipcMain.handle("chats:list", () => chatService.listChats());
   ipcMain.handle("chats:get", (_event, id: string) => chatService.getChat(id));

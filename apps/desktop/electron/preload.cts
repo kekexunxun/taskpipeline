@@ -50,6 +50,13 @@ contextBridge.exposeInMainWorld("agentApi", {
   indexRepoWiki: (repositoryId: string) => ipcRenderer.invoke("repowiki:index", repositoryId),
   listRepoWikiDocs: (repositoryId: string) => ipcRenderer.invoke("repowiki:list", repositoryId),
   searchRepoWiki: (repositoryId: string, query: string) => ipcRenderer.invoke("repowiki:search", repositoryId, query),
+  // === Agent 配置 ==================================================
+  listAgents: () => ipcRenderer.invoke("agents:list"),
+  saveAgent: (profile: unknown) => ipcRenderer.invoke("agents:save", profile),
+  deleteAgent: (id: string) => ipcRenderer.invoke("agents:delete", id),
+  listAgentTemplates: () => ipcRenderer.invoke("agents:templates"),
+  exportAgents: () => ipcRenderer.invoke("agents:export"),
+  importAgents: () => ipcRenderer.invoke("agents:import"),
   // === Chat 对话(Codex 样式) ==================================================
   listChats: () => ipcRenderer.invoke("chats:list"),
   getChat: (id: string) => ipcRenderer.invoke("chats:get", id),

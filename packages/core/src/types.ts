@@ -43,6 +43,17 @@ export type Task = {
   autoCreateMergeRequests?: boolean;
   /** 任务级覆盖：实现完成后是否先生成最小测试集，再进入校验/Review。 */
   createTestCasesEnabled?: boolean;
+  /**
+   * 任务级 Agent 覆盖：指定 Agent id 时强制使用该 Agent（不再按仓库白名单解析）；
+   * `AGENT_TASK_DISABLED` 表示本任务禁用 Agent 注入，跟随系统模型设置。
+   * `undefined` 表示沿用仓库白名单解析（默认）。
+   */
+  agentProfileId?: string;
+  /**
+   * 逐仓库 Agent 覆盖：key 为仓库 repositoryId，value 为 Agent id。
+   * 优先级高于 task 级 agentProfileId，但低于仓库绑定 Agent。
+   */
+  repoAgentIds?: Record<string, string>;
   /** 最近一次测试用例生成的摘要，用于 Timeline 展示。 */
   testsGenerated?: { files: string[]; commitSha?: string; finishedAt: string };
   createdAt: string;
@@ -160,6 +171,53 @@ export type ModelProfile = {
   apiKeyEnv?: string;
   qoderEnabled?: boolean;
 };
+
+// === Agent 体系(可配置多 Agent + 仓库白名单绑定 + 模型路由) ====================
+
+/** 模型提供者标识；未配置表示跟随系统（inherit）。 */
+export type AgentProvider = "qoder" | "openai" | string;
+
+/**
+ * Agent 定义：每个 Agent 携带领域系统提示词、工程约定与模型偏好。
+ *
+ * - 仓库绑定在 Agent 侧（`repositoryIds` 白名单）：任务多仓库时每个仓库独立解析自己的 Agent；
+ * - 未绑定任何仓库的 Agent 不会自动命中，未命中仓库回退内置「通用」Agent（空内容=原行为）；
+ * - `preferredProvider` 与 `preferredModel` 成对出现，决定任务执行路径与模型（任务显式 > Agent > 系统）。
+ */
+export type AgentProfile = {
+  id: string;
+  name: string;
+  description?: string;
+  /** 角色/领域系统提示词，注入所有阶段 prompt 的 Agent 段。 */
+  systemPrompt: string;
+  /** 工程约定，追加在 systemPrompt 之后。 */
+  engineeringGuidelines?: string;
+  /** 模型提供者 + 模型名，成对出现；未配置时跟随系统 modelProfile。 */
+  preferredProvider?: AgentProvider;
+  preferredModel?: string;
+  /** 白名单绑定：适用仓库 id 列表。 */
+  repositoryIds: string[];
+  /** repowiki 文档路径白名单：命中这些路径的文档全文注入（不截断）。 */
+  wikiIncludePaths?: string[];
+  enabled: boolean;
+  /** 内置模板标记，UI 提供"基于模板新建"入口。 */
+  builtin?: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** 内置「通用」Agent 的固定 id：任何仓库未命中自定义 Agent 时回退到它。 */
+export const GENERAL_AGENT_ID = "builtin-general";
+
+/** 任务级 Agent 覆盖的特殊值：本任务禁用 Agent 注入（不注入指引、模型跟随系统）。 */
+export const AGENT_TASK_DISABLED = "__disabled__";
+
+/** 内置角色 Agent 固定 id：Code Review Agent */
+export const AGENT_REVIEWER_ID = "builtin-reviewer";
+/** 内置角色 Agent 固定 id：测试用例生成 Agent */
+export const AGENT_TEST_WRITER_ID = "builtin-test-writer";
+/** 内置角色 Agent 固定 id：MR 描述生成 Agent */
+export const AGENT_MR_WRITER_ID = "builtin-mr-writer";
 
 export function boardColumnFor(state: TaskState): BoardColumn {
   if (["completed", "cancelled"].includes(state)) return "done";

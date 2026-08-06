@@ -1,7 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   AlertCircleIcon,
+  BotIcon,
   ChevronRightIcon,
+  DownloadIcon,
   ExternalLinkIcon,
   GitBranchIcon,
   KeyRoundIcon,
@@ -10,10 +12,11 @@ import {
   PlusIcon,
   RefreshCwIcon,
   ServerIcon,
-  Trash2Icon
+  Trash2Icon,
+  UploadIcon
 } from "lucide-react";
-import type { QoderStatus } from "@/api";
-import type { Memory, MemoryScope, RepositoryProfile } from "@coding-agent/core";
+import type { AgentTemplate, QoderStatus } from "@/api";
+import type { AgentProfile, Memory, MemoryScope, RepositoryProfile } from "@coding-agent/core";
 import { api } from "@/api";
 import { useFeedback } from "@/hooks/useGlobalFeedback";
 import { cn } from "@/lib/utils";
@@ -45,6 +48,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ModelBadges } from "@/components/ModelBadges";
 import { RepositoryDialog, TestButton, type RepoDraft } from "./RepositoryDialog";
+import { AgentDialog } from "./AgentDialog";
 import { MemoryDialog } from "./MemoryDialog";
 import {
   OpenAIProfileDialog,
@@ -106,6 +110,8 @@ const secretKeys = [
   "modelApiKey"
 ] as const;
 const MANAGED_MEMORY_SCOPES: MemoryScope[] = ["user", "repo"];
+/** 系统内置角色 Agent 的固定 id，用于 Tab 分类。 */
+const ROLE_AGENT_IDS = ["builtin-reviewer", "builtin-test-writer", "builtin-mr-writer"];
 
 function Section({
   title,
@@ -142,10 +148,12 @@ function SettingField({ label, children }: { label: string; children: ReactNode 
  */
 function RepositoryCard({
   repository,
+  agent,
   onEdit,
   onDelete
 }: {
   repository: RepositoryProfile;
+  agent?: AgentProfile;
   onEdit(): void;
   onDelete(): void;
 }) {
@@ -159,7 +167,14 @@ function RepositoryCard({
           <GitBranchIcon size={12} />
         </div>
         <div className="min-w-0">
-          <h4 className="truncate text-xs font-semibold text-foreground">{repository.name}</h4>
+          <div className="flex items-center gap-1.5">
+            <h4 className="truncate text-xs font-semibold text-foreground">{repository.name}</h4>
+            {agent && (
+              <Badge variant="muted" className="shrink-0 text-[9px]" title={`绑定 Agent：${agent.name}`}>
+                {agent.name}
+              </Badge>
+            )}
+          </div>
           <p className="mt-0.5 inline-flex items-center gap-1 truncate text-[11px] text-muted-foreground">
             <GitBranchIcon size={9} />
             {repository.defaultBranch || "main"}
@@ -190,20 +205,27 @@ function RepositoryCard({
 
 /**
  * 记忆卡片：标题可点击展开内容，操作按钮靠右悬浮。
+ * 展开后按 范围 / 关键词 / 内容 三段式结构化展示。
  */
 function MemoryCard({
   memory,
+  repository,
   expanded,
   onToggle,
   onEdit,
   onDelete
 }: {
   memory: Memory;
+  repository?: RepositoryProfile;
   expanded: boolean;
   onToggle(): void;
   onEdit(): void;
   onDelete(): void;
 }) {
+  const scopeValue =
+    memory.scope === "user"
+      ? "用户级"
+      : repository?.localPath || repository?.name || "—";
   return (
     <article className="group rounded-md border bg-card">
       <div className="flex items-center gap-1.5 px-2.5 py-2">
@@ -241,11 +263,17 @@ function MemoryCard({
         </div>
       </div>
       {expanded && (
-        <div className="border-t px-3 pb-2.5 pt-2">
-          <p className="whitespace-pre-wrap text-[11px] leading-5 text-muted-foreground">{memory.content}</p>
+        <div className="space-y-1.5 border-t px-3 pb-2.5 pt-2">
           {memory.tags.length > 0 && (
-            <p className="mt-1.5 text-[10px] text-muted-foreground/70">#{memory.tags.join(" #")}</p>
+            <div className="space-y-0.5">
+              <p className="text-[10px] leading-4 text-muted-foreground/70">关键词</p>
+              <p className="text-[11px] leading-5 text-muted-foreground">{memory.tags.join(", ")}</p>
+            </div>
           )}
+          <div className="space-y-0.5">
+            <p className="text-[10px] leading-4 text-muted-foreground/70">内容</p>
+            <p className="whitespace-pre-wrap text-[11px] leading-5 text-muted-foreground">{memory.content}</p>
+          </div>
         </div>
       )}
     </article>
@@ -278,6 +306,69 @@ function QoderModelCard({
   );
 }
 
+/**
+ * Agent 卡片：展示名称 / 描述 / 绑定仓库数与模型偏好，操作按钮靠右悬浮。
+ */
+function AgentCard({
+  agent,
+  boundRepositories,
+  onEdit,
+  onDelete,
+  onToggleEnabled,
+  hideDelete
+}: {
+  agent: AgentProfile;
+  boundRepositories: number;
+  onEdit(): void;
+  onDelete(): void;
+  onToggleEnabled(enabled: boolean): void;
+  hideDelete?: boolean;
+}) {
+  return (
+    <article className="group rounded-md border bg-card">
+      <div className="flex items-center gap-2 px-3 py-2.5">
+        <div className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
+          <BotIcon size={13} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <h4 className="truncate text-xs font-semibold text-foreground">{agent.name}</h4>
+            {agent.builtin && <Badge variant="muted" className="text-[9px]">内置</Badge>}
+          </div>
+          <p className="mt-0.5 truncate text-[11px] text-muted-foreground" title={agent.description}>
+            {agent.description || "—"}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <Switch
+            checked={agent.enabled}
+            disabled={agent.builtin}
+            onCheckedChange={(checked) => onToggleEnabled(checked)}
+            aria-label={`启用 Agent ${agent.name}`}
+          />
+          <Button variant="ghost" size="icon-sm" aria-label={`编辑 Agent ${agent.name}`} onClick={onEdit}>
+            <PencilIcon size={11} />
+          </Button>
+          {!hideDelete && (
+            <Button variant="ghost" size="icon-sm" aria-label={`删除 Agent ${agent.name}`} onClick={onDelete}>
+              <Trash2Icon size={11} />
+            </Button>
+          )}
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-t px-3 py-1.5 text-[11px] text-muted-foreground">
+        <span>绑定 {boundRepositories} 个仓库</span>
+        {agent.preferredProvider && agent.preferredModel && (
+          <>
+            <span className="text-muted-foreground/50">·</span>
+            <span>{agent.preferredProvider === "qoder" ? "Qoder" : "OpenAI"} · {agent.preferredModel}</span>
+          </>
+        )}
+      </div>
+    </article>
+  );
+}
+
 export function SettingsDialog({
   open,
   onOpenChange,
@@ -306,6 +397,11 @@ export function SettingsDialog({
   const [rebuildingWiki, setRebuildingWiki] = useState<string | undefined>(undefined);
   const [activeMemoryTab, setActiveMemoryTab] = useState<string>("user");
   const [expandedMemoryId, setExpandedMemoryId] = useState<string | undefined>(undefined);
+  const [agents, setAgents] = useState<AgentProfile[]>([]);
+  const [agentTab, setAgentTab] = useState<"system" | "custom">("system");
+  const [agentTemplates, setAgentTemplates] = useState<AgentTemplate[]>([]);
+  const [agentDialog, setAgentDialog] = useState<{ open: boolean; initial?: AgentProfile }>({ open: false });
+  const [deleteAgent, setDeleteAgent] = useState<AgentProfile | undefined>(undefined);
   const [openAIDraft, setOpenAIDraft] = useState<OpenAIDraft | null>(null);
   const [openAIDialog, setOpenAIDialog] = useState<{ open: boolean; mode: "create" | "edit" }>({
     open: false,
@@ -324,6 +420,8 @@ export function SettingsDialog({
       const repositoryList = await api.listRepositories();
       setRepositories(repositoryList);
       setMemories(await api.listMemories({ scopes: MANAGED_MEMORY_SCOPES }));
+      setAgents(await api.listAgents());
+      setAgentTemplates(await api.listAgentTemplates());
       const counts: Record<string, number> = {};
       for (const repository of repositoryList) counts[repository.id] = (await api.listRepoWikiDocs(repository.id)).length;
       setWikiCounts(counts);
@@ -427,12 +525,15 @@ export function SettingsDialog({
       showError(reason instanceof Error ? reason.message : String(reason));
     }
   };
+  const boundAgentCount = deleteRepository ? agents.filter((agent) => agent.repositoryIds.includes(deleteRepository.id)).length : 0;
   const removeRepository = async () => {
     if (!deleteRepository) return;
     try {
       await api.deleteRepository(deleteRepository.id);
       setDeleteRepository(undefined);
       await refreshRepositories();
+      // 删除仓库会同步解绑 Agent 白名单，刷新列表
+      await refreshAgents();
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -454,6 +555,55 @@ export function SettingsDialog({
       showError(reason instanceof Error ? reason.message : String(reason));
     }
   };
+  const refreshAgents = async () => {
+    try {
+      setAgents(await api.listAgents());
+    } catch (reason) {
+      showError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+  const toggleAgentEnabled = async (agent: AgentProfile, enabled: boolean) => {
+    try {
+      await api.saveAgent({ ...agent, enabled, updatedAt: new Date().toISOString() });
+      await refreshAgents();
+    } catch (reason) {
+      showError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+  const removeAgent = async () => {
+    if (!deleteAgent) return;
+    try {
+      await api.deleteAgent(deleteAgent.id);
+      setDeleteAgent(undefined);
+      await refreshAgents();
+    } catch (reason) {
+      showError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+  const exportAgents = async () => {
+    try {
+      const filePath = await api.exportAgents();
+      if (filePath) showSuccess(`已导出 Agent 配置：${filePath}`);
+    } catch (reason) {
+      showError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+  const importAgents = async () => {
+    try {
+      const next = await api.importAgents();
+      if (next) {
+        setAgents(next);
+        showSuccess(`已导入 ${next.length} 个 Agent`);
+      }
+    } catch (reason) {
+      showError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+  /** 白名单解析（与主进程 AgentService 一致）：命中多个取最近修改。 */
+  const agentForRepository = (repositoryId: string) =>
+    agents
+      .filter((agent) => agent.enabled && agent.repositoryIds.includes(repositoryId))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
   const rebuildRepoWiki = async (repositoryId: string) => {
     setRebuildingWiki(repositoryId);
     try {
@@ -507,6 +657,7 @@ export function SettingsDialog({
                 <TabsTrigger className="justify-start h-7 px-2 text-xs!" value="general">通用</TabsTrigger>
                 <TabsTrigger className="justify-start h-7 px-2 text-xs!" value="atlassian">Atlassian</TabsTrigger>
                 <TabsTrigger className="justify-start h-7 px-2 text-xs!" value="repositories">仓库</TabsTrigger>
+                <TabsTrigger className="justify-start h-7 px-2 text-xs!" value="agents">Agent</TabsTrigger>
                 <TabsTrigger className="justify-start h-7 px-2 text-xs!" value="memory">记忆</TabsTrigger>
                 <TabsTrigger className="justify-start h-7 px-2 text-xs!" value="model">模型</TabsTrigger>
               </TabsList>
@@ -596,12 +747,14 @@ export function SettingsDialog({
                         <Input
                           value={settings.jiraUrl}
                           onChange={(event) => update("jiraUrl", event.target.value)}
+                          placeholder="请输入Jira Host"
                         />
                       </SettingField>
                       <SettingField label="Jira Email">
                         <Input
                           value={settings.jiraEmail}
                           onChange={(event) => update("jiraEmail", event.target.value)}
+                          placeholder="请输入Jira Email"
                         />
                       </SettingField>
                       <SettingField label="Jira Token">
@@ -609,6 +762,7 @@ export function SettingsDialog({
                           aria-label="Jira Token"
                           value={settings.jiraToken}
                           onChange={(event) => update("jiraToken", event.target.value)}
+                          placeholder="请输入Jira Token"
                         />
                       </SettingField>
                       <TestButton kind="jira" label="测试 Jira 连接" />
@@ -620,12 +774,14 @@ export function SettingsDialog({
                         <Input
                           value={settings.confluenceUrl}
                           onChange={(event) => update("confluenceUrl", event.target.value)}
+                          placeholder="请输入Confluence Host"
                         />
                       </SettingField>
                       <SettingField label="Confluence Email">
                         <Input
                           value={settings.confluenceEmail}
                           onChange={(event) => update("confluenceEmail", event.target.value)}
+                          placeholder="请输入Confluence Email"
                         />
                       </SettingField>
                       <SettingField label="Confluence Token">
@@ -633,6 +789,7 @@ export function SettingsDialog({
                           aria-label="Confluence Token"
                           value={settings.confluenceToken}
                           onChange={(event) => update("confluenceToken", event.target.value)}
+                          placeholder="请输入Confluence Token"
                         />
                       </SettingField>
                       <TestButton kind="confluence" label="测试 Confluence 连接" />
@@ -658,6 +815,7 @@ export function SettingsDialog({
                         <RepositoryCard
                           key={repository.id}
                           repository={repository}
+                          agent={agentForRepository(repository.id)}
                           onEdit={() =>
                             setRepositoryDialog({ open: true, initial: repository })
                           }
@@ -670,6 +828,85 @@ export function SettingsDialog({
                       还没有配置仓库
                     </div>
                   )}
+                </TabsContent>
+                <TabsContent value="agents" className="space-y-2.5">
+                  <div className="flex items-start justify-between gap-2.5">
+                    <div>
+                      <h3 className="text-xs font-semibold">Agent</h3>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        为仓库分配领域专精 Agent：任务执行时自动注入其指引并按首选模型路由。
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <Button size="sm" variant="outline" onClick={exportAgents} title="导出全部 Agent 为 JSON 文件">
+                        <DownloadIcon size={11} />
+                        导出
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={importAgents} title="从 JSON 文件导入 Agent（已存在则覆盖）">
+                        <UploadIcon size={11} />
+                        导入
+                      </Button>
+                      <Button size="sm" onClick={() => setAgentDialog({ open: true })}>
+                        <PlusIcon size={11} />
+                        新增 Agent
+                      </Button>
+                    </div>
+                  </div>
+                  <Tabs value={agentTab} onValueChange={(value) => setAgentTab(value as "system" | "custom")}>
+                    <TabsList className="h-7 justify-start gap-0.5 rounded-md border bg-card/40 p-0.5">
+                      <TabsTrigger value="system" className="h-6 px-2.5 text-xs!">系统角色</TabsTrigger>
+                      <TabsTrigger value="custom" className="h-6 px-2.5 text-xs!">自定义 Agent</TabsTrigger>
+                    </TabsList>
+                    <TabsContent value="system" className="mt-2.5 space-y-1.5">
+                      {(() => {
+                        const roleAgents = agents.filter((a) => ROLE_AGENT_IDS.includes(a.id));
+                        return roleAgents.length ? (
+                          <div className="grid gap-1.5">
+                            {roleAgents.map((agent) => (
+                              <AgentCard
+                                key={agent.id}
+                                agent={agent}
+                                boundRepositories={0}
+                                onEdit={() => setAgentDialog({ open: true, initial: agent })}
+                                onDelete={() => setDeleteAgent(agent)}
+                                onToggleEnabled={(enabled) => void toggleAgentEnabled(agent, enabled)}
+                                hideDelete
+                              />
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
+                            暂无系统角色
+                          </div>
+                        );
+                      })()}
+                    </TabsContent>
+                    <TabsContent value="custom" className="mt-2.5 space-y-1.5">
+                      {(() => {
+                        const customAgents = agents.filter((a) => !ROLE_AGENT_IDS.includes(a.id));
+                        return customAgents.length ? (
+                          <div className="grid gap-1.5">
+                            {customAgents.map((agent) => (
+                              <AgentCard
+                                key={agent.id}
+                                agent={agent}
+                                boundRepositories={agent.repositoryIds.filter((id) =>
+                                  repositories.some((repo) => repo.id === id)
+                                ).length}
+                                onEdit={() => setAgentDialog({ open: true, initial: agent })}
+                                onDelete={() => setDeleteAgent(agent)}
+                                onToggleEnabled={(enabled) => void toggleAgentEnabled(agent, enabled)}
+                              />
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
+                            还没有配置自定义 Agent，未绑定 Agent 的仓库将使用通用能力执行
+                          </div>
+                        );
+                      })()}
+                    </TabsContent>
+                  </Tabs>
                 </TabsContent>
                 <TabsContent value="memory" className="space-y-5">
                   <Section title="记忆管理" description="用户级与仓库级长期记忆会注入到对话与任务执行上下文，可在此新增、修正或删除。">
@@ -737,6 +974,7 @@ export function SettingsDialog({
                                 <MemoryCard
                                   key={memory.id}
                                   memory={memory}
+                                  repository={repository}
                                   expanded={expandedMemoryId === memory.id}
                                   onToggle={() => setExpandedMemoryId((current) => (current === memory.id ? undefined : memory.id))}
                                   onEdit={() => setMemoryDialog({ open: true, initial: memory })}
@@ -850,6 +1088,21 @@ export function SettingsDialog({
           await refreshRepositories();
         }}
       />
+      <AgentDialog
+        open={agentDialog.open}
+        initial={agentDialog.initial}
+        repositories={repositories}
+        templates={agentTemplates}
+        builtin={agentDialog.initial ? ROLE_AGENT_IDS.includes(agentDialog.initial.id) : false}
+        onOpenChange={(next) =>
+          setAgentDialog((current) => ({ ...current, open: next }))
+        }
+        onError={(reason) => showError(reason instanceof Error ? reason.message : String(reason))}
+        onSaved={async () => {
+          setAgentDialog({ open: false });
+          await refreshAgents();
+        }}
+      />
       <OpenAIProfileDialog
         open={openAIDialog.open}
         mode={openAIDialog.mode}
@@ -896,6 +1149,27 @@ export function SettingsDialog({
         </AlertDialogContent>
       </AlertDialog>
       <AlertDialog
+        open={Boolean(deleteAgent)}
+        onOpenChange={(next) => {
+          if (!next) setDeleteAgent(undefined);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除 Agent？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将删除「{deleteAgent?.name}」。已绑定该 Agent 的仓库将回退使用通用能力执行。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void removeAgent()}>
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
         open={Boolean(deleteRepository)}
         onOpenChange={(next) => {
           if (!next) setDeleteRepository(undefined);
@@ -906,6 +1180,7 @@ export function SettingsDialog({
             <AlertDialogTitle>删除仓库配置？</AlertDialogTitle>
             <AlertDialogDescription>
               将删除「{deleteRepository?.name}」的配置，不会删除本地文件夹。
+              {boundAgentCount > 0 ? `已绑定该仓库的 ${boundAgentCount} 个 Agent 将同步解绑。` : null}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

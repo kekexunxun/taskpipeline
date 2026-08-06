@@ -21,9 +21,11 @@ type SdkMessage = Record<string, unknown> & {
 
 vi.mock("@qoder-ai/qoder-agent-sdk", () => {
   const scripts: { messages: SdkMessage[] }[] = [];
+  const queryCalls: unknown[] = [];
   return {
     accessToken: (token: string) => ({ token }),
-    query: () => {
+    query: (options: unknown) => {
+      queryCalls.push(options);
       const script = scripts.shift() ?? { messages: [] };
       return {
         [Symbol.asyncIterator]() {
@@ -41,7 +43,8 @@ vi.mock("@qoder-ai/qoder-agent-sdk", () => {
         }
       };
     },
-    __pushQueryScript: (s: { messages: SdkMessage[] }) => scripts.push(s)
+    __pushQueryScript: (s: { messages: SdkMessage[] }) => scripts.push(s),
+    __queryCalls: queryCalls
   };
 });
 
@@ -49,6 +52,7 @@ vi.mock("@qoder-ai/qoder-agent-sdk", () => {
 const { QoderTaskAgentDriver } = await import("./qoder-task-agent.js");
 const sdkMock = (await import("@qoder-ai/qoder-agent-sdk")) as unknown as {
   __pushQueryScript: (s: { messages: SdkMessage[] }) => void;
+  __queryCalls: unknown[];
 };
 
 function assistantMsg(text: string, sessionId?: string): SdkMessage {
@@ -98,7 +102,7 @@ function fakeRepos(): TaskRepository[] {
 
 type CapturedEvent = { type: string; [key: string]: unknown };
 
-function driver() {
+function driver(extra: Partial<ConstructorParameters<typeof QoderTaskAgentDriver>[0]> = {}) {
   const events: CapturedEvent[] = [];
   const addTaskEvent = () => undefined;
   const emitPi = (_e: { type: "qoder_event"; taskId: string; message: SDKMessage }) => undefined;
@@ -108,7 +112,8 @@ function driver() {
     dataDir: tmpdir(),
     addTaskEvent,
     emitPi,
-    emit: (e) => events.push(e as CapturedEvent)
+    emit: (e) => events.push(e as CapturedEvent),
+    ...extra
   });
   return { driver: d, events };
 }
@@ -119,6 +124,7 @@ describe("QoderTaskAgentDriver", () => {
   beforeEach(() => {
     savedLog = process.env.CODING_AGENT_QODER_LOG;
     delete process.env.CODING_AGENT_QODER_LOG;
+    sdkMock.__queryCalls.length = 0;
   });
 
   afterEach(() => {
@@ -178,6 +184,57 @@ describe("QoderTaskAgentDriver", () => {
     const result = d.collectResult("test");
     expect(result.responseTexts.some((t) => t.includes("a_test.ts"))).toBe(true);
     expect(result.sessionId).toBe("test-sess");
+  });
+
+  it("runPlan prepends agent context sections to the prompt", async () => {
+    sdkMock.__pushQueryScript({ messages: [assistantMsg("分析中", "p-sess"), resultMsg("{}", "p-sess")] });
+    const { driver: d } = driver({
+      resolveAgentContext: async () => ({ sections: ["## Agent 指引 — 仓库 repo（repo）\n遵循项目约定"] })
+    });
+    await d.runPlan({ task: fakeTask(), repos: fakeRepos() });
+    const prompt = String((sdkMock.__queryCalls[0] as { prompt?: unknown } | undefined)?.prompt ?? "");
+    expect(prompt).toContain("## Agent 指引 — 仓库 repo");
+    expect(prompt).toContain("遵循项目约定");
+  });
+
+  it("runImplementation prepends agent context sections to the prompt", async () => {
+    sdkMock.__pushQueryScript({ messages: [resultMsg("Done", "i-sess")] });
+    const { driver: d } = driver({
+      resolveAgentContext: async () => ({ sections: ["## Agent 指引 — 仓库 repo\n遵循项目约定"] })
+    });
+    await d.runImplementation({ task: fakeTask(), repos: fakeRepos() });
+    const prompt = String((sdkMock.__queryCalls[0] as { prompt?: unknown } | undefined)?.prompt ?? "");
+    expect(prompt).toContain("## Agent 指引");
+  });
+
+  it("runImplementation with resumeSessionId skips agent context re-injection", async () => {
+    sdkMock.__pushQueryScript({ messages: [resultMsg("Resumed", "r-sess")] });
+    const { driver: d } = driver({
+      resolveAgentContext: async () => ({ sections: ["## Agent 指引 — 仓库 repo\n遵循项目约定"] })
+    });
+    await d.runImplementation({ task: fakeTask(), repos: fakeRepos(), resumeSessionId: "r-sess", extraPrompt: "继续完成" });
+    const prompt = String((sdkMock.__queryCalls[0] as { prompt?: unknown } | undefined)?.prompt ?? "");
+    expect(prompt).not.toContain("## Agent 指引");
+    expect(prompt).toContain("继续完成");
+  });
+
+  it("runTestGeneration prepends agent context sections to the prompt", async () => {
+    sdkMock.__pushQueryScript({ messages: [resultMsg("{\"files\":[]}", "t-sess")] });
+    const { driver: d } = driver({
+      resolveAgentContext: async () => ({ sections: ["## Agent 指引 — 仓库 repo\n遵循项目约定"] })
+    });
+    await d.runTestGeneration({ task: fakeTask(), repos: fakeRepos() });
+    const prompt = String((sdkMock.__queryCalls[0] as { prompt?: unknown } | undefined)?.prompt ?? "");
+    expect(prompt).toContain("## Agent 指引");
+  });
+
+  it("forwards resolveModel result as the query model", async () => {
+    sdkMock.__pushQueryScript({ messages: [resultMsg("Done", "m-sess")] });
+    const { driver: d } = driver({
+      resolveModel: () => "claude-sonnet-4.5"
+    });
+    await d.runImplementation({ task: fakeTask(), repos: fakeRepos() });
+    expect((sdkMock.__queryCalls[0] as { options?: { model?: unknown } } | undefined)?.options?.model).toBe("claude-sonnet-4.5");
   });
 
   it("throws when no token is configured", async () => {

@@ -84,6 +84,11 @@ export type TaskAgentDeps = {
   resolveModel?: (task: Task) => string | undefined;
   /** Qoder 提示词前置的记忆上下文(可选)。 */
   resolveMemoryContext?: (task: Task, repos: TaskRepository[]) => Promise<string | undefined>;
+  /**
+   * 按任务关联仓库解析的 Agent 指引段(可选)。
+   * 非 resume 场景注入到 prompt 最前;resume(真实续接)时由调用方不提供。
+   */
+  resolveAgentContext?: (task: Task, repos: TaskRepository[]) => Promise<{ sections: string[] }>;
 };
 
 export interface TaskAgentDriver {

@@ -1,4 +1,4 @@
-import type { AgentEvent, Approval, Memory, MemoryScope, MemorySearchHit, RepositoryProfile, RepoWikiDoc, RepoWikiSearchHit, Task, TaskCard, TaskRepository, TaskStartMode } from "@coding-agent/core";
+import type { AgentEvent, AgentProfile, Approval, Memory, MemoryScope, MemorySearchHit, RepositoryProfile, RepoWikiDoc, RepoWikiSearchHit, Task, TaskCard, TaskRepository, TaskStartMode } from "@coding-agent/core";
 
 export type ChangedFile = { repositoryId: string; repositoryName: string; path: string; status: string };
 export type TaskDetail = { task?: Task; repositories: TaskRepository[]; events: AgentEvent[]; approvals: Approval[]; changedFiles: ChangedFile[] };
@@ -19,9 +19,9 @@ export type JiraTaskCandidate = Pick<Task, "taskKey" | "source" | "sourceUrl" | 
 export type RepositoryFolder = Omit<RepositoryProfile, "id">;
 export type MergeRepoStatus = { repoId: string; repoName: string; mergeRequestIid: number; mergeRequestUrl?: string; state: "opened" | "merged" | "closed" | "error"; error?: string };
 export type MergeStatusSummary = { taskId: string; taskTitle: string; repos: MergeRepoStatus[]; allMerged: boolean; taskCompleted: boolean };
-export type CreateTaskInput = Pick<Task, "title" | "description"> & Partial<Pick<Task, "keywords" | "acceptanceCriteria" | "openCodeReviewEnabled" | "autoCreateMergeRequests" | "createTestCasesEnabled">>;
+export type CreateTaskInput = Pick<Task, "title" | "description"> & Partial<Pick<Task, "keywords" | "acceptanceCriteria" | "openCodeReviewEnabled" | "autoCreateMergeRequests" | "createTestCasesEnabled" | "agentProfileId" | "repoAgentIds">>;
 export type RepositoryCommands = Partial<Pick<TaskRepository, "setupCommand" | "lintCommand" | "testCommand" | "buildCommand">>;
-export type StartTaskOptions = { mode: TaskStartMode; repositoryCommands?: Record<string, RepositoryCommands>; useAllRepositories?: boolean };
+export type StartTaskOptions = { mode: TaskStartMode; repositoryCommands?: Record<string, RepositoryCommands>; useAllRepositories?: boolean; repoAgentIds?: Record<string, string> };
 export type TaskRemovalMode = "workspace" | "all";
 export type TaskBackendId = "jira" | "github" | "linear";
 export type TaskBackendInfo = { id: TaskBackendId; displayName: string; configured: boolean; description?: string };
@@ -124,6 +124,15 @@ export type MemorySearchOptions = { repositoryIds?: string[]; conversationId?: s
 export type MemorySearchResult = { memories: MemorySearchHit[]; wikiDocs: RepoWikiSearchHit[] };
 export type RepoWikiIndexResult = { indexed: number; removed: number };
 
+/** 内置 Agent 模板（主进程 AGENT_TEMPLATES 的镜像形态，仅用于「基于模板新建」入口）。 */
+export type AgentTemplate = {
+  id: string;
+  name: string;
+  description: string;
+  systemPrompt: string;
+  engineeringGuidelines?: string;
+};
+
 export type AgentApi = {
   listTasks(): Promise<TaskCard[]>; getTask(id: string): Promise<TaskDetail>; createTask(input: CreateTaskInput): Promise<Task>; updateTask(id: string, patch: Partial<Task>): Promise<Task>;
   deleteTask(id: string, mode?: TaskRemovalMode): Promise<void>; listRepositories(): Promise<RepositoryProfile[]>; saveRepository(profile: RepositoryProfile): Promise<void>; deleteRepository(id: string): Promise<void>; chooseRepositoryFolder(): Promise<RepositoryFolder | undefined>; attachRepository(taskId: string, repositoryId: string): Promise<TaskRepository>; detachRepository(taskId: string, repositoryId: string): Promise<void>; updateTaskRepositoryCommands(taskId: string, repositoryId: string, commands: RepositoryCommands): Promise<TaskRepository>; getSetting(key: string): Promise<string | undefined>; setSetting(key: string, value: string, secret?: boolean): Promise<void>;
@@ -145,6 +154,13 @@ export type AgentApi = {
   indexRepoWiki(repositoryId: string): Promise<RepoWikiIndexResult>;
   listRepoWikiDocs(repositoryId: string): Promise<RepoWikiDoc[]>;
   searchRepoWiki(repositoryId: string, query: string): Promise<RepoWikiSearchHit[]>;
+  // agents
+  listAgents(): Promise<AgentProfile[]>;
+  saveAgent(profile: AgentProfile): Promise<AgentProfile[]>;
+  deleteAgent(id: string): Promise<AgentProfile[]>;
+  listAgentTemplates(): Promise<AgentTemplate[]>;
+  exportAgents(): Promise<string | undefined>;
+  importAgents(): Promise<AgentProfile[]>;
   // chat
   listChats(): Promise<ChatConversationMeta[]>;
   getChat(id: string): Promise<{ conversation: ChatConversation; messages: ChatMessage[] } | undefined>;
@@ -172,6 +188,16 @@ const demoRepositories: RepositoryProfile[] = [
   { id: "repo-events", name: "event-core", localPath: "/demo/event-core", defaultBranch: "main" },
   { id: "repo-web", name: "web-console", localPath: "/demo/web-console", defaultBranch: "main" },
   { id: "repo-infra", name: "infra-scripts", localPath: "/demo/infra-scripts", defaultBranch: "main" }
+];
+
+const demoAgents: AgentProfile[] = [
+  { id: "builtin-general", name: "通用", description: "内置兜底 Agent：未绑定自定义 Agent 的仓库使用通用能力执行，行为与未配置时一致。", systemPrompt: "", repositoryIds: [], enabled: true, builtin: true, createdAt: nowIso(), updatedAt: nowIso() },
+  { id: "demo-java", name: "Java 服务端", description: "示例：Spring Boot 服务端项目约定（绑定 payment-service）。", systemPrompt: "- 统一使用 Result<T> 包装接口返回，禁止直接返回实体对象\n- 事务方法显式声明 @Transactional(rollbackFor = Exception.class)\n- 日志使用 slf4j，禁止 System.out / printStackTrace", repositoryIds: ["repo-payment"], enabled: true, createdAt: nowIso(), updatedAt: nowIso() }
+];
+
+const demoAgentTemplates: AgentTemplate[] = [
+  { id: "java-backend", name: "Java 服务端", description: "Spring Boot / MyBatis 等公司 Java 服务端项目。", systemPrompt: "- 使用项目现有框架版本，禁止引入未使用的新依赖\n- 统一使用 Result<T> 包装接口返回\n- 分页查询复用 PageQuery 基类\n- 事务方法显式声明 @Transactional(rollbackFor = Exception.class)", engineeringGuidelines: "实现前先阅读目标模块已有 Service / Mapper 的写法，复用现有工具类。" },
+  { id: "frontend-react", name: "前端 React + TS", description: "React / TypeScript 前端项目（含 Next.js / Vite）。", systemPrompt: "- TypeScript 严格模式，禁止 any\n- 组件使用函数组件 + hooks，禁止 class 组件\n- 状态管理使用项目现有方案\n- 新增 UI 必须补齐 loading / empty / error 三态", engineeringGuidelines: "改动前先查看现有页面/组件的实现模式，复用项目内已有的 UI 组件。" }
 ];
 
 const demoTaskRepositories = new Map<string, TaskRepository[]>(demoTasks.map((task) => {
@@ -256,6 +282,23 @@ export const api: AgentApi = window.agentApi ?? {
   async indexRepoWiki() { return { indexed: 0, removed: 0 }; },
   async listRepoWikiDocs() { return []; },
   async searchRepoWiki() { return []; },
+
+  // Agent mock（浏览器回退模式：内存 demo 数据）
+  async listAgents() { return demoAgents; },
+  async saveAgent(profile) {
+    const index = demoAgents.findIndex((item) => item.id === profile.id);
+    if (index >= 0) demoAgents[index] = profile;
+    else demoAgents.push(profile);
+    return demoAgents;
+  },
+  async deleteAgent(id) {
+    const index = demoAgents.findIndex((item) => item.id === id);
+    if (index >= 0) demoAgents.splice(index, 1);
+    return demoAgents;
+  },
+  async listAgentTemplates() { return demoAgentTemplates; },
+  async exportAgents() { return undefined; },
+  async importAgents() { return demoAgents; },
 
   // Chat mock
   async listChats() { return [...memoryChats.values()].map(({ messages, ...meta }) => meta).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)); },

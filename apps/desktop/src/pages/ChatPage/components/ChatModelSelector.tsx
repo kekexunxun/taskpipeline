@@ -49,7 +49,7 @@ export function ChatModelSelector({
           aria-label="选择模型"
         >
           <CpuIcon size={10} className="opacity-70" />
-          <span className="max-w-32 truncate">{current?.displayName ?? "Auto"}</span>
+          <span className="max-w-32 truncate">{current?.displayName ?? value ?? "Auto"}</span>
           <ChevronDownIcon size={9} className="opacity-70" />
         </Button>
       </ModelSelectorTrigger>

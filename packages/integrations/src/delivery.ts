@@ -21,6 +21,12 @@ export interface DeliveryServiceOptions {
   approver?: DeliveryApprover;
   /** 注入 GitLab service 工厂,便于测试时 mock。 */
   gitlabFactory?: (baseUrl: string, projectId: string | number) => GitLabService;
+  /**
+   * LLM 驱动的 MR 描述生成回调。
+   * 注入后 submitMergeRequests 优先使用其返回结果作为 MR title/description；
+   * 抛错或未注入时回退现有模板行为（不阻断 MR 提交）。
+   */
+  describeMergeRequest?: (task: Task, repo: TaskRepository, signal?: AbortSignal) => Promise<{ commitMessage?: string; title: string; description: string }>;
 }
 
 /**
@@ -71,12 +77,31 @@ export class DeliveryService {
         const profile = profiles.get(repo.repositoryId);
         const remote = profile?.remoteUrl && parseGitLabRemote(profile.remoteUrl);
         if (!remote || !repo.worktreePath || !repo.featureBranch) throw new Error(`仓库 ${repo.name} 缺少 GitLab 地址或 worktree`);
+        // LLM 驱动的 MR 描述生成（非阻断：失败回退模板）
+        let mrTitle: string;
+        let mrDescription: string;
+        let commitMessage = message;
+        if (this.options.describeMergeRequest) {
+          try {
+            const described = await this.options.describeMergeRequest(task, repo, signal);
+            if (described.commitMessage) commitMessage = described.commitMessage;
+            mrTitle = described.title;
+            mrDescription = described.description;
+          } catch (error) {
+            mrTitle = `${task.taskKey ? `${task.taskKey} ` : ""}${task.title}`;
+            mrDescription = `Automated implementation for ${task.taskKey ?? taskId}.`;
+            this.sink.addEvent({ taskId, kind: "error", title: "LLM 生成 MR 描述失败，使用模板回退", detail: error instanceof Error ? error.message : String(error) });
+          }
+        } else {
+          mrTitle = `${task.taskKey ? `${task.taskKey} ` : ""}${task.title}`;
+          mrDescription = `Automated implementation for ${task.taskKey ?? taskId}.`;
+        }
         if (this.options.approver) {
-          const ok = await this.options.approver(task, "commit", `${repo.name}: commit\n${message}`);
+          const ok = await this.options.approver(task, "commit", `${repo.name}: commit\n${commitMessage}`);
           if (!ok) { this.sink.addEvent({ taskId, kind: "permission", title: "已拒绝 commit", detail: `${repo.name}: 用户拒绝 commit` }); this.fallbackToAwaitingCommit(taskId); return; }
         }
         this.sink.addEvent({ taskId, kind: "status", title: `${repo.name}: git add + commit (--no-verify)` });
-        const sha = await this.git.commit(repo.worktreePath, message, signal);
+        const sha = await this.git.commit(repo.worktreePath, commitMessage, signal);
         this.sink.addEvent({ taskId, kind: "status", title: `${repo.name}: commit ${sha.slice(0, 8)} 已就绪,正在 push` });
         if (this.options.approver) {
           const ok = await this.options.approver(task, "push", `${repo.name}: push ${repo.featureBranch}`);
@@ -92,7 +117,7 @@ export class DeliveryService {
           this.store.updateTaskRepository(repo.id, { commitSha: sha, mergeRequestState: "opened", deliveryStatus: "mr_created" });
           this.sink.addEvent({ taskId, kind: "command", title: `${repo.name} 已更新 MR`, detail: repo.mergeRequestUrl });
         } else {
-          const mr = await factory(remote.baseUrl, remote.projectId).createMergeRequest({ sourceBranch: repo.featureBranch, targetBranch: repo.baseBranch, title: `${task.taskKey ? `${task.taskKey} ` : ""}${task.title}`, description: `Automated implementation for ${task.taskKey ?? taskId}.` }, signal);
+          const mr = await factory(remote.baseUrl, remote.projectId).createMergeRequest({ sourceBranch: repo.featureBranch, targetBranch: repo.baseBranch, title: mrTitle, description: mrDescription }, signal);
           this.store.updateTaskRepository(repo.id, { commitSha: sha, mergeRequestUrl: mr.web_url, mergeRequestIid: mr.iid, mergeRequestState: "opened", deliveryStatus: "mr_created" });
           this.sink.addEvent({ taskId, kind: "command", title: `${repo.name} 已创建 MR`, detail: mr.web_url });
         }

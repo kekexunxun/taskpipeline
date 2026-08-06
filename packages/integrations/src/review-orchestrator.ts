@@ -29,16 +29,16 @@ export type DelegateReviewerInput = {
  * class 里的 `call` 方法签名能直接匹配(避免 method vs property 推断差异)。
  */
 export interface Reviewer {
-  call(input: DelegateReviewerInput, taskId: string, model?: string, signal?: AbortSignal): Promise<string>;
+  call(input: DelegateReviewerInput, taskId: string, model?: string, signal?: AbortSignal, prompt?: string): Promise<string>;
 }
 
-export type ReviewerFunction = (input: DelegateReviewerInput, taskId: string, model?: string, signal?: AbortSignal) => Promise<string>;
+export type ReviewerFunction = (input: DelegateReviewerInput, taskId: string, model?: string, signal?: AbortSignal, prompt?: string) => Promise<string>;
 
 /**
  * 把一个 function 适配成 `Reviewer` 接口,
  * 便于宿主直接传入 lambda(例如 Qoder reviewer)。
  */
-export function asReviewer(fn: ReviewerFunction): Reviewer { return { call: fn }; }
+export function asReviewer(fn: ReviewerFunction): Reviewer { return { call: (input, taskId, model, signal, prompt) => fn(input, taskId, model, signal, prompt) }; }
 
 /**
  * 把 DelegateReviewerInput 渲染成 LLM 提示词。
@@ -102,7 +102,7 @@ export function parseReviewResult(text: string): ReviewResult {
  */
 export class OpenAICompatReviewer implements Reviewer {
   constructor(private readonly resolver: SettingResolver, private readonly timeoutMs: number = 3 * 60_000, private readonly fetcher: typeof fetch = fetch) {}
-  call = async (input: DelegateReviewerInput, _taskId: string, model?: string, externalSignal?: AbortSignal): Promise<string> => {
+  call = async (input: DelegateReviewerInput, _taskId: string, model?: string, externalSignal?: AbortSignal, prompt?: string): Promise<string> => {
     const raw = this.resolver.get("modelProfile");
     if (!raw) throw new Error("未配置 modelProfile,无法在 OpenAI 兼容模式下做委托 Review");
     const profile = JSON.parse(raw) as { baseUrl?: string; model?: string; apiKeyEnv?: string };
@@ -119,7 +119,7 @@ export class OpenAICompatReviewer implements Reviewer {
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           model: model ?? profile.model,
-          messages: [{ role: "user", content: buildReviewPrompt(input) }],
+          messages: [{ role: "user", content: prompt ?? buildReviewPrompt(input) }],
           response_format: { type: "json_object" },
           temperature: 0
         })
