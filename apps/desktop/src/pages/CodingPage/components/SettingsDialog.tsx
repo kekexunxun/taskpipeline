@@ -281,11 +281,13 @@ function QoderModelCard({
 export function SettingsDialog({
   open,
   onOpenChange,
-  qoder
+  qoder,
+  onQoderRefresh
 }: {
   open: boolean;
   onOpenChange(open: boolean): void;
   qoder?: QoderStatus;
+  onQoderRefresh?(): void;
 }) {
   const { showError, showSuccess } = useFeedback();
   const [settings, setSettings] = useState<Settings>(defaults);
@@ -360,6 +362,10 @@ export function SettingsDialog({
       for (const key of secretKeys)
         if (settings[key] && settings[key] !== "__configured__")
           await api.setSetting(key, settings[key], true);
+      // Token 变更后触发 Qoder 状态刷新
+      if (settings.qoderToken && settings.qoderToken !== "__configured__") {
+        onQoderRefresh?.();
+      }
       showSuccess("设置已保存");
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason));
@@ -519,7 +525,7 @@ export function SettingsDialog({
                         <div className="flex flex-col gap-1 rounded-md border bg-card px-2.5 py-1.5 text-xs text-muted-foreground">
                           <div className="flex items-center gap-1.5">
                             <ServerIcon size={12} />
-                            <span className="text-sm text-foreground">连接状态</span>
+                            <span className="text-xs text-foreground">连接状态</span>
                             <Badge variant={qoder.connected ? "success" : "destructive"}>
                               {qoder.connected ? "已连接" : "未连接"}
                             </Badge>

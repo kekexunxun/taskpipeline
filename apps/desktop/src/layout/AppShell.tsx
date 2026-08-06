@@ -48,7 +48,7 @@ export function AppShell() {
         <TooltipProvider delayDuration={350}>
           <GlobalFeedback />
           <ShellInner onOpenSettings={() => setSettingsOpen(true)} />
-          <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} qoder={qoder.status} />
+          <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} qoder={qoder.status} onQoderRefresh={() => void qoder.refresh()} />
         </TooltipProvider>
       </QoderStatusProvider>
     </FeedbackProvider>
