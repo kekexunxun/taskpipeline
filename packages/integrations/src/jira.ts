@@ -62,7 +62,9 @@ export function mapJiraTasks(response: unknown, mapping: JiraMapping = {}): Jira
     if (!jiraKey || !title) return [];
     const remoteStatus = asText(read(row, "status", "status"));
     const state: TaskState = mapping.statusMap?.[remoteStatus] ?? "draft";
-    const sourceUrl = asText(read(row, "sourceUrl", "url")) || undefined;
+    const sourceUrlRaw = asText(read(row, "sourceUrl", "url")) || undefined;
+    // REST API URL → browse URL
+    const sourceUrl = sourceUrlRaw ? sourceUrlRaw.replace(/\/rest\/api\/(?:2|3)\/issue\//i, "/browse/") : undefined;
     return [{ taskKey: jiraKey, source: "jira", ...(sourceUrl ? { sourceUrl } : {}), title, description: asText(read(row, "description", "description")), keywords: asList(read(row, "keywords", "labels")), acceptanceCriteria: asList(read(row, "acceptanceCriteria", "acceptance_criteria")), state }];
   });
 }

@@ -44,8 +44,11 @@ export function useTasks(): CodingPageState {
   const liveMessageId = useRef<string | undefined>(undefined);
   const planningRef = useRef(false);
   const notifiedPlanRef = useRef<string | undefined>(undefined);
+  const pendingTaskIdRef = useRef<string | undefined>(undefined);
 
   const acceptDetail = useCallback((next: TaskDetail) => {
+    // 竞态保护：只接受当前选中任务的响应
+    if (next.task?.id && next.task.id !== pendingTaskIdRef.current) return;
     setDetail(next);
     planningRef.current = next.task?.state === "planning";
     if (next.task?.state === "awaiting_plan_approval") {
@@ -131,12 +134,18 @@ export function useTasks(): CodingPageState {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, refresh, acceptDetail]);
 
-  // 切换任务时清空 liveEvents 并加载详情
+  // 切换任务时清空 liveEvents 并加载详情（不清空 detail，避免闪烁）
   useEffect(() => {
     setLiveEvents([]);
     setSending(false);
-    setDetail(undefined);
-    if (selectedId) void api.getTask(selectedId).then(acceptDetail);
+    if (selectedId) {
+      pendingTaskIdRef.current = selectedId;
+      void api.getTask(selectedId).then(acceptDetail);
+    } else {
+      // 没有选中任务时清空详情
+      pendingTaskIdRef.current = undefined;
+      setDetail(undefined);
+    }
   }, [selectedId, acceptDetail]);
 
   const run = useCallback(async (action: () => Promise<unknown>) => {

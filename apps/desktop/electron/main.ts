@@ -1138,7 +1138,7 @@ async function* holdQoderProbe(signal: AbortSignal): AsyncGenerator<never> {
 
 async function getQoderStatus(): Promise<QoderStatus> {
   const token = protectedValue("qoderToken");
-  if (modelProvider() !== "qoder" || !token) return { enabled: false, connected: false, running: false, models: [] };
+  if (!token) return { enabled: false, connected: false, running: false, models: [] };
   const probeAbort = activeQoderQuery ? undefined : new AbortController();
   const q = activeQoderQuery ?? query({
     prompt: holdQoderProbe(probeAbort!.signal),
@@ -1155,7 +1155,7 @@ async function getQoderStatus(): Promise<QoderStatus> {
       models: models.filter((model) => model.isEnabled !== false).map(({ value, displayName, description, isDefault, isEnabled, isReasoning, isVl, priceFactor }) => ({ value, displayName, description, isDefault, isEnabled, isReasoning, isVl, priceFactor }))
     };
   } catch (error) {
-    return { enabled: true, connected: false, running: Boolean(activeQoderQuery), models: [], error: error instanceof Error ? error.message : String(error) };
+    console.error("[qoder:status] probe failed:", error instanceof Error ? error.message : String(error)); return { enabled: true, connected: false, running: Boolean(activeQoderQuery), models: [], error: error instanceof Error ? error.message : String(error) };
   } finally {
     if (probeAbort) { probeAbort.abort(); try { await q.close(); } catch { /* The probe may already be closed after an initialization failure. */ } }
   }

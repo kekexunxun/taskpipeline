@@ -1,8 +1,9 @@
-import { CircleDotIcon, RefreshCwIcon } from "lucide-react";
+import { AlertCircleIcon, CircleDotIcon, RefreshCwIcon } from "lucide-react";
 import type { QoderStatus } from "../api";
 import { formatTokens } from "../utils/format";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 export function QoderStatusBar({ status, refreshing, onRefresh }: { status: QoderStatus; refreshing: boolean; onRefresh(): void }) {
   const quotaUsed = status.usage?.userQuota?.used ?? status.usage?.orgResourcePackage?.used;
@@ -11,12 +12,24 @@ export function QoderStatusBar({ status, refreshing, onRefresh }: { status: Qode
   const percentage = status.usage?.totalUsagePercentage ?? status.usage?.userQuota?.percentage;
   const tier = status.account?.subscriptionType ?? status.usage?.userType ?? "Qoder";
   const defaultModel = status.models.find((model) => model.isDefault)?.displayName;
+  const hasError = !status.connected && status.error;
   return (
     <footer className="flex h-[26px] min-w-0 items-center gap-3 overflow-hidden border-t bg-card/80 px-2 text-xs text-muted-foreground">
       <div className="flex min-w-0 flex-1 items-center gap-4 overflow-hidden">
-        <span className={cn("inline-flex shrink-0 items-center gap-1", status.connected ? "text-emerald-400" : "text-red-300")} title={status.error}>
-          <CircleDotIcon size={10} />{status.connected ? status.running ? "Qoder 执行中" : "Qoder 已连接" : "Qoder 未连接"}
-        </span>
+        {hasError ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex shrink-0 cursor-help items-center gap-1 text-amber-400">
+                <AlertCircleIcon size={10} />Qoder 连接异常
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="max-w-xs text-xs">{status.error}</TooltipContent>
+          </Tooltip>
+        ) : (
+          <span className={cn("inline-flex shrink-0 items-center gap-1", status.connected ? "text-emerald-400" : "text-muted-foreground")}>
+            <CircleDotIcon size={10} />{status.connected ? status.running ? "Qoder 执行中" : "Qoder 已连接" : "Qoder 未连接"}
+          </span>
+        )}
         <span className="shrink-0">档位 <b className="text-foreground">{tier}</b></span>
         {defaultModel && <span className="shrink-0">默认模型 <b className="text-foreground">{defaultModel}</b></span>}
         {quotaUsed !== undefined && (

@@ -5,6 +5,10 @@ import type { TaskCard } from "@coding-agent/core";
 import type { TaskDetail } from "@/api";
 import { DetailPanel, isPlanningEvent } from "./DetailPanel";
 
+vi.mock("@/hooks/useChatModels", () => ({
+  useChatModels: () => ({ modelGroups: [], loading: false, refresh: vi.fn() })
+}));
+
 vi.mock("./DetailHeader", () => ({ DetailHeader: () => null }));
 vi.mock("./DetailActions", () => ({ DetailActions: () => null }));
 vi.mock("./UsageSection", () => ({ UsageSection: () => <div>usage</div> }));

@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
+  AlertCircleIcon,
   ChevronRightIcon,
   ExternalLinkIcon,
   GitBranchIcon,
@@ -515,13 +516,23 @@ export function SettingsDialog({
                         />
                       </SettingField>
                       {qoder && (
-                        <div className="flex items-center gap-1.5 rounded-md border bg-card px-2.5 py-1.5 text-xs text-muted-foreground">
-                          <ServerIcon size={12} />
-                          <span className="text-sm text-foreground">连接状态</span>
-                          <Badge variant={qoder.connected ? "success" : "destructive"}>
-                            {qoder.connected ? "已连接" : "未连接"}
-                          </Badge>
-                          <span>{qoder.account?.subscriptionType ?? "未知档位"}</span>
+                        <div className="flex flex-col gap-1 rounded-md border bg-card px-2.5 py-1.5 text-xs text-muted-foreground">
+                          <div className="flex items-center gap-1.5">
+                            <ServerIcon size={12} />
+                            <span className="text-sm text-foreground">连接状态</span>
+                            <Badge variant={qoder.connected ? "success" : "destructive"}>
+                              {qoder.connected ? "已连接" : "未连接"}
+                            </Badge>
+                            <span>{qoder.account?.subscriptionType ?? "未知档位"}</span>
+                          </div>
+                          {qoder.error && !qoder.connected && (
+                            <div className="flex items-start gap-1.5 pl-5 text-[11px] text-destructive">
+                              <AlertCircleIcon size={11} className="mt-0.5 shrink-0" />
+                              <span title={qoder.error} className="break-words">
+                                {qoder.error.length > 120 ? `${qoder.error.slice(0, 120)}...` : qoder.error}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       )}
                     </FieldGroup>

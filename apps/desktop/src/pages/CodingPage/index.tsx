@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useTasks } from "./hooks/useTasks";
-import { useQoderStatusContext } from "../../hooks/useQoderStatusContext";
 import { useFeedback } from "../../hooks/useGlobalFeedback";
 import { api, type TaskRemovalMode } from "../../api";
 import { BoardPanel } from "./components/BoardPanel";
@@ -14,7 +13,6 @@ import { UiRequestDialog } from "./components/UiRequestDialog";
 export default function CodingPage() {
   const navigate = useNavigate();
   const { taskId } = useParams();
-  const qoder = useQoderStatusContext();
   const { showError, showSuccess } = useFeedback();
   const tasks = useTasks();
   const [editingTask, setEditingTask] = useState<string | "new">();
@@ -110,7 +108,6 @@ export default function CodingPage() {
             card={tasks.tasks.find((t) => t.id === tasks.selectedId)}
             detail={tasks.detail}
             liveEvents={tasks.liveEvents}
-            qoder={qoder.status}
             prompt={tasks.prompt}
             running={tasks.running}
             sending={tasks.sending}

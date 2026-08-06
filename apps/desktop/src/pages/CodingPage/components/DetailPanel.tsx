@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { ActivityIcon, FileDiffIcon, FileTextIcon, GitMergeIcon, MessageSquareTextIcon, PlayIcon, RotateCcwIcon } from "lucide-react";
 import type { Task, TaskCard, TaskRepository } from "@coding-agent/core";
-import type { ChatModelGroup, QoderStatus, TaskDetail, ChangedFile } from "../../../api";
+import type { ChatModelGroup, TaskDetail, ChangedFile } from "../../../api";
+import { useChatModels } from "../../../hooks/useChatModels";
 import { DetailHeader } from "./DetailHeader";
 import { UsageSection } from "./UsageSection";
 import { ChangedFilesSection } from "./ChangedFilesSection";
@@ -27,7 +28,6 @@ type Props = {
   card?: TaskCard;
   detail?: TaskDetail;
   liveEvents: TimelineItem[];
-  qoder?: QoderStatus;
   prompt: string;
   running: boolean;
   sending: boolean;
@@ -62,7 +62,6 @@ export function DetailPanel({
   card,
   detail,
   liveEvents,
-  qoder,
   prompt,
   running,
   sending,
@@ -96,6 +95,7 @@ export function DetailPanel({
   const repositories = detail?.repositories ?? card?.repositories ?? [];
   const [activeTab, setActiveTab] = useState("activity");
   const [planFeedback, setPlanFeedback] = useState("");
+  const { modelGroups: allModelGroups } = useChatModels();
   const groups = useMemo(() => {
     const byRepo = new Map<string, { repositoryId: string; repositoryName: string; files: ChangedFile[] }>();
     for (const file of detail?.changedFiles ?? []) {
@@ -125,11 +125,6 @@ export function DetailPanel({
   const totalFiles = detail?.changedFiles.length ?? 0;
   const mergeRequestCount = detail?.repositories.filter((repo) => repo.mergeRequestUrl).length ?? 0;
   const canChat = ["implementing", "awaiting_input"].includes(task.state) || inReviewStates.has(task.state) || ["failed", "validation_failed"].includes(task.state) || running;
-  const modelGroups: ChatModelGroup[] = qoder?.enabled && qoder.connected && qoder.models.length > 0
-    ? [{ driverId: "qoder", displayName: "Qoder Agent SDK", models: qoder.models.map((model) => ({ value: `qoder:${model.value}`, displayName: model.displayName, isDefault: model.isDefault, isReasoning: model.isReasoning, isVl: model.isVl, priceFactor: model.priceFactor })) }]
-    : [];
-  const hasModelSelector = modelGroups.length > 0;
-  const showUsage = hasModelSelector || running || Boolean(task.sessionUsage || card.sessionUsage);
   const showChangedFiles =
     totalFiles > 0 ||
     inReviewStates.has(task.state) ||
@@ -164,17 +159,14 @@ export function DetailPanel({
         onReimplement={onReimplement}
         onResume={onResume}
       />
-      {showUsage && (
-        <UsageSection
-          task={task}
-          card={card}
-          model={task.qoderModel}
-          onChangeModel={onChangeModel}
-          modelGroups={modelGroups}
-          running={running || starting}
-          hasModelSelector={hasModelSelector}
-        />
-      )}
+      <UsageSection
+        task={task}
+        card={card}
+        model={task.qoderModel}
+        onChangeModel={onChangeModel}
+        modelGroups={allModelGroups}
+        running={running || starting}
+      />
       <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 flex-1 flex-col gap-0">
         <TabsList className="h-9 w-full shrink-0 justify-start gap-0 rounded-none bg-transparent px-3 py-0">
           {hasPlan && <TabsTrigger value="plan" data-detail-tab className={detailTabClass}>

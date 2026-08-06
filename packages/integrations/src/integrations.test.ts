@@ -20,7 +20,7 @@ describe("Jira mapping", () => {
 
   it("maps the simplified issue shape returned by mcp-atlassian", () => {
     const response = { content: [{ type: "text", text: JSON.stringify({ total: 1, issues: [{ key: "OPS-12", self: "https://jira.example.com/rest/api/2/issue/OPS-12", summary: "Fix export", description: "Include audit fields", labels: ["audit"], status: { name: "Open" } }] }) }] };
-    expect(mapJiraTasks(response)).toEqual([{ taskKey: "OPS-12", source: "jira", sourceUrl: "https://jira.example.com/rest/api/2/issue/OPS-12", title: "Fix export", description: "Include audit fields", keywords: ["audit"], acceptanceCriteria: [], state: "draft" }]);
+    expect(mapJiraTasks(response)).toEqual([{ taskKey: "OPS-12", source: "jira", sourceUrl: "https://jira.example.com/browse/OPS-12", title: "Fix export", description: "Include audit fields", keywords: ["audit"], acceptanceCriteria: [], state: "draft" }]);
   });
 
   it("fetches Jira candidates without requiring a local task store", async () => {

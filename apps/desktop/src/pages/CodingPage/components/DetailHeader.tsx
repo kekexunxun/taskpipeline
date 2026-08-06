@@ -24,9 +24,7 @@ function SourceBadge({ source, taskKey, sourceUrl }: { source: Task["source"]; t
     return (
       <Tooltip>
         <TooltipTrigger asChild>
-          <Button
-            size="sm"
-            type="button"
+          <span
             className="inline-flex items-center gap-1 rounded border border-border/70 bg-foreground/[0.03] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground transition-colors hover:border-ring hover:bg-foreground/5 hover:text-foreground focus-visible:outline-none"
             onClick={() => {
               api.openExternal(sourceUrl).catch(() => { /* 失败由调用方处理 */ });
@@ -34,7 +32,7 @@ function SourceBadge({ source, taskKey, sourceUrl }: { source: Task["source"]; t
           >
             {label} · {taskKey ?? ""}
             <ExternalLinkIcon size={9} />
-          </Button>
+          </span>
         </TooltipTrigger>
         <TooltipContent>在 Jira 打开 {taskKey ?? ""}</TooltipContent>
       </Tooltip>

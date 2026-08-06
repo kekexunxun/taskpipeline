@@ -67,10 +67,15 @@ export async function importJiraIssue(client: McpClient, keyOrUrl: string, store
     const description = typeof fields?.description === "string"
       ? fields.description
       : fields?.description ? JSON.stringify(fields.description) : payload?.text ?? "";
+    const rawUrl = /^https?:\/\//i.test(keyOrUrl.trim()) ? keyOrUrl.trim() : issue?.url ?? issue?.self;
+    // REST API URL → browse URL; 都没有则不设置 sourceUrl
+    const sourceUrl = rawUrl
+      ? rawUrl.replace(/\/rest\/api\/(?:2|3)\/issue\//i, "/browse/")
+      : undefined;
     return store.upsertJiraTask({
       taskKey: issue?.key ?? key,
       source: "jira",
-      sourceUrl: /^https?:\/\//i.test(keyOrUrl.trim()) ? keyOrUrl.trim() : issue?.url ?? issue?.self,
+      ...(sourceUrl ? { sourceUrl } : {}),
       title: fields?.summary ?? fields?.title ?? key,
       description,
       keywords: fields?.labels ?? [],

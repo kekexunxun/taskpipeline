@@ -11,6 +11,7 @@ import {
   type DriverPart,
   type StoredMessageRecord
 } from "@/api";
+import { useChatModels } from "@/hooks/useChatModels";
 import { useFeedback } from "@/hooks/useGlobalFeedback";
 import { ElectronChatTransport } from "../chat-transport";
 
@@ -68,7 +69,7 @@ export function useChat() {
   const [conversation, setConversation] = useState<ChatConversation>();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
-  const [modelGroups, setModelGroups] = useState<ChatModelGroup[]>([]);
+  const { modelGroups } = useChatModels();
   const [model, setModel] = useState<string>();
   const [driverId, setDriverId] = useState<ChatDriverId | undefined>();
   /** 包装 setModel:同时根据 model value 推断 driverId 并设上。 */
@@ -96,18 +97,6 @@ export function useChat() {
 
   useEffect(() => {
     void refreshMetas();
-    void api
-      .listChatModels()
-      .then((groups) => {
-        setModelGroups(groups);
-        const preferredDriver = groups[0]?.driverId;
-        const preferredModel =
-          groups.flatMap((group) => group.models).find((item) => item.isDefault) ??
-          groups[0]?.models[0];
-        setDriverId((current) => current ?? preferredDriver);
-        setModel((current) => current ?? preferredModel?.value);
-      })
-      .catch((reason) => showError(reason instanceof Error ? reason.message : String(reason)));
     // 任务后端列表
     void api
       .listTaskBackends()
@@ -117,6 +106,17 @@ export function useChat() {
       })
       .catch(() => undefined);
   }, [refreshMetas, showError]);
+
+  // 模型列表首次加载时,设置默认 driver 和 model
+  useEffect(() => {
+    if (modelGroups.length === 0) return;
+    const preferredDriver = modelGroups[0]?.driverId;
+    const preferredModel =
+      modelGroups.flatMap((group) => group.models).find((item) => item.isDefault) ??
+      modelGroups[0]?.models[0];
+    setDriverId((current) => current ?? preferredDriver);
+    setModel((current) => current ?? preferredModel?.value);
+  }, [modelGroups]);
 
   const loadConversation = useCallback(
     async (id: string) => {
