@@ -1,6 +1,6 @@
-import { Code2Icon, SettingsIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Code2Icon, SettingsIcon } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 export function TopBar({ onOpenSettings }: { onOpenSettings(): void }) {
   return (
@@ -9,7 +9,7 @@ export function TopBar({ onOpenSettings }: { onOpenSettings(): void }) {
         <span className="grid size-6 place-items-center rounded-md border border-border bg-muted text-foreground">
           <Code2Icon size={13} />
         </span>
-        <strong className="font-semibold">CodeArc</strong>
+        <strong className="font-semibold">TaskPipeline</strong>
       </div>
       <div className="window-no-drag">
         <Tooltip>
@@ -22,5 +22,5 @@ export function TopBar({ onOpenSettings }: { onOpenSettings(): void }) {
         </Tooltip>
       </div>
     </header>
-  );
+  )
 }

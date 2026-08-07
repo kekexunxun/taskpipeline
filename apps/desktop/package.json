@@ -8,7 +8,12 @@
     "predev": "npm run build -w @coding-agent/core && npm run build -w @coding-agent/integrations && npm run build -w @coding-agent/pi-package",
     "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json --watch\" \"wait-on tcp:5173 file:dist-electron/main.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "build": "vite build && tsc -p tsconfig.electron.json",
-    "prepackage": "node -e \"const fs=require('fs'),p=require('path');['core','integrations','pi-package'].forEach(n=>{const d=p.join('node_modules','@coding-agent',n);try{fs.rmSync(d,{recursive:!0,force:!0})}catch{}fs.cpSync(p.join('../../packages',n,'dist'),p.join(d,'dist'),{recursive:!0});fs.copyFileSync(p.join('../../packages',n,'package.json'),p.join(d,'package.json'));console.log('copied @coding-agent/'+n)})\"",
+    "prepackage": "node scripts/copy-monorepo-packages.mjs",
+    "prepackage:dir": "node scripts/copy-monorepo-packages.mjs",
+    "prepackage:mac": "node scripts/copy-monorepo-packages.mjs",
+    "prepackage:win": "node scripts/copy-monorepo-packages.mjs",
+    "prepackage:linux": "node scripts/copy-monorepo-packages.mjs",
+    "stage:monorepo": "node scripts/copy-monorepo-packages.mjs",
     "package": "electron-builder",
     "package:dir": "electron-builder --dir",
     "package:mac": "electron-builder --mac",
@@ -31,7 +36,7 @@
   },
   "build": {
     "appId": "com.codingagent.desktop",
-    "productName": "CodeArc",
+    "productName": "TaskPipeline",
     "directories": {
       "output": "../../release"
     },

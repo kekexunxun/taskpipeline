@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1458,7 +1459,11 @@ async function startPi(taskId: string): Promise<void> {
     ? SessionManager.open(task.piSessionPath, sessionDir, cwd)
     : SessionManager.create(cwd, sessionDir)
   const settingsManager = SettingsManager.create(cwd, agentDir)
-  const extension = join(__dirname, '../../../packages/pi-package/dist/index.js')
+  // 开发期依赖根 `node_modules/@coding-agent/pi-package` 的符号链接，
+  // 打包后依赖 `prepackage` 拷贝到 `apps/desktop/node_modules/@coding-agent/pi-package`。
+  // 使用 `require.resolve` 让两种布局都能解析到 `dist/index.js`。
+  const require = createRequire(import.meta.url)
+  const extension = require.resolve('@coding-agent/pi-package')
   const additionalExtensionPaths = [extension]
   // 若用户已通过 `pi install npm:pi-trace-extension` 安装，追加加载（提供执行视角 trace 数据源）。
   // 缺失时静默降级：仅数据源④不可用，任务 / 对话 / 官方 session 三路 trace 不受影响。
