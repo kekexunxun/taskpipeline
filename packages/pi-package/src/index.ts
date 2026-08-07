@@ -71,8 +71,10 @@ function buildJiraClient(profile: McpProfile): McpClient {
 function buildDeliveryService(ctx: { ui: { confirm(title: string, message: string): Promise<boolean> } }): DeliveryService {
   return new DeliveryService(store, gitService, piResolver, piSink, {
     approver: async (task, kind, context) => {
+      // 与 desktop 端一致：默认"常规可行"不弹窗；deliveryConfirm=true 时才逐步骤确认。
+      if (piResolver.get("deliveryConfirm") !== "true") return true;
       const approval = store.addApproval({ taskId: task.id, kind, context });
-      const accepted = await ctx.ui.confirm("业务节点确认", context);
+      const accepted = await ctx.ui.confirm(`确认${kind}：${task.title}`, `${task.title}\n\n${context}`);
       store.resolveApproval(approval.id, accepted ? "approved" : "rejected");
       return accepted;
     }
@@ -93,13 +95,6 @@ function setState(task: Task, state: TaskState): Task {
 function configuredSecret(settingKey: string, envName?: string): string | undefined {
   if (envName && process.env[envName]) return process.env[envName];
   return keyStore.resolve(store.getSetting(settingKey), settingKey);
-}
-
-async function approve(task: Task, kind: Parameters<TaskStore["addApproval"]>[0]["kind"], context: string, ctx: { ui: { confirm(title: string, message: string): Promise<boolean> } }): Promise<boolean> {
-  const approval = store.addApproval({ taskId: task.id, kind, context });
-  const accepted = await ctx.ui.confirm("业务节点确认", context);
-  store.resolveApproval(approval.id, accepted ? "approved" : "rejected");
-  return accepted;
 }
 
 export default function codingAgentExtension(pi: ExtensionAPI) {

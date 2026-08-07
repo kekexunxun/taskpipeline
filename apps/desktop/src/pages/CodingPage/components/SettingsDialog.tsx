@@ -74,6 +74,8 @@ type Settings = {
   reviewAutoFix: string;
   /** Phase 4：自动修订最大轮数。 */
   reviewAutoFixMaxRounds: string;
+  /** 交付确认：commit/push/MR 前是否弹窗确认（默认关闭=自动提交，常规可行）。 */
+  deliveryConfirm: string;
   // modelApiKey 不再在通用设置中展示，由 OpenAI-Compatible 弹窗维护
   modelApiKey?: string;
 };
@@ -97,7 +99,8 @@ const defaults: Settings = {
   openCodeReviewEnabled: "false",
   createTestCasesEnabled: "false",
   reviewAutoFix: "false",
-  reviewAutoFixMaxRounds: "2"
+  reviewAutoFixMaxRounds: "2",
+  deliveryConfirm: "false"
 };
 const ordinaryKeys = [
   "defaultModel",
@@ -109,7 +112,8 @@ const ordinaryKeys = [
   "openCodeReviewEnabled",
   "createTestCasesEnabled",
   "reviewAutoFix",
-  "reviewAutoFixMaxRounds"
+  "reviewAutoFixMaxRounds",
+  "deliveryConfirm"
 ] as const;
 const secretKeys = [
   "qoderToken",
@@ -737,6 +741,16 @@ export function SettingsDialog({
                         <Switch
                           checked={settings.autoCreateMergeRequests === "true"}
                           onCheckedChange={(checked) => update("autoCreateMergeRequests", checked ? "true" : "false")}
+                        />
+                      </label>
+                      <label className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
+                        <span className="min-w-0">
+                          <span className="block text-xs font-medium text-foreground">提交前人工确认</span>
+                          <span className="mt-0.5 block text-[11px] text-muted-foreground">开启后 commit / push / 建 MR 前逐步骤弹窗确认；关闭时自动提交。</span>
+                        </span>
+                        <Switch
+                          checked={settings.deliveryConfirm === "true"}
+                          onCheckedChange={(checked) => update("deliveryConfirm", checked ? "true" : "false")}
                         />
                       </label>
                       <label className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">

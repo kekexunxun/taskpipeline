@@ -330,10 +330,14 @@ function buildReviewOrchestrator(): ReviewOrchestrator {
 const taskWorkflow = new TaskWorkflow(store, desktopResolver, desktopSink, taskWorkspace)
 
 /**
- * 交付确认点（commit / push / 建 MR）：HITL 的核心拦截。
+ * 交付确认点（commit / push / 建 MR）。
  *
- * 每次提交前弹 UI 确认框，用户拒绝则 DeliveryService 不执行该步骤并退到 awaiting_commit。
- * 确认请求与结果都会写入 Approval 表，形成可审计的审批记录。
+ * 默认"常规可行"：不弹确认框直接放行（保持任务自动提交的流畅性）。
+ * 系统设置 `deliveryConfirm=true` 时开启逐步骤确认——用户拒绝则 DeliveryService
+ * 不执行该步骤并退到 awaiting_commit，确认请求与结果写入 Approval 表。
+ *
+ * 该 approver 始终接在 DeliveryService 上（不拆掉），设置开关切换行为，
+ * 为后续任务执行模式改造（并行任务归属、逐任务确认策略等）保留扩展点。
  */
 const deliveryStepLabels: Record<'commit' | 'push' | 'merge_request', string> = {
   commit: '提交代码',
@@ -345,12 +349,15 @@ async function deliveryApprover(
   kind: 'commit' | 'push' | 'merge_request',
   context: string
 ): Promise<boolean> {
+  // 默认不确认（常规可行）；仅在设置开启时逐步骤弹窗。
+  if (store.getSetting('deliveryConfirm') !== 'true') return true
   const label = deliveryStepLabels[kind]
   const approval = store.addApproval({ taskId: task.id, kind, context })
+  // 消息带任务标题与仓库信息，避免并行任务时混淆确认归属。
   const ok =
     (await requestUi<boolean>(
       'confirm',
-      { title: `确认${label}`, message: context, taskId: task.id },
+      { title: `确认${label}：${task.title}`, message: `${task.title}\n\n${context}`, taskId: task.id },
       { timeout: 10 * 60_000 } // 超时默认拒绝（安全兜底），用户仍可手动重试提交
     )) ?? false
   store.resolveApproval(approval.id, ok ? 'approved' : 'rejected')
@@ -473,16 +480,18 @@ function createQoderTaskAgent(): QoderTaskAgentDriver {
       if (activeQoderQuery === q) activeQoderQuery = undefined
       if (activeQoderAbort?.signal === undefined) activeQoderAbort = undefined
     },
-    // Phase 2 HITL：危险工具调用确认（shell / git 写操作 / 删除类）。
+    // 工具调用 HITL：仅删除/重命名/移动等破坏性操作弹确认；其余默认放行（常规可行）。
     onPermissionRequest: async (taskId, toolName, toolInput, signal) => {
       if (!isDangerousTool(toolName, toolInput)) return 'allow'
       const detail = describeToolAction(toolName, toolInput)
+      const task = store.getTask(taskId)
       const approval = store.addApproval({ taskId, kind: 'permission', context: detail })
-      addTaskEvent({ taskId, kind: 'permission', title: `请求执行危险操作:${toolName}`, detail })
+      addTaskEvent({ taskId, kind: 'permission', title: `请求执行破坏性操作:${toolName}`, detail })
+      // 消息带任务标题，并行任务时确认框归属清晰。
       const ok =
         (await requestUi<boolean>(
           'confirm',
-          { title: `允许执行 ${toolName}?`, message: detail, taskId },
+          { title: `允许执行 ${toolName}?`, message: `${task?.title ?? ''}\n\n${detail}`, taskId },
           { timeout: 10 * 60_000, signal } // 会话中止/超时默认拒绝（安全兜底）
         )) ?? false
       store.resolveApproval(approval.id, ok ? 'approved' : 'rejected')

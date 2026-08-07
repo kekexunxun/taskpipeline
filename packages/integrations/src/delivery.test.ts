@@ -37,6 +37,21 @@ function setupAwaitingCommitTask(store: TaskStore): { task: Task; repo: TaskRepo
 }
 
 describe("DeliveryService 交付确认点（Phase 1 HITL）", () => {
+  it("未注入 approver 时默认直接执行（常规可行，等价于 deliveryConfirm 关闭）", async () => {
+    const store = createStore();
+    const { sink } = createSink(store);
+    const { task } = setupAwaitingCommitTask(store);
+    const service = new DeliveryService(store, gitMock as never, resolver, sink, {
+      gitlabFactory: () => ({ createMergeRequest: vi.fn().mockResolvedValue({ web_url: "https://gitlab.example.com/mr/1", iid: 1 }) }) as never
+    });
+    await service.submitMergeRequests(task.id);
+    expect(gitMock.commit).toHaveBeenCalledTimes(1);
+    expect(gitMock.push).toHaveBeenCalledTimes(1);
+    expect(store.getTask(task.id)?.state).toBe("await_merge");
+    // 无 approver 时不产生任何 permission 事件
+    expect(store.listEvents(task.id).some((event) => event.kind === "permission")).toBe(false);
+  });
+
   it("approver 返回 false 时拒绝 commit 并退回 awaiting_commit，不执行 git 操作", async () => {
     const store = createStore();
     const { sink, events } = createSink(store);

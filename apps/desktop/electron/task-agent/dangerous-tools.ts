@@ -1,31 +1,24 @@
 /**
- * 危险工具判定 — Phase 2 HITL 的核心规则。
+ * 危险工具判定 — 工具调用 HITL 规则。
  *
- * Qoder 实现阶段当前用 `permissionMode: "acceptEdits"`（自动接受编辑），
- * 但 shell / git 写操作 / 删除类操作应拦截给用户确认。
+ * Qoder 实现阶段用 `permissionMode: "acceptEdits"`（自动接受编辑）。
+ * 默认"常规可行"：只有不可逆的破坏性操作才拦截给用户确认，避免频繁弹窗打断执行，
+ * 也避免并行任务时确认框归属不清。
  *
- * 规则：
- * - Bash / Shell / Terminal 类：只读命令（ls/cat/head/git status 等）自动放行，其余确认；
- * - Git 类：写操作（push/merge/reset/clean/checkout -f/delete/rm/rebase/pull）确认，只读放行；
- * - Delete / Remove / Unlink / Rm / Rename / Move 类：确认；
- * - 其余工具（Read / Write / Edit / Glob / Grep 等）：自动放行，避免打断 agent 正常节奏。
+ * 规则（仅确认删除/重命名/移动类，其余一律放行）：
+ * - 工具名含 delete / remove / unlink / rm / rename / mv / move → 确认；
+ * - Bash / Shell 命令中出现 rm / rmdir / unlink / mv / git rm → 确认；
+ * - 其余（shell 写命令、git push/merge/reset 等写操作、Read/Write/Edit/Glob 等）→ 自动放行。
+ *
+ * 该判定与 PermissionRequest hook 之间保持接口不变（返回 boolean），
+ * 后续如需按工具/按命令细化策略（白名单、按仓库规则等），只需扩展本文件。
  */
 
-const READONLY_BASH_COMMANDS = [
-  /^ls\b/, /^cat\b/, /^head\b/, /^tail\b/, /^less\b/, /^more\b/, /^pwd\b/, /^whoami\b/,
-  /^env\b/, /^echo\b/, /^printf\b/, /^which\b/, /^find\b/, /^grep\b/, /^wc\b/, /^sort\b/,
-  /^date\b/, /^uname\b/, /^tree\b/, /^file\b/, /^stat\b/, /^du\b/, /^df\b/
+/** Bash 命令中的破坏性动词（词边界扫描，任意位置命中即确认，覆盖 sudo/xargs/引号/多行前缀；
+ * `(?<!-)` 排除 --rm 这类 flag 形态，避免误拦 docker run --rm 等非删除场景）。 */
+const DESTRUCTIVE_BASH_PATTERNS = [
+  /(?<!-)\brm\b/, /\brmdir\b/, /\bunlink\b/, /\bmv\b/, /\bgit\s+rm\b/, /(^|\s)-delete\b/
 ];
-
-const READONLY_GIT_COMMANDS = [
-  /^status\b/, /^diff\b/, /^log\b/, /^branch\b/, /^remote\b/, /^show\b/, /^rev-parse\b/,
-  /^fetch\b/, /^merge-base\b/, /^ls-files\b/, /^describe\b/, /^config\b/, /^tag\b/,
-  /^blame\b/, /^check-ignore\b/, /^symbolic-ref\b/, /^for-each-ref\b/
-];
-
-function isReadonlyCommand(command: string, prefixes: RegExp[]): boolean {
-  return prefixes.some((pattern) => pattern.test(command.trim()));
-}
 
 function toolInputString(input: unknown): string {
   if (typeof input === "string") return input;
@@ -44,24 +37,16 @@ export function isDangerousTool(toolName: string, input: unknown): boolean {
   const name = toolName.toLowerCase();
   const command = toolInputString(input);
 
-  // 删除 / 重命名 / 移动类
-  if (/(^|_)rm\b/.test(name) || /delete|remove|unlink|rename|^mv$|^move\b/.test(name)) return true;
+  // 删除 / 重命名 / 移动类工具 → 确认（子串/词边界混合匹配：MoveFile/Rmdir 也能命中，
+  // 但 remove 中的 move 因前面是词字符不会被 \bmove 误伤）。
+  if (/delete|remove|unlink|rename|\bmove|\brm/.test(name)) return true;
 
-  // Git 写操作（qodercli 通过 Git 工具或 Bash 调用；工具名可能是 Git / GitPush 等复合名）
-  if (/git/i.test(name)) {
-    if (!command) return true; // 复合工具名无命令文本时无法判断，保守确认
-    return !isReadonlyCommand(command, READONLY_GIT_COMMANDS);
-  }
-
-  // Shell 类：只读命令放行，其余确认
+  // Bash/Shell 命令中的破坏性操作 → 确认；其余 shell 命令默认放行（常规可行）。
   if (/\bbash\b|shell|terminal|command|exec|run\b/.test(name)) {
-    if (!command) return true; // 无法解析命令文本，保守确认
-    // 重定向 / 追加输出（> / >> / 2> 等）会写文件系统，一律视为写操作
-    if (/[^=!<>]>/.test(command) || /^>/.test(command)) return true;
-    return !isReadonlyCommand(command, READONLY_BASH_COMMANDS) && !(command.startsWith("git ") && isReadonlyCommand(command.slice(4), READONLY_GIT_COMMANDS));
+    return DESTRUCTIVE_BASH_PATTERNS.some((pattern) => pattern.test(command.trim()));
   }
 
-  // 其余工具（Read/Write/Edit/Glob/Grep/WebFetch 等）自动放行
+  // 其余工具（Read/Write/Edit/Glob/Grep/WebFetch/Git 写操作等）自动放行
   return false;
 }
 
