@@ -8,11 +8,11 @@
     "predev": "npm run build -w @coding-agent/core && npm run build -w @coding-agent/integrations && npm run build -w @coding-agent/pi-package",
     "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json --watch\" \"wait-on tcp:5173 file:dist-electron/main.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "build": "vite build && tsc -p tsconfig.electron.json",
-    "prepackage": "node scripts/copy-monorepo-packages.mjs",
-    "prepackage:dir": "node scripts/copy-monorepo-packages.mjs",
-    "prepackage:mac": "node scripts/copy-monorepo-packages.mjs",
-    "prepackage:win": "node scripts/copy-monorepo-packages.mjs",
-    "prepackage:linux": "node scripts/copy-monorepo-packages.mjs",
+    "prepackage": "node scripts/copy-monorepo-packages.mjs && node scripts/copy-qodercli.mjs",
+    "prepackage:dir": "node scripts/copy-monorepo-packages.mjs && node scripts/copy-qodercli.mjs",
+    "prepackage:mac": "node scripts/copy-monorepo-packages.mjs && node scripts/copy-qodercli.mjs",
+    "prepackage:win": "node scripts/copy-monorepo-packages.mjs && node scripts/copy-qodercli.mjs",
+    "prepackage:linux": "node scripts/copy-monorepo-packages.mjs && node scripts/copy-qodercli.mjs",
     "stage:monorepo": "node scripts/copy-monorepo-packages.mjs",
     "package": "electron-builder",
     "package:dir": "electron-builder --dir",
@@ -43,6 +43,7 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "qoder-bin/**/*",
       "package.json",
       "!**/*.map"
     ],
@@ -51,6 +52,7 @@
       "**/*.node",
       "**/better-sqlite3/**",
       "**/@qoder-ai/qoder-agent-sdk/**",
+      "**/qoder-bin/**",
       "**/@alibaba-group/ocr-darwin-arm64/**"
     ],
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",

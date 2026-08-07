@@ -1,9 +1,11 @@
 @import 'tailwindcss';
 
-/* 排除 Electron 主进程和构建产物，避免 Tailwind 自动扫描把主进程里的字符串（如 console.error('[qoder:status] ...')、IPC channel 名字）误识别为任意值类。 */
+/* 排除 Electron 主进程和构建产物，避免 Tailwind 自动扫描误把主进程里的字符串字面量识别为任意值类。 */
 @source not "../electron";
 @source not "../dist-electron";
 @source not "../dist";
+@source not "../qoder-bin";
+@source not "../main.js";
 
 @theme inline {
   --color-background: var(--background);
@@ -411,10 +413,8 @@ textarea:focus-visible {
 /* 折叠态：底部淡出，提示下方还有内容。 */
 .mask-fade-bottom {
   mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
-  mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
 }
 .mask-fade-bottom-soft {
-  mask-image: linear-gradient(to bottom, #000 75%, transparent 100%);
   mask-image: linear-gradient(to bottom, #000 75%, transparent 100%);
 }
 

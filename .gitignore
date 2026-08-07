@@ -3,6 +3,7 @@ dist/
 dist-electron/
 release/
 .vite/
+apps/desktop/main.js
 .env
 .env.*
 !.env.example

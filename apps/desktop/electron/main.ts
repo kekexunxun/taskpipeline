@@ -94,6 +94,37 @@ import {
   type RepoContextEntry
 } from './agents/agent-generator.js'
 
+/**
+ * 修复 Qoder Agent SDK 在 Electron asar 打包下的 qodercli 路径解析问题。
+ *
+ * SDK 内部通过 `import.meta.url` 拼接 `<sdk>/dist/_bundled/qodercli` 定位 CLI:
+ *
+ *   function Tt() {
+ *     if (process.env.QODERCLI_PATH) return process.env.QODERCLI_PATH;
+ *     let s = vr(); // 走 import.meta.url 解析
+ *     ...
+ *   }
+ *
+ * Electron 打包后,SDK 的 dist/index.js 仍位于 app.asar 内,import.meta.url
+ * 指向虚拟路径。asar 透明层让 existsSync 误判 qodercli "存在",但 spawn 一个
+ * asar 内的二进制(无真实 inode)会失败 `ENOTDIR`,表现是 Qoder 连接状态一直
+ * 报 "未连接" + `spawn ENOTDIR`。
+ *
+ * prepackage 阶段已把 qodercli 复制到 `qoder-bin/qodercli`(同步进入
+ * asarUnpack),我们显式设置 QODERCLI_PATH,让 SDK 在第一行短路返回,
+ * 跳过自己的 import.meta.url 解析链。dev 模式下 qoder-bin 不存在时
+ * 不设该环境变量,SDK 会走默认的 node_modules 路径解析。
+ */
+if (!process.env.QODERCLI_PATH) {
+  const binaryName = process.platform === 'win32' ? 'qodercli.exe' : 'qodercli'
+  const candidate = app.isPackaged
+    ? join(process.resourcesPath, 'app.asar.unpacked', 'qoder-bin', binaryName)
+    : join(app.getAppPath(), 'qoder-bin', binaryName)
+  if (existsSync(candidate)) {
+    process.env.QODERCLI_PATH = candidate
+  }
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 /**
  * 「AI 生成 Agent 模板」用的一次性哨兵 taskId。
@@ -2731,6 +2762,16 @@ app.whenReady().then(() => {
 })
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+app.on('activate', () => {
+  // macOS：点击 dock 图标时重新唤起窗口。无窗口则新建；窗口被 hide 后则恢复并聚焦。
+  if (BrowserWindow.getAllWindows().length === 0) {
+    void createWindow()
+  } else if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  }
 })
 app.on('before-quit', () => {
   void stopPi()
