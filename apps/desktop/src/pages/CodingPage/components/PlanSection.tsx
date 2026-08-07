@@ -2,16 +2,10 @@ import { useMemo } from 'react'
 import { LoaderCircleIcon, MessageSquareTextIcon } from 'lucide-react'
 import type { Task } from '@coding-agent/core'
 import { normalizeTimelineItems, type TimelineItem } from './Timeline'
+import { readablePlanContent } from './planContent'
 import { MessageResponse } from '@/components/ai-elements/message'
 import { cn } from '@/lib/utils'
 import { formatTime } from '@/utils/format'
-
-export function readablePlanContent(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined
-  const content = value.trim()
-  if (!content || content === '[object Object]') return undefined
-  return content
-}
 
 /**
  * 计划面板：生成中给"扫光 + 呼吸边框 + 跳点"动效；内容进入使用渐显上滑；调整记录交错入场。
