@@ -74,6 +74,14 @@ export class TaskStore {
       "ALTER TABLE task_repositories ADD COLUMN merge_request_state TEXT",
       "ALTER TABLE task_repositories ADD COLUMN merge_request_checked_at TEXT"
     ]) { try { this.db.exec(statement); } catch { /* Existing databases may already contain the column. */ } }
+    // 兼容更早的历史库：legacy `jira_key` 列 → 通用 `task_key` + `source='jira'`。
+    // 只在 task_key 为空时迁移，避免覆盖用户后续对 source 的修改（幂等，可安全重复打开）。
+    try {
+      const columns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+      if (columns.some((column) => column.name === "jira_key")) {
+        this.db.exec("UPDATE tasks SET task_key = jira_key, source = 'jira' WHERE jira_key IS NOT NULL AND jira_key != '' AND task_key IS NULL");
+      }
+    } catch { /* 迁移失败不影响正常打开 */ }
   }
 
   close(): void { this.db.close(); }

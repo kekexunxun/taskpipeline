@@ -115,6 +115,8 @@ export function useTasks(): CodingPageState {
         setSending(false);
         setRunning(false);
         liveMessageId.current = undefined;
+        // 任务会话结束：清空排队中的执行器确认请求（主进程已按取消处理）。
+        window.dispatchEvent(new CustomEvent("task:ui-clear"));
         if (event.phase === "planning" || planningRef.current) setLiveEvents([]);
         planningRef.current = false;
         void refresh();

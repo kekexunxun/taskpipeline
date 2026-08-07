@@ -1,4 +1,4 @@
-import { CheckIcon, Loader2Icon, MessageCircleIcon, PlayIcon, RefreshCcwIcon, SendIcon, SquareIcon } from "lucide-react";
+import { CheckIcon, Loader2Icon, MessageCircleIcon, PauseIcon, PlayIcon, RefreshCcwIcon, SendIcon, SquareIcon } from "lucide-react";
 import type { TaskCard } from "@coding-agent/core";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,8 @@ export function DetailActions({
   merging,
   onStart,
   onAbort,
+  onPause,
+  onResumePaused,
   onReview,
   onResetReview,
   onResetDelivery,
@@ -38,6 +40,8 @@ export function DetailActions({
   merging: boolean;
   onStart(): void;
   onAbort(): void;
+  onPause(): void;
+  onResumePaused(): void;
   onReview(): void;
   onResetReview(): void;
   onResetDelivery(): void;
@@ -60,10 +64,11 @@ export function DetailActions({
   const isFailed = state === "failed";
   const isValidationFailed = state === "validation_failed";
   const isAwaitingInput = state === "awaiting_input";
+  const isPaused = state === "paused";
   const isContinuable = ["confirmed", "preparing", "planning", "implementing"].includes(state);
   const isValidating = state === "validating";
   const isManuallyCompletable = isAwaitingReview || isReviewing || isReviewBlocked || isAwaitingCommit || isAwaitMerge;
-  const hasActions = isDraft || running || starting || isContinuable || isAwaitingInput || isValidating || isAwaitingReview || isReviewing || isReviewBlocked || isFailed || isValidationFailed || isAwaitingCommit || isDelivering || isAwaitMerge || isCompleted || isCancelled;
+  const hasActions = isDraft || running || starting || isContinuable || isAwaitingInput || isPaused || isValidating || isAwaitingReview || isReviewing || isReviewBlocked || isFailed || isValidationFailed || isAwaitingCommit || isDelivering || isAwaitMerge || isCompleted || isCancelled;
   if (!hasActions) return null;
 
   return (
@@ -90,8 +95,18 @@ export function DetailActions({
       )}
       {!starting && !running && isValidating && <Button size="sm" className="gap-1 px-2" onClick={onRetryValidation}><RefreshCcwIcon size={11} />继续校验</Button>}
       {!starting && running && (
-        <Button size="sm" variant="destructive" className="gap-1 px-2" onClick={onAbort}>
-          <SquareIcon size={11} />终止
+        <>
+          <Button size="sm" variant="secondary" className="gap-1 px-2" onClick={onPause}>
+            <PauseIcon size={11} />暂停
+          </Button>
+          <Button size="sm" variant="destructive" className="gap-1 px-2" onClick={onAbort}>
+            <SquareIcon size={11} />终止
+          </Button>
+        </>
+      )}
+      {!starting && !running && isPaused && (
+        <Button size="sm" className="gap-1 px-2" onClick={onResumePaused}>
+          <PlayIcon size={11} />继续执行
         </Button>
       )}
       {!starting && !running && isAwaitingReview && (

@@ -25,6 +25,8 @@ function cardWithState(state: TaskCard["state"]): TaskCard {
 const callbacks = {
   onStart: vi.fn(),
   onAbort: vi.fn(),
+  onPause: vi.fn(),
+  onResumePaused: vi.fn(),
   onReview: vi.fn(),
   onResetReview: vi.fn(),
   onResetDelivery: vi.fn(),

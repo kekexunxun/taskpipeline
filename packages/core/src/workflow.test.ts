@@ -66,4 +66,18 @@ describe("task workflow", () => {
   it("allows completed tasks to be reimplemented", () => {
     expect(() => transitionTask("completed", "preparing")).not.toThrow();
   });
+
+  it("supports pausing and resuming an in-flight implementation (Phase 3 HITL)", () => {
+    // 暂停：implementing / awaiting_input -> paused
+    expect(() => transitionTask("implementing", "paused")).not.toThrow();
+    expect(() => transitionTask("awaiting_input", "paused")).not.toThrow();
+    // 恢复：paused -> implementing
+    expect(() => transitionTask("paused", "implementing")).not.toThrow();
+    // 暂停中也可中止 / 取消
+    expect(() => transitionTask("paused", "failed")).not.toThrow();
+    expect(() => transitionTask("paused", "cancelled")).not.toThrow();
+    // 未实现的状态不能直接暂停
+    expect(() => transitionTask("awaiting_review", "paused")).toThrow();
+    expect(boardColumnFor("paused")).toBe("in_progress");
+  });
 });

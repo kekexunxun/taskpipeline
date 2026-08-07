@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ActivityIcon, FileDiffIcon, FileTextIcon, GitMergeIcon, MessageSquareTextIcon, PlayIcon, RotateCcwIcon } from "lucide-react";
+import { ActivityIcon, FileDiffIcon, FileTextIcon, GitMergeIcon, MessageSquareTextIcon, PencilIcon, PlayIcon, RotateCcwIcon } from "lucide-react";
 import type { Task, TaskCard, TaskRepository } from "@coding-agent/core";
 import type { ChatModelGroup, TaskDetail, ChangedFile } from "../../../api";
 import { useChatModels } from "../../../hooks/useChatModels";
@@ -7,10 +7,12 @@ import { DetailHeader } from "./DetailHeader";
 import { UsageSection } from "./UsageSection";
 import { ChangedFilesSection } from "./ChangedFilesSection";
 import { MergeRequestsSection } from "./MergeRequestsSection";
+import { ApprovalsSection } from "./ApprovalsSection";
 import { DetailActions } from "./DetailActions";
 import { Timeline, type TimelineItem } from "./Timeline";
 import { TaskComposer } from "./Composer";
 import { PlanSection } from "./PlanSection";
+import { EditPlanDialog } from "./EditPlanDialog";
 import { inReviewStates } from "../../../utils/status";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
@@ -43,12 +45,15 @@ type Props = {
   onChangeModel(value: string | undefined): void;
   onStart(): void;
   onAbort(): void;
+  onPause(): void;
+  onResumePaused(): void;
   onReview(): void;
   onResetReview(): void;
   onResetDelivery(): void;
   onRetryValidation(): void;
   onApprovePlan(): void;
   onRevisePlan(feedback: string): void;
+  onPlanEdited(): void;
   onSubmitMR(): void;
   onManualComplete(): void;
   onReimplement(): void;
@@ -77,12 +82,15 @@ export function DetailPanel({
   onChangeModel,
   onStart,
   onAbort,
+  onPause,
+  onResumePaused,
   onReview,
   onResetReview,
   onResetDelivery,
   onRetryValidation,
   onApprovePlan,
   onRevisePlan,
+  onPlanEdited,
   onSubmitMR,
   onManualComplete,
   onReimplement,
@@ -95,6 +103,7 @@ export function DetailPanel({
   const repositories = detail?.repositories ?? card?.repositories ?? [];
   const [activeTab, setActiveTab] = useState("activity");
   const [planFeedback, setPlanFeedback] = useState("");
+  const [planEditOpen, setPlanEditOpen] = useState(false);
   const { modelGroups: allModelGroups } = useChatModels();
   const groups = useMemo(() => {
     const byRepo = new Map<string, { repositoryId: string; repositoryName: string; files: ChangedFile[] }>();
@@ -150,6 +159,8 @@ export function DetailPanel({
         merging={merging}
         onStart={onStart}
         onAbort={onAbort}
+        onPause={onPause}
+        onResumePaused={onResumePaused}
         onReview={onReview}
         onResetReview={onResetReview}
         onResetDelivery={onResetDelivery}
@@ -196,6 +207,7 @@ export function DetailPanel({
           {showChangedFiles ? <ChangedFilesSection groups={groups} total={totalFiles} /> : <div className="grid min-h-48 place-items-center text-xs text-muted-foreground">任务产生文件变化后将在这里显示</div>}
         </TabsContent>
         <TabsContent value="delivery" className="thin-scrollbar mt-0 min-h-0 flex-1 overflow-y-auto">
+          <ApprovalsSection approvals={detail?.approvals ?? []} />
           {mergeRequestCount > 0 ? <MergeRequestsSection repos={detail?.repositories ?? []} onOpen={onOpenUrl} /> : <div className="grid min-h-48 place-items-center text-xs text-muted-foreground">提交 Merge Request 后将在这里显示</div>}
         </TabsContent>
       </Tabs>
@@ -229,6 +241,16 @@ export function DetailPanel({
                 >
                   <RotateCcwIcon size={11} />重新生成
                 </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="gap-1 px-2"
+                  disabled={running}
+                  onClick={() => setPlanEditOpen(true)}
+                >
+                  <PencilIcon size={11} />编辑计划
+                </Button>
                 <Button type="button" size="sm" disabled={running} onClick={onApprovePlan}>
                   <PlayIcon size={11} />批准并开始
                 </Button>
@@ -237,6 +259,13 @@ export function DetailPanel({
           </div>
         </div>
       )}
+      <EditPlanDialog
+        open={planEditOpen}
+        taskId={task.id}
+        initialContent={task.planContent ?? ""}
+        onOpenChange={setPlanEditOpen}
+        onSaved={onPlanEdited}
+      />
       {canChat && activeTab === "activity" && (
         <div className="shrink-0 border-t bg-background/95 px-3 pb-2 pt-1.5">
           <TaskComposer

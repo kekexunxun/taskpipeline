@@ -134,12 +134,15 @@ export default function CodingPage() {
             }}
             onStart={() => { setStartOpen(true); }}
             onAbort={() => runAction(() => api.abortTask())}
+            onPause={() => { if (tasks.selectedId) runAction(() => api.pauseTask(tasks.selectedId!)); }}
+            onResumePaused={() => { if (tasks.selectedId) runAction(() => api.resumePausedTask(tasks.selectedId!)); }}
             onReview={() => { if (tasks.selectedId) runAction(() => api.runReview(tasks.selectedId!)); }}
             onResetReview={() => { if (tasks.selectedId) runAction(() => api.resetReview(tasks.selectedId!)); }}
             onResetDelivery={() => { if (tasks.selectedId) runAction(() => api.resetDelivery(tasks.selectedId!)); }}
             onRetryValidation={() => { if (tasks.selectedId) runAction(() => api.retryTaskValidation(tasks.selectedId!)); }}
             onApprovePlan={() => { if (tasks.selectedId) runAction(() => api.approveTaskPlan(tasks.selectedId!)); }}
             onRevisePlan={(feedback) => { if (tasks.selectedId) runAction(() => api.reviseTaskPlan(tasks.selectedId!, feedback)); }}
+            onPlanEdited={() => { if (tasks.selectedId) { void tasks.refresh(); void tasks.loadDetail(tasks.selectedId); } }}
             onSubmitMR={() => {
               if (!tasks.selectedId) return;
               setMerging(true);

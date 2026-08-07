@@ -13,6 +13,7 @@
  */
 
 import { accessToken, query, type Query, type SDKMessage } from "@qoder-ai/qoder-agent-sdk";
+import type { HookCallback, HookEvent, HookJSONOutput } from "@qoder-ai/qoder-agent-sdk";
 import type { Task, TaskRepository, TaskStore } from "@coding-agent/core";
 import { implementationOutcomeInstruction } from "../task-readiness.js";
 import type { TaskAgentDriver, TaskAgentDeps, TaskAgentEvent, TaskAgentResult, TaskAgentPhase, RunPlanInput, RunImplementationInput, RunTestGenerationInput } from "./task-agent-driver.js";
@@ -35,6 +36,13 @@ export type QoderTaskAgentDeps = TaskAgentDeps & {
   /** 切换 driver 时给上层信号,让 main.ts 把 activeQoderQuery 状态清掉。 */
   onQueryStarted?: (query: Query, abort: AbortController) => void;
   onQueryFinished?: (query: Query) => void;
+  /**
+   * Phase 2 HITL：工具调用确认回调。
+   * 返回 "allow" 放行该工具调用，返回 "deny" 拒绝（SDK 会把拒绝消息反馈给 agent，让它换方案）。
+   * `signal` 为 SDK 传入的会话中止信号：任务被 abort 时确认框应立刻按拒绝处理。
+   * 未注入时所有 PermissionRequest hook 直接放行（保持原行为）。
+   */
+  onPermissionRequest?: (taskId: string, toolName: string, toolInput: unknown, signal?: AbortSignal) => Promise<"allow" | "deny">;
   /**
    * 测试用例生成阶段的 Agent 上下文（角色定义 + 领域指引）。
    * 存在时优先使用，回退现有 resolveAgentContext。
@@ -225,6 +233,21 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
 
     const token = this.deps.qoderTokenProvider();
     if (!token) throw new Error("请先配置 Qoder Token");
+    // Phase 2 HITL：PermissionRequest hook —— 危险工具由上层（main.ts）弹 UI 确认，
+    // 其余直接 allow，保持 acceptEdits 的流畅节奏。
+    const permissionHooks = this.deps.onPermissionRequest
+      ? ({
+          PermissionRequest: [{
+            hooks: [async (input: Parameters<HookCallback>[0], _toolUseID?: string, options?: { signal: AbortSignal }): Promise<HookJSONOutput> => {
+              if (input.hook_event_name !== "PermissionRequest") return { hookEventName: "PermissionRequest", decision: { behavior: "allow" } };
+              const decision = await this.deps.onPermissionRequest!(task.id, input.tool_name, input.tool_input, options?.signal);
+              return decision === "deny"
+                ? { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: "用户拒绝了此操作，请改用其他方案", interrupt: false } }
+                : { hookEventName: "PermissionRequest", decision: { behavior: "allow" } };
+            }]
+          }]
+        } satisfies Partial<Record<HookEvent, { hooks: HookCallback[] }>>)
+      : undefined;
     const q = query({
       prompt,
       options: {
@@ -236,7 +259,8 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
         permissionMode,
         persistSession,
         ...(resumeSessionId ? { resume: resumeSessionId } : {}),
-        ...(model ? { model } : {})
+        ...(model ? { model } : {}),
+        ...(permissionHooks ? { hooks: permissionHooks } : {})
       }
     });
     this.deps.onQueryStarted?.(q, abort);

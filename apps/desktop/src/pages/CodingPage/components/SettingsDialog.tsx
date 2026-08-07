@@ -70,6 +70,10 @@ type Settings = {
   autoCreateMergeRequests: string;
   openCodeReviewEnabled: string;
   createTestCasesEnabled: string;
+  /** Phase 4：review 阻断后是否自动按意见修订并重审（默认关闭，需人工确认开启）。 */
+  reviewAutoFix: string;
+  /** Phase 4：自动修订最大轮数。 */
+  reviewAutoFixMaxRounds: string;
   // modelApiKey 不再在通用设置中展示，由 OpenAI-Compatible 弹窗维护
   modelApiKey?: string;
 };
@@ -91,7 +95,9 @@ const defaults: Settings = {
   confluenceToken: "",
   autoCreateMergeRequests: "false",
   openCodeReviewEnabled: "false",
-  createTestCasesEnabled: "false"
+  createTestCasesEnabled: "false",
+  reviewAutoFix: "false",
+  reviewAutoFixMaxRounds: "2"
 };
 const ordinaryKeys = [
   "defaultModel",
@@ -101,7 +107,9 @@ const ordinaryKeys = [
   "confluenceEmail",
   "autoCreateMergeRequests",
   "openCodeReviewEnabled",
-  "createTestCasesEnabled"
+  "createTestCasesEnabled",
+  "reviewAutoFix",
+  "reviewAutoFixMaxRounds"
 ] as const;
 const secretKeys = [
   "qoderToken",
@@ -729,6 +737,31 @@ export function SettingsDialog({
                         <Switch
                           checked={settings.autoCreateMergeRequests === "true"}
                           onCheckedChange={(checked) => update("autoCreateMergeRequests", checked ? "true" : "false")}
+                        />
+                      </label>
+                      <label className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
+                        <span className="min-w-0">
+                          <span className="block text-xs font-medium text-foreground">Review 自动修订</span>
+                          <span className="mt-0.5 block text-[11px] text-muted-foreground">Review 阻断时按意见自动修改并重审（可设轮数上限）；关闭时停在阻断状态由人工处理。</span>
+                        </span>
+                        <Switch
+                          checked={settings.reviewAutoFix === "true"}
+                          onCheckedChange={(checked) => update("reviewAutoFix", checked ? "true" : "false")}
+                        />
+                      </label>
+                      <label className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
+                        <span className="min-w-0">
+                          <span className="block text-xs font-medium text-foreground">自动修订轮数上限</span>
+                          <span className="mt-0.5 block text-[11px] text-muted-foreground">达到上限后停止自动修订，等待人工处理剩余意见。</span>
+                        </span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={10}
+                          aria-label="自动修订轮数上限"
+                          className="h-8 w-16 rounded-md border bg-background px-2 text-xs"
+                          value={Number(settings.reviewAutoFixMaxRounds) || 2}
+                          onChange={(event) => update("reviewAutoFixMaxRounds", String(Math.max(1, Math.min(10, Number(event.target.value) || 2))))}
                         />
                       </label>
                     </div>

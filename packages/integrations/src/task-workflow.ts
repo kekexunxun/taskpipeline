@@ -442,6 +442,7 @@ export class TaskWorkflow {
       planRevision: undefined,
       failureStage: undefined,
       reviewStatus: "pending",
+      reviewFixCount: undefined,
       commitMessage: undefined,
       piSessionPath: undefined,
       sessionUsage: undefined

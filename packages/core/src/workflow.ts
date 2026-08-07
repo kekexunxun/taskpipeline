@@ -5,8 +5,11 @@ const transitions: Record<TaskState, TaskState[]> = {
   draft: ["confirmed", "cancelled"], confirmed: ["preparing", "cancelled"], preparing: ["planning", "implementing", "failed", "cancelled"],
   planning: ["awaiting_plan_approval", "completed", "failed", "cancelled"],
   awaiting_plan_approval: ["planning", "implementing", "failed", "cancelled"],
-  implementing: ["awaiting_input", "generating_tests", "validating", "awaiting_review", "failed", "cancelled"],
-  awaiting_input: ["implementing", "completed", "failed", "cancelled"],
+  implementing: ["paused", "awaiting_input", "generating_tests", "validating", "awaiting_review", "failed", "cancelled"],
+  // paused 是用户手动暂停的中间态：恢复走 implementing（Qoder 按 qoderSessionId 续接会话），
+  // 也可以中止（failed）或放弃（cancelled）。
+  paused: ["implementing", "failed", "cancelled"],
+  awaiting_input: ["implementing", "paused", "completed", "failed", "cancelled"],
   // generating_tests 是新引入的中间态：实现完成后、validation/review 之前。
   // 允许退到 validating（正常路径）/ implementing（重做）/ failed（生成失败）。
   generating_tests: ["validating", "implementing", "failed", "cancelled"],

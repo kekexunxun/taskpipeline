@@ -174,8 +174,9 @@ describe("DetailHeader", () => {
       sourceUrl: "https://jira.example.com/browse/BSADAPT-100"
     };
     renderHeader(jiraTask);
-    const button = screen.getByRole("button", { name: /Jira.*BSADAPT-100/ });
-    await user.click(button);
+    // Jira 快捷入口是 span + onClick（TooltipTrigger asChild 包裹），无 button role。
+    const badge = screen.getByText("Jira · BSADAPT-100");
+    await user.click(badge);
     expect(apiModule.api.openExternal).toHaveBeenCalledWith(jiraTask.sourceUrl);
   });
 

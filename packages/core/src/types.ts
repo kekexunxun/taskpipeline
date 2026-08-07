@@ -3,7 +3,7 @@ export type BoardColumn = (typeof BOARD_COLUMNS)[number];
 
 export const TASK_STATES = [
   "draft", "confirmed", "preparing", "planning", "awaiting_plan_approval",
-  "implementing", "awaiting_input", "generating_tests", "validating", "validation_failed", "awaiting_review",
+  "implementing", "paused", "awaiting_input", "generating_tests", "validating", "validation_failed", "awaiting_review",
   "reviewing", "review_blocked", "awaiting_commit", "delivering",
   "await_merge", "completed", "failed", "cancelled"
 ] as const;
@@ -56,6 +56,8 @@ export type Task = {
   repoAgentIds?: Record<string, string>;
   /** 最近一次测试用例生成的摘要，用于 Timeline 展示。 */
   testsGenerated?: { files: string[]; commitSha?: string; finishedAt: string };
+  /** Phase 4：Review 自动修订已执行的轮数（达到 reviewAutoFixMaxRounds 后停止）。 */
+  reviewFixCount?: number;
   createdAt: string;
   updatedAt: string;
 };

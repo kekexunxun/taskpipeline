@@ -35,6 +35,7 @@ import { MemoryService, renderMemoryContext } from "./memory/memory-service.js";
 import { extractMemories } from "./memory/memory-extractor.js";
 import { implementationOutcomeInstruction, isExplicitNoChangeCompletionRequest, nextStepForImplementation, nextStepForPlan, parseImplementationDecision } from "./task-readiness.js";
 import { QoderTaskAgentDriver, type QoderTaskAgentDeps } from "./task-agent/qoder-task-agent.js";
+import { describeToolAction, isDangerousTool } from "./task-agent/dangerous-tools.js";
 import { closeQoderQuerySafely, logQoderMessage, qoderLogFile, qoderText, recordQoderMessage } from "./task-agent/log.js";
 import { parseTestCaseGeneration } from "./task-agent/parsers/test-case-parser.js";
 import { AgentService, type OperationKind } from "./agents/agent-service.js";
@@ -78,7 +79,7 @@ type QoderStatus = {
 
 const taskStateLabels: Record<Task["state"], string> = {
   draft: "待处理", confirmed: "已确认", preparing: "准备环境", implementing: "实现中",
-  planning: "计划中", awaiting_plan_approval: "等待计划确认", awaiting_input: "等待补充", generating_tests: "生成测试用例中", validating: "校验中", validation_failed: "校验失败",
+  planning: "计划中", awaiting_plan_approval: "等待计划确认", paused: "已暂停", awaiting_input: "等待补充", generating_tests: "生成测试用例中", validating: "校验中", validation_failed: "校验失败",
   awaiting_review: "等待 Review", reviewing: "Review 中", review_blocked: "Review 阻断",
   awaiting_commit: "等待提交 MR", delivering: "提交 MR 中", await_merge: "等待合并",
   completed: "已完成", failed: "执行失败", cancelled: "已取消"
@@ -218,7 +219,33 @@ function buildReviewOrchestrator(): ReviewOrchestrator {
   return new ReviewOrchestrator({ ocr: ocrService, git: gitService, reviewer: asReviewer(callQoderOrOpenAIReviewer) }, desktopSink);
 }
 const taskWorkflow = new TaskWorkflow(store, desktopResolver, desktopSink, taskWorkspace);
+
+/**
+ * 交付确认点（commit / push / 建 MR）：HITL 的核心拦截。
+ *
+ * 每次提交前弹 UI 确认框，用户拒绝则 DeliveryService 不执行该步骤并退到 awaiting_commit。
+ * 确认请求与结果都会写入 Approval 表，形成可审计的审批记录。
+ */
+const deliveryStepLabels: Record<"commit" | "push" | "merge_request", string> = {
+  commit: "提交代码",
+  push: "推送分支",
+  merge_request: "创建 Merge Request"
+};
+async function deliveryApprover(task: Task, kind: "commit" | "push" | "merge_request", context: string): Promise<boolean> {
+  const label = deliveryStepLabels[kind];
+  const approval = store.addApproval({ taskId: task.id, kind, context });
+  const ok = (await requestUi<boolean>(
+    "confirm",
+    { title: `确认${label}`, message: context, taskId: task.id },
+    { timeout: 10 * 60_000 } // 超时默认拒绝（安全兜底），用户仍可手动重试提交
+  )) ?? false;
+  store.resolveApproval(approval.id, ok ? "approved" : "rejected");
+  addTaskEvent({ taskId: task.id, kind: "permission", title: ok ? `已确认${label}` : `已拒绝${label}`, detail: context });
+  return ok;
+}
+
 const deliveryService = new DeliveryService(store, gitService, desktopResolver, desktopSink, {
+  approver: deliveryApprover,
   describeMergeRequest: async (task, repo, signal) => {
     const repos = store.listTaskRepositories(task.id);
     const body = [
@@ -304,6 +331,20 @@ function createQoderTaskAgent(): QoderTaskAgentDriver {
     onQueryFinished: (q) => {
       if (activeQoderQuery === q) activeQoderQuery = undefined;
       if (activeQoderAbort?.signal === undefined) activeQoderAbort = undefined;
+    },
+    // Phase 2 HITL：危险工具调用确认（shell / git 写操作 / 删除类）。
+    onPermissionRequest: async (taskId, toolName, toolInput, signal) => {
+      if (!isDangerousTool(toolName, toolInput)) return "allow";
+      const detail = describeToolAction(toolName, toolInput);
+      const approval = store.addApproval({ taskId, kind: "permission", context: detail });
+      addTaskEvent({ taskId, kind: "permission", title: `请求执行危险操作:${toolName}`, detail });
+      const ok = (await requestUi<boolean>(
+        "confirm",
+        { title: `允许执行 ${toolName}?`, message: detail, taskId },
+        { timeout: 10 * 60_000, signal } // 会话中止/超时默认拒绝（安全兜底）
+      )) ?? false;
+      store.resolveApproval(approval.id, ok ? "approved" : "rejected");
+      return ok ? "allow" : "deny";
     }
   });
 }
@@ -535,8 +576,10 @@ async function runQoder(taskId: string, extraPrompt?: string, signal?: AbortSign
     await finishImplementation(task.id, responseTexts, signal);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    addTaskEvent({ taskId, kind: "error", title: "Qoder 执行失败", detail });
     const current = store.getTask(task.id);
+    // 用户主动暂停（pauseTask）导致的中断不算执行失败：只保留 paused 状态，不写 error 事件。
+    if (current?.state === "paused") return;
+    addTaskEvent({ taskId, kind: "error", title: "Qoder 执行失败", detail });
     if (["implementing", "validating"].includes(current?.state ?? "")) updateState(current!, "failed");
     emitPi({ type: "agent_error", taskId, message: detail });
   } finally {
@@ -634,7 +677,7 @@ async function advanceAfterValidation(taskId: string, state: TaskState, signal?:
   const task = store.getTask(taskId);
   // 任务级覆盖优先于系统级设置。
   if (taskWorkflow.isReviewEnabledFor(task)) {
-    await taskWorkflow.runReview(taskId, buildReviewOrchestrator(), signal);
+    await runReviewWithAutoFix(taskId, signal);
   } else {
     store.updateTask(taskId, { reviewStatus: "waived" });
     updateState(store.getTask(taskId)!, "awaiting_commit");
@@ -644,6 +687,89 @@ async function advanceAfterValidation(taskId: string, state: TaskState, signal?:
   if (updated?.state === "awaiting_commit" && taskWorkflow.shouldAutoCreateMergeRequestsFor(updated)) {
     await deliveryService.submitMergeRequests(taskId, signal);
   }
+}
+
+// === Phase 4: Review 自动修订闭环 =============================================
+
+/** 系统设置：Review 阻断后是否自动按意见修订（默认关闭，由用户在设置里开启）。 */
+function reviewAutoFixEnabled(): boolean {
+  return store.getSetting("reviewAutoFix") === "true";
+}
+/** 系统设置：自动修订最大轮数（默认 2）。 */
+function reviewAutoFixMaxRounds(): number {
+  const raw = Number(store.getSetting("reviewAutoFixMaxRounds"));
+  return Number.isFinite(raw) && raw >= 1 ? Math.min(Math.floor(raw), 10) : 2;
+}
+
+/** 从最近的 review 事件里收集意见（含阻断级别），用于自动修订 prompt。 */
+function collectReviewComments(taskId: string, blockingOnly: boolean): Array<{ severity?: string; path?: string; line?: number; message?: string }> {
+  const events = store.listEvents(taskId);
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.kind !== "review") continue;
+    const payload = event.payload as { comments?: Array<{ severity?: string; path?: string; line?: number; message?: string }> } | undefined;
+    const comments = payload?.comments ?? [];
+    if (!blockingOnly) return comments;
+    const blocking = comments.filter((comment) => ["critical", "high", "error"].includes(String(comment.severity ?? "").toLowerCase()));
+    if (blocking.length) return blocking;
+  }
+  return [];
+}
+
+/** 把 review 意见渲染成修订 prompt（追加给实现阶段的指令）。 */
+function buildReviewFixPrompt(task: Task, comments: Array<{ severity?: string; path?: string; line?: number; message?: string }>): string {
+  const lines = comments.map((comment, index) => {
+    const loc = comment.path ? `${comment.path}${typeof comment.line === "number" ? `:${comment.line}` : ""}` : "（全局）";
+    return `${index + 1}. [${comment.severity ?? "high"}] ${loc} — ${comment.message ?? "(无描述)"}`;
+  });
+  return [
+    "Code review 未通过，以下是需要修复的问题。请逐一修复，不要遗漏；不要引入与这些问题无关的改动。",
+    "",
+    ...lines,
+    "",
+    implementationOutcomeInstruction
+  ].join("\n");
+}
+
+/**
+ * Review + 自动修订闭环：
+ * 1. 跑 review；2. 阻断且开启自动修订且未达上限 → 把意见拼进 prompt 重跑实现；
+ * 3. 实现完成后经 finishImplementation → advanceAfterValidation 再次进入本函数，形成循环，
+ *    直到 Review 通过、达到轮数上限或用户手动介入。
+ */
+async function runReviewWithAutoFix(taskId: string, signal?: AbortSignal): Promise<void> {
+  await taskWorkflow.runReview(taskId, buildReviewOrchestrator(), signal);
+  const task = store.getTask(taskId);
+  if (!task || task.state !== "review_blocked") return;
+  if (!reviewAutoFixEnabled()) return;
+  const used = task.reviewFixCount ?? 0;
+  const maxRounds = reviewAutoFixMaxRounds();
+  const comments = collectReviewComments(taskId, true);
+  if (comments.length === 0) return;
+  if (used >= maxRounds) {
+    addTaskEvent({ taskId, kind: "status", title: "已到达 Review 自动修订上限", detail: `已自动修订 ${used} 轮，剩余 ${comments.length} 条阻断意见需人工处理` });
+    return;
+  }
+  const fixPrompt = buildReviewFixPrompt(task, comments);
+  store.updateTask(taskId, { reviewFixCount: used + 1 });
+  updateState(store.getTask(taskId)!, "implementing");
+  addTaskEvent({
+    taskId,
+    kind: "status",
+    title: `按 Review 意见自动修订(第 ${used + 1}/${maxRounds} 轮)`,
+    detail: comments.map((comment) => `[${comment.severity ?? "high"}] ${comment.path ?? ""}${typeof comment.line === "number" ? `:${comment.line}` : ""} ${comment.message ?? ""}`).join("\n")
+  });
+  // 注意：修订分支直接用传入 signal 跑 runQoder，不能再嵌套 runTaskOperation——
+  // 嵌套会 abort 当前 operation 的 signal，导致修订后 review 通过时旧 advanceAfterValidation
+  // 用已 abort 的 signal 调 submitMergeRequests，git 操作被立即取消、自动提交失败一次。
+  if (runtimeProvider(task) === "qoder") {
+    await runQoder(taskId, fixPrompt, signal).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
+    return;
+  }
+  signal?.throwIfAborted();
+  await startPi(taskId);
+  if (!piSession) throw new Error("OpenAI agent session is unavailable");
+  await piSession!.prompt(await buildAgentPrompt(task, `${fixPrompt}\n\n${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ""}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`), { source: "rpc" });
 }
 
 /**
@@ -807,8 +933,10 @@ function requestUi<T>(method: string, payload: Record<string, unknown>, options?
   const id = randomUUID();
   return new Promise((resolve) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let abortListener: () => void = () => undefined;
     const finish = (response: Record<string, unknown>) => {
       if (timer) clearTimeout(timer);
+      if (options?.signal) options.signal.removeEventListener("abort", abortListener);
       pendingUi.delete(id);
       if (response.cancelled) resolve(undefined);
       else if (method === "confirm") resolve(Boolean(response.confirmed) as T);
@@ -817,7 +945,8 @@ function requestUi<T>(method: string, payload: Record<string, unknown>, options?
     pendingUi.set(id, finish);
     emitPi({ type: "extension_ui_request", id, method, ...payload, timeout: options?.timeout });
     if (options?.timeout) timer = setTimeout(() => finish({ cancelled: true }), options.timeout);
-    options?.signal?.addEventListener("abort", () => finish({ cancelled: true }), { once: true });
+    abortListener = () => finish({ cancelled: true });
+    options?.signal?.addEventListener("abort", abortListener, { once: true });
   });
 }
 
@@ -947,6 +1076,8 @@ async function startTask(taskId: string, options: { mode?: TaskStartMode; reposi
   }
   if (current && ["draft", "failed"].includes(current.state) && runtimeProvider(current) === "qoder") store.updateTask(taskId, { sessionUsage: undefined });
   const mode = options.mode ?? "direct";
+  // 新的实现流程开始：清零 Review 自动修订计数。
+  store.updateTask(taskId, { reviewFixCount: 0 });
   const task = await runTaskOperation(taskId, (signal) => taskWorkflow.begin(taskId, mode, options.repositoryCommands, signal));
   if (mode === "plan") {
     if (runtimeProvider(task) === "qoder") void runTaskOperation(taskId, (signal) => runQoderPlan(taskId, undefined, signal)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
@@ -1024,9 +1155,68 @@ async function resumeTask(taskId: string): Promise<void> {
   });
 }
 
+/**
+ * Phase 3 HITL：暂停正在运行的任务。
+ * 先切到 paused 再中断 in-flight 操作——runQoder 的失败处理看到 paused 不会标 failed；
+ * Qoder 会话保留（qoderSessionId），恢复时按会话续接。
+ */
+async function pauseTask(taskId: string): Promise<void> {
+  const task = store.getTask(taskId);
+  if (!task) throw new Error("Task not found");
+  if (!["implementing", "awaiting_input"].includes(task.state)) throw new Error("当前状态不能暂停");
+  updateState(task, "paused");
+  const operation = activeTaskOperations.get(taskId);
+  operation?.controller.abort(new Error("任务已暂停"));
+  if (activeTaskId === taskId) {
+    activeQoderAbort?.abort(new Error("任务已暂停"));
+    const qoderQuery = activeQoderQuery;
+    activeQoderQuery = undefined;
+    if (qoderQuery) {
+      try { await qoderQuery.interrupt(); } catch { /* may already be closed */ }
+      await closeQoderQuerySafely(qoderQuery, 5_000);
+    }
+    await stopPi();
+    activeTaskId = undefined;
+    store.setSetting("activeTaskId", "");
+  }
+  addTaskEvent({ taskId, kind: "status", title: "任务已暂停", detail: "可通过「继续执行」从当前进度续跑" });
+}
+
+/** Phase 3 HITL：恢复已暂停的任务（paused -> implementing，Qoder 按会话续接）。 */
+async function resumePausedTask(taskId: string): Promise<void> {
+  const current = store.getTask(taskId);
+  if (!current || current.state !== "paused") throw new Error("只有暂停的任务可以继续执行");
+  qoderTokenGuard(current);
+  const task = updateState(current, "implementing");
+  addTaskEvent({ taskId, kind: "status", title: "任务已恢复执行" });
+  if (runtimeProvider(task) === "qoder") {
+    void runTaskOperation(taskId, (signal) => runQoder(taskId, resumeImplementationInstruction, signal, task.qoderSessionId)).catch((error) => emitPi({ type: "agent_error", taskId, message: error instanceof Error ? error.message : String(error) }));
+    return;
+  }
+  await runTaskOperation(taskId, async (signal) => {
+    signal.throwIfAborted();
+    await startPi(taskId);
+    if (!piSession) throw new Error("OpenAI agent session is unavailable");
+    await piSession!.prompt(await buildAgentPrompt(task, `${resumeImplementationInstruction}\n\n${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ""}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}\n\n${implementationOutcomeInstruction}`), { source: "rpc" });
+  });
+}
+
+/** Phase 3 HITL：手动编辑计划内容（计划确认阶段直接改 planContent，不走重新生成）。 */
+async function updateTaskPlan(taskId: string, planContent: string): Promise<void> {
+  const task = store.getTask(taskId);
+  if (!task) throw new Error("Task not found");
+  if (!["awaiting_plan_approval", "planning"].includes(task.state)) throw new Error("当前状态不能编辑计划");
+  const content = planContent.trim();
+  if (!content) throw new Error("计划内容不能为空");
+  const revision = (task.planRevision ?? 0) + 1;
+  store.updateTask(taskId, { planContent: content, planRevision: revision });
+  addTaskEvent({ taskId, kind: "status", title: "计划已手动编辑", detail: `第 ${revision} 版` });
+}
+
 async function approveTaskPlan(taskId: string): Promise<void> {
   const before = store.getTask(taskId);
   if (!before?.planContent) throw new Error("当前任务没有可批准的计划");
+  store.updateTask(taskId, { reviewFixCount: 0 });
   const approval = store.addApproval({ taskId, kind: "plan", context: before.planContent });
   store.resolveApproval(approval.id, "approved");
   const task = await runTaskOperation(taskId, (signal) => taskWorkflow.approvePlan(taskId, signal));
@@ -1490,12 +1680,15 @@ function registerIpc(): void {
   ipcMain.handle("tasks:start", (_event, taskId: string, options?: { mode?: TaskStartMode; repositoryCommands?: RepositoryCommandMap; useAllRepositories?: boolean; repoAgentIds?: Record<string, string> }) => startTask(taskId, options));
   ipcMain.handle("tasks:reimplement", (_event, taskId: string) => taskWorkflow.reimplement(taskId));
   ipcMain.handle("tasks:resume", (_event, taskId: string) => resumeTask(taskId));
+  ipcMain.handle("tasks:pause", (_event, taskId: string) => pauseTask(taskId));
+  ipcMain.handle("tasks:resume-paused", (_event, taskId: string) => resumePausedTask(taskId));
+  ipcMain.handle("tasks:update-plan", (_event, taskId: string, planContent: string) => updateTaskPlan(taskId, planContent));
   ipcMain.handle("tasks:approve-plan", (_event, taskId: string) => approveTaskPlan(taskId));
   ipcMain.handle("tasks:revise-plan", (_event, taskId: string, feedback: string) => reviseTaskPlan(taskId, feedback));
   ipcMain.handle("tasks:retry-validation", (_event, taskId: string) => retryTaskValidation(taskId));
   ipcMain.handle("tasks:message", (_event, taskId: string, message: string) => sendTaskMessage(taskId, message));
   ipcMain.handle("tasks:abort", () => activeTaskId ? stopTaskOperations(activeTaskId, true) : undefined);
-  ipcMain.handle("tasks:review", (_event, taskId: string) => runTaskOperation(taskId, (signal) => taskWorkflow.runReview(taskId, buildReviewOrchestrator(), signal)));
+  ipcMain.handle("tasks:review", (_event, taskId: string) => runTaskOperation(taskId, (signal) => runReviewWithAutoFix(taskId, signal)));
   ipcMain.handle("tasks:reset-review", (_event, taskId: string) => taskWorkflow.resetReview(taskId));
   ipcMain.handle("tasks:reset-delivery", (_event, taskId: string) => deliveryService.resetDelivery(taskId));
   ipcMain.handle("tasks:submit-mrs", (_event, taskId: string) => runTaskOperation(taskId, (signal) => deliveryService.submitMergeRequests(taskId, signal)));

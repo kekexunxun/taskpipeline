@@ -191,15 +191,19 @@ describe("QoderPlanModeProvider.runPlan", () => {
   });
 
   it("hardTimeoutMs 触发 abortController.abort", async () => {
-    // 用一个会立刻 settle 的 iterator,通过 setTimeout 把硬超时 setTimeout 提前
-    messageIterators.push(asyncIterFromArray<unknown>([]));
+    // 迭代器永不结束：hardTimer 触发 abort 后，mock query() 的 next() 通过 abort race reject，
+    // for-await 抛错 → runPlan reject。与上方 options.signal abort 测试同一套机制。
+    const neverEnds: AsyncIterable<unknown> = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() { return new Promise(() => { /* never resolves unless aborted — mock 拒绝拦截 */ }); }
+        };
+      }
+    };
+    messageIterators.push(neverEnds);
     const provider = new QoderPlanModeProvider(() => "tok", () => undefined);
-    // 用 Promise.race 等待 promise 拒绝,避免 hardTimer 跨 fake/real timer 出错
-    const promise = provider.runPlan(TEST_CTX, { hardTimeoutMs: 1 });
-    await expect(Promise.race([
-      promise,
-      new Promise((_, reject) => setTimeout(() => reject(new Error("hardTimer 测试超时")), 1000))
-    ])).rejects.toBeDefined();
+    const promise = provider.runPlan(TEST_CTX, { hardTimeoutMs: 20 });
+    await expect(promise).rejects.toBeDefined();
     const ac = queryCalls[0]!.options.abortController!;
     expect(ac.signal.aborted).toBe(true);
   });
