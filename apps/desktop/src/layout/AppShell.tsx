@@ -13,6 +13,7 @@ import { SettingsDialog } from "../pages/CodingPage/components/SettingsDialog";
 
 const ChatPage = lazy(() => import("../pages/ChatPage/index"));
 const CodingPage = lazy(() => import("../pages/CodingPage/index"));
+const TracePage = lazy(() => import("../pages/TracePage/index"));
 
 function ShellInner({ onOpenSettings }: { onOpenSettings(): void }) {
   const qoder = useQoderStatusContext();
@@ -29,6 +30,8 @@ function ShellInner({ onOpenSettings }: { onOpenSettings(): void }) {
               <Route path="/chat/:conversationId" element={<ChatPage />} />
               <Route path="/coding" element={<CodingPage />} />
               <Route path="/coding/:taskId" element={<CodingPage />} />
+              <Route path="/trace" element={<TracePage />} />
+              <Route path="/trace/:kind/:traceId" element={<TracePage />} />
             </Routes>
           </Suspense>
         </div>

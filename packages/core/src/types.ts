@@ -289,3 +289,54 @@ export type RepoWikiDoc = {
 
 export type MemorySearchHit = Memory & { score: number };
 export type RepoWikiSearchHit = RepoWikiDoc & { score: number };
+
+// === Trace 系统（对话 / 任务 / Pi 会话统一执行轨迹） ==========================
+
+/** Trace 归属类型：任务 / 对话 / Pi 会话。 */
+export type TraceKind = "task" | "chat" | "pi_session";
+
+/** 归一化后的执行轨迹条目类型。 */
+export type TraceEntryType =
+  | "session_start"
+  | "session_end"
+  | "message"
+  | "thinking"
+  | "tool_call"
+  | "tool_result"
+  | "status"
+  | "error"
+  | "review"
+  | "diff";
+
+/** 归一化 trace 条目，各数据源（events 表 / chats-v3 / pi session / pi-trace events）统一映射为它。 */
+export type TraceEntry = {
+  /** 全局唯一：`${source}-${traceId}-${seq}`。 */
+  id: string;
+  /** 归属：taskId / chatId / piSessionId。 */
+  traceId: string;
+  kind: TraceKind;
+  type: TraceEntryType;
+  title: string;
+  detail?: string;
+  /** 原始数据（AgentEvent / SDK raw / events.jsonl 事件）。 */
+  payload?: unknown;
+  createdAt: string;
+  source: "events" | "chat" | "pi" | "pi_trace";
+};
+
+/** Trace 列表项（列表页用，不携带完整条目）。 */
+export type TraceSummary = {
+  traceId: string;
+  kind: TraceKind;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  entryCount: number;
+  state?: string;
+  stats?: { turns?: number; tokens?: { input: number; output: number; total: number }; costUsd?: number };
+  lastEntry?: Pick<TraceEntry, "type" | "title" | "createdAt">;
+  /** pi-trace 源存在 trace.html 时给出（前端"在浏览器打开"用）。 */
+  traceHtmlPath?: string;
+  /** pi_session 源关联到的任务（D6：pi_session_path 匹配 / 时间窗兜底）。 */
+  linkedTaskId?: string;
+};

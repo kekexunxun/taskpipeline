@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentProfile, Approval, Memory, MemoryScope, MemorySearchHit, RepositoryProfile, RepoWikiDoc, RepoWikiSearchHit, Task, TaskCard, TaskRepository, TaskStartMode } from "@coding-agent/core";
+import type { AgentEvent, AgentProfile, Approval, Memory, MemoryScope, MemorySearchHit, RepositoryProfile, RepoWikiDoc, RepoWikiSearchHit, Task, TaskCard, TaskRepository, TaskStartMode, TraceEntry, TraceKind, TraceSummary } from "@coding-agent/core";
 
 export type ChangedFile = { repositoryId: string; repositoryName: string; path: string; status: string };
 export type TaskDetail = { task?: Task; repositories: TaskRepository[]; events: AgentEvent[]; approvals: Approval[]; changedFiles: ChangedFile[] };
@@ -170,6 +170,9 @@ export type AgentApi = {
   startChatStream(input: StartChatStreamInput): Promise<void>;
   abortChat(input: AbortChatStreamInput): Promise<void>;
   onChatStreamEvent(callback: (event: ChatStreamEvent) => void): () => void;
+  // trace
+  listTrace(): Promise<TraceSummary[]>;
+  getTrace(kind: TraceKind, traceId: string): Promise<TraceEntry[]>;
 };
 
 declare global { interface Window { agentApi?: AgentApi } }
@@ -385,5 +388,7 @@ export const api: AgentApi = window.agentApi ?? {
     const driverId = memoryChats.get(chatId)?.driverId ?? "qoder";
     memoryListeners.forEach((callback) => callback({ streamId, chatId, driverId, chunk: { type: "done", status: "aborted" }, done: true }));
   },
-  onChatStreamEvent(callback) { memoryListeners.add(callback); return () => { memoryListeners.delete(callback); }; }
+  onChatStreamEvent(callback) { memoryListeners.add(callback); return () => { memoryListeners.delete(callback); }; },
+  async listTrace() { return []; },
+  async getTrace() { return []; }
 };

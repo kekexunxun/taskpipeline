@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -16,13 +17,14 @@ import {
   type ExtensionUIDialogOptions,
   type ExtensionUIContext
 } from "@earendil-works/pi-coding-agent";
-import { TaskStore, LocalFileKeyStore, boardColumnFor, transitionTask, type AgentEvent, type AgentProfile, type Memory, type SessionUsage, type SettingResolver, type Task, type TaskEventSink, type TaskRepository, type TaskStartMode, type TaskState } from "@coding-agent/core";
+import { TaskStore, LocalFileKeyStore, boardColumnFor, transitionTask, type AgentEvent, type AgentProfile, type Memory, type SessionUsage, type SettingResolver, type Task, type TaskEventSink, type TaskRepository, type TaskStartMode, type TaskState, type TraceKind } from "@coding-agent/core";
 import {
   AtlassianClientFactory, DeliveryService, fetchJiraTasks, GitService, importJiraIssue, MergeStatusRefresher, openTaskEditor, OpenCodeReviewService,
   OpenAICompatReviewer, parseGitLabRemote, redactSecrets,
   ReviewOrchestrator, TaskCompleter, TaskWorkflow, testAtlassianConnection, asReviewer, type RepositoryCommandMap
 } from "@coding-agent/integrations";
 import { resolveBundledOcrBinary, resolveOcrBinary, createOcrRunner } from "./ocr.js";
+import { TraceService } from "./trace/trace-service.js";
 import { accessToken, query, type AccountInfo, type ModelInfo, type Query, type SDKMessage, type UsageInfo } from "@qoder-ai/qoder-agent-sdk";
 import { parsePlanDecision, sdkResultText } from "./plan-content.js";
 import { ChatService } from "./chat/chat-service.js";
@@ -277,6 +279,10 @@ const chatService = new ChatService(store, dataDir, chatDriverRegistry, () => ma
   if (resolveDefaultBackend() === "jira") return new JiraTaskCreationBackend(atlassianFactory);
   return undefined;
 }, async ({ conversationId, query }) => memoryService.buildSystemPrompt({ userId: memoryService.ensureUserId(), conversationId, query }), consolidateChatMemory);
+
+// Trace 服务：聚合任务 / 对话 / Pi 会话执行轨迹（Trace 页面数据源）。
+// ④ pi-trace-extension 的 traces 目录默认在 ~/.pi/agent/traces，可用 settings `piAgentDir` 覆盖。
+const traceService = new TraceService(store, chatService, dataDir, join(homedir(), ".pi", "agent"));
 
 // Task agent driver — 负责"任务执行"路径(plan / implementation / test_generation)。
 // 当前只注册 Qoder；接口已经摆好，后续接入其它 agent 运行时仅需 add() 一行。
@@ -705,7 +711,7 @@ function reviewAutoFixMaxRounds(): number {
 function collectReviewComments(taskId: string, blockingOnly: boolean): Array<{ severity?: string; path?: string; line?: number; message?: string }> {
   const events = store.listEvents(taskId);
   for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i];
+    const event = events[i]!;
     if (event.kind !== "review") continue;
     const payload = event.payload as { comments?: Array<{ severity?: string; path?: string; line?: number; message?: string }> } | undefined;
     const comments = payload?.comments ?? [];
@@ -1011,7 +1017,12 @@ async function startPi(taskId: string): Promise<void> {
     : SessionManager.create(cwd, sessionDir);
   const settingsManager = SettingsManager.create(cwd, agentDir);
   const extension = join(__dirname, "../../../packages/pi-package/dist/index.js");
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, additionalExtensionPaths: [extension] });
+  const additionalExtensionPaths = [extension];
+  // 若用户已通过 `pi install npm:pi-trace-extension` 安装，追加加载（提供执行视角 trace 数据源）。
+  // 缺失时静默降级：仅数据源④不可用，任务 / 对话 / 官方 session 三路 trace 不受影响。
+  const traceExtension = join(agentDir, "npm", "pi-trace-extension", "extensions", "trace", "index.ts");
+  if (existsSync(traceExtension)) additionalExtensionPaths.push(traceExtension);
+  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, additionalExtensionPaths });
   await resourceLoader.reload({ resolveProjectTrust: async () => {
     if (!hasTrustRequiringProjectResources(cwd)) return true;
     const trustStore = new ProjectTrustStore(agentDir);
@@ -1638,6 +1649,9 @@ async function consolidateChatMemory(input: { conversation: ChatConversation; si
 // === IPC 路由(全部保留) =======================================================
 
 function registerIpc(): void {
+  // Trace 页面：聚合四路数据源（tasks+events / chats-v3 / pi-sessions / pi-trace events.jsonl）。
+  ipcMain.handle("trace:list", () => traceService.listSummaries());
+  ipcMain.handle("trace:get", (_event, kind: string, traceId: string) => traceService.getTrace(traceId, kind as TraceKind));
   ipcMain.handle("tasks:list", async () => { await mergeRefresher.refresh(); return taskCardsWithCurrentChanges(); });
   ipcMain.handle("tasks:get", async (_event, id: string) => { await mergeRefresher.refresh(); return { task: store.getTask(id), repositories: store.listTaskRepositories(id), events: store.listEvents(id), approvals: store.listApprovals(id), changedFiles: await taskChangedFiles(id) }; });
   ipcMain.handle("tasks:create", (_event, input: Pick<Task, "title" | "description"> & Partial<Pick<Task, "keywords" | "acceptanceCriteria">>) => store.createTask(input));

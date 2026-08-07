@@ -13,7 +13,7 @@
  */
 
 import { accessToken, query, type Query, type SDKMessage } from "@qoder-ai/qoder-agent-sdk";
-import type { HookCallback, HookEvent, HookJSONOutput } from "@qoder-ai/qoder-agent-sdk";
+import type { HookCallback, HookCallbackMatcher, HookEvent, HookJSONOutput } from "@qoder-ai/qoder-agent-sdk";
 import type { Task, TaskRepository, TaskStore } from "@coding-agent/core";
 import { implementationOutcomeInstruction } from "../task-readiness.js";
 import type { TaskAgentDriver, TaskAgentDeps, TaskAgentEvent, TaskAgentResult, TaskAgentPhase, RunPlanInput, RunImplementationInput, RunTestGenerationInput } from "./task-agent-driver.js";
@@ -239,14 +239,16 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
       ? ({
           PermissionRequest: [{
             hooks: [async (input: Parameters<HookCallback>[0], _toolUseID?: string, options?: { signal: AbortSignal }): Promise<HookJSONOutput> => {
-              if (input.hook_event_name !== "PermissionRequest") return { hookEventName: "PermissionRequest", decision: { behavior: "allow" } };
+              if (input.hook_event_name !== "PermissionRequest") {
+                return { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } };
+              }
               const decision = await this.deps.onPermissionRequest!(task.id, input.tool_name, input.tool_input, options?.signal);
               return decision === "deny"
-                ? { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: "用户拒绝了此操作，请改用其他方案", interrupt: false } }
-                : { hookEventName: "PermissionRequest", decision: { behavior: "allow" } };
+                ? { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: "用户拒绝了此操作，请改用其他方案", interrupt: false } } }
+                : { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } };
             }]
           }]
-        } satisfies Partial<Record<HookEvent, { hooks: HookCallback[] }>>)
+        } satisfies Partial<Record<HookEvent, HookCallbackMatcher[]>>)
       : undefined;
     const q = query({
       prompt,

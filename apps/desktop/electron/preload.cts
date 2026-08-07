@@ -68,5 +68,8 @@ contextBridge.exposeInMainWorld("agentApi", {
   listChatModels: () => ipcRenderer.invoke("chats:list-models"),
   startChatStream: (input: unknown) => ipcRenderer.invoke("chats:start-stream", input),
   abortChat: (input: unknown) => ipcRenderer.invoke("chats:abort", input),
-  onChatStreamEvent: (callback: (event: unknown) => void) => { const listener = (_: unknown, event: unknown) => callback(event); ipcRenderer.on("chat:stream-event", listener); return () => ipcRenderer.removeListener("chat:stream-event", listener); }
+  onChatStreamEvent: (callback: (event: unknown) => void) => { const listener = (_: unknown, event: unknown) => callback(event); ipcRenderer.on("chat:stream-event", listener); return () => ipcRenderer.removeListener("chat:stream-event", listener); },
+  // === Trace 页面(任务 / 对话 / Pi 会话统一执行轨迹) ============================
+  listTrace: () => ipcRenderer.invoke("trace:list"),
+  getTrace: (kind: string, traceId: string) => ipcRenderer.invoke("trace:get", kind, traceId)
 });
