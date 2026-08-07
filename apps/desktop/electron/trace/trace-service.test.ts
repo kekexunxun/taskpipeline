@@ -171,7 +171,7 @@ function fakeChatService(): ChatService {
   }
   return {
     listChats: () => [{ id: 'chat-1', title: '测试对话', createdAt: now, updatedAt: now, messageCount: 1 }],
-    getChat: (id) =>
+    getChat: (id: string) =>
       id === 'chat-1'
         ? {
             conversation: {
@@ -362,6 +362,46 @@ describe('TraceService', () => {
     )
     expect(await service.getTrace('nope', 'pi_session')).toEqual([])
     expect(await service.getTrace('nope', 'task')).toEqual([])
+  })
+
+  it('「其它」业务事件：listSummaries 包含 kind=other 条目，getTrace 返回单条 entry', async () => {
+    const store = new TaskStore(':memory:')
+    const event = store.addTraceEvent({
+      category: 'other',
+      subType: 'agent_template_generation',
+      title: 'AI 生成 Agent 模板',
+      detail: '描述：为支付服务补充幂等性指引\n参考仓库：payment-service',
+      payload: { model: 'qoder:claude-sonnet-4.5', repositoryIds: ['r1'] }
+    })
+
+    const service = new TraceService(store, fakeChatService(), temporaryRoot('g5'), temporaryRoot('g5a'))
+    const summaries = service.listSummaries()
+    const otherSummary = summaries.find((s) => s.kind === 'other' && s.traceId === event.id)
+    expect(otherSummary).toBeDefined()
+    expect(otherSummary?.title).toBe('AI 生成 Agent 模板')
+    expect(otherSummary?.entryCount).toBe(1)
+    expect(otherSummary?.state).toBe('ended')
+
+    const entries = await service.getTrace(event.id, 'other')
+    expect(entries).toHaveLength(1)
+    expect(entries[0]!.kind).toBe('other')
+    expect(entries[0]!.title).toBe('AI 生成 Agent 模板')
+    expect(entries[0]!.detail).toContain('支付服务')
+    expect(entries[0]!.payload).toMatchObject({
+      category: 'other',
+      subType: 'agent_template_generation',
+      model: 'qoder:claude-sonnet-4.5'
+    })
+  })
+
+  it('「其它」详情不存在时返回空数组', async () => {
+    const service = new TraceService(
+      new TaskStore(':memory:'),
+      fakeChatService(),
+      temporaryRoot('g6'),
+      temporaryRoot('g6a')
+    )
+    expect(await service.getTrace('does-not-exist', 'other')).toEqual([])
   })
 })
 

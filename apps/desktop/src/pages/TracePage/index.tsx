@@ -7,7 +7,7 @@ import { TraceFilters, type TraceKindFilter } from './components/TraceFilters'
 import { TraceList } from './components/TraceList'
 import { TraceDetail } from './components/TraceDetail'
 
-const VALID_KINDS: TraceKind[] = ['task', 'chat', 'pi_session']
+const VALID_KINDS: TraceKind[] = ['task', 'chat', 'pi_session', 'other']
 
 /**
  * Trace 页面：展示所有对话 / 任务 / Pi 会话的整体执行轨迹。

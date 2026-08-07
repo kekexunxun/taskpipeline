@@ -6,7 +6,7 @@ import { Timeline, type TimelineItem } from '../../CodingPage/components/Timelin
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 
-const kindLabels: Record<TraceKind, string> = { task: '任务', chat: '对话', pi_session: 'Pi 会话' }
+const kindLabels: Record<TraceKind, string> = { task: '任务', chat: '对话', pi_session: 'Pi 会话', other: '其它' }
 
 /** TraceEntry.type → Timeline 的 AgentEvent.kind（Timeline 已内置去重 / 折叠逻辑）。 */
 function toTimelineKind(type: TraceEntryType): AgentEvent['kind'] {

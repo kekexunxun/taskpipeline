@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ActivityIcon, Code2Icon, Link2Icon, MessageSquareTextIcon, type LucideIcon } from 'lucide-react'
+import { ActivityIcon, Code2Icon, Link2Icon, MessageSquareTextIcon, SparklesIcon, type LucideIcon } from 'lucide-react'
 import type { TraceKind, TraceSummary } from '@coding-agent/core'
 import type { TraceKindFilter } from './TraceFilters'
 import { cn } from '@/lib/utils'
@@ -11,7 +11,9 @@ import { statusLabels } from '@/utils/status'
 const kindMeta: Record<TraceKind, { label: string; icon: LucideIcon; className: string }> = {
   task: { label: '任务', icon: Code2Icon, className: 'text-sky-500' },
   chat: { label: '对话', icon: MessageSquareTextIcon, className: 'text-violet-500' },
-  pi_session: { label: 'Pi 会话', icon: ActivityIcon, className: 'text-emerald-500' }
+  pi_session: { label: 'Pi 会话', icon: ActivityIcon, className: 'text-emerald-500' },
+  // 「其它」分类：目前承接 AI 生成 Agent 模板等非任务 / 非对话 / 非 Pi 会话事件。
+  other: { label: '其它', icon: SparklesIcon, className: 'text-amber-500' }
 }
 
 function matches(summary: TraceSummary, kind: TraceKindFilter, query: string): boolean {

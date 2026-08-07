@@ -10,7 +10,8 @@ const options: Array<{ value: TraceKindFilter; label: string }> = [
   { value: 'all', label: '全部' },
   { value: 'task', label: '任务' },
   { value: 'chat', label: '对话' },
-  { value: 'pi_session', label: 'Pi 会话' }
+  { value: 'pi_session', label: 'Pi 会话' },
+  { value: 'other', label: '其它' }
 ]
 
 /** 顶部筛选：类型切换 + 关键词搜索。 */

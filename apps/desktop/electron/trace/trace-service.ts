@@ -11,7 +11,7 @@
  * 任务 ↔ Pi 会话关联（D6）：`pi_session_path` 文件名匹配优先，时间窗兜底。
  */
 
-import type { AgentEvent, TaskStore, TraceEntry, TraceKind, TraceSummary } from '@coding-agent/core'
+import type { AgentEvent, TaskStore, TraceEntry, TraceEvent, TraceKind, TraceSummary } from '@coding-agent/core'
 import type { ChatService } from '../chat/chat-service.js'
 import type { StoredMessage } from '../chat/chat-types.js'
 import { listPiSessionFiles, parsePiSessionFile, sessionIdFromFile } from './pi-session-trace.js'
@@ -106,6 +106,12 @@ export class TraceService {
       })
     }
 
+    // ⑤ 「其它」业务事件（如 AI 生成 Agent 模板）。
+    // 不挂载任务，作为独立 trace 出现；详情页走 store.getTraceEvent() 取原始事件。
+    for (const event of this.store.listTraceEvents()) {
+      summaries.push(traceEventToSummary(event))
+    }
+
     return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   }
 
@@ -113,6 +119,10 @@ export class TraceService {
   async getTrace(traceId: string, kind: TraceKind): Promise<TraceEntry[]> {
     if (kind === 'task') return this.store.listEvents(traceId).map(eventToTraceEntry)
     if (kind === 'chat') return chatEntries(traceId, this.chatService.getChat(traceId)?.messages ?? [])
+    if (kind === 'other') {
+      const event = this.store.getTraceEvent(traceId)
+      return event ? [traceEventToEntry(event)] : []
+    }
 
     const traceInfo = listPiTraceSessions(this.resolveAgentDir()).find((info) => info.sessionId === traceId)
     if (traceInfo) {
@@ -182,6 +192,39 @@ function eventToTraceEntry(event: AgentEvent): TraceEntry {
     title: event.title,
     detail: event.detail,
     payload: event.payload,
+    createdAt: event.createdAt,
+    source: 'events'
+  }
+}
+
+/** trace_events（不挂任务） → TraceSummary，固定走 "other" 分类。 */
+function traceEventToSummary(event: TraceEvent): TraceSummary {
+  return {
+    traceId: event.id,
+    kind: 'other',
+    title: event.title,
+    createdAt: event.createdAt,
+    updatedAt: event.createdAt,
+    entryCount: 1,
+    state: 'ended',
+    lastEntry: { type: 'status', title: event.title, createdAt: event.createdAt }
+  }
+}
+
+/** trace_events → TraceEntry，作为详情页唯一一条记录。 */
+function traceEventToEntry(event: TraceEvent): TraceEntry {
+  return {
+    id: `other-${event.id}`,
+    traceId: event.id,
+    kind: 'other',
+    type: 'status',
+    title: event.title,
+    detail: event.detail,
+    payload: {
+      ...(event.payload && typeof event.payload === 'object' ? event.payload : {}),
+      subType: event.subType,
+      category: event.category
+    },
     createdAt: event.createdAt,
     source: 'events'
   }
