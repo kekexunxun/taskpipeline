@@ -60,6 +60,7 @@ import {
   type UsageInfo
 } from '@qoder-ai/qoder-agent-sdk'
 import { TraceService } from './trace/trace-service.js'
+import { QoderTraceSink } from './trace/qoder-trace.js'
 import { resolveBundledOcrBinary, resolveOcrBinary, createOcrRunner } from './ocr.js'
 import { parsePlanDecision } from './plan-content.js'
 import { ChatService } from './chat/chat-service.js'
@@ -408,6 +409,8 @@ const chatService = new ChatService(
 // Trace 服务：聚合任务 / 对话 / Pi 会话执行轨迹（Trace 页面数据源）。
 // ④ pi-trace-extension 的 traces 目录默认在 ~/.pi/agent/traces，可用 settings `piAgentDir` 覆盖。
 const traceService = new TraceService(store, chatService, dataDir, join(homedir(), '.pi', 'agent'))
+// Qoder 执行 trace：任务消息流落盘为 dataDir/traces/qoder/<taskId>.jsonl（Trace 页 step 级展示）。
+const qoderTraceSink = new QoderTraceSink(dataDir)
 
 // Task agent driver — 负责"任务执行"路径(plan / implementation / test_generation)。
 // 当前只注册 Qoder；接口已经摆好，后续接入其它 agent 运行时仅需 add() 一行。
@@ -1328,6 +1331,9 @@ function emitPi(event: unknown): void {
   )
     updatePiUsage(activeTaskId)
   if (activeTaskId && record.type === 'tool_execution_end') emitTaskChanged(activeTaskId)
+  // Qoder 任务消息流 → 本地 trace 文件（thinking / 工具 / 文本 / result 汇总）。
+  if (record.type === 'qoder_event' && typeof record.taskId === 'string')
+    qoderTraceSink.append(record.taskId, record.message)
   sendTaskEvent(typeof record.taskId === 'string' || !activeTaskId ? record : { ...record, taskId: activeTaskId })
   if (
     record.type === 'agent_end' &&
@@ -1447,8 +1453,14 @@ async function startPi(taskId: string): Promise<void> {
   const additionalExtensionPaths = [extension]
   // 若用户已通过 `pi install npm:pi-trace-extension` 安装，追加加载（提供执行视角 trace 数据源）。
   // 缺失时静默降级：仅数据源④不可用，任务 / 对话 / 官方 session 三路 trace 不受影响。
-  const traceExtension = join(agentDir, 'npm', 'pi-trace-extension', 'extensions', 'trace', 'index.ts')
-  if (existsSync(traceExtension)) additionalExtensionPaths.push(traceExtension)
+  // `pi install` 的实际落盘是 `<agentDir>/npm/node_modules/pi-trace-extension`（npm 标准布局），
+  // 兼容旧式 `<agentDir>/npm/pi-trace-extension` 两种路径。
+  const traceExtensionCandidates = [
+    join(agentDir, 'npm', 'node_modules', 'pi-trace-extension', 'extensions', 'trace', 'index.ts'),
+    join(agentDir, 'npm', 'pi-trace-extension', 'extensions', 'trace', 'index.ts')
+  ]
+  const traceExtension = traceExtensionCandidates.find((candidate) => existsSync(candidate))
+  if (traceExtension) additionalExtensionPaths.push(traceExtension)
   const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, additionalExtensionPaths })
   await resourceLoader.reload({
     resolveProjectTrust: async () => {

@@ -1,4 +1,5 @@
 import { MessageResponse } from '@/components/ai-elements/message'
+import { cn } from '@/lib/utils'
 import type { DriverPart } from '@/api'
 
 /**
@@ -15,8 +16,9 @@ export function TextPart({
   part: Extract<DriverPart, { type: 'text' }>
   isAnimating?: boolean
 }) {
+  // 整个对话区统一使用 text-xs (12px) — 与思考/工具区字号对齐,长文本更易扫读。
   return (
-    <div className={isAnimating ? 'animate-pulse' : undefined}>
+    <div className={cn(isAnimating && 'animate-pulse', 'text-xs leading-relaxed')}>
       <MessageResponse>{part.text}</MessageResponse>
     </div>
   )

@@ -76,6 +76,62 @@ export function listPiTraceSessions(agentDir: string): PiTraceSessionInfo[] {
   return out.sort((a, b) => b.mtimeMs - a.mtimeMs)
 }
 
+/** pi-trace 会话的执行统计（列表页用，流式聚合 turn_summary，不整读大文件）。 */
+export type PiTraceStats = {
+  turns?: number
+  tokens?: { input: number; output: number; total: number }
+  costUsd?: number
+  durationMs?: number
+  model?: string
+}
+
+/**
+ * 流式扫描 events.jsonl，聚合执行统计：
+ * - turns：turn_summary 数量；
+ * - tokens / costUsd：各 turn_summary 的 usage 累加；
+ * - model：最后一条 turn_summary 的 model；
+ * - durationMs：session_start → session_shutdown 的间隔。
+ */
+export async function summarizePiTrace(eventsFile: string): Promise<PiTraceStats> {
+  const stats: PiTraceStats = {}
+  let startTs: number | undefined
+  let endTs: number | undefined
+  let stream: ReturnType<typeof createReadStream>
+  try {
+    stream = createReadStream(eventsFile, { encoding: 'utf8' })
+  } catch {
+    return stats
+  }
+  const lines = createInterface({ input: stream, crlfDelay: Infinity })
+  for await (const line of lines) {
+    if (!line.trim()) continue
+    let event: Record<string, unknown>
+    try {
+      event = JSON.parse(line) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    if (event.type === 'session_start' && typeof event.ts === 'number') startTs = event.ts
+    else if (event.type === 'session_shutdown' && typeof event.ts === 'number') endTs = event.ts
+    else if (event.type === 'turn_summary') {
+      stats.turns = (stats.turns ?? 0) + 1
+      if (typeof event.model === 'string') stats.model = event.model
+      const usage = event.usage as { input?: number; output?: number; cost?: number } | undefined
+      if (usage) {
+        const input = typeof usage.input === 'number' ? usage.input : 0
+        const output = typeof usage.output === 'number' ? usage.output : 0
+        const tokens = stats.tokens ?? (stats.tokens = { input: 0, output: 0, total: 0 })
+        tokens.input += input
+        tokens.output += output
+        tokens.total += input + output
+        if (typeof usage.cost === 'number') stats.costUsd = (stats.costUsd ?? 0) + usage.cost
+      }
+    }
+  }
+  if (startTs !== undefined && endTs !== undefined) stats.durationMs = Math.max(0, endTs - startTs)
+  return stats
+}
+
 /** 逐行解析 events.jsonl → TraceEntry[]（流式，可处理大文件）。 */
 export async function parsePiTraceEvents(filePath: string): Promise<TraceEntry[]> {
   const sessionId = basenameWithoutExt(filePath)

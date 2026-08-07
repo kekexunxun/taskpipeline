@@ -7,6 +7,7 @@ import type { ChatService } from '../chat/chat-service.js'
 import type { StoredMessage } from '../chat/chat-types.js'
 import { parsePiSessionFile, sessionIdFromFile } from './pi-session-trace.js'
 import { listPiTraceSessions, parsePiTraceEvents } from './pi-trace-events.js'
+import { QoderTraceSink } from './qoder-trace.js'
 import { TraceService } from './trace-service.js'
 
 const roots: string[] = []
@@ -170,7 +171,9 @@ function fakeChatService(): ChatService {
     ]
   }
   return {
-    listChats: () => [{ id: 'chat-1', title: '测试对话', createdAt: now, updatedAt: now, messageCount: 1 }],
+    listChats: () => [
+      { id: 'chat-1', title: '测试对话', createdAt: now, updatedAt: now, messageCount: 1, model: 'openai:default' }
+    ],
     getChat: (id: string) =>
       id === 'chat-1'
         ? {
@@ -262,12 +265,27 @@ describe('pi-session-trace', () => {
 })
 
 describe('TraceService', () => {
-  it('聚合 task / chat / pi_session 三类 summary，并按更新时间排序', () => {
+  it('聚合 task / chat / pi_session 三类 summary，并按更新时间排序', async () => {
     const dataDir = temporaryRoot('svc')
     const agentDir = temporaryRoot('svc-agent')
     const store = new TaskStore(':memory:')
     const task = store.createTask({ title: '示例任务', description: 'desc' })
     store.addEvent({ taskId: task.id, kind: 'status', title: '开始执行' })
+    // 任务 sessionUsage → stats（Token / 成本 / 时长 / 模型）
+    store.updateTask(task.id, {
+      sessionUsage: {
+        provider: 'qoder',
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 150,
+        costUsd: 0.01,
+        durationMs: 30000,
+        turns: 2
+      },
+      qoderModel: 'qoder:claude-sonnet-4.5'
+    })
 
     // ③ 官方 session
     mkdirSync(join(dataDir, 'pi-sessions'), { recursive: true })
@@ -280,7 +298,7 @@ describe('TraceService', () => {
     writePiTraceSession(agentDir, 'sess-pi', PI_TRACE_EVENTS)
 
     const service = new TraceService(store, fakeChatService(), dataDir, agentDir)
-    const summaries = service.listSummaries()
+    const summaries = await service.listSummaries()
     const kinds = summaries.map((s) => s.kind)
     expect(kinds).toContain('task')
     expect(kinds).toContain('chat')
@@ -292,6 +310,55 @@ describe('TraceService', () => {
     const taskSummary = summaries.find((s) => s.kind === 'task')
     expect(taskSummary?.entryCount).toBe(1)
     expect(taskSummary?.state).toBe('draft')
+    // 任务 stats 来自 sessionUsage
+    expect(taskSummary?.stats).toMatchObject({
+      turns: 2,
+      tokens: { input: 100, output: 50, total: 150 },
+      costUsd: 0.01,
+      durationMs: 30000,
+      model: 'qoder:claude-sonnet-4.5'
+    })
+    // pi-trace stats 流式聚合 turn_summary（fixture 里 usage input=100 / output=50 / cost=0.001）
+    const piTraceSummary = summaries.find((s) => s.kind === 'pi_session' && s.traceId === 'sess-pi')
+    expect(piTraceSummary?.stats).toMatchObject({
+      turns: 1,
+      tokens: { input: 100, output: 50, total: 150 },
+      costUsd: 0.001
+    })
+    // 对话 stats 只带模型
+    expect(summaries.find((s) => s.kind === 'chat')?.stats?.model).toBe('openai:default')
+  })
+
+  it('getTrace task 合并 Qoder 执行 trace 补充事件', async () => {
+    const dataDir = temporaryRoot('gq')
+    const store = new TaskStore(':memory:')
+    const task = store.createTask({ title: '任务', description: 'd' })
+    store.addEvent({ taskId: task.id, kind: 'status', title: '开始执行' })
+    // Qoder trace：thinking / tool_call（events 表里没有的 step 级细节）
+    const sink = new QoderTraceSink(dataDir)
+    sink.append(task.id, {
+      type: 'stream_event',
+      event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: '分析中' } }
+    })
+    sink.append(task.id, {
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        content_block: { type: 'tool_use', id: 'tc1', name: 'read', input: { path: 'x.ts' } }
+      }
+    })
+
+    const service = new TraceService(store, fakeChatService(), dataDir, temporaryRoot('gqa'))
+    const entries = await service.getTrace(task.id, 'task')
+    const types = entries.map((e) => e.type)
+    expect(types).toContain('status') // events 原有
+    expect(types).toContain('thinking') // qoder 补充
+    expect(types).toContain('tool_call') // qoder 补充
+    expect(entries.find((e) => e.type === 'tool_call')?.detail).toContain('x.ts')
+    // 合并后按时间排序
+    for (let i = 1; i < entries.length; i += 1) {
+      expect(Date.parse(entries[i - 1]!.createdAt) <= Date.parse(entries[i]!.createdAt)).toBe(true)
+    }
   })
 
   it('getTrace 按 kind 返回：task 来自 events 表', async () => {
@@ -349,7 +416,7 @@ describe('TraceService', () => {
     writePiTraceSession(agentDir, 'sess-pi', PI_TRACE_EVENTS)
 
     const service = new TraceService(store, fakeChatService(), dataDir, agentDir)
-    const summary = service.listSummaries().find((s) => s.kind === 'pi_session' && s.traceId === 'sess-pi')
+    const summary = (await service.listSummaries()).find((s) => s.kind === 'pi_session' && s.traceId === 'sess-pi')
     expect(summary?.linkedTaskId).toBe(task.id)
   })
 
@@ -375,7 +442,7 @@ describe('TraceService', () => {
     })
 
     const service = new TraceService(store, fakeChatService(), temporaryRoot('g5'), temporaryRoot('g5a'))
-    const summaries = service.listSummaries()
+    const summaries = await service.listSummaries()
     const otherSummary = summaries.find((s) => s.kind === 'other' && s.traceId === event.id)
     expect(otherSummary).toBeDefined()
     expect(otherSummary?.title).toBe('AI 生成 Agent 模板')

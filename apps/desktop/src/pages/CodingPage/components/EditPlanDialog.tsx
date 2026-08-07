@@ -48,7 +48,7 @@ export function EditPlanDialog({
         <Textarea
           value={content}
           onChange={(event) => setContent(event.target.value)}
-          className="min-h-[40vh] max-h-[60vh] resize-y font-mono text-xs"
+          className="min-h-[40vh] max-h-[60vh] resize-y font-mono text-xs!"
           placeholder="在此编辑计划内容（Markdown）"
         />
         <DialogFooter>

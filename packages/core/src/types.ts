@@ -350,7 +350,7 @@ export type TraceEntry = {
   /** 原始数据（AgentEvent / SDK raw / events.jsonl 事件）。 */
   payload?: unknown
   createdAt: string
-  source: 'events' | 'chat' | 'pi' | 'pi_trace'
+  source: 'events' | 'chat' | 'pi' | 'pi_trace' | 'qoder'
 }
 
 /** Trace 列表项（列表页用，不携带完整条目）。 */
@@ -362,7 +362,14 @@ export type TraceSummary = {
   updatedAt: string
   entryCount: number
   state?: string
-  stats?: { turns?: number; tokens?: { input: number; output: number; total: number }; costUsd?: number }
+  /** 执行统计：Token / 成本 / 时长 / 模型等关键指标。 */
+  stats?: {
+    turns?: number
+    tokens?: { input: number; output: number; total: number }
+    costUsd?: number
+    model?: string
+    durationMs?: number
+  }
   lastEntry?: Pick<TraceEntry, 'type' | 'title' | 'createdAt'>
   /** pi-trace 源存在 trace.html 时给出（前端"在浏览器打开"用）。 */
   traceHtmlPath?: string

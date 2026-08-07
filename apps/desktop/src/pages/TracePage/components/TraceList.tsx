@@ -5,7 +5,7 @@ import type { TraceKind, TraceSummary } from '@coding-agent/core'
 import type { TraceKindFilter } from './TraceFilters'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
-import { formatTime } from '@/utils/format'
+import { formatDuration, formatTime, formatTokens } from '@/utils/format'
 import { statusLabels } from '@/utils/status'
 
 const kindMeta: Record<TraceKind, { label: string; icon: LucideIcon; className: string }> = {
@@ -90,6 +90,28 @@ export function TraceList({
                   <span>{formatTime(summary.updatedAt)}</span>
                   <span>· {summary.entryCount} 条</span>
                 </span>
+                {summary.stats && (
+                  <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+                    {summary.stats.model && (
+                      <Badge variant="outline" className="max-w-40 truncate px-1 py-0 font-mono text-[9px]">
+                        {summary.stats.model}
+                      </Badge>
+                    )}
+                    {summary.stats.tokens && summary.stats.tokens.total > 0 && (
+                      <span title={`输入 ${summary.stats.tokens.input} · 输出 ${summary.stats.tokens.output}`}>
+                        ↑{formatTokens(summary.stats.tokens.input)} ↓{formatTokens(summary.stats.tokens.output)}
+                      </span>
+                    )}
+                    {typeof summary.stats.costUsd === 'number' && summary.stats.costUsd > 0 && (
+                      <span className="text-emerald-600 dark:text-emerald-400">
+                        ${summary.stats.costUsd.toFixed(4)}
+                      </span>
+                    )}
+                    {typeof summary.stats.durationMs === 'number' && summary.stats.durationMs > 0 && (
+                      <span>{formatDuration(summary.stats.durationMs)}</span>
+                    )}
+                  </span>
+                )}
                 {summary.kind === 'pi_session' && summary.linkedTaskId && (
                   <span className="mt-1 flex items-center gap-1 text-[10px] text-muted-foreground">
                     <Link2Icon size={10} />

@@ -14,8 +14,9 @@
 import type { AgentEvent, TaskStore, TraceEntry, TraceEvent, TraceKind, TraceSummary } from '@coding-agent/core'
 import type { ChatService } from '../chat/chat-service.js'
 import type { StoredMessage } from '../chat/chat-types.js'
+import { parseQoderTraceFile } from './qoder-trace.js'
 import { listPiSessionFiles, parsePiSessionFile, sessionIdFromFile } from './pi-session-trace.js'
-import { listPiTraceSessions, parsePiTraceEvents } from './pi-trace-events.js'
+import { listPiTraceSessions, parsePiTraceEvents, summarizePiTrace } from './pi-trace-events.js'
 
 /** D6 时间窗兜底：±5 分钟内任务有事件即视为关联候选。 */
 const TRACE_WINDOW_MS = 5 * 60 * 1000
@@ -37,13 +38,14 @@ export class TraceService {
   }
 
   /** 聚合四路数据源为列表 summary，按 updatedAt 倒序。 */
-  listSummaries(): TraceSummary[] {
+  async listSummaries(): Promise<TraceSummary[]> {
     const summaries: TraceSummary[] = []
     const tasks = this.store.listTasks()
 
-    // ① 任务（events 表）
+    // ① 任务（events 表）—— stats 来自任务的 sessionUsage（Token / 成本 / 时长 / 模型）。
     for (const task of tasks) {
       const events = this.store.listEvents(task.id)
+      const usage = task.sessionUsage
       summaries.push({
         traceId: task.id,
         kind: 'task',
@@ -52,6 +54,15 @@ export class TraceService {
         updatedAt: task.updatedAt,
         entryCount: events.length,
         state: task.state,
+        stats: usage
+          ? {
+              turns: usage.turns,
+              tokens: { input: usage.inputTokens, output: usage.outputTokens, total: usage.totalTokens },
+              costUsd: usage.costUsd,
+              durationMs: usage.durationMs,
+              model: task.qoderModel ?? usage.provider
+            }
+          : undefined,
         lastEntry: lastOf(events, (event) => ({
           type: mapEventKind(event.kind),
           title: event.title,
@@ -60,7 +71,7 @@ export class TraceService {
       })
     }
 
-    // ② 对话（chats-v3）
+    // ② 对话（chats-v3）—— stats 只带模型名（消息内未持久化 usage）。
     for (const chat of this.chatService.listChats()) {
       summaries.push({
         traceId: chat.id,
@@ -68,7 +79,8 @@ export class TraceService {
         title: chat.title,
         createdAt: chat.createdAt,
         updatedAt: chat.updatedAt,
-        entryCount: chat.messageCount
+        entryCount: chat.messageCount,
+        stats: chat.model ? { model: chat.model } : undefined
       })
     }
 
@@ -89,9 +101,10 @@ export class TraceService {
       })
     }
 
-    // ④ pi-trace sessions（执行视角，主）
+    // ④ pi-trace sessions（执行视角，主）—— stats 流式聚合 turn_summary 的 Token / 成本 / 模型 / 时长。
     for (const info of listPiTraceSessions(this.resolveAgentDir())) {
       const startedAt = info.startedAt ?? new Date(info.mtimeMs).toISOString()
+      const stats = await summarizePiTrace(info.eventsFile)
       summaries.push({
         traceId: info.sessionId,
         kind: 'pi_session',
@@ -100,6 +113,7 @@ export class TraceService {
         updatedAt: new Date(info.mtimeMs).toISOString(),
         entryCount: Math.max(1, Math.round(info.sizeBytes / AVG_EVENT_BYTES)),
         state: info.firstLine?.type === 'session_start' ? (info.traceHtmlPath ? 'ended' : 'running') : 'running',
+        stats: Object.keys(stats).length > 0 ? stats : undefined,
         lastEntry: info.firstLine ? { type: 'session_start', title: '执行会话开始', createdAt: startedAt } : undefined,
         traceHtmlPath: info.traceHtmlPath,
         linkedTaskId: this.linkedTaskFor(info.sessionId) ?? this.linkedByTimeWindow(new Date(startedAt).getTime())
@@ -117,7 +131,12 @@ export class TraceService {
 
   /** 单条 trace 的完整轨迹。pi_session 优先 ④ 执行视图，缺省回退 ③ 官方会话。 */
   async getTrace(traceId: string, kind: TraceKind): Promise<TraceEntry[]> {
-    if (kind === 'task') return this.store.listEvents(traceId).map(eventToTraceEntry)
+    if (kind === 'task') {
+      // events 表 + Qoder 执行 trace（thinking / 工具调用 / 结果等 events 里没有的细节）合并。
+      const events = this.store.listEvents(traceId).map(eventToTraceEntry)
+      const qoder = await parseQoderTraceFile(this.dataDir, traceId)
+      return mergeTaskTrace(events, qoder)
+    }
     if (kind === 'chat') return chatEntries(traceId, this.chatService.getChat(traceId)?.messages ?? [])
     if (kind === 'other') {
       const event = this.store.getTraceEvent(traceId)
@@ -195,6 +214,20 @@ function eventToTraceEntry(event: AgentEvent): TraceEntry {
     createdAt: event.createdAt,
     source: 'events'
   }
+}
+
+/** 任务详情 = events + Qoder 执行 trace 补充（thinking / 工具调用 / 结果 / 会话结束汇总），按时间排序。 */
+function mergeTaskTrace(events: TraceEntry[], qoder: TraceEntry[]): TraceEntry[] {
+  if (qoder.length === 0) return events
+  const supplement = qoder.filter(
+    (entry) =>
+      entry.type === 'thinking' ||
+      entry.type === 'tool_call' ||
+      entry.type === 'tool_result' ||
+      (entry.type === 'status' && entry.title === 'Qoder 会话结束')
+  )
+  if (supplement.length === 0) return events
+  return [...events, ...supplement].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
 }
 
 /** trace_events（不挂任务） → TraceSummary，固定走 "other" 分类。 */
