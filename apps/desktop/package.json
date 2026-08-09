@@ -1,6 +1,6 @@
 {
   "name": "@coding-agent/desktop",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.js",
@@ -26,9 +26,9 @@
   "dependencies": {
     "@ai-sdk/openai-compatible": "3.0.18",
     "@alibaba-group/open-code-review": "1.8.0",
-    "@coding-agent/core": "0.1.0",
-    "@coding-agent/integrations": "0.1.0",
-    "@coding-agent/pi-package": "0.1.0",
+    "@coding-agent/core": "1.0.0",
+    "@coding-agent/integrations": "1.0.0",
+    "@coding-agent/pi-package": "1.0.0",
     "@earendil-works/pi-coding-agent": "^0.82.1",
     "@qoder-ai/qoder-agent-sdk": "1.0.16",
     "ai": "7.0.44",
