@@ -27,7 +27,7 @@ export function TraceFilters({
   onQueryChange(query: string): void
 }) {
   return (
-    <div className="flex items-center gap-2 px-4 py-3">
+    <div className="flex flex-col gap-2 px-4 py-3">
       <div className="flex items-center gap-1 rounded-md border bg-background p-0.5">
         {options.map((option) => (
           <Button
@@ -41,7 +41,7 @@ export function TraceFilters({
           </Button>
         ))}
       </div>
-      <div className="relative ml-auto w-56">
+      <div className="relative">
         <SearchIcon
           size={14}
           className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted-foreground"
@@ -50,7 +50,7 @@ export function TraceFilters({
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
           placeholder="搜索标题 / 任务 / 会话"
-          className="h-8 pl-8 text-xs"
+          className="h-8 pl-8 text-xs!"
         />
       </div>
     </div>
