@@ -9,7 +9,7 @@ import {
   RotateCcwIcon,
   SquareTerminalIcon
 } from 'lucide-react'
-import type { TaskCard, TaskRepository } from '@coding-agent/core'
+import type { TaskCard, TaskRepository } from '@task-pipeline/core'
 import type { TaskDetail, ChangedFile } from '../../../api'
 import { useChatModels } from '../../../hooks/useChatModels'
 import { inReviewStates } from '../../../utils/status'

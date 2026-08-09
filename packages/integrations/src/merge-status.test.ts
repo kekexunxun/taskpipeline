@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Task, TaskEventSink, TaskStore } from "@coding-agent/core";
+import type { Task, TaskEventSink, TaskStore } from "@task-pipeline/core";
 import { TaskCompleter } from "./merge-status.js";
 
 const task: Task = {

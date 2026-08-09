@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { TaskCard } from "@coding-agent/core";
+import type { TaskCard } from "@task-pipeline/core";
 import { BoardPanel } from "./BoardPanel";
 
 function task(id: string, state: TaskCard["state"], boardColumn: TaskCard["boardColumn"]): TaskCard {

@@ -11,16 +11,16 @@
 
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { SessionUsage, TaskStore } from '@coding-agent/core'
+import type { SessionUsage, TaskStore } from '@task-pipeline/core'
 import type { Query, SDKMessage } from '@qoder-ai/qoder-agent-sdk'
 import { sdkResultText } from '../plan-content.js'
 
 /**
- * Qoder 阶段日志文件路径(若 `CODING_AGENT_QODER_LOG=1`)。
+ * Qoder 阶段日志文件路径(若 `TASK_PIPELINE_QODER_LOG=1`)。
  * 文件按 `taskId-<timestamp>.jsonl` 命名,append 模式逐条写入。
  */
 export function qoderLogFile(dataDir: string, taskId: string): string | undefined {
-  if (process.env.CODING_AGENT_QODER_LOG !== '1') return undefined
+  if (process.env.TASK_PIPELINE_QODER_LOG !== '1') return undefined
   const dir = join(dataDir, 'logs', 'qoder')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')

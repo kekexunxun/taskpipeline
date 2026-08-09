@@ -12,7 +12,7 @@
 import { closeSync, createReadStream, existsSync, openSync, readdirSync, readSync, statSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { join } from 'node:path'
-import type { TraceEntry } from '@coding-agent/core'
+import type { TraceEntry } from '@task-pipeline/core'
 
 /** pi-trace-extension 的 traces 根目录（`<agentDir>/traces`）。 */
 export function piTraceRoot(agentDir: string): string {

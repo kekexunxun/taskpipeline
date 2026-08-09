@@ -1,7 +1,7 @@
 # 计划：pi-package 与 desktop 业务逻辑对齐 + 下沉共享
 
 > 状态：**已完成**（2026-07-30）
-> 目标：把 desktop 已迭代成熟的 review / deliver / MR 状态 / Jira 同步 / 编辑器唤起等业务逻辑下沉到 `@coding-agent/integrations`（必要时在 `@coding-agent/core` 加抽象接口），让 `apps/desktop/electron/main.ts` 和 `packages/pi-package/src/index.ts` 复用同一份实现，**禁止再次分叉**。
+> 目标：把 desktop 已迭代成熟的 review / deliver / MR 状态 / Jira 同步 / 编辑器唤起等业务逻辑下沉到 `@task-pipeline/integrations`（必要时在 `@task-pipeline/core` 加抽象接口），让 `apps/desktop/electron/main.ts` 和 `packages/pi-package/src/index.ts` 复用同一份实现，**禁止再次分叉**。
 
 ---
 
@@ -48,8 +48,8 @@
 
 ### 1.3 已有可复用基础设施
 
-- `@coding-agent/core`：`TaskStore`、`LocalFileKeyStore`、`transitionTask`、`boardColumnFor`、所有类型。
-- `@coding-agent/integrations`：`GitService`（含 `--no-verify` / 90s / 网络错误识别）、`GitLabService`、`OpenCodeReviewService`（含 `delegate rule`）、`McpClient`、`DockerSandbox`。
+- `@task-pipeline/core`：`TaskStore`、`LocalFileKeyStore`、`transitionTask`、`boardColumnFor`、所有类型。
+- `@task-pipeline/integrations`：`GitService`（含 `--no-verify` / 90s / 网络错误识别）、`GitLabService`、`OpenCodeReviewService`（含 `delegate rule`）、`McpClient`、`DockerSandbox`。
 - 状态机 `delivering` 出口：`["await_merge", "failed", "awaiting_commit"]`（[workflow.ts](file:///Users/robin/Documents/codingagent/packages/core/src/workflow.ts)）已正确支持回退。
 
 ---
@@ -515,10 +515,10 @@ const approveForPi: DeliveryServiceOptions["approve"] = async (task, kind, conte
 ### 8.3 typecheck
 
 ```bash
-npm run typecheck -w @coding-agent/core
-npm run typecheck -w @coding-agent/integrations
-npm run typecheck -w @coding-agent/pi-package
-npm run typecheck -w @coding-agent/desktop
+npm run typecheck -w @task-pipeline/core
+npm run typecheck -w @task-pipeline/integrations
+npm run typecheck -w @task-pipeline/pi-package
+npm run typecheck -w @task-pipeline/desktop
 ```
 
 ---
@@ -619,7 +619,7 @@ npm run typecheck -w @coding-agent/desktop
 ## 11. 验收标准
 
 1. **行为等价**：desktop 与 pi-package 在 review / deliver / MR 状态 / Jira 同步 4 个流程上**行为一致**（事件文案、状态转移、错误处理）。
-2. **不引入新依赖**：所有下沉使用已有的 `@coding-agent/core` / `@coding-agent/integrations` 类型。
+2. **不引入新依赖**：所有下沉使用已有的 `@task-pipeline/core` / `@task-pipeline/integrations` 类型。
 3. **状态机不变**：`core/workflow.ts` 转移表 0 改动。
 4. **测试通过**：4 个包 `typecheck` + `test` 全部 green。
 5. **desktop `main.ts` 行数减少**：从 ~1080 行降到 ~500-600 行。

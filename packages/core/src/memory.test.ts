@@ -15,7 +15,7 @@ afterEach(() => {
 })
 
 function makeStore(): MemoryStore {
-  const dir = mkdtempSync(join(tmpdir(), 'coding-agent-memory-'))
+  const dir = mkdtempSync(join(tmpdir(), 'task-pipeline-memory-'))
   dirs.push(dir)
   return new MemoryStore(new Database(join(dir, 'memory.db')))
 }
@@ -109,7 +109,7 @@ describe('MemoryStore trigram search', () => {
 
 describe('MemoryStore trigram migration', () => {
   it('幂等：第二次构造后 FTS5 schema 不变,数据可继续被检索', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'coding-agent-mig-'))
+    const dir = mkdtempSync(join(tmpdir(), 'task-pipeline-mig-'))
     dirs.push(dir)
     const file = join(dir, 'memory.db')
     const first = new MemoryStore(new Database(file))
@@ -129,7 +129,7 @@ describe('MemoryStore trigram migration', () => {
   })
 
   it('从旧 unicode61 schema 迁移到 trigram + 重新填充', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'coding-agent-mig-old-'))
+    const dir = mkdtempSync(join(tmpdir(), 'task-pipeline-mig-old-'))
     dirs.push(dir)
     const file = join(dir, 'memory.db')
     const db = new Database(file)

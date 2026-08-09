@@ -1,4 +1,4 @@
-import type { TaskCard } from "@coding-agent/core";
+import type { TaskCard } from "@task-pipeline/core";
 import type { TaskRemovalMode } from "@/api";
 import { columns } from "../../../utils/status";
 import { BoardToolbar } from "./BoardToolbar";

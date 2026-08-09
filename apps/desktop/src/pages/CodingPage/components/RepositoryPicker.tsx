@@ -1,5 +1,5 @@
 import { CheckIcon, GitBranchIcon } from "lucide-react";
-import type { RepositoryProfile, TaskRepository } from "@coding-agent/core";
+import type { RepositoryProfile, TaskRepository } from "@task-pipeline/core";
 import { cn } from "@/lib/utils";
 
 export function mergeRepositoryOptions(profiles: RepositoryProfile[], attached: TaskRepository[]): RepositoryProfile[] {

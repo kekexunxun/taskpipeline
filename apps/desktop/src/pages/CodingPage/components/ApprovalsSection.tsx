@@ -1,5 +1,5 @@
 import { CheckCircle2Icon, ClockIcon, ShieldCheckIcon, XCircleIcon } from "lucide-react";
-import type { Approval } from "@coding-agent/core";
+import type { Approval } from "@task-pipeline/core";
 import { Badge } from "@/components/ui/badge";
 import { formatTime } from "@/utils/format";
 

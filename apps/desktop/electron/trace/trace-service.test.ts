@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { TaskStore, type TraceEntry } from '@coding-agent/core'
+import { TaskStore, type TraceEntry } from '@task-pipeline/core'
 import type { ChatService } from '../chat/chat-service.js'
 import type { StoredMessage } from '../chat/chat-types.js'
 import { parsePiSessionFile, sessionIdFromFile } from './pi-session-trace.js'
@@ -12,7 +12,7 @@ import { TraceService, eventToTraceEntry } from './trace-service.js'
 
 const roots: string[] = []
 function temporaryRoot(name: string) {
-  const root = join(tmpdir(), `coding-agent-trace-${name}-${crypto.randomUUID()}`)
+  const root = join(tmpdir(), `task-pipeline-trace-${name}-${crypto.randomUUID()}`)
   roots.push(root)
   mkdirSync(root, { recursive: true })
   return root

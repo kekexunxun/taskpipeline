@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AGENT_TASK_DISABLED, type RepoWikiDoc, type Task, type TaskRepository } from "@coding-agent/core";
+import { AGENT_TASK_DISABLED, type RepoWikiDoc, type Task, type TaskRepository } from "@task-pipeline/core";
 import { AgentService, createAgentDraft, generalAgent } from "./agent-service.js";
 
 /** 内存版 settings 存取，模拟 TaskStore.getSetting/setSetting。 */

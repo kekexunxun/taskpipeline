@@ -7,13 +7,13 @@ export type ImplementationDecision = {
   content: string;
 };
 
-const outcomeMarker = /<!--\s*coding-agent-outcome:(needs_input|already_satisfied|completed)\s*-->/i;
+const outcomeMarker = /<!--\s*task-pipeline-outcome:(needs_input|already_satisfied|completed)\s*-->/i;
 
 export const implementationOutcomeInstruction = [
   "本轮结束前必须明确当前执行结果，并在最终回复最后一行输出且只输出以下标记之一：",
-  "<!-- coding-agent-outcome:needs_input -->：信息不足、存在阻塞、需要用户回答，或实现尚未完成；即使已经修改了部分文件也使用此项。",
-  "<!-- coding-agent-outcome:already_satisfied -->：已核实当前仓库满足任务要求且无需修改任何文件。",
-  "<!-- coding-agent-outcome:completed -->：要求的代码修改已经全部完成，可以进入校验。",
+  "<!-- task-pipeline-outcome:needs_input -->：信息不足、存在阻塞、需要用户回答，或实现尚未完成；即使已经修改了部分文件也使用此项。",
+  "<!-- task-pipeline-outcome:already_satisfied -->：已核实当前仓库满足任务要求且无需修改任何文件。",
+  "<!-- task-pipeline-outcome:completed -->：要求的代码修改已经全部完成，可以进入校验。",
   "不要把一次对话结束当作实现完成。无法确定时必须使用 needs_input。"
 ].join("\n");
 

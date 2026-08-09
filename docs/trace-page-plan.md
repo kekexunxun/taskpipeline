@@ -29,7 +29,7 @@
 
 | 数据源 | 位置 | 内容 | 现状 |
 |---|---|---|---|
-| ① 任务 + 事件 | SQLite `coding-agent.db`：`tasks` / `events` 表 | 任务元数据 + 执行事件（`kind: message/tool/permission/command/diff/review/error/status`） | 已有，`store.listEvents(taskId)` |
+| ① 任务 + 事件 | SQLite `task-pipeline.db`：`tasks` / `events` 表 | 任务元数据 + 执行事件（`kind: message/tool/permission/command/diff/review/error/status`） | 已有，`store.listEvents(taskId)` |
 | ② 对话 | `dataDir/chats-v3/chat-*.json` + `index.json` | 每条消息 `{id, role, createdAt, driverId, raw}` | 已有，`ChatStorage.listMetas/getConversation` |
 | ③ Pi 官方 session | `dataDir/pi-sessions/*.jsonl`（JSONL v3，`SessionHeader` + 条目树） | 对话视角的完整会话流 | 已有，任务 `pi_session_path` 指回 |
 | ④ pi-trace 事件 | `~/.pi/agent/traces/<session-id>/events.jsonl`（追加式 JSONL） | **执行视角** trace：`session → interaction → turn → step(llm) + tool` 树，含延迟/tokens/cost/payload/子代理 | 需接入（本计划 P2/P3） |
@@ -281,14 +281,14 @@ apps/desktop/src/pages/TracePage/
 
 | 阶段 | 内容 | 改动文件 | 验证 |
 |---|---|---|---|
-| **P0 基建** | `TraceKind/TraceEntry/TraceSummary` 类型；`TraceService` 骨架 | `packages/core/src/types.ts`、`apps/desktop/electron/trace/trace-service.ts` | `npm run typecheck -w @coding-agent/desktop` |
-| **P1 三路历史聚合** | ① events 表直映射；② chats-v3 按 driverId 拆 parts；③ pi-sessions JSONL 解析 | `trace/pi-session-trace.ts`、`trace-service.ts` | 单测（fixture 假 store + 假 chats + 样例 session JSONL），`npm run test -w @coding-agent/desktop` |
+| **P0 基建** | `TraceKind/TraceEntry/TraceSummary` 类型；`TraceService` 骨架 | `packages/core/src/types.ts`、`apps/desktop/electron/trace/trace-service.ts` | `npm run typecheck -w @task-pipeline/desktop` |
+| **P1 三路历史聚合** | ① events 表直映射；② chats-v3 按 driverId 拆 parts；③ pi-sessions JSONL 解析 | `trace/pi-session-trace.ts`、`trace-service.ts` | 单测（fixture 假 store + 假 chats + 样例 session JSONL），`npm run test -w @task-pipeline/desktop` |
 | **P2 pi-trace 解析** | `trace/pi-trace-events.ts`：目录扫描 + events.jsonl 逐行解析 + 事件映射 + D6 关联 | `trace/pi-trace-events.ts`、`trace-service.ts` | 单测（样例 events.jsonl fixture 断言映射与关联）；样例文件放 `apps/desktop/electron/trace/__fixtures__/` |
 | **P3 插件接入** | 安装文档 + `main.ts` `additionalExtensionPaths` 追加；缺失降级 | `main.ts`、`docs/` | 起任务 → `~/.pi/agent/traces/` 出现 events.jsonl；卸载路径后仍能启动 |
 | **P4 IPC + 前端** | `trace:list/trace:get`（preload + api.ts + demo）；ActionBar、路由、TracePage（列表/详情/筛选/useTrace） | `preload.cts`、`api.ts`、`ActionBar.tsx`、`AppShell.tsx`、`pages/TracePage/*` | 组件测试（参照 `TaskCard.test.tsx`）+ `npm run dev` 手动走查：三条数据源各造一条可点开 |
 | **P5 增值（可选）** | "打开 trace.html"、tokens/cost 汇总卡片、深链 `/trace/:kind/:traceId` 直达 | TracePage、trace-service | 手动验证 |
 
-每阶段结束跑：`npm run typecheck`、`npm run lint`、`npm run test -w @coding-agent/desktop`（涉及前端组件时）。
+每阶段结束跑：`npm run typecheck`、`npm run lint`、`npm run test -w @task-pipeline/desktop`（涉及前端组件时）。
 
 ---
 

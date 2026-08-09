@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AtlassianClientFactory } from "@coding-agent/integrations";
+import type { AtlassianClientFactory } from "@task-pipeline/integrations";
 import { JiraTaskCreationAgent, type JiraCreateInput } from "../task-creation-agent.js";
 import type { ToolSource, ToolDeclaration } from "../drivers/tool-source.js";
 import type { ChatTaskCreationResult } from "../chat-types.js";

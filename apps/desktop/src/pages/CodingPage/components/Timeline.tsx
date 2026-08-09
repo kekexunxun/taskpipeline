@@ -9,7 +9,7 @@ import {
   TerminalIcon,
   XIcon
 } from 'lucide-react'
-import type { AgentEvent } from '@coding-agent/core'
+import type { AgentEvent } from '@task-pipeline/core'
 import { cn } from '@/lib/utils'
 import { formatTime } from '@/utils/format'
 import { localizedEventTitle } from '@/utils/status'
@@ -52,7 +52,7 @@ const icons = {
   status: ActivityIcon
 } as const
 const agentMessageTitle = /^(?:qoder agent|openai agent|ai)$/i
-const outcomeMarker = /\n?\s*<!--\s*coding-agent-outcome:(?:needs_input|already_satisfied|completed)\s*-->/gi
+const outcomeMarker = /\n?\s*<!--\s*task-pipeline-outcome:(?:needs_input|already_satisfied|completed)\s*-->/gi
 
 function isAgentMessage(item: TimelineItem): boolean {
   return item.kind === 'message' && agentMessageTitle.test(item.title.trim())

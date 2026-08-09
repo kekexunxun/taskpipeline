@@ -7,7 +7,7 @@ import type { ChatConversation, StoredMessageRecord } from "./chat-types.js";
 
 const roots: string[] = [];
 function temporaryRoot() {
-  const root = join(tmpdir(), `coding-agent-chat-${crypto.randomUUID()}`);
+  const root = join(tmpdir(), `task-pipeline-chat-${crypto.randomUUID()}`);
   roots.push(root);
   return root;
 }

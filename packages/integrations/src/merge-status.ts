@@ -1,5 +1,5 @@
-import type { SettingResolver, TaskEventSink, TaskStore } from "@coding-agent/core";
-import { transitionTask } from "@coding-agent/core";
+import type { SettingResolver, TaskEventSink, TaskStore } from "@task-pipeline/core";
+import { transitionTask } from "@task-pipeline/core";
 import { GitLabService, parseGitLabRemote } from "./gitlab.js";
 
 /**

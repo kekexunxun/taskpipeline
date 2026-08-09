@@ -13,7 +13,7 @@
 import { appendFileSync, createReadStream, existsSync, mkdirSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createInterface } from 'node:readline'
-import type { TraceEntry } from '@coding-agent/core'
+import type { TraceEntry } from '@task-pipeline/core'
 
 export function qoderTraceDir(dataDir: string): string {
   return join(dataDir, 'traces', 'qoder')

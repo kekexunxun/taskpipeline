@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { FolderOpenIcon, Loader2Icon, SaveIcon } from "lucide-react";
-import type { RepositoryProfile } from "@coding-agent/core";
+import type { RepositoryProfile } from "@task-pipeline/core";
 import { api } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

@@ -1,4 +1,4 @@
-import type { JiraMapping, Task, TaskState } from "@coding-agent/core";
+import type { JiraMapping, Task, TaskState } from "@task-pipeline/core";
 
 const defaultFields = {
   key: "key",

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { RepositoryProfile, SettingResolver, Task, TaskEventSink, TaskRepository, TaskStartMode, TaskState, TaskStore } from "@coding-agent/core";
-import { isReviewable, resolveTaskSetting, transitionTask } from "@coding-agent/core";
+import type { RepositoryProfile, SettingResolver, Task, TaskEventSink, TaskRepository, TaskStartMode, TaskState, TaskStore } from "@task-pipeline/core";
+import { isReviewable, resolveTaskSetting, transitionTask } from "@task-pipeline/core";
 import { GitService } from "./git.js";
 import { runShell, type ShellRunner } from "./process.js";
 import type { ReviewOrchestrator } from "./review-orchestrator.js";

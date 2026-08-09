@@ -15,7 +15,7 @@ import type {
   TraceEntry,
   TraceKind,
   TraceSummary
-} from '@coding-agent/core'
+} from '@task-pipeline/core'
 
 export type ChangedFile = { repositoryId: string; repositoryName: string; path: string; status: string }
 export type TaskDetail = {

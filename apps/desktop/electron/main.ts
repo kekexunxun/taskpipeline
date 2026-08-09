@@ -36,7 +36,7 @@ import {
   type TaskStartMode,
   type TaskState,
   type TraceKind
-} from '@coding-agent/core'
+} from '@task-pipeline/core'
 import {
   AtlassianClientFactory,
   DeliveryService,
@@ -54,7 +54,7 @@ import {
   testAtlassianConnection,
   asReviewer,
   type RepositoryCommandMap
-} from '@coding-agent/integrations'
+} from '@task-pipeline/integrations'
 import {
   accessToken,
   query,
@@ -137,14 +137,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
  * （包含 addEvent / updateTask / emitPi），避免外键异常。
  */
 const AGENT_GENERATOR_TASK_ID = '__agent_generator__'
+// 开发环境下 Electron 默认按 package.json 的 name(@task-pipeline/desktop)生成 userData 目录,
+// 这里显式固定为产品名,保证 dev 与打包版都落在 ~/Library/Application Support/TaskPipeline
+app.setName('TaskPipeline')
 let mainWindow: BrowserWindow | undefined
 let piSession: AgentSession | undefined
 let unsubscribePi: (() => void) | undefined
 const pendingUi = new Map<string, (response: Record<string, unknown>) => void>()
-const dataDir = process.env.CODING_AGENT_DATA_DIR ?? join(app.getPath('userData'), 'data')
-process.env.CODING_AGENT_DATA_DIR = dataDir
+const dataDir = process.env.TASK_PIPELINE_DATA_DIR ?? join(app.getPath('userData'), 'data')
+process.env.TASK_PIPELINE_DATA_DIR = dataDir
 mkdirSync(dataDir, { recursive: true })
-const store = new TaskStore(join(dataDir, 'coding-agent.db'))
+const store = new TaskStore(join(dataDir, 'task-pipeline.db'))
 const keyStore = new LocalFileKeyStore(dataDir)
 const memoryService = new MemoryService(store)
 // Agent 体系：可配置多 Agent + 仓库白名单绑定 + 模型路由（配置存 settings key `agentProfiles`）。
@@ -1541,11 +1544,11 @@ async function startPi(taskId: string): Promise<void> {
     ? SessionManager.open(task.piSessionPath, sessionDir, cwd)
     : SessionManager.create(cwd, sessionDir)
   const settingsManager = SettingsManager.create(cwd, agentDir)
-  // 开发期依赖根 `node_modules/@coding-agent/pi-package` 的符号链接，
-  // 打包后依赖 `prepackage` 拷贝到 `apps/desktop/node_modules/@coding-agent/pi-package`。
+  // 开发期依赖根 `node_modules/@task-pipeline/pi-package` 的符号链接，
+  // 打包后依赖 `prepackage` 拷贝到 `apps/desktop/node_modules/@task-pipeline/pi-package`。
   // 使用 `require.resolve` 让两种布局都能解析到 `dist/index.js`。
   const require = createRequire(import.meta.url)
-  const extension = require.resolve('@coding-agent/pi-package')
+  const extension = require.resolve('@task-pipeline/pi-package')
   const additionalExtensionPaths = [extension]
   // 若用户已通过 `pi install npm:pi-trace-extension` 安装，追加加载（提供执行视角 trace 数据源）。
   // 缺失时静默降级：仅数据源④不可用，任务 / 对话 / 官方 session 三路 trace 不受影响。

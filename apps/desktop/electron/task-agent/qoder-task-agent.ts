@@ -14,7 +14,7 @@
 
 import { accessToken, query, QoderCliProcessError, type Query, type SDKMessage } from '@qoder-ai/qoder-agent-sdk'
 import type { HookCallback, HookCallbackMatcher, HookEvent, HookJSONOutput } from '@qoder-ai/qoder-agent-sdk'
-import type { Task, TaskRepository, TaskStore } from '@coding-agent/core'
+import type { Task, TaskRepository, TaskStore } from '@task-pipeline/core'
 import { implementationOutcomeInstruction } from '../task-readiness.js'
 import type {
   TaskAgentDriver,

@@ -1,4 +1,4 @@
-import type { SessionUsage, Task, TaskCard } from "@coding-agent/core";
+import type { SessionUsage, Task, TaskCard } from "@task-pipeline/core";
 import { ActivityIcon, AlertCircleIcon, BotIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";

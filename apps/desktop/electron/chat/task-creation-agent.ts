@@ -1,5 +1,5 @@
-import type { AtlassianClientFactory, McpClient } from "@coding-agent/integrations";
-import { mcpPayload } from "@coding-agent/integrations";
+import type { AtlassianClientFactory, McpClient } from "@task-pipeline/integrations";
+import { mcpPayload } from "@task-pipeline/integrations";
 
 type McpToolDefinition = {
   name?: string;

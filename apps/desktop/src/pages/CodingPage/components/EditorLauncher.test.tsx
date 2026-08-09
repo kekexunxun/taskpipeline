@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { TaskRepository } from "@coding-agent/core";
+import type { TaskRepository } from "@task-pipeline/core";
 import { EditorLauncher } from "./EditorLauncher";
 
 function repo(partial: Partial<TaskRepository>): TaskRepository {

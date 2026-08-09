@@ -16,7 +16,7 @@ import {
   Trash2Icon,
   UploadIcon
 } from 'lucide-react'
-import type { AgentProfile, Memory, MemoryScope, RepositoryProfile } from '@coding-agent/core'
+import type { AgentProfile, Memory, MemoryScope, RepositoryProfile } from '@task-pipeline/core'
 import { RepositoryDialog, TestButton, type RepoDraft } from './RepositoryDialog'
 import { AgentDialog } from './AgentDialog'
 import { MemoryDialog } from './MemoryDialog'
@@ -891,6 +891,7 @@ export function SettingsDialog({
                           aria-label="Qoder Token"
                           value={settings.qoderToken}
                           onChange={(event) => update('qoderToken', event.target.value)}
+                          placeholder="Qoder Token"
                         />
                       </SettingField>
                       {qoder && (
@@ -922,6 +923,7 @@ export function SettingsDialog({
                           aria-label="GitLab Token"
                           value={settings.gitlabToken}
                           onChange={(event) => update('gitlabToken', event.target.value)}
+                          placeholder="GitLab Token"
                         />
                       </SettingField>
                     </FieldGroup>

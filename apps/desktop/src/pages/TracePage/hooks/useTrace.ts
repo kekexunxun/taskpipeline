@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { TraceEntry, TraceKind, TraceSummary } from '@coding-agent/core'
+import type { TraceEntry, TraceKind, TraceSummary } from '@task-pipeline/core'
 import { api } from '../../../api'
 
 /**

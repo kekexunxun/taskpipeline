@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { BrowserWindow } from "electron";
-import type { TaskStore } from "@coding-agent/core";
+import type { TaskStore } from "@task-pipeline/core";
 import { ChatStorage } from "./chat-storage.js";
 import type { ChatDriverRegistry } from "./drivers/driver-registry.js";
 import type { ChatDriver } from "./drivers/chat-driver.js";

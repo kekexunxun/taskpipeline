@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ActivityIcon, Code2Icon, Link2Icon, MessageSquareTextIcon, SparklesIcon, type LucideIcon } from 'lucide-react'
-import type { TraceKind, TraceSummary } from '@coding-agent/core'
+import type { TraceKind, TraceSummary } from '@task-pipeline/core'
 import type { TraceKindFilter } from './TraceFilters'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'

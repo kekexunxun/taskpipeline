@@ -15,7 +15,7 @@ import {
   XIcon,
   type LucideIcon
 } from 'lucide-react'
-import type { TraceEntry, TraceEntryType, TraceKind, TraceSummary } from '@coding-agent/core'
+import type { TraceEntry, TraceEntryType, TraceKind, TraceSummary } from '@task-pipeline/core'
 import { api } from '../../../api'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'

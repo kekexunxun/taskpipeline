@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { Task, TaskRepository } from "@coding-agent/core";
+import type { Task, TaskRepository } from "@task-pipeline/core";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DetailHeader } from "./DetailHeader";
 

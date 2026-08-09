@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TaskStore } from "@coding-agent/core";
+import { TaskStore } from "@task-pipeline/core";
 import { GitService } from "./git.js";
 import { parseGitLabRemote } from "./gitlab.js";
 import { mapJiraTasks } from "./jira.js";
@@ -334,7 +334,7 @@ describe("process integrations", () => {
 
 describe("task command workflow", () => {
   it("restarts a failed setup and lets a task override clear the repository default", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-workflow-"));
     try {
       const store = new TaskStore(join(dir, "store.db"));
       store.saveRepositoryProfile({ id: "repo", name: "repo", localPath: dir, defaultBranch: "main", setupCommand: "install" });
@@ -352,7 +352,7 @@ describe("task command workflow", () => {
   });
 
   it("marks environment preparation as failed and retries a missing worktree", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-workflow-"));
     try {
       const store = new TaskStore(join(dir, "store.db"));
       store.saveRepositoryProfile({ id: "repo", name: "repo", localPath: dir, defaultBranch: "main" });
@@ -388,7 +388,7 @@ describe("task command workflow", () => {
   });
 
   it("completes a planning task when the repository already satisfies the request", () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-workflow-"));
     try {
       const store = new TaskStore(join(dir, "store.db"));
       const task = store.createTask({ title: "Already done", description: "test", state: "planning" });
@@ -410,7 +410,7 @@ describe("task command workflow", () => {
   });
 
   it("completes an implementing task when the agent confirms no changes are required", () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-workflow-"));
     try {
       const store = new TaskStore(join(dir, "store.db"));
       const task = store.createTask({ title: "Already done", description: "test", state: "implementing" });
@@ -429,7 +429,7 @@ describe("task command workflow", () => {
   });
 
   it("pauses for user input and resumes implementation after a reply", () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-workflow-"));
     try {
       const store = new TaskStore(join(dir, "store.db"));
       const task = store.createTask({ title: "Needs details", description: "", state: "implementing" });
@@ -443,7 +443,7 @@ describe("task command workflow", () => {
   });
 
   it("completes a waiting task when the user explicitly requests no changes", () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-workflow-"));
     try {
       const store = new TaskStore(join(dir, "store.db"));
       const task = store.createTask({ title: "No changes", description: "", state: "awaiting_input" });
@@ -462,7 +462,7 @@ describe("task command workflow", () => {
   });
 
   it("resets a completed task for reimplementation and preserves the old MR in history", () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-workflow-"));
     try {
       const store = new TaskStore(join(dir, "store.db"));
       const task = store.createTask({ title: "Reimplement", description: "test", state: "completed", reviewStatus: "passed", summary: "done", commitMessage: "feat: old" });
@@ -477,7 +477,7 @@ describe("task command workflow", () => {
   });
 
   it("runs validation commands in the configured order and records failure state", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-workflow-"));
     try {
       const store = new TaskStore(join(dir, "store.db"));
       const task = store.createTask({ title: "Validate", description: "test", state: "implementing" });
@@ -492,7 +492,7 @@ describe("task command workflow", () => {
   });
 
   it("can resume validation when the task was left in validating", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-workflow-"));
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-workflow-"));
     try {
       const store = new TaskStore(join(dir, "store.db"));
       const task = store.createTask({ title: "Resume validation", description: "test", state: "validating" });

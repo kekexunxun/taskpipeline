@@ -9,7 +9,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { parseSessionEntries, type FileEntry } from '@earendil-works/pi-coding-agent'
-import type { TraceEntry } from '@coding-agent/core'
+import type { TraceEntry } from '@task-pipeline/core'
 
 /** 从 session 文件路径推导 sessionId（文件名去 `.jsonl` 后缀）。 */
 export function sessionIdFromFile(filePath: string): string {

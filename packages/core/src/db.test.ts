@@ -10,7 +10,7 @@ afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: tru
 
 describe("TaskStore", () => {
   it("coordinates leases across two SQLite connections", () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-db-")); dirs.push(dir);
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-db-")); dirs.push(dir);
     const file = join(dir, "store.db");
     const first = new TaskStore(file);
     const task = first.createTask({ title: "Lease", description: "test" });
@@ -23,7 +23,7 @@ describe("TaskStore", () => {
   });
 
   it("upserts Jira tasks and associates multiple repository profiles", () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-db-")); dirs.push(dir);
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-db-")); dirs.push(dir);
     const store = new TaskStore(join(dir, "store.db"));
     const first = store.upsertJiraTask({ taskKey: "ABC-1", title: "Old", description: "one" });
     const second = store.upsertJiraTask({ taskKey: "ABC-1", title: "New", description: "two" });
@@ -53,7 +53,7 @@ describe("TaskStore", () => {
     // 会把已 completed 的任务回退成 draft,commitMessage / qoderModel / piSessionPath / sessionUsage 全部被默认值清空。
     // 这里用模拟"任务已经跑完整条流水线"的 task 重新 upsert 一次,验证工作流和运行期字段全部保留,
     // 同时 title / description 等 Jira 内容字段按新值更新。
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-db-")); dirs.push(dir);
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-db-")); dirs.push(dir);
     const store = new TaskStore(join(dir, "store.db"));
     const usage = { provider: "qoder" as const, inputTokens: 10, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 30, turns: 2 };
     const original = store.upsertJiraTask({ taskKey: "ABC-1", title: "Original", description: "v1" });
@@ -84,7 +84,7 @@ describe("TaskStore", () => {
   });
 
   it("scopes identical task keys by source", () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-db-")); dirs.push(dir);
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-db-")); dirs.push(dir);
     const store = new TaskStore(join(dir, "store.db"));
     const local = store.createTask({ taskKey: "ABC-1", title: "Local", description: "local" });
     const jira = store.upsertJiraTask({ taskKey: "ABC-1", title: "Jira", description: "jira" });
@@ -97,7 +97,7 @@ describe("TaskStore", () => {
   });
 
   it("migrates legacy Jira keys into generic task source fields", () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-db-")); dirs.push(dir);
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-db-")); dirs.push(dir);
     const file = join(dir, "store.db");
     const legacy = new Database(file);
     legacy.exec(`
@@ -131,7 +131,7 @@ describe("TaskStore", () => {
   });
 
   it("persists a task-specific Qoder model", () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-db-")); dirs.push(dir);
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-db-")); dirs.push(dir);
     const store = new TaskStore(join(dir, "store.db"));
     const task = store.createTask({ title: "Model", description: "test", qoderModel: "performance" });
     expect(store.getTask(task.id)?.qoderModel).toBe("performance");
@@ -140,7 +140,7 @@ describe("TaskStore", () => {
   });
 
   it("persists plan metadata and repository command snapshots", () => {
-    const dir = mkdtempSync(join(tmpdir(), "coding-agent-db-")); dirs.push(dir);
+    const dir = mkdtempSync(join(tmpdir(), "task-pipeline-db-")); dirs.push(dir);
     const store = new TaskStore(join(dir, "store.db"));
     const repo = { id: "repo", name: "repo", localPath: join(dir, "repo"), defaultBranch: "main", setupCommand: "npm ci", lintCommand: "npm run lint", testCommand: "npm test", buildCommand: "npm run build" };
     store.saveRepositoryProfile(repo);

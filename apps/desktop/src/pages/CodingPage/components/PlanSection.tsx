@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { LoaderCircleIcon, MessageSquareTextIcon } from 'lucide-react'
-import type { Task } from '@coding-agent/core'
+import type { Task } from '@task-pipeline/core'
 import { normalizeTimelineItems, type TimelineItem } from './Timeline'
 import { readablePlanContent } from './planContent'
 import { MessageResponse } from '@/components/ai-elements/message'

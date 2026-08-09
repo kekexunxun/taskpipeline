@@ -1,5 +1,5 @@
-import type { Task, TaskEventSink, TaskRepository, SettingResolver } from "@coding-agent/core";
-import { blockingSeveritiesFor } from "@coding-agent/core";
+import type { Task, TaskEventSink, TaskRepository, SettingResolver } from "@task-pipeline/core";
+import { blockingSeveritiesFor } from "@task-pipeline/core";
 import { GitService } from "./git.js";
 import { OpenCodeReviewService, extractFirstJsonObject, type ReviewResult } from "./review.js";
 import { redactSecrets } from "./process.js";

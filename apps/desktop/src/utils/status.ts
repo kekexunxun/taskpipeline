@@ -1,4 +1,4 @@
-import type { BoardColumn } from "@coding-agent/core";
+import type { BoardColumn } from "@task-pipeline/core";
 import { InboxIcon, ActivityIcon, ShieldIcon, CheckCircle2Icon } from "lucide-react";
 
 export const columns: Array<{ id: BoardColumn; title: string; icon: typeof InboxIcon }> = [

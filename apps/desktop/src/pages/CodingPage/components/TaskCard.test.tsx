@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { TaskCard } from "@coding-agent/core";
+import type { TaskCard } from "@task-pipeline/core";
 import { TaskCardView } from "./TaskCard";
 
 const task: TaskCard = {

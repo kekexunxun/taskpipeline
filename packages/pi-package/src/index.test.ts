@@ -8,7 +8,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // === 重依赖 mock =============================================================
 
-vi.mock("@coding-agent/core", () => {
+vi.mock("@task-pipeline/core", () => {
   const noop = () => undefined;
   const id = <T>(x: T) => x;
   return {
@@ -30,7 +30,7 @@ vi.mock("@coding-agent/core", () => {
   };
 });
 
-vi.mock("@coding-agent/integrations", () => ({
+vi.mock("@task-pipeline/integrations", () => ({
   AtlassianClientFactory: class { create() { return {}; } },
   DeliveryService: class { constructor() {} },
   GitService: class {},
@@ -84,8 +84,8 @@ beforeEach(() => {
   // Node 进程上 ppid 是只读 getter,必须先 delete 再 define 才能修改
   delete (process as { ppid?: unknown }).ppid;
   Object.defineProperty(process, "ppid", { value: 99999, configurable: true, writable: true });
-  originalSubagent = process.env.CODING_AGENT_SUBAGENT;
-  originalNonce = process.env.CODING_AGENT_SUBAGENT_NONCE;
+  originalSubagent = process.env.TASK_PIPELINE_SUBAGENT;
+  originalNonce = process.env.TASK_PIPELINE_SUBAGENT_NONCE;
   process.env = { ...originalEnv };
 });
 
@@ -94,20 +94,20 @@ afterEach(() => {
   if (savedPpid !== undefined) {
     Object.defineProperty(process, "ppid", { value: savedPpid, configurable: true, writable: true });
   }
-  if (originalSubagent === undefined) delete process.env.CODING_AGENT_SUBAGENT;
-  else process.env.CODING_AGENT_SUBAGENT = originalSubagent;
-  if (originalNonce === undefined) delete process.env.CODING_AGENT_SUBAGENT_NONCE;
-  else process.env.CODING_AGENT_SUBAGENT_NONCE = originalNonce;
+  if (originalSubagent === undefined) delete process.env.TASK_PIPELINE_SUBAGENT;
+  else process.env.TASK_PIPELINE_SUBAGENT = originalSubagent;
+  if (originalNonce === undefined) delete process.env.TASK_PIPELINE_SUBAGENT_NONCE;
+  else process.env.TASK_PIPELINE_SUBAGENT_NONCE = originalNonce;
   process.env = originalEnv;
 });
 
 function setSubagent(nonce: string | undefined): void {
   if (nonce === undefined) {
-    delete process.env.CODING_AGENT_SUBAGENT;
-    delete process.env.CODING_AGENT_SUBAGENT_NONCE;
+    delete process.env.TASK_PIPELINE_SUBAGENT;
+    delete process.env.TASK_PIPELINE_SUBAGENT_NONCE;
   } else {
-    process.env.CODING_AGENT_SUBAGENT = "1";
-    process.env.CODING_AGENT_SUBAGENT_NONCE = nonce;
+    process.env.TASK_PIPELINE_SUBAGENT = "1";
+    process.env.TASK_PIPELINE_SUBAGENT_NONCE = nonce;
   }
 }
 
@@ -120,9 +120,9 @@ describe("isSubagentProcess 三重身份校验", () => {
     expect(isSubagentProcess(makePi({ value: nonce }))).toBe(true);
   });
 
-  it("case 2: env 标记未设(CODING_AGENT_SUBAGENT != '1') → 拒绝", () => {
+  it("case 2: env 标记未设(TASK_PIPELINE_SUBAGENT != '1') → 拒绝", () => {
     const nonce = "b".repeat(32);
-    process.env.CODING_AGENT_SUBAGENT_NONCE = nonce; // 故意只设 nonce,不设标记
+    process.env.TASK_PIPELINE_SUBAGENT_NONCE = nonce; // 故意只设 nonce,不设标记
     expect(isSubagentProcess(makePi({ value: nonce }))).toBe(false);
   });
 
@@ -143,8 +143,8 @@ describe("isSubagentProcess 三重身份校验", () => {
   });
 
   it("case 5: env 中 nonce 缺失 → 拒绝(防单独靠 env 标记蒙混)", () => {
-    process.env.CODING_AGENT_SUBAGENT = "1";
-    // 没设 CODING_AGENT_SUBAGENT_NONCE
+    process.env.TASK_PIPELINE_SUBAGENT = "1";
+    // 没设 TASK_PIPELINE_SUBAGENT_NONCE
     expect(isSubagentProcess(makePi({ value: "anything" }))).toBe(false);
   });
 

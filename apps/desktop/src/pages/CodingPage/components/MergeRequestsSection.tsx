@@ -1,5 +1,5 @@
 import { ExternalLinkIcon, GitBranchIcon, GitMergeIcon } from "lucide-react";
-import type { TaskRepository } from "@coding-agent/core";
+import type { TaskRepository } from "@task-pipeline/core";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatTime } from "@/utils/format";

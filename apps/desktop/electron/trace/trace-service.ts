@@ -11,7 +11,7 @@
  * 任务 ↔ Pi 会话关联（D6）：`pi_session_path` 文件名匹配优先，时间窗兜底。
  */
 
-import type { AgentEvent, TaskStore, TraceEntry, TraceEvent, TraceKind, TraceSummary } from '@coding-agent/core'
+import type { AgentEvent, TaskStore, TraceEntry, TraceEvent, TraceKind, TraceSummary } from '@task-pipeline/core'
 import type { ChatService } from '../chat/chat-service.js'
 import { chatEntries } from './chat-entries.js'
 import { parseQoderTraceFile } from './qoder-trace.js'

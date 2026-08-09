@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { Task } from "@coding-agent/core";
+import type { Task } from "@task-pipeline/core";
 import { PlanSection } from "./PlanSection";
 
 vi.mock("@/components/ai-elements/message", () => ({

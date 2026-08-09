@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { ActivityIcon } from 'lucide-react'
-import type { TraceKind } from '@coding-agent/core'
+import type { TraceKind } from '@task-pipeline/core'
 import { useTrace } from './hooks/useTrace'
 import { TraceFilters, type TraceKindFilter } from './components/TraceFilters'
 import { TraceList } from './components/TraceList'

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { PlanModeContext } from '@coding-agent/core'
+import type { PlanModeContext } from '@task-pipeline/core'
 
 interface QueryCall {
   prompt: string

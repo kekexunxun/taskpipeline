@@ -22,7 +22,7 @@
 
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import { AGENT_REVIEWER_ID, AGENT_TASK_DISABLED, AGENT_TEST_WRITER_ID, AGENT_MR_WRITER_ID, GENERAL_AGENT_ID, type AgentProfile, type RepoWikiDoc, type Task, type TaskRepository } from "@coding-agent/core";
+import { AGENT_REVIEWER_ID, AGENT_TASK_DISABLED, AGENT_TEST_WRITER_ID, AGENT_MR_WRITER_ID, GENERAL_AGENT_ID, type AgentProfile, type RepoWikiDoc, type Task, type TaskRepository } from "@task-pipeline/core";
 
 const SETTINGS_KEY = "agentProfiles";
 /** Agent 指引段总长上限；截断优先级 systemPrompt > engineeringGuidelines > wiki 全文。 */

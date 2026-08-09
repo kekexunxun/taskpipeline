@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import type { Approval } from "@coding-agent/core";
+import type { Approval } from "@task-pipeline/core";
 import { ApprovalsSection } from "./ApprovalsSection";
 
 const approvals: Approval[] = [

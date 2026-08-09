@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { CheckSquareIcon, ChevronDownIcon, ExternalLinkIcon, GitPullRequestArrowIcon, Maximize2Icon, Minimize2Icon, TagIcon, XIcon } from "lucide-react";
-import type { Task, TaskRepository } from "@coding-agent/core";
+import type { Task, TaskRepository } from "@task-pipeline/core";
 import { api } from "@/api";
 import { EditorLauncher } from "./EditorLauncher";
 import { Button } from "@/components/ui/button";

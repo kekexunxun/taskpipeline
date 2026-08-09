@@ -1,11 +1,11 @@
 {
-  "name": "@coding-agent/desktop",
+  "name": "@task-pipeline/desktop",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
-    "predev": "npm run build -w @coding-agent/core && npm run build -w @coding-agent/integrations && npm run build -w @coding-agent/pi-package",
+    "predev": "npm run build -w @task-pipeline/core && npm run build -w @task-pipeline/integrations && npm run build -w @task-pipeline/pi-package",
     "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json --watch\" \"wait-on tcp:5173 file:dist-electron/main.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "build": "vite build && tsc -p tsconfig.electron.json",
     "prepackage": "node scripts/copy-monorepo-packages.mjs && node scripts/copy-qodercli.mjs",
@@ -26,16 +26,16 @@
   "dependencies": {
     "@ai-sdk/openai-compatible": "3.0.18",
     "@alibaba-group/open-code-review": "1.8.0",
-    "@coding-agent/core": "1.0.0",
-    "@coding-agent/integrations": "1.0.0",
-    "@coding-agent/pi-package": "1.0.0",
+    "@task-pipeline/core": "1.0.0",
+    "@task-pipeline/integrations": "1.0.0",
+    "@task-pipeline/pi-package": "1.0.0",
     "@earendil-works/pi-coding-agent": "^0.82.1",
     "@qoder-ai/qoder-agent-sdk": "1.0.16",
     "ai": "7.0.44",
     "zod": "^3.24.2"
   },
   "build": {
-    "appId": "com.codingagent.desktop",
+    "appId": "com.taskpipeline.desktop",
     "productName": "TaskPipeline",
     "directories": {
       "output": "../../release"
@@ -53,7 +53,8 @@
       "**/better-sqlite3/**",
       "**/@qoder-ai/qoder-agent-sdk/**",
       "**/qoder-bin/**",
-      "**/@alibaba-group/ocr-darwin-arm64/**"
+      "**/@alibaba-group/ocr-darwin-arm64/**",
+      "**/@alibaba-group/ocr-darwin-x64/**"
     ],
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "mac": {
@@ -142,6 +143,7 @@
     "wait-on": "^8.0.1"
   },
   "optionalDependencies": {
+    "@alibaba-group/ocr-darwin-x64": "1.8.0",
     "@alibaba-group/ocr-win32-x64": "1.8.0",
     "@esbuild/win32-x64": "0.25.12",
     "@rollup/rollup-win32-x64-msvc": "4.62.3",

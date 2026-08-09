@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import type { TaskCard } from '@coding-agent/core'
+import type { TaskCard } from '@task-pipeline/core'
 import { DetailPanel } from './DetailPanel'
 import { isPlanningEvent } from './planningEvent'
 import type { TaskDetail } from '@/api'

@@ -19,7 +19,7 @@
  *  - test_generation: 在实现完成之后,生成最小测试集。
  */
 
-import type { Task, TaskRepository } from "@coding-agent/core";
+import type { Task, TaskRepository } from "@task-pipeline/core";
 
 /** 当前支持的 task agent 运行时。 */
 export type TaskAgentId = "qoder";

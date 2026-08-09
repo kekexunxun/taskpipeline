@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentProfile } from "@coding-agent/core";
+import type { AgentProfile } from "@task-pipeline/core";
 import { api } from "../api";
 
 export type AgentsSnapshot = {

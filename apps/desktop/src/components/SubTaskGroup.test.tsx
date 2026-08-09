@@ -271,7 +271,7 @@ describe('toolInputSummary', () => {
   it('file_path / path 只保留末段文件名,同时识别 Unix / 与 Windows \\ 分隔符', () => {
     expect(
       toolInputSummary({
-        file_path: '/Users/robin/Library/Application Support/@coding-agent/desktop/data/workspaces/x/src/api/index.ts'
+        file_path: '/Users/robin/Library/Application Support/@task-pipeline/desktop/data/workspaces/x/src/api/index.ts'
       })
     ).toBe('index.ts')
     expect(toolInputSummary({ path: 'src/api/index.ts' })).toBe('index.ts')

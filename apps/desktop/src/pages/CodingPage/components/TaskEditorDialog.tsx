@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { CheckIcon, ChevronDownIcon, Loader2Icon, PlayIcon, SaveIcon, SlidersHorizontalIcon, SparklesIcon, WandSparklesIcon } from "lucide-react";
-import type { AgentProfile, RepositoryProfile, Task, TaskRepository, TaskStartMode } from "@coding-agent/core";
+import type { AgentProfile, RepositoryProfile, Task, TaskRepository, TaskStartMode } from "@task-pipeline/core";
 // 与 packages/core/src/types.ts 的 AGENT_TASK_DISABLED 保持一致；
 // 前端不得 import core 运行值（会拖入 better-sqlite3，导致 vite 预打包在浏览器环境崩溃）
 const AGENT_TASK_DISABLED = "__disabled__";

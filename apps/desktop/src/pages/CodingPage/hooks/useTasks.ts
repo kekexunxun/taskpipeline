@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentEvent, Task, TaskCard } from "@coding-agent/core";
+import type { AgentEvent, Task, TaskCard } from "@task-pipeline/core";
 import { api, type TaskDetail } from "../../../api";
 import { useFeedback } from "../../../hooks/useGlobalFeedback";
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { TaskStore } from "@coding-agent/core";
+import type { TaskStore } from "@task-pipeline/core";
 
 /**
  * 假 ai-sdk streamText:用 `vi.mock` 替换 `ai`,把 `streamText().fullStream` 接到一个可脚本化的

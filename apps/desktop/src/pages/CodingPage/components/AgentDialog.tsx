@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Loader2Icon, SaveIcon, SparklesIcon } from 'lucide-react'
-import type { AgentProfile, RepositoryProfile } from '@coding-agent/core'
+import type { AgentProfile, RepositoryProfile } from '@task-pipeline/core'
 import { ChatModelSelector } from '../../ChatPage/components/ChatModelSelector'
 import { AgentAIGenerateDialog } from './AgentAIGenerateDialog'
 import type { AgentGenerationResult, AgentTemplate, ChatModelGroup } from '@/api'

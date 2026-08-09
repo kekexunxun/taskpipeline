@@ -42,7 +42,7 @@ describe('normalizeTimelineItems', () => {
   it('removes internal outcome markers from displayed content', () => {
     expect(
       normalizeTimelineItems([
-        item('1', 'message', 'Qoder Agent', '请补充信息\n<!-- coding-agent-outcome:needs_input -->')
+        item('1', 'message', 'Qoder Agent', '请补充信息\n<!-- task-pipeline-outcome:needs_input -->')
       ])[0]?.detail
     ).toBe('请补充信息')
   })

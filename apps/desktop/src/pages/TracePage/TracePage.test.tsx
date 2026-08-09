@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
-import type { TraceEntry, TraceSummary } from '@coding-agent/core'
+import type { TraceEntry, TraceSummary } from '@task-pipeline/core'
 import { TraceDetail } from './components/TraceDetail'
 import { TraceList } from './components/TraceList'
 

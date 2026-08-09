@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TaskStore, type AgentEvent, type Task, type TaskEventSink, type TaskRepository, type SettingResolver } from "@coding-agent/core";
+import { TaskStore, type AgentEvent, type Task, type TaskEventSink, type TaskRepository, type SettingResolver } from "@task-pipeline/core";
 import { DeliveryService } from "./delivery.js";
 
 const dirs: string[] = [];
@@ -10,7 +10,7 @@ afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: tru
 beforeEach(() => { vi.clearAllMocks(); });
 
 function createStore(): TaskStore {
-  const dir = mkdtempSync(join(tmpdir(), "coding-agent-delivery-")); dirs.push(dir);
+  const dir = mkdtempSync(join(tmpdir(), "task-pipeline-delivery-")); dirs.push(dir);
   return new TaskStore(join(dir, "store.db"));
 }
 

@@ -1,6 +1,6 @@
 import { tmpdir } from 'node:os'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Task, TaskRepository, TaskStore } from '@coding-agent/core'
+import type { Task, TaskRepository, TaskStore } from '@task-pipeline/core'
 import type { SDKMessage } from '@qoder-ai/qoder-agent-sdk'
 
 /**
@@ -167,14 +167,14 @@ describe('QoderTaskAgentDriver', () => {
   let savedLog: string | undefined
 
   beforeEach(() => {
-    savedLog = process.env.CODING_AGENT_QODER_LOG
-    delete process.env.CODING_AGENT_QODER_LOG
+    savedLog = process.env.TASK_PIPELINE_QODER_LOG
+    delete process.env.TASK_PIPELINE_QODER_LOG
     sdkMock.__queryCalls.length = 0
   })
 
   afterEach(() => {
-    if (savedLog === undefined) delete process.env.CODING_AGENT_QODER_LOG
-    else process.env.CODING_AGENT_QODER_LOG = savedLog
+    if (savedLog === undefined) delete process.env.TASK_PIPELINE_QODER_LOG
+    else process.env.TASK_PIPELINE_QODER_LOG = savedLog
   })
 
   it('emits agent_start/agent_end and a single agent_text per assistant message', async () => {

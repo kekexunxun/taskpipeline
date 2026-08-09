@@ -6,7 +6,7 @@ import { QoderTraceSink, parseQoderTraceFile } from './qoder-trace.js'
 
 const roots: string[] = []
 function temporaryRoot() {
-  const root = join(tmpdir(), `coding-agent-qoder-trace-${crypto.randomUUID()}`)
+  const root = join(tmpdir(), `task-pipeline-qoder-trace-${crypto.randomUUID()}`)
   roots.push(root)
   return root
 }

@@ -1,5 +1,5 @@
 import { CheckIcon, Loader2Icon, MessageCircleIcon, PauseIcon, PlayIcon, RefreshCcwIcon, SendIcon, SquareIcon } from "lucide-react";
-import type { TaskCard } from "@coding-agent/core";
+import type { TaskCard } from "@task-pipeline/core";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {

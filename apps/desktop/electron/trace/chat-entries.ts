@@ -8,7 +8,7 @@
  * - tool-use payload 增加 toolName / input，tool-result payload 增加 output（供 ToolCallRow 展示）。
  */
 
-import type { TraceEntry } from '@coding-agent/core'
+import type { TraceEntry } from '@task-pipeline/core'
 import type { StoredMessage } from '../chat/chat-types.js'
 
 /** 对话消息（StoredMessage，含 parts）→ TraceEntry[]。 */

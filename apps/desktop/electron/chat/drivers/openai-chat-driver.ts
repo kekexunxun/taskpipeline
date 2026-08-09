@@ -15,7 +15,7 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { stepCountIs, streamText, tool as aiTool, type ModelMessage } from "ai";
 import { z } from "zod";
-import type { TaskStore } from "@coding-agent/core";
+import type { TaskStore } from "@task-pipeline/core";
 import type { ChatDriver, StreamChatInput } from "./chat-driver.js";
 import type { ToolSource } from "./tool-source.js";
 import type { ChatModelInfo, ChatStreamChunk, ChatTaskCreationResult, DriverPart, StoredMessage, StoredMessageRecord } from "../chat-types.js";

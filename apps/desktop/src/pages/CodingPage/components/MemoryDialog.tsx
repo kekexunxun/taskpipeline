@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Loader2Icon } from "lucide-react";
-import type { Memory, MemoryScope, RepositoryProfile } from "@coding-agent/core";
+import type { Memory, MemoryScope, RepositoryProfile } from "@task-pipeline/core";
 import { api } from "@/api";
 import { Button } from "@/components/ui/button";
 import {

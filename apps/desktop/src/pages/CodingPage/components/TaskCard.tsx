@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { CircleDotIcon, FileTextIcon, FolderXIcon, GitBranchIcon, Loader2Icon, PencilIcon, ShieldIcon, Trash2Icon } from "lucide-react";
-import type { TaskCard } from "@coding-agent/core";
+import type { TaskCard } from "@task-pipeline/core";
 import type { TaskRemovalMode } from "@/api";
 import {
   AlertDialog,

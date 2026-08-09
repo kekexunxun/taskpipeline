@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Electron-builder 在 asar 打包时只能包含 `apps/desktop/` 下的文件。
-// npm workspace 把 `@coding-agent/*` 安装为指向 `packages/*` 的符号链接，
+// npm workspace 把 `@task-pipeline/*` 安装为指向 `packages/*` 的符号链接，
 // 解析依赖时会跳到 `apps/desktop/` 之外的位置，触发
 // "must be under apps/desktop/" 错误。
 // 本脚本把 `packages/*/dist` 与 `package.json` 真实拷贝到
-// `apps/desktop/node_modules/@coding-agent/*`，让 electron-builder 解析时
+// `apps/desktop/node_modules/@task-pipeline/*`，让 electron-builder 解析时
 // 停在应用目录内，避免跨出根目录。
 //
 // 该步骤必须早于 electron-builder 运行：推荐在 `prepackage` 触发，
@@ -22,7 +22,7 @@ const packagesRoot = join(repoRoot, 'packages')
 const packages = ['core', 'integrations', 'pi-package']
 
 for (const name of packages) {
-  const targetDir = join(appDir, 'node_modules', '@coding-agent', name)
+  const targetDir = join(appDir, 'node_modules', '@task-pipeline', name)
   const sourceDist = join(packagesRoot, name, 'dist')
   const sourcePkg = join(packagesRoot, name, 'package.json')
 
@@ -41,7 +41,7 @@ for (const name of packages) {
   mkdirSync(targetDir, { recursive: true })
   copyDirSync(sourceDist, join(targetDir, 'dist'))
   copyFileSync(sourcePkg, join(targetDir, 'package.json'))
-  console.log(`[copy-monorepo-packages] staged @coding-agent/${name}`)
+  console.log(`[copy-monorepo-packages] staged @task-pipeline/${name}`)
 }
 
 function lstatSafe(path) {

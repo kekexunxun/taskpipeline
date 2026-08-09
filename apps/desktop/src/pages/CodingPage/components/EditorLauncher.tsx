@@ -1,5 +1,5 @@
 import { Code2Icon, FolderOpenIcon, TerminalIcon } from "lucide-react";
-import type { TaskRepository } from "@coding-agent/core";
+import type { TaskRepository } from "@task-pipeline/core";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,

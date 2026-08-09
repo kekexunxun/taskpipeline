@@ -1,5 +1,5 @@
 import { accessToken, query, QoderCliProcessError, type Query } from '@qoder-ai/qoder-agent-sdk'
-import type { ParsedPlan, PlanModeContext, PlanModeProvider, RunPlanOptions } from '@coding-agent/core'
+import type { ParsedPlan, PlanModeContext, PlanModeProvider, RunPlanOptions } from '@task-pipeline/core'
 import { stripQoderModelPrefix } from '../qoder-task-agent.js'
 
 /**

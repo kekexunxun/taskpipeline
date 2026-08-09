@@ -4,7 +4,7 @@ import { isExplicitNoChangeCompletionRequest, nextStepForImplementation, nextSte
 describe("parseImplementationDecision", () => {
   it("uses the explicit outcome marker", () => {
     expect(parseImplementationDecision([
-      "I need the acceptance criteria before I can continue.\n<!-- coding-agent-outcome:needs_input -->"
+      "I need the acceptance criteria before I can continue.\n<!-- task-pipeline-outcome:needs_input -->"
     ])).toMatchObject({ outcome: "needs_input", content: "I need the acceptance criteria before I can continue." });
   });
 

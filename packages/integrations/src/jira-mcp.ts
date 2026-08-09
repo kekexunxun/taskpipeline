@@ -1,4 +1,4 @@
-import type { McpProfile, SettingResolver, Task, TaskStore } from "@coding-agent/core";
+import type { McpProfile, SettingResolver, Task, TaskStore } from "@task-pipeline/core";
 import { McpClient } from "./mcp.js";
 import { mapJiraTasks, type JiraTaskInput } from "./jira.js";
 

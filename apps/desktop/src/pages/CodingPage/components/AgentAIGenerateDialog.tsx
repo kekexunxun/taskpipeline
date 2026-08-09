@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { AlertCircleIcon, Loader2Icon, SparklesIcon } from 'lucide-react'
-import type { RepositoryProfile } from '@coding-agent/core'
+import type { RepositoryProfile } from '@task-pipeline/core'
 import type { AgentGenerationInput, AgentGenerationResult } from '@/api'
 import { api } from '@/api'
 import { Button } from '@/components/ui/button'

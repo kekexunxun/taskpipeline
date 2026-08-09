@@ -1,5 +1,5 @@
 {
-  "name": "@coding-agent/pi-package",
+  "name": "@task-pipeline/pi-package",
   "version": "1.0.0",
   "type": "module",
   "main": "dist/index.js",
@@ -15,8 +15,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@coding-agent/core": "1.0.0",
-    "@coding-agent/integrations": "1.0.0",
+    "@task-pipeline/core": "1.0.0",
+    "@task-pipeline/integrations": "1.0.0",
     "@earendil-works/pi-coding-agent": "0.82.1"
   },
   "devDependencies": {

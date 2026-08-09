@@ -1,4 +1,4 @@
-import type { AtlassianClientFactory, McpClient } from "@coding-agent/integrations";
+import type { AtlassianClientFactory, McpClient } from "@task-pipeline/integrations";
 import { describe, expect, it, vi } from "vitest";
 import { JiraTaskCreationAgent } from "./task-creation-agent.js";
 import { JiraTaskCreationBackend } from "./task-backends/jira.js";

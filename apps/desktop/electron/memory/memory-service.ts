@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { MemoryStore, type Memory, type MemoryScope, type MemorySearchHit, type RepoWikiSearchHit, type TaskStore } from "@coding-agent/core";
+import { MemoryStore, type Memory, type MemoryScope, type MemorySearchHit, type RepoWikiSearchHit, type TaskStore } from "@task-pipeline/core";
 import { collectRepoWikiDocs } from "../repowiki/indexer.js";
 import type { ExtractedMemoryDraft } from "./memory-extractor.js";
 import { fallbackKeywords } from "./memory-keyword-extractor.js";

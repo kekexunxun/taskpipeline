@@ -11,7 +11,7 @@ import type {
   StoredMessage,
   StoredMessageRecord
 } from "./chat-types.js";
-import type { TaskStore } from "@coding-agent/core";
+import type { TaskStore } from "@task-pipeline/core";
 
 /**
  * 假的 ChatDriver:用脚本化的 part 序列驱动 streamChat 行为。

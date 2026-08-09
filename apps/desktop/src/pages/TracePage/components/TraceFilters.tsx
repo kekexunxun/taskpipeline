@@ -1,5 +1,5 @@
 import { SearchIcon } from 'lucide-react'
-import type { TraceKind } from '@coding-agent/core'
+import type { TraceKind } from '@task-pipeline/core'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'

@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
-import type { SessionUsage, TaskStore } from '@coding-agent/core'
+import type { SessionUsage, TaskStore } from '@task-pipeline/core'
 import type { SDKMessage } from '@qoder-ai/qoder-agent-sdk'
 import { recordQoderMessage } from './log.js'
 
