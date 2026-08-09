@@ -31,11 +31,21 @@ jobs:
           node-version: 22
           cache: npm
 
+      # runner 默认 Python 3.12+ 移除了 distutils，而根目录 node-gyp 9.x
+      # （旧版 @electron/rebuild 依赖）的 gyp 仍 import distutils，
+      # 故固定 Python 3.11 供 node-gyp 使用（npm_config_python 在下方 npm ci 生效）
+      - name: Setup Python for node-gyp
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       # npm ci 会触发 apps/desktop 的 postinstall:
       # - electron-builder install-app-deps 为 Electron 重编译 better-sqlite3
       # - @qoder-ai/qoder-agent-sdk postinstall 按当前平台下载 qodercli 二进制
       - name: Install dependencies
         run: npm ci
+        env:
+          npm_config_python: python
 
       # 根脚本先构建所有 workspace，再走 prepackage:* 钩子
       # （拷贝 monorepo 内部包 + qodercli 二进制），最后 electron-builder
