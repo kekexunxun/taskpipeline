@@ -142,8 +142,10 @@
     "wait-on": "^8.0.1"
   },
   "optionalDependencies": {
+    "@alibaba-group/ocr-win32-x64": "1.8.0",
     "@esbuild/win32-x64": "0.25.12",
     "@rollup/rollup-win32-x64-msvc": "4.62.3",
+    "@tailwindcss/oxide-win32-x64-msvc": "4.3.3",
     "lightningcss-win32-x64-msvc": "1.32.0"
   }
 }
