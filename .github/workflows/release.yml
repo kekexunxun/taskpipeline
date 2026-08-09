@@ -18,7 +18,9 @@ jobs:
         include:
           - os: macos-latest
             script: package:mac
-          - os: windows-latest
+          # 固定 windows-2022：windows-latest(2025) 镜像缺少 node-gyp 可用的
+          # Visual Studio C++ 工具链，会导致 better-sqlite3 重编译失败
+          - os: windows-2022
             script: package:win
     runs-on: ${{ matrix.os }}
     steps:
