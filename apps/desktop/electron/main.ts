@@ -449,17 +449,17 @@ const keywordRewriter: KeywordRewriter = async (query) => {
   const { driverId } = resolveTaskChatModel()
   const driver = chatDriverRegistry.tryGet(driverId)
   if (!driver) return []
-  const model = await resolveKeywordModel(driverId)
+  const model = await resolveLiteModel(driverId)
   return extractKeywords({ driver, driverId, model, text: query })
 }
 
 /**
- * 关键词提取的模型选择策略：
+ * 轻量任务的模型选择策略（关键词提取 / MR 描述生成等短输出场景共用）：
  * - Qoder: 从 getQoderStatus() 拉模型列表，挑名字含 lite / haiku / mini / flash 的；
  *   找不到或 Qoder 未连接时回落到系统 defaultModel。
  * - OpenAI: 跟随系统 defaultOpenAIModel。
  */
-async function resolveKeywordModel(driverId: ChatDriverId): Promise<string> {
+async function resolveLiteModel(driverId: ChatDriverId): Promise<string> {
   if (driverId === 'qoder') {
     try {
       const status = await getQoderStatus()
@@ -926,9 +926,13 @@ async function runOperationAgent(
   if (!roleAgent || !roleBody) return ''
   const prompt = [roleBody, contextBody, body].filter(Boolean).join('\n\n')
   if (providerForTask(taskId) !== 'qoder') {
+    // OpenAI 路径跟随：preferredModel 未配置时 callOpenAIForPrompt 内部回落系统 modelProfile.model。
     return callOpenAIForPrompt(prompt, taskId, roleAgent.preferredModel, signal)
   }
-  return callQoderReviewer(prompt, taskId, roleAgent.preferredModel, signal)
+  // MR 描述生成只是短文本 JSON 输出，Qoder 走 lite 模型节省 credits（与关键词提取同策略）；
+  // 其它操作（review / test）仍尊重角色 Agent 的 preferredModel。
+  const model = operation === 'mr' ? await resolveLiteModel('qoder') : roleAgent.preferredModel
+  return callQoderReviewer(prompt, taskId, model, signal)
 }
 
 // === Qoder 集成(留在 desktop) ==================================================
@@ -2490,7 +2494,7 @@ async function taskMemoryContext(task: Task, repos: TaskRepository[]): Promise<s
     // 到 trace 里:模型、返回的关键词数组、耗时。生产环境调 OpenAI 关键词提取本身
     // 一次几百毫秒 ~ 几秒,不记会让用户看到“检索”却不知道背后是 LLM 调用,trace 会误导。
     const { driverId } = resolveTaskChatModel()
-    const keywordModel = await resolveKeywordModel(driverId)
+    const keywordModel = await resolveLiteModel(driverId)
     const tracedRewriter: KeywordRewriter = async (query) => {
       const start = Date.now()
       try {
