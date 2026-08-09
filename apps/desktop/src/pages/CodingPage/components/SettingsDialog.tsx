@@ -835,13 +835,13 @@ export function SettingsDialog({
   }
   const openAIConfigured = Boolean(openAIDraft?.baseUrl && openAIDraft?.model)
   const userMemories = memories.filter((memory) => memory.scope === 'user')
-  const openMemoryCreate = () => {
-    const activeRepo = repositories.find((repository) => repository.id === activeMemoryTab)
-    setMemoryDialog({
-      open: true,
-      initial: activeRepo ? { scope: 'repo', repositoryId: activeRepo.id } : { scope: 'user' }
-    })
-  }
+  // const openMemoryCreate = () => {
+  //   const activeRepo = repositories.find((repository) => repository.id === activeMemoryTab)
+  //   setMemoryDialog({
+  //     open: true,
+  //     initial: activeRepo ? { scope: 'repo', repositoryId: activeRepo.id } : { scope: 'user' }
+  //   })
+  // }
   const openAIInitial: OpenAIProfile | undefined = openAIDraft
     ? {
         baseUrl: openAIDraft.baseUrl,
@@ -1217,10 +1217,10 @@ export function SettingsDialog({
                         <h3 className="text-xs font-semibold">记忆</h3>
                         <p className="mt-0.5 text-xs text-muted-foreground">共 {memories.length} 条</p>
                       </div>
-                      <Button size="sm" onClick={openMemoryCreate}>
+                      {/* <Button size="sm" onClick={openMemoryCreate}>
                         <PlusIcon size={11} />
                         新增记忆
-                      </Button>
+                      </Button> */}
                     </div>
                     <Tabs value={activeMemoryTab} onValueChange={setActiveMemoryTab}>
                       <TabsList className="h-7 justify-start gap-0.5 rounded-md border bg-card/40 p-0.5">
