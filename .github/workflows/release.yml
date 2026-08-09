@@ -54,12 +54,13 @@ jobs:
       - name: Package
         run: npm run ${{ matrix.script }}
         env:
-          # macOS 签名与公证（可选）：未配置 secrets 时 electron-builder 自动跳过签名
-          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # macOS 签名与公证（可选）：secrets 未配置时置为 null（即不注入该变量），
+          # 避免 electron-builder 把空字符串 CSC_LINK 误当文件路径报 "not a file"
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK || null }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD || null }}
+          APPLE_ID: ${{ secrets.APPLE_ID || null }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || null }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || null }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
