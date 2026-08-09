@@ -13,7 +13,7 @@
 
 import type { AgentEvent, TaskStore, TraceEntry, TraceEvent, TraceKind, TraceSummary } from '@coding-agent/core'
 import type { ChatService } from '../chat/chat-service.js'
-import type { StoredMessage } from '../chat/chat-types.js'
+import { chatEntries } from './chat-entries.js'
 import { parseQoderTraceFile } from './qoder-trace.js'
 import { listPiSessionFiles, parsePiSessionFile, sessionIdFromFile } from './pi-session-trace.js'
 import { listPiTraceSessions, parsePiTraceEvents, summarizePiTrace } from './pi-trace-events.js'
@@ -202,8 +202,12 @@ export function mapEventKind(kind: AgentEvent['kind']): TraceEntry['type'] {
   }
 }
 
-function eventToTraceEntry(event: AgentEvent): TraceEntry {
-  return {
+export function eventToTraceEntry(event: AgentEvent): TraceEntry {
+  // events 表不持久化 AgentEvent.parentTaskId / taskId / sdkSubtype,这些字段只存
+  // 在 payload(JSON 列)里。这里从 payload 提到 entry 顶层,让 groupByParentTask
+  // 能识别子任务边界。
+  const payload = (event.payload ?? {}) as Record<string, unknown>
+  const out: TraceEntry = {
     id: `ev-${event.id}`,
     traceId: event.taskId,
     kind: 'task',
@@ -214,6 +218,18 @@ function eventToTraceEntry(event: AgentEvent): TraceEntry {
     createdAt: event.createdAt,
     source: 'events'
   }
+  // 旧数据兜底:payload 只有 subtaskId / sdkSubtype、没有 parentTaskId 时,这里用
+  // subtaskId 自指(写到 taskId 字段,因为 TraceEntry 没有 subtaskId,只有 taskId),
+  // groupByParentTask 的 `item.taskId === parent && !group.header` 规则会把它
+  // 识别为 group header。行为与 Timeline / qoder-trace / qoder-chat-driver 一致。
+  if (typeof payload.subtaskId === 'string') {
+    out.taskId = payload.subtaskId
+    out.parentTaskId = payload.subtaskId
+  } else if (typeof payload.parentTaskId === 'string') {
+    out.parentTaskId = payload.parentTaskId
+  }
+  if (typeof payload.sdkSubtype === 'string') out.sdkSubtype = payload.sdkSubtype
+  return out
 }
 
 /** 任务详情 = events + Qoder 执行 trace 补充（thinking / 工具调用 / 结果 / 会话结束汇总），按时间排序。 */
@@ -261,84 +277,6 @@ function traceEventToEntry(event: TraceEvent): TraceEntry {
     createdAt: event.createdAt,
     source: 'events'
   }
-}
-
-/** 对话消息（StoredMessage，含 parts）→ TraceEntry[]。 */
-function chatEntries(chatId: string, messages: StoredMessage[]): TraceEntry[] {
-  const out: TraceEntry[] = []
-  let seq = 0
-  for (const message of messages) {
-    const roleTitle = message.role === 'user' ? '用户' : message.role === 'system' ? '系统' : 'AI'
-    const parts = message.parts
-    if (parts.length === 0) {
-      // 未注册 driver / 兜底：直接按 role 输出文本
-      out.push({
-        id: `chat-${chatId}-${seq++}`,
-        traceId: chatId,
-        kind: 'chat',
-        type: 'message',
-        title: roleTitle,
-        detail: rawText(message),
-        payload: message.raw,
-        createdAt: message.createdAt,
-        source: 'chat'
-      })
-      continue
-    }
-    for (const part of parts) {
-      const base = { traceId: chatId, kind: 'chat' as const, createdAt: message.createdAt, source: 'chat' as const }
-      if (part.type === 'text') {
-        out.push({ ...base, id: `chat-${chatId}-${seq++}`, type: 'message', title: roleTitle, detail: part.text })
-      } else if (part.type === 'qoder.thinking') {
-        out.push({
-          ...base,
-          id: `chat-${chatId}-${seq++}`,
-          type: 'thinking',
-          title: '思考',
-          detail: truncate(part.text, 4000),
-          payload: { signature: part.signature }
-        })
-      } else if (part.type === 'qoder.session') {
-        out.push({ ...base, id: `chat-${chatId}-${seq++}`, type: 'status', title: `Qoder 会话 ${part.sessionId}` })
-      } else if (part.type === 'qoder.tool-use' || part.type === 'openai.tool-call') {
-        out.push({
-          ...base,
-          id: `chat-${chatId}-${seq++}`,
-          type: 'tool_call',
-          title: `工具 ${part.name}`,
-          detail: truncate(part.input, 2000),
-          payload: { toolCallId: part.toolCallId }
-        })
-      } else if (part.type === 'qoder.tool-result' || part.type === 'openai.tool-result') {
-        out.push({
-          ...base,
-          id: `chat-${chatId}-${seq++}`,
-          type: 'tool_result',
-          title: '工具结果',
-          detail: truncate(part.output, 3000),
-          payload: { toolCallId: part.toolCallId, isError: 'isError' in part ? part.isError : undefined }
-        })
-      }
-    }
-  }
-  return out
-}
-
-/** 从无 parts 的 record 中尽力提取文本（与 api.ts demo 的 messageText 语义一致）。 */
-function rawText(message: StoredMessage): string | undefined {
-  const raw = message.raw
-  if (raw && typeof raw === 'object') {
-    const candidate = raw as { text?: string; kind?: string; content?: string }
-    if (typeof candidate.text === 'string') return truncate(candidate.text, 4000)
-    if (typeof candidate.content === 'string') return truncate(candidate.content, 4000)
-  }
-  return undefined
-}
-
-function truncate(value: unknown, max: number): string {
-  if (value === undefined || value === null) return ''
-  const s = typeof value === 'string' ? value : JSON.stringify(value)
-  return s.length > max ? `${s.slice(0, max)}…[truncated ${s.length - max}]` : s
 }
 
 function lastOf<T, R>(items: T[], map: (item: T) => R | undefined): R | undefined {

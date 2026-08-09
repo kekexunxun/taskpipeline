@@ -1,21 +1,102 @@
-import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
+import type Database from "better-sqlite3";
 import type { Memory, MemoryScope, MemorySearchHit, RepoWikiDoc, RepoWikiSearchHit } from "./types.js";
 
-function ftsQuery(input: string): string {
-  return input.trim().split(/\s+/).filter(Boolean).map((term) => `"${term.replace(/"/g, '""')}"`).join(" AND ");
+/**
+ * 将 LLM 提取的关键词数组转成 FTS5 MATCH 表达式。
+ *
+ * 背景：
+ * - FTS5 原来用 unicode61 分词器处理中文按码点切，召回率极低。
+ * - 现已迁移到 `tokenize='trigram'`，但 trigram 至少需要 3 字符才能建索引；
+ *   短词 (<3 字符) 单独查不到，靠 OR 合并里的"长尾词"兜住。
+ * - 多个关键词用 `OR` 合并，配合 `bm25()` 自然排序，比单关键词 AND 召回更高。
+ */
+function ftsQuery(keywords: string[]): string {
+  const cleaned = keywords
+    .map((keyword) => keyword.trim().replace(/"/g, '""'))
+    .filter((keyword) => keyword.length > 0);
+  if (!cleaned.length) return "";
+  return cleaned
+    .map((keyword) => (keyword.length <= 2 ? `"${keyword}"` : `"${keyword}"*`))
+    .join(" OR ");
+}
+
+/**
+ * 启动时迁移：检测现有 FTS5 表是否仍用旧 unicode61 分词器；
+ * 若是，删除并用 trigram 重建（同时从原始表重新填充）。
+ * 项目未上线，数据库可随意重建，不需要保留旧索引。
+ */
+function migrateFtsToTrigram(db: Database.Database): void {
+  const memoriesFts = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories_fts'")
+    .get() as { sql?: string } | undefined;
+  if (memoriesFts?.sql && !memoriesFts.sql.includes("tokenize='trigram'")) {
+    db.exec(`
+      DROP TRIGGER IF EXISTS memories_ai;
+      DROP TRIGGER IF EXISTS memories_ad;
+      DROP TRIGGER IF EXISTS memories_au;
+      DROP TABLE IF EXISTS memories_fts;
+      CREATE VIRTUAL TABLE memories_fts USING fts5(
+        title, content, tags,
+        content='memories', content_rowid='rowid',
+        tokenize='trigram'
+      );
+      CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+        INSERT INTO memories_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags);
+      END;
+      CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, title, content, tags) VALUES('delete', old.rowid, old.title, old.content, old.tags);
+      END;
+      CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, title, content, tags) VALUES('delete', old.rowid, old.title, old.content, old.tags);
+        INSERT INTO memories_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags);
+      END;
+      INSERT INTO memories_fts(rowid, title, content, tags) SELECT rowid, title, content, tags FROM memories;
+    `);
+  }
+  const wikiFts = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='repo_wiki_docs_fts'")
+    .get() as { sql?: string } | undefined;
+  if (wikiFts?.sql && !wikiFts.sql.includes("tokenize='trigram'")) {
+    db.exec(`
+      DROP TRIGGER IF EXISTS repo_wiki_docs_ai;
+      DROP TRIGGER IF EXISTS repo_wiki_docs_ad;
+      DROP TRIGGER IF EXISTS repo_wiki_docs_au;
+      DROP TABLE IF EXISTS repo_wiki_docs_fts;
+      CREATE VIRTUAL TABLE repo_wiki_docs_fts USING fts5(
+        title, content,
+        content='repo_wiki_docs', content_rowid='rowid',
+        tokenize='trigram'
+      );
+      CREATE TRIGGER repo_wiki_docs_ai AFTER INSERT ON repo_wiki_docs BEGIN
+        INSERT INTO repo_wiki_docs_fts(rowid, title, content) VALUES (new.rowid, new.title, new.content);
+      END;
+      CREATE TRIGGER repo_wiki_docs_ad AFTER DELETE ON repo_wiki_docs BEGIN
+        INSERT INTO repo_wiki_docs_fts(repo_wiki_docs_fts, rowid, title, content) VALUES('delete', old.rowid, old.title, old.content);
+      END;
+      CREATE TRIGGER repo_wiki_docs_au AFTER UPDATE ON repo_wiki_docs BEGIN
+        INSERT INTO repo_wiki_docs_fts(repo_wiki_docs_fts, rowid, title, content) VALUES('delete', old.rowid, old.title, old.content);
+        INSERT INTO repo_wiki_docs_fts(rowid, title, content) VALUES (new.rowid, new.title, new.content);
+      END;
+      INSERT INTO repo_wiki_docs_fts(rowid, title, content) SELECT rowid, title, content FROM repo_wiki_docs;
+    `);
+  }
 }
 
 export class MemoryStore {
   constructor(readonly db: Database.Database) {
-    this.db.exec(`
+    db.exec(`
       CREATE TABLE IF NOT EXISTS memories (
         id TEXT PRIMARY KEY, scope TEXT NOT NULL, user_id TEXT, repository_id TEXT, conversation_id TEXT,
         title TEXT NOT NULL, content TEXT NOT NULL, tags TEXT NOT NULL,
         pinned INTEGER NOT NULL DEFAULT 0, importance REAL NOT NULL DEFAULT 0.5,
         source TEXT NOT NULL DEFAULT 'manual', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
-      CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(title, content, tags, content='memories', content_rowid='rowid');
+      CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+        title, content, tags,
+        content='memories', content_rowid='rowid',
+        tokenize='trigram'
+      );
       CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
         INSERT INTO memories_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags);
       END;
@@ -30,7 +111,11 @@ export class MemoryStore {
         id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, path TEXT NOT NULL,
         title TEXT NOT NULL, content TEXT NOT NULL, mtime TEXT, hash TEXT NOT NULL, updated_at TEXT NOT NULL
       );
-      CREATE VIRTUAL TABLE IF NOT EXISTS repo_wiki_docs_fts USING fts5(title, content, content='repo_wiki_docs', content_rowid='rowid');
+      CREATE VIRTUAL TABLE IF NOT EXISTS repo_wiki_docs_fts USING fts5(
+        title, content,
+        content='repo_wiki_docs', content_rowid='rowid',
+        tokenize='trigram'
+      );
       CREATE TRIGGER IF NOT EXISTS repo_wiki_docs_ai AFTER INSERT ON repo_wiki_docs BEGIN
         INSERT INTO repo_wiki_docs_fts(rowid, title, content) VALUES (new.rowid, new.title, new.content);
       END;
@@ -42,6 +127,7 @@ export class MemoryStore {
         INSERT INTO repo_wiki_docs_fts(rowid, title, content) VALUES (new.rowid, new.title, new.content);
       END;
     `);
+    migrateFtsToTrigram(db);
   }
 
   private now(): string { return new Date().toISOString(); }
@@ -104,9 +190,9 @@ export class MemoryStore {
     return (this.db.prepare(`SELECT * FROM memories ${where} ORDER BY pinned DESC, updated_at DESC`).all(...params) as Record<string, unknown>[]).map((row) => this.parseMemory(row));
   }
 
-  searchMemories(input: { query: string; scopes?: MemoryScope[]; repositoryId?: string; userId?: string; conversationId?: string; limit?: number }): MemorySearchHit[] {
+  searchMemories(input: { keywords: string[]; scopes?: MemoryScope[]; repositoryId?: string; userId?: string; conversationId?: string; limit?: number }): MemorySearchHit[] {
     const limit = Math.max(1, Math.min(input.limit ?? 10, 50));
-    const query = ftsQuery(input.query);
+    const query = ftsQuery(input.keywords);
     if (!query) return [];
     const clauses = ["memories_fts MATCH ?"];
     const params: unknown[] = [query];
@@ -149,9 +235,9 @@ export class MemoryStore {
     return (this.db.prepare("SELECT * FROM repo_wiki_docs WHERE repository_id = ? ORDER BY path").all(repositoryId) as Record<string, unknown>[]).map((row) => this.parseRepoWikiDoc(row));
   }
 
-  searchRepoWikiDocs(input: { repositoryId: string; query: string; limit?: number }): RepoWikiSearchHit[] {
+  searchRepoWikiDocs(input: { repositoryId: string; keywords: string[]; limit?: number }): RepoWikiSearchHit[] {
     const limit = Math.max(1, Math.min(input.limit ?? 10, 50));
-    const query = ftsQuery(input.query);
+    const query = ftsQuery(input.keywords);
     if (!query) return [];
     const rows = this.db.prepare(`SELECT docs.*, CAST(-bm25(repo_wiki_docs_fts) * 100 AS INTEGER) AS score FROM repo_wiki_docs_fts JOIN repo_wiki_docs docs ON docs.rowid = repo_wiki_docs_fts.rowid WHERE repo_wiki_docs_fts MATCH ? AND docs.repository_id = ? ORDER BY score DESC LIMIT ?`).all(query, input.repositoryId, limit) as Array<Record<string, unknown>>;
     return rows.map((row) => ({ ...this.parseRepoWikiDoc(row), score: Number(row.score) }));

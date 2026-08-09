@@ -135,6 +135,21 @@ export type AgentEvent = {
   detail?: string
   payload?: unknown
   createdAt: string
+  /**
+   * 归属子任务 ID（Qoder 子 Agent）。
+   *
+   * - 与 `TraceEntry.parentTaskId` 语义一致: undefined 表示主流程,有值表示嵌套在子任务内。
+   * - 由 `recordQoderMessage` 透传 SDKMessage.parent_tool_use_id 反查 task_started 的结果。
+   * - 其它源(本地状态变更 / 内存注入 / 用户操作)不携带该字段。
+   *
+   * 命名说明: `taskId` 已是 AgentEvent 归属任务的 ID,这里另起 `parentTaskId`(本字段)
+   * 表达"这条 AgentEvent 在哪个子任务里",与 TraceEntry.parentTaskId 同义。
+   */
+  parentTaskId?: string
+  /** 仅 task_started / task_progress / task_notification 三类系统消息持有,标识子任务本体。 */
+  subtaskId?: string
+  /** Qoder SDKMessage.subtype 透传。 */
+  sdkSubtype?: string
 }
 
 export type Approval = {
@@ -351,6 +366,21 @@ export type TraceEntry = {
   payload?: unknown
   createdAt: string
   source: 'events' | 'chat' | 'pi' | 'pi_trace' | 'qoder'
+  /**
+   * 归属子任务 ID（Qoder 子 Agent）。
+   *
+   * - 仅 Qoder 源使用；其它源恒为 undefined。
+   * - 来自 SDKMessage.parent_tool_use_id 反查 task_started.tool_use_id 后得到的 task_id。
+   * - 为 undefined 表示"主流程"；有值表示"嵌套在该子任务内"。
+   *
+   * 注意：JSONL 落盘形态不动（你确认的"落盘保持原样,只在解析时计算"），该字段在
+   * parseQoderTraceFile 阶段被注入到内存 entry 上。
+   */
+  parentTaskId?: string
+  /** 仅 task_started / task_progress / task_notification 三类系统消息持有，标识子任务本体。 */
+  taskId?: string
+  /** Qoder SDKMessage.subtype 透传（如 task_started / task_progress / hook_started 等），UI 据此路由。 */
+  sdkSubtype?: string
 }
 
 /** Trace 列表项（列表页用，不携带完整条目）。 */

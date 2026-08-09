@@ -225,7 +225,7 @@ export function DetailPanel({
           </TabsContent>
         )}
         <TabsContent value="activity" className="thin-scrollbar mt-0 min-h-0 flex-1 overflow-y-auto">
-          <Timeline items={executionEvents} />
+          <Timeline items={executionEvents} live={running} />
         </TabsContent>
         <TabsContent value="files" className="thin-scrollbar mt-0 min-h-0 flex-1 overflow-y-auto">
           {showChangedFiles ? (

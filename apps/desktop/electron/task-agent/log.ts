@@ -71,9 +71,37 @@ export function qoderText(message: SDKMessage): string | undefined {
   )
 }
 
+/** 从任意位置抽取非空字符串(给 parent_tool_use_id 反查用,避开 SDK 在多处的字段漂移)。 */
+function readNonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * 进程级 `tool_use_id -> task_id` 映射,跨 `recordQoderMessage` 多次调用累积。
+ *
+ * - 写到该 Map 的唯一入口:`task_started` 消息处理时,以其 `tool_use_id` 为键。
+ * - 读取入口:其它消息的 `parent_tool_use_id` 反查。
+ * - 内存中保留全部历史 task_started 的映射,适用于:
+ *   - 同一任务内嵌套多层子任务(Explore -> 内部又开 Plan 之类的);
+ *   - 同进程跑多任务的串行 SDK 顺序(虽然 map 跨任务不清理,但因为 tool_use_id 是 UUID
+ *     不会撞车,正确性 OK;性能上每次只 O(1) 写读,内存压力极低)。
+ */
+const recordQoderSubtaskCtx: {
+  taskIdByToolUseId: Map<string, string>
+  /** tool_use_id -> tool_name,用于在 tool_result 反查时携带名字(SDK 协议里 tool_result 不带 name)。 */
+  toolNameByToolUseId: Map<string, string>
+} = {
+  taskIdByToolUseId: new Map<string, string>(),
+  toolNameByToolUseId: new Map<string, string>()
+}
+
 /**
  * 记录一条 SDKMessage:更新 sessionUsage + 写任务事件 + emit qoder_event。
  * 拆出来是因为 plan / implementation / test_generation 三个阶段都共用,避免在 driver 内重复。
+ *
+ * 子任务透传:函数会从 message.parent_tool_use_id / message.task_id / message.subtype 抽取
+ * `parentTaskId / subtaskId / sdkSubtype` 三个字段并随 `addTaskEvent` 写入,这样 CodingPage 的
+ * Timeline 才能用 `groupByParentTask` 把子任务内的工具调用 / 文本 / 思考折叠成卡片。
  */
 export function recordQoderMessage(
   store: TaskStore,
@@ -83,9 +111,13 @@ export function recordQoderMessage(
     recordText: boolean
     addTaskEvent: (event: {
       taskId: string
-      kind: 'message' | 'status' | 'error'
+      kind: 'message' | 'status' | 'error' | 'tool'
       title: string
       detail?: string
+      parentTaskId?: string
+      subtaskId?: string
+      sdkSubtype?: string
+      payload?: unknown
     }) => void
     emitPi: (event: { type: 'qoder_event'; taskId: string; message: SDKMessage }) => void
   }
@@ -98,6 +130,40 @@ export function recordQoderMessage(
   if (!store.getTask(taskId)) return
   const text = qoderText(message)
   const current = store.getTask(taskId)?.sessionUsage
+
+  /**
+   * 抽取 SDKMessage 上的子任务关联字段。
+   *
+   * Qoder SDK 在每条消息上同时携带 `parent_tool_use_id` 与可选的 `task_id` / `subtype`,
+   * 维护 `taskIdByToolUseId` 这个 `tool_use_id -> task_id` 映射是子任务分组的唯一关键:
+   * - 看到 `task_started` 时把其 `tool_use_id -> task_id` 写入映射;
+   * - 其它消息根据 `parent_tool_use_id` 反查以决定是否归属子任务。
+   *
+   * 函数级映射:整个进程一个 Map,跨调用累积。`recordQoderMessage` 多次调用时按
+   * SDK 顺序触发,所以同 task 内子任务的 tool_use_id 一定能命中。
+   */
+  const ctx = recordQoderSubtaskCtx
+  const sdkMessage = message as unknown as Record<string, any>
+  const messageParent = readNonEmptyString(sdkMessage.parent_tool_use_id)
+  const innerMessageParent = readNonEmptyString(sdkMessage.message?.parent_tool_use_id)
+  const parentToolUseId = messageParent ?? innerMessageParent
+  if (
+    sdkMessage.type === 'system' &&
+    sdkMessage.subtype === 'task_started' &&
+    typeof sdkMessage.task_id === 'string' &&
+    typeof sdkMessage.tool_use_id === 'string'
+  ) {
+    ctx.taskIdByToolUseId.set(sdkMessage.tool_use_id, sdkMessage.task_id)
+  }
+  const resolvedParentTaskId = parentToolUseId ? ctx.taskIdByToolUseId.get(parentToolUseId) : undefined
+  const isTaskStart =
+    sdkMessage.type === 'system' && sdkMessage.subtype === 'task_started' && typeof sdkMessage.task_id === 'string'
+  const isTaskProgress =
+    sdkMessage.type === 'system' && sdkMessage.subtype === 'task_progress' && typeof sdkMessage.task_id === 'string'
+  const isTaskNotification =
+    sdkMessage.type === 'system' && sdkMessage.subtype === 'task_notification' && typeof sdkMessage.task_id === 'string'
+  const subtaskId = isTaskStart || isTaskProgress || isTaskNotification ? (sdkMessage.task_id as string) : undefined
+  const sdkSubtype = typeof sdkMessage.subtype === 'string' ? sdkMessage.subtype : undefined
   const previous = current?.provider === 'qoder' ? current : undefined
 
   if (message.type === 'assistant') {
@@ -188,13 +254,175 @@ export function recordQoderMessage(
     store.updateTask(taskId, { sessionUsage: usage })
   }
 
-  if (text && options.recordText) options.addTaskEvent({ taskId, kind: 'message', title: 'Qoder Agent', detail: text })
-  else if (message.type === 'system')
+  /**
+   * 抽取 assistant.tool_use / user.tool_result → 缓存到 toolBlocks,作为 timeline 的「工具调用」子条目。
+   *
+   * 之前 log.ts 只在 assistant 文本上写 message 条目,tool_use / tool_result 直接被丢弃,所以
+   * timeline 看不到子任务内的工具执行痕迹。这里按 SDK 顺序成对收集,执行了什么(input) 在
+   * tool_use,结果是什么(output) 在 tool_result,稍后以 kind='tool' 事件写入 events 表,
+   * 前端按 toolUseId 配对渲染。
+   */
+  type ExtractedToolBlock = {
+    toolUseId: string
+    toolName: string
+    phase: 'use' | 'result'
+    input?: unknown
+    output?: unknown
+    isError?: boolean
+  }
+  const toolBlocks: ExtractedToolBlock[] = []
+  const msgContent = sdkMessage.message?.content
+  if (Array.isArray(msgContent)) {
+    for (const block of msgContent) {
+      if (!block || typeof block !== 'object') continue
+      const b = block as Record<string, unknown>
+      if (
+        message.type === 'assistant' &&
+        b.type === 'tool_use' &&
+        typeof b.id === 'string' &&
+        typeof b.name === 'string'
+      ) {
+        const toolUseId = b.id
+        const toolName = b.name
+        ctx.toolNameByToolUseId.set(toolUseId, toolName)
+        toolBlocks.push({ toolUseId, toolName, phase: 'use', input: b.input })
+      } else if (message.type === 'user' && b.type === 'tool_result' && typeof b.tool_use_id === 'string') {
+        const toolUseId = b.tool_use_id
+        const toolName = ctx.toolNameByToolUseId.get(toolUseId) ?? 'tool'
+        toolBlocks.push({ toolUseId, toolName, phase: 'result', output: b.content, isError: b.is_error === true })
+      }
+    }
+  }
+
+  // 子任务关联字段打包到 payload(数据库 events 表没有 parent_task_id / subtask_id 列,
+  // 但 payload 本身就是 JSON 列,前端可读出来用于 groupByParentTask)。
+  //
+  // 子任务三类消息(task_started / task_progress / task_notification)自指
+  // `parentTaskId = subtaskId`:SDK 在 system 任务消息上不会重复携带 parent_tool_use_id,
+  // 所以这里用消息自身携带的 task_id 兜底,与 qoder-trace.ts 解析侧、qoder-chat-driver
+  // 的 subtask-* part 保持一致;这样 groupByParentTask 能依据 `parentTaskId` 把它们归到
+  // 同一子任务 group,task_started 被识别为 group header。其它消息仍走
+  // `parent_tool_use_id` 反查路径。
+  const subtaskPayload: { parentTaskId?: string; subtaskId?: string; sdkSubtype?: string } = {
+    ...(resolvedParentTaskId && !subtaskId ? { parentTaskId: resolvedParentTaskId } : {}),
+    ...(subtaskId ? { subtaskId } : {}),
+    ...(sdkSubtype ? { sdkSubtype } : {})
+  }
+  if (subtaskId) subtaskPayload.parentTaskId = subtaskId
+  const hasSubtaskMeta = Object.keys(subtaskPayload).length > 0
+
+  if (text && options.recordText) {
+    const usageObj = sdkMessage.message?.usage
+    const usage = usageObj && typeof usageObj === 'object' ? (usageObj as Record<string, unknown>) : undefined
+    options.addTaskEvent({
+      taskId,
+      kind: 'message',
+      title: 'Qoder Agent',
+      detail: text,
+      ...(hasSubtaskMeta
+        ? {
+            payload: {
+              ...subtaskPayload,
+              ...(usage ? { usage } : {})
+            }
+          }
+        : usage
+          ? { payload: { usage } }
+          : {})
+    })
+  } else if (message.type === 'system') {
+    // 子任务三类消息独立成 title,与 trace 解析侧保持一致,
+    // 渲染层(groupByParentTask)用 sdkSubtype 把它们从普通 status 里识别出来。
+    let title = `Qoder ${message.subtype}`
+    if (sdkMessage.subtype === 'task_started') title = 'Qoder 子任务启动'
+    else if (sdkMessage.subtype === 'task_progress') title = 'Qoder 子任务进度'
+    else if (sdkMessage.subtype === 'task_notification') title = 'Qoder 子任务收尾'
     options.addTaskEvent({
       taskId,
       kind: 'status',
-      title: `Qoder ${message.subtype}`,
-      detail: JSON.stringify(message).slice(0, 2000)
+      title,
+      detail: JSON.stringify(message).slice(0, 2000),
+      payload: {
+        ...(hasSubtaskMeta ? subtaskPayload : {}),
+        ...(sdkMessage.subtype === 'task_started'
+          ? {
+              taskType: readNonEmptyString(sdkMessage.task_type),
+              subagentType: readNonEmptyString(sdkMessage.subagent_type),
+              toolUseId: readNonEmptyString(sdkMessage.tool_use_id),
+              description: readNonEmptyString(sdkMessage.description)
+            }
+          : {}),
+        ...(sdkMessage.subtype === 'task_progress'
+          ? {
+              lastToolName: readNonEmptyString(sdkMessage.last_tool_name),
+              description: readNonEmptyString(sdkMessage.description),
+              summary: readNonEmptyString(sdkMessage.summary),
+              usage: sdkMessage.usage
+            }
+          : {}),
+        ...(sdkMessage.subtype === 'task_notification'
+          ? {
+              status: readNonEmptyString(sdkMessage.status),
+              summary: readNonEmptyString(sdkMessage.summary),
+              outputFile: readNonEmptyString(sdkMessage.output_file),
+              usage: sdkMessage.usage
+            }
+          : {})
+      }
     })
+  }
+
+  // 工具调用事件:每个 tool_use / tool_result block 写一条 kind='tool' 事件,前端按 toolUseId 配对展示。
+  // 子任务归属走 resolvedParentTaskId:assistant/user 消息上的 parent_tool_use_id → task_started 的 task_id。
+  const toolDetailLimit = 2000
+  for (const block of toolBlocks) {
+    const isUse = block.phase === 'use'
+    let detail: string | undefined
+    try {
+      if (isUse) {
+        detail = JSON.stringify(block.input, null, 2).slice(0, toolDetailLimit)
+      } else {
+        detail = JSON.stringify(block.output, null, 2).slice(0, toolDetailLimit)
+      }
+    } catch {
+      detail = isUse ? '[unserializable input]' : '[unserializable output]'
+    }
+    options.addTaskEvent({
+      taskId,
+      kind: 'tool',
+      title: block.toolName,
+      ...(typeof detail === 'string' ? { detail } : {}),
+      ...(resolvedParentTaskId || subtaskId
+        ? {
+            payload: {
+              ...(resolvedParentTaskId ? { parentTaskId: resolvedParentTaskId } : {}),
+              ...(subtaskId ? { subtaskId } : {}),
+              toolName: block.toolName,
+              toolUseId: block.toolUseId,
+              ...(isUse
+                ? { phase: 'use' as const, input: block.input }
+                : { phase: 'result' as const, output: block.output, ...(block.isError ? { isError: true } : {}) })
+            }
+          }
+        : isUse
+          ? {
+              payload: {
+                toolName: block.toolName,
+                toolUseId: block.toolUseId,
+                phase: 'use' as const,
+                input: block.input
+              }
+            }
+          : {
+              payload: {
+                toolName: block.toolName,
+                toolUseId: block.toolUseId,
+                phase: 'result' as const,
+                output: block.output,
+                ...(block.isError ? { isError: true } : {})
+              }
+            })
+    })
+  }
   options.emitPi({ type: 'qoder_event', taskId, message })
 }

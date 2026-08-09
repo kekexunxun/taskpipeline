@@ -109,15 +109,75 @@ export type TaskBackendInfo = { id: TaskBackendId; displayName: string; configur
 /** Chat driver 标识,跨主进程 / IPC / 前端保持一致。 */
 export type ChatDriverId = 'qoder' | 'openai'
 
-/** Driver 推给上层的"消息片"统一外壳。 */
+/**
+ * Driver 推给上层的"消息片"统一外壳。
+ *
+ * - 父任务关联:除 `qoder.session` 这类纯元信息外,所有 part 都可携带 `parentTaskId?` 字段。
+ *   Qoder driver 维护 `tool_use_id -> task_id` 映射,看到 `task_started` 时写入映射,
+ *   看到其它消息时用 `parent_tool_use_id` 反查,得到的 task_id 即为该 part 所属子任务。
+ *   PartRenderer 用 `groupByParentTask` 把 part 数组拆成"主流程 + 子任务折叠卡",
+ *   与 TracePage / CodingPage Timeline 一致。
+ * - 子任务三类系统消息独立成 part(`qoder.subtask-start` / `qoder.subtask-progress` /
+ *   `qoder.subtask-end`),分别承担折叠卡的"标题 / 进度摘要 / 收尾状态"。
+ */
 export type DriverPart =
   | { driverId: 'qoder'; type: 'qoder.session'; sessionId: string }
-  | { driverId: 'qoder'; type: 'qoder.thinking'; text: string; signature?: string }
-  | { driverId: 'qoder'; type: 'qoder.tool-use'; toolCallId: string; name: string; input: unknown }
-  | { driverId: 'qoder'; type: 'qoder.tool-result'; toolCallId: string; output: unknown; isError?: boolean }
-  | { driverId: 'openai'; type: 'openai.tool-call'; toolCallId: string; name: string; input: unknown }
-  | { driverId: 'openai'; type: 'openai.tool-result'; toolCallId: string; output: unknown }
-  | { driverId: ChatDriverId; type: 'text'; text: string }
+  | { driverId: 'qoder'; type: 'qoder.thinking'; text: string; signature?: string; parentTaskId?: string }
+  | {
+      driverId: 'qoder'
+      type: 'qoder.tool-use'
+      toolCallId: string
+      name: string
+      input: unknown
+      parentTaskId?: string
+    }
+  | {
+      driverId: 'qoder'
+      type: 'qoder.tool-result'
+      toolCallId: string
+      output: unknown
+      isError?: boolean
+      parentTaskId?: string
+    }
+  | {
+      driverId: 'qoder'
+      type: 'qoder.subtask-start'
+      taskId: string
+      parentTaskId: string
+      taskType?: string
+      subagentType?: string
+      description?: string
+      toolUseId?: string
+    }
+  | {
+      driverId: 'qoder'
+      type: 'qoder.subtask-progress'
+      taskId: string
+      parentTaskId: string
+      description?: string
+      lastToolName?: string
+      usage?: unknown
+    }
+  | {
+      driverId: 'qoder'
+      type: 'qoder.subtask-end'
+      taskId: string
+      parentTaskId: string
+      status: string
+      summary?: string
+      outputFile?: string
+      usage?: unknown
+    }
+  | {
+      driverId: 'openai'
+      type: 'openai.tool-call'
+      toolCallId: string
+      name: string
+      input: unknown
+      parentTaskId?: string
+    }
+  | { driverId: 'openai'; type: 'openai.tool-result'; toolCallId: string; output: unknown; parentTaskId?: string }
+  | { driverId: ChatDriverId; type: 'text'; text: string; parentTaskId?: string }
 
 /** 持久化形态: driver 自己的 raw + 共用元数据。 */
 export type StoredMessageRecord = {
@@ -222,8 +282,17 @@ export type MemoryListFilter = {
   repositoryId?: string
   conversationId?: string
 }
-export type MemorySearchOptions = { repositoryIds?: string[]; conversationId?: string; limit?: number }
-export type MemorySearchResult = { memories: MemorySearchHit[]; wikiDocs: RepoWikiSearchHit[] }
+export type MemorySearchOptions = {
+  repositoryIds?: string[]
+  conversationId?: string
+  limit?: number
+  /**
+   * 内部标记：是否由 dev 探针面板发起。仅 dev 面板填该值，生产聊天 / 任务流程不设。
+   * 主进程据此决定是否落 `trace_events`（"other" 分类）；不设则不写 trace。
+   */
+  traceSource?: 'dev-probe'
+}
+export type MemorySearchResult = { memories: MemorySearchHit[]; wikiDocs: RepoWikiSearchHit[]; keywords: string[] }
 export type RepoWikiIndexResult = { indexed: number; removed: number }
 
 /** 内置 Agent 模板（主进程 AGENT_TEMPLATES 的镜像形态，仅用于「基于模板新建」入口）。 */
@@ -796,7 +865,7 @@ export const api: AgentApi = window.agentApi ?? {
   },
   async deleteMemory() {},
   async searchMemory() {
-    return { memories: [], wikiDocs: [] }
+    return { memories: [], wikiDocs: [], keywords: [] }
   },
   async indexRepoWiki() {
     return { indexed: 0, removed: 0 }

@@ -8,7 +8,7 @@ import type { StoredMessage } from '../chat/chat-types.js'
 import { parsePiSessionFile, sessionIdFromFile } from './pi-session-trace.js'
 import { listPiTraceSessions, parsePiTraceEvents } from './pi-trace-events.js'
 import { QoderTraceSink } from './qoder-trace.js'
-import { TraceService } from './trace-service.js'
+import { TraceService, eventToTraceEntry } from './trace-service.js'
 
 const roots: string[] = []
 function temporaryRoot(name: string) {
@@ -474,3 +474,66 @@ describe('TraceService', () => {
 
 // 避免未使用告警：TraceEntry 类型引用保留
 export type { TraceEntry }
+
+describe('eventToTraceEntry', () => {
+  /**
+   * 旧数据兜底:老版本 log.ts 只在 payload 里写 subtaskId / sdkSubtype,不写 parentTaskId;
+   * eventToTraceEntry 现在从 payload 把这些字段提到 entry 顶层(否则 groupByParentTask
+   * 在 entry 顶层看不到,旧数据全部进 main 流)。回归测试保护这条数据通路。
+   */
+  it('旧数据: payload 只有 subtaskId / sdkSubtype → entry 顶层有 taskId + parentTaskId(自指) + sdkSubtype', () => {
+    const entry = eventToTraceEntry({
+      id: 'ev-1',
+      taskId: 'task-1',
+      kind: 'status',
+      title: 'Qoder 子任务启动',
+      detail: '{"type":"system",...}',
+      payload: {
+        subtaskId: 'sub-old',
+        sdkSubtype: 'task_started',
+        taskType: 'Explore',
+        description: '在仓库里搜代码'
+      },
+      createdAt: '2026-08-08T00:00:00.000Z'
+    })
+    expect(entry.taskId).toBe('sub-old')
+    expect(entry.parentTaskId).toBe('sub-old')
+    expect(entry.sdkSubtype).toBe('task_started')
+  })
+
+  it('新数据: payload 同时有 subtaskId + parentTaskId → 优先用 subtaskId 自指(与 log.ts 写入路径一致)', () => {
+    const entry = eventToTraceEntry({
+      id: 'ev-2',
+      taskId: 'task-2',
+      kind: 'status',
+      title: 'Qoder 子任务进度',
+      detail: '{}',
+      payload: {
+        parentTaskId: 'sub-new',
+        subtaskId: 'sub-new',
+        sdkSubtype: 'task_progress'
+      },
+      createdAt: '2026-08-08T00:00:00.000Z'
+    })
+    expect(entry.parentTaskId).toBe('sub-new')
+    expect(entry.taskId).toBe('sub-new')
+    expect(entry.sdkSubtype).toBe('task_progress')
+  })
+
+  it('主流程 entry: payload 不含 subtaskId / parentTaskId → entry 顶层不挂子任务字段', () => {
+    const entry = eventToTraceEntry({
+      id: 'ev-3',
+      taskId: 'task-3',
+      kind: 'message',
+      title: 'Qoder Agent',
+      detail: '主流程回复',
+      payload: { usage: { total_tokens: 100 } },
+      createdAt: '2026-08-08T00:00:00.000Z'
+    })
+    expect(entry.parentTaskId).toBeUndefined()
+    expect(entry.taskId).toBeUndefined()
+    expect(entry.sdkSubtype).toBeUndefined()
+    // payload 原样保留
+    expect(entry.payload).toEqual({ usage: { total_tokens: 100 } })
+  })
+})

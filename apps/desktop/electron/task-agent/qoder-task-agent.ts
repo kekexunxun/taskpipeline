@@ -42,9 +42,13 @@ export type QoderTaskAgentDeps = TaskAgentDeps & {
   dataDir: string
   addTaskEvent: (event: {
     taskId: string
-    kind: 'message' | 'status' | 'error'
+    kind: 'message' | 'status' | 'error' | 'tool'
     title: string
     detail?: string
+    parentTaskId?: string
+    subtaskId?: string
+    sdkSubtype?: string
+    payload?: unknown
   }) => void
   emitPi: (event: { type: 'qoder_event'; taskId: string; message: SDKMessage }) => void
   /** 切换 driver 时给上层信号,让 main.ts 把 activeQoderQuery 状态清掉。 */
@@ -141,10 +145,10 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     const buffers: PhaseBuffers = { responseTexts: [] }
     this.buffers.set('planning', buffers)
 
-    const [agentContext, memoryContext] = await Promise.all([
-      this.deps.resolveAgentContext?.(task, repos),
-      this.deps.resolveMemoryContext?.(task, repos)
-    ])
+    // 串行：先取记忆上下文再取 Agent 指引，保证 trace 中“检索记忆上下文”先于“注入 Agent 上下文”出现。
+    // 两者无依赖，串行仅增一个微秒级等待，换取可读的 trace 顺序。
+    const memoryContext = await this.deps.resolveMemoryContext?.(task, repos)
+    const agentContext = await this.deps.resolveAgentContext?.(task, repos)
     const prompt = [
       ...(agentContext?.sections ?? []),
       memoryContext ?? '',
@@ -181,9 +185,14 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     this.buffers.set('implementation', buffers)
 
     // resume 走 Qoder 真实续接：会话上下文已包含原 Agent 指引，不重新拼（与 memoryContext 一致）。
+    // 非 resume 场景同样串行：先取记忆再取 Agent 指引，让 trace 中两者顺序固定。
     const [agentContext, memoryContext] = resumeSessionId
       ? [undefined, undefined]
-      : await Promise.all([this.deps.resolveAgentContext?.(task, repos), this.deps.resolveMemoryContext?.(task, repos)])
+      : await (async () => {
+          const memory = await this.deps.resolveMemoryContext?.(task, repos)
+          const agent = await this.deps.resolveAgentContext?.(task, repos)
+          return [agent, memory]
+        })()
     const prompt = resumeSessionId
       ? (extraPrompt ?? '任务此前执行失败/中断，请基于当前会话上下文继续完成剩余工作。')
       : [

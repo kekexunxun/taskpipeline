@@ -104,3 +104,212 @@ describe('recordQoderMessage — 哨兵 taskId 防御', () => {
     expect(updateCalls.length).toBeGreaterThanOrEqual(1)
   })
 })
+
+/**
+ * `recordQoderMessage` 工具调用事件:assistant 消息里的 tool_use block 写一条 kind='tool' 事件,
+ * user 消息里的 tool_result block 写另一条 kind='tool' 事件。前端按 toolUseId 配对展示
+ * 「执行了什么(input)+ 结果是什么(output)」。这两条事件之前被直接丢,这次回归保护。
+ */
+describe('recordQoderMessage — tool_use / tool_result 事件', () => {
+  function makeAssistantToolUseMessage(): SDKMessage {
+    return {
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'text', text: '下面我读一下文件' },
+          {
+            type: 'tool_use',
+            id: 'toolu_001',
+            name: 'Read',
+            input: { file_path: '/tmp/x.ts', limit: 100 }
+          }
+        ]
+      }
+    } as unknown as SDKMessage
+  }
+
+  function makeUserToolResultMessage(): SDKMessage {
+    return {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_001',
+            content: 'file contents here',
+            is_error: false
+          }
+        ]
+      }
+    } as unknown as SDKMessage
+  }
+
+  function makeStore(): { store: TaskStore; addTaskEvent: ReturnType<typeof vi.fn> } {
+    const addTaskEvent = vi.fn()
+    const store = {
+      getTask: () => ({ id: 'real-task', sessionUsage: undefined }),
+      addEvent: vi.fn(),
+      updateTask: vi.fn()
+    } as unknown as TaskStore
+    return { store, addTaskEvent }
+  }
+
+  it('assistant.tool_use 写 kind=tool / phase=use 事件,input 走 detail', () => {
+    const { store, addTaskEvent } = makeStore()
+    recordQoderMessage(store, 'real-task', makeAssistantToolUseMessage(), {
+      recordText: true,
+      addTaskEvent: addTaskEvent as never,
+      emitPi: vi.fn() as never
+    })
+    // text message 事件 + tool_use 事件
+    const toolEvent = addTaskEvent.mock.calls.map((c) => c[0]).find((e: { kind?: string }) => e?.kind === 'tool')
+    expect(toolEvent).toBeTruthy()
+    expect(toolEvent.title).toBe('Read')
+    expect(toolEvent.detail).toContain('file_path')
+    expect(toolEvent.detail).toContain('/tmp/x.ts')
+    expect(toolEvent.payload.toolName).toBe('Read')
+    expect(toolEvent.payload.toolUseId).toBe('toolu_001')
+    expect(toolEvent.payload.phase).toBe('use')
+    expect(toolEvent.payload.input).toEqual({ file_path: '/tmp/x.ts', limit: 100 })
+  })
+
+  it('user.tool_result 写 kind=tool / phase=result 事件,output 走 detail', () => {
+    const { store, addTaskEvent } = makeStore()
+    // 先喂 assistant.tool_use 建立 toolName 映射,再喂 user.tool_result
+    recordQoderMessage(store, 'real-task', makeAssistantToolUseMessage(), {
+      recordText: true,
+      addTaskEvent: addTaskEvent as never,
+      emitPi: vi.fn() as never
+    })
+    addTaskEvent.mockClear()
+    recordQoderMessage(store, 'real-task', makeUserToolResultMessage(), {
+      recordText: true,
+      addTaskEvent: addTaskEvent as never,
+      emitPi: vi.fn() as never
+    })
+    const toolEvent = addTaskEvent.mock.calls.map((c) => c[0]).find((e: { kind?: string }) => e?.kind === 'tool')
+    expect(toolEvent).toBeTruthy()
+    expect(toolEvent.title).toBe('Read')
+    expect(toolEvent.payload.toolName).toBe('Read')
+    expect(toolEvent.payload.toolUseId).toBe('toolu_001')
+    expect(toolEvent.payload.phase).toBe('result')
+    expect(toolEvent.payload.output).toBe('file contents here')
+    expect(toolEvent.payload.isError).toBeUndefined()
+  })
+
+  it('tool_result 的 is_error=true 会被透传到 payload.isError', () => {
+    const { store, addTaskEvent } = makeStore()
+    recordQoderMessage(store, 'real-task', makeAssistantToolUseMessage(), {
+      recordText: true,
+      addTaskEvent: addTaskEvent as never,
+      emitPi: vi.fn() as never
+    })
+    addTaskEvent.mockClear()
+    recordQoderMessage(
+      store,
+      'real-task',
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_001',
+              content: 'permission denied',
+              is_error: true
+            }
+          ]
+        }
+      } as unknown as SDKMessage,
+      {
+        recordText: true,
+        addTaskEvent: addTaskEvent as never,
+        emitPi: vi.fn() as never
+      }
+    )
+    const toolEvent = addTaskEvent.mock.calls
+      .map((c) => c[0])
+      .find((e: { kind?: string; payload?: { phase?: string } }) => e?.payload?.phase === 'result')
+    expect(toolEvent?.payload.isError).toBe(true)
+  })
+
+  it('tool_use 事件会带父任务归属字段(parentTaskId),让 groupByParentTask 折叠', () => {
+    const { store, addTaskEvent } = makeStore()
+    // 喂一个 task_started 消息建立 tool_use_id -> task_id 映射,再喂 assistant 子任务里的 tool_use
+    recordQoderMessage(
+      store,
+      'real-task',
+      {
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'sub-task-1',
+        tool_use_id: 'toolu_parent',
+        task_type: 'Explore',
+        description: '查找相关代码'
+      } as unknown as SDKMessage,
+      {
+        recordText: false,
+        addTaskEvent: addTaskEvent as never,
+        emitPi: vi.fn() as never
+      }
+    )
+    addTaskEvent.mockClear()
+    // 子任务内的 tool_use,parent_tool_use_id 反查到 sub-task-1
+    recordQoderMessage(
+      store,
+      'real-task',
+      {
+        type: 'assistant',
+        parent_tool_use_id: 'toolu_parent',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'toolu_child_001',
+              name: 'Grep',
+              input: { pattern: 'invoice' }
+            }
+          ]
+        }
+      } as unknown as SDKMessage,
+      {
+        recordText: true,
+        addTaskEvent: addTaskEvent as never,
+        emitPi: vi.fn() as never
+      }
+    )
+    const toolEvent = addTaskEvent.mock.calls.map((c) => c[0]).find((e: { kind?: string }) => e?.kind === 'tool')
+    expect(toolEvent?.payload.parentTaskId).toBe('sub-task-1')
+  })
+
+  it('task_progress 写 status 事件,payload 带 description + summary + lastToolName', () => {
+    // 之前只提 description,但 SDK 实际发的 task_progress 消息可能 description 空、summary 有内容
+    // (类似「已读 1 个文件」)。这次回归保护:summary 也要提到 payload,前端兜底用。
+    const { store, addTaskEvent } = makeStore()
+    recordQoderMessage(
+      store,
+      'real-task',
+      {
+        type: 'system',
+        subtype: 'task_progress',
+        task_id: 'sub-1',
+        description: '',
+        summary: '已读 1 个文件',
+        last_tool_name: 'Read'
+      } as unknown as SDKMessage,
+      {
+        recordText: false,
+        addTaskEvent: addTaskEvent as never,
+        emitPi: vi.fn() as never
+      }
+    )
+    const event = addTaskEvent.mock.calls.map((c) => c[0])[0]
+    expect(event.kind).toBe('status')
+    expect(event.payload.summary).toBe('已读 1 个文件')
+    expect(event.payload.lastToolName).toBe('Read')
+    // description 是空字符串,readNonEmptyString 过滤后变 undefined
+    expect(event.payload.description).toBeUndefined()
+  })
+})

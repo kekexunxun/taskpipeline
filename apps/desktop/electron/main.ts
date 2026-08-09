@@ -26,6 +26,9 @@ import {
   type AgentEvent,
   type AgentProfile,
   type Memory,
+  type MemoryScope,
+  type MemorySearchHit,
+  type RepoWikiSearchHit,
   type SettingResolver,
   type Task,
   type TaskEventSink,
@@ -70,8 +73,9 @@ import { QoderChatDriver } from './chat/drivers/qoder-chat-driver.js'
 import { OpenAIChatDriver } from './chat/drivers/openai-chat-driver.js'
 import { JiraTaskCreationBackend } from './chat/task-backends/jira.js'
 import type { ChatDriverId, ChatConversation } from './chat/chat-types.js'
-import { MemoryService, renderMemoryContext } from './memory/memory-service.js'
+import { MemoryService, renderMemoryContext, type KeywordRewriter } from './memory/memory-service.js'
 import { extractMemories } from './memory/memory-extractor.js'
+import { extractKeywords } from './memory/memory-keyword-extractor.js'
 import {
   implementationOutcomeInstruction,
   isExplicitNoChangeCompletionRequest,
@@ -429,6 +433,48 @@ const chatDriverRegistry = new ChatDriverRegistry()
 chatDriverRegistry.register(new QoderChatDriver(() => protectedValue('qoderToken'), getQoderStatus))
 chatDriverRegistry.register(new OpenAIChatDriver(store, () => protectedValue('modelApiKey')))
 
+/**
+ * 生产环境下的关键词改写器：按当前 system model 选 driver，调 LLM 提取。
+ * driver 不可用 / 抽错时由 MemoryService.resolveKeywords 内部走 fallbackKeywords 兑底，
+ * 不会拖垃检索链路。任务上下文 / 会话上下文 / dev probe 共用这一个实例。
+ *
+ * 模型选择：关键词提取只是几行 JSON，Qoder 走 lite 模型节省 credits，
+ * OpenAI 跟随系统 defaultOpenAIModel（用户在 chat 设置里选什么就用什么）。
+ */
+const keywordRewriter: KeywordRewriter = async (query) => {
+  const { driverId } = resolveTaskChatModel()
+  const driver = chatDriverRegistry.tryGet(driverId)
+  if (!driver) return []
+  const model = await resolveKeywordModel(driverId)
+  return extractKeywords({ driver, driverId, model, text: query })
+}
+
+/**
+ * 关键词提取的模型选择策略：
+ * - Qoder: 从 getQoderStatus() 拉模型列表，挑名字含 lite / haiku / mini / flash 的；
+ *   找不到或 Qoder 未连接时回落到系统 defaultModel。
+ * - OpenAI: 跟随系统 defaultOpenAIModel。
+ */
+async function resolveKeywordModel(driverId: ChatDriverId): Promise<string> {
+  if (driverId === 'qoder') {
+    try {
+      const status = await getQoderStatus()
+      const enabled = status.models.filter((m) => m.isEnabled !== false)
+      // 优先选 priceFactor === 0 的（语义上最便宜=“完全免费”的 Lite），
+      // 找不到再按名字特征回落（haiku/flash/lite/mini 作为完整 word 匹配，
+      // 避免 “MiniMax” 里的 “Mini” 被误命中）。
+      const free =
+        enabled.find((m) => m.priceFactor === 0) ??
+        enabled.find((m) => /(^|[^a-z])(lite|haiku|flash|mini)([^a-z]|$)/i.test(`${m.value} ${m.displayName ?? ''}`))
+      if (free?.value) return free.value
+    } catch {
+      /* 静默回落到默认 */
+    }
+    return store.getSetting('defaultModel') ?? 'claude-sonnet-4.5'
+  }
+  return store.getSetting('defaultOpenAIModel') ?? 'gpt-4o'
+}
+
 const chatService = new ChatService(
   store,
   dataDir,
@@ -441,7 +487,12 @@ const chatService = new ChatService(
     return undefined
   },
   async ({ conversationId, query }) =>
-    memoryService.buildSystemPrompt({ userId: memoryService.ensureUserId(), conversationId, query }),
+    memoryService.buildSystemPrompt({
+      userId: memoryService.ensureUserId(),
+      conversationId,
+      query,
+      keywordRewriter
+    }),
   consolidateChatMemory
 )
 
@@ -2257,23 +2308,117 @@ function resolveTaskChatModel(): { driverId: ChatDriverId; model: string } {
 
 async function taskMemoryContext(task: Task, repos: TaskRepository[]): Promise<string | undefined> {
   try {
-    const { memories, wikiDocs } = await memoryService.search({
+    // 关键词提取走 LLM 同步起调用(Qoder 跳 lite,OpenAI 跟随),需要把这一步单独记
+    // 到 trace 里:模型、返回的关键词数组、耗时。生产环境调 OpenAI 关键词提取本身
+    // 一次几百毫秒 ~ 几秒,不记会让用户看到“检索”却不知道背后是 LLM 调用,trace 会误导。
+    const { driverId } = resolveTaskChatModel()
+    const keywordModel = await resolveKeywordModel(driverId)
+    const tracedRewriter: KeywordRewriter = async (query) => {
+      const start = Date.now()
+      try {
+        const kw = await keywordRewriter(query)
+        const ms = Date.now() - start
+        addTaskEvent({
+          taskId: task.id,
+          kind: 'status',
+          title: 'LLM 提取检索关键词',
+          detail: `模型：${keywordModel}\n驱动：${driverId}\n关键词：${kw.length ? kw.join('、') : '（空，已回退到 fallbackKeywords）'}\n耗时：${ms} ms`
+        })
+        return kw
+      } catch (error) {
+        const ms = Date.now() - start
+        addTaskEvent({
+          taskId: task.id,
+          kind: 'error',
+          title: 'LLM 提取检索关键词失败',
+          detail: `模型：${keywordModel}\n驱动：${driverId}\n耗时：${ms} ms\n${error instanceof Error ? error.message : String(error)}`
+        })
+        throw error
+      }
+    }
+    const searchResult = await memoryService.search({
       userId: memoryService.ensureUserId(),
       repositoryIds: repos.map((repo) => repo.repositoryId),
       conversationId: `task:${task.id}`,
-      query: `${task.title}\n${task.description}`
+      query: `${task.title}\n${task.description}`,
+      keywordRewriter: tracedRewriter
     })
+    const { memories, wikiDocs, keywords } = searchResult
     addTaskEvent({
       taskId: task.id,
       kind: 'status',
       title: '检索记忆上下文',
-      detail: `用户级 ${memories.filter((m) => m.scope === 'user').length} 条、仓库级 ${memories.filter((m) => m.scope === 'repo').length} 条、对话级 ${memories.filter((m) => m.scope === 'conversation').length} 条、repowiki 文档 ${wikiDocs.length} 篇${memories.length + wikiDocs.length ? '' : '（未命中）'}`
+      // 顶部拼接驱动 + 模型,跟「LLM 提取检索关键词」一致 —— 记忆检索只走 FTS5,
+      // 但 FTS5 喂什么词是 LLM 决定的,用户要能看到这条线索。
+      detail: formatMemorySearchDetail(memories, wikiDocs, keywords, { driverId, model: keywordModel })
     })
-    return renderMemoryContext(memories, wikiDocs)
+    const memoryContext = renderMemoryContext(memories, wikiDocs)
+    // 独立发一条「注入记忆上下文」:与「注入 Agent 上下文」对称,验证检索出的内容真的
+    // 进了 prompt。原实现只在「检索」上 addTaskEvent,不告诉调用方拼了什么,trace 上
+    // 看不到实际注入的文本(只能去 hooks / driver 里推)。
+    if (memoryContext) {
+      addTaskEvent({
+        taskId: task.id,
+        kind: 'status',
+        title: '注入记忆上下文',
+        detail:
+          memoryContext.length > 2000
+            ? `${memoryContext.slice(0, 2000)}\n…（已截断，原文 ${memoryContext.length} 字）`
+            : memoryContext
+      })
+    }
+    return memoryContext
   } catch (error) {
     console.warn('[memory] task context failed:', error)
     return undefined
   }
+}
+
+/**
+ * 把 memoryService.search 返回结果格式化为可读的 trace detail。
+ * - 按 scope 分组列出（用户 / 仓库 / 对话 / repowiki）；
+ * - 每条带标题 + score + 200 字预览；
+ * - 顶部拼接驱动 + 模型（与「LLM 提取检索关键词」对齐 + 备注命中总数 / 关键词）。
+ */
+function formatMemorySearchDetail(
+  memories: MemorySearchHit[],
+  wikiDocs: RepoWikiSearchHit[],
+  keywords: string[],
+  meta: { driverId: string; model: string }
+): string {
+  const scopeLabel: Record<MemoryScope, string> = { user: '用户', repo: '仓库', conversation: '对话' }
+  const total = memories.length + wikiDocs.length
+  const header = [`驱动：${meta.driverId}`, `模型：${meta.model}`, `命中：${total} 条`]
+  if (total === 0) {
+    return [
+      ...header,
+      `未命中任何记忆（用户级 / 仓库级 / 对话级 / repowiki）。`,
+      `关键词：${keywords.length ? keywords.join('、') : '（空）'}`
+    ].join('\n')
+  }
+  const lines: string[] = [...header, `关键词：${keywords.join('、')}`]
+  const grouped = new Map<MemoryScope, MemorySearchHit[]>()
+  for (const m of memories) {
+    if (!grouped.has(m.scope)) grouped.set(m.scope, [])
+    grouped.get(m.scope)!.push(m)
+  }
+  for (const scope of ['user', 'repo', 'conversation'] as MemoryScope[]) {
+    const list = grouped.get(scope)
+    if (!list?.length) continue
+    lines.push(`\n[${scopeLabel[scope]}级] ${list.length} 条`)
+    for (const hit of list) {
+      const preview = hit.content.length > 200 ? `${hit.content.slice(0, 200)}…` : hit.content
+      lines.push(`- ${hit.title}（score ${hit.score.toFixed(1)}）\n  ${preview.replace(/\n+/g, ' ')}`)
+    }
+  }
+  if (wikiDocs.length) {
+    lines.push(`\n[repowiki] ${wikiDocs.length} 篇`)
+    for (const doc of wikiDocs) {
+      const preview = doc.content.length > 200 ? `${doc.content.slice(0, 200)}…` : doc.content
+      lines.push(`- ${doc.path}（score ${doc.score.toFixed(1)}）\n  ${preview.replace(/\n+/g, ' ')}`)
+    }
+  }
+  return lines.join('\n')
 }
 
 async function consolidateTaskMemory(taskId: string, responseTexts: string[]): Promise<void> {
@@ -2585,8 +2730,45 @@ function registerIpc(): void {
   ipcMain.handle('memory:delete', (_event, id: string) => memoryService.deleteMemory(id))
   ipcMain.handle(
     'memory:search',
-    (_event, query: string, options?: { repositoryIds?: string[]; conversationId?: string; limit?: number }) =>
-      memoryService.search({ userId: memoryService.ensureUserId(), query, ...options })
+    async (
+      _event,
+      query: string,
+      options?: { repositoryIds?: string[]; conversationId?: string; limit?: number; traceSource?: 'dev-probe' }
+    ) => {
+      const result = await memoryService.search({
+        userId: memoryService.ensureUserId(),
+        query,
+        keywordRewriter,
+        ...options
+      })
+      // 只有 dev probe 调用才落 trace。生产流程（chat / task）中的检索不写 trace_events：
+      // - chat 路径的 LLM 调用本身走 `qoder_event` 与 ChatService 事件流；
+      // - task 路径的 `recordQoderMessage` 会写 `events` 表 + 更新 sessionUsage；
+      // 两者都不需要也不适合在中间被"检索"这一步额外插一条"其它"事件。
+      if (options?.traceSource === 'dev-probe') {
+        try {
+          store.addTraceEvent({
+            category: 'other',
+            subType: 'memory_search_dev_probe',
+            title: `记忆检索 dev probe（关键词 ${result.keywords.length} / 记忆 ${result.memories.length} / Wiki ${result.wikiDocs.length}）`,
+            detail: `query: ${query}\nkeywords: ${result.keywords.join(', ')}`,
+            payload: {
+              query,
+              keywords: result.keywords,
+              repositoryIds: options.repositoryIds ?? [],
+              conversationId: options.conversationId,
+              limit: options.limit,
+              memoryHitCount: result.memories.length,
+              wikiHitCount: result.wikiDocs.length
+            }
+          })
+        } catch (error) {
+          // trace 写入失败不影响检索结果返回
+          console.warn('[memory] dev probe trace failed:', error)
+        }
+      }
+      return result
+    }
   )
   ipcMain.handle('repowiki:index', async (_event, repositoryId: string) => {
     const profile = store.listRepositoryProfiles().find((repo) => repo.id === repositoryId)
