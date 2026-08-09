@@ -58,6 +58,7 @@
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "mac": {
       "category": "public.app-category.developer-tools",
+      "identity": null,
       "target": [
         "dmg",
         "zip"
@@ -142,6 +143,7 @@
   },
   "optionalDependencies": {
     "@esbuild/win32-x64": "0.25.12",
-    "@rollup/rollup-win32-x64-msvc": "4.62.3"
+    "@rollup/rollup-win32-x64-msvc": "4.62.3",
+    "lightningcss-win32-x64-msvc": "1.32.0"
   }
 }
