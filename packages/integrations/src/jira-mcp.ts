@@ -132,7 +132,16 @@ export async function testAtlassianConnectionRest(
 export async function importJiraIssue(client: McpClient, keyOrUrl: string, store: TaskStore): Promise<Task> {
   const key = jiraKeyFrom(keyOrUrl)
   try {
-    const payload = mcpPayload(await client.callTool('jira_get_issue', { issue_key: key }))
+    const result = await client.callTool('jira_get_issue', { issue_key: key })
+    const payload = mcpPayload(result)
+    // 部分版本 mcp-atlassian 失败时不抛错也不置 isError，而是把错误文案当普通 text 返回。
+    // 不在此拦截，401/404 文案会被当作 description 落库，导入一条标题为 key 的脏任务。
+    const errorText = typeof payload?.text === 'string' ? payload.text : ''
+    if ((result as { isError?: boolean } | undefined)?.isError || errorText) {
+      if (looksLikeAuthError(errorText)) throw new Error(`Jira Token 无效或已过期：${errorText}`)
+      if (looksLikeNotFoundError(errorText)) throw new Error(`Jira Issue ${key} 不存在`)
+      throw new Error(errorText || `获取 Jira Issue ${key} 失败`)
+    }
     const issue = payload?.issue ?? payload
     const fields = issue?.fields ?? issue
     const description =

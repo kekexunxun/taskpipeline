@@ -1,7 +1,8 @@
-import { useState } from "react";
-import { Link2Icon, Loader2Icon } from "lucide-react";
-import { api } from "@/api";
-import { Button } from "@/components/ui/button";
+import { useState } from 'react'
+import { Link2Icon, Loader2Icon } from 'lucide-react'
+import { api } from '@/api'
+import { useFeedback } from '@/hooks/useGlobalFeedback'
+import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogClose,
@@ -10,21 +11,22 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle
-} from "@/components/ui/dialog";
-import { Field } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
+} from '@/components/ui/dialog'
+import { Field } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
 
 export function JiraDialog({
   open,
   onOpenChange,
   onImported
 }: {
-  open: boolean;
-  onOpenChange(open: boolean): void;
-  onImported(): void;
+  open: boolean
+  onOpenChange(open: boolean): void
+  onImported(): void
 }) {
-  const [key, setKey] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [key, setKey] = useState('')
+  const [busy, setBusy] = useState(false)
+  const { showError } = useFeedback()
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
@@ -52,14 +54,17 @@ export function JiraDialog({
             size="sm"
             disabled={!key.trim() || busy}
             onClick={async () => {
-              setBusy(true);
+              setBusy(true)
               try {
-                await api.importJiraTask(key.trim());
-                onImported();
-                onOpenChange(false);
-                setKey("");
+                await api.importJiraTask(key.trim())
+                onImported()
+                onOpenChange(false)
+                setKey('')
+              } catch (reason) {
+                // 主进程拒绝（如 Token 失效）时弹 toast，避免静默失败。
+                showError(reason instanceof Error ? reason.message : String(reason))
               } finally {
-                setBusy(false);
+                setBusy(false)
               }
             }}
           >
@@ -69,5 +74,5 @@ export function JiraDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
+  )
 }

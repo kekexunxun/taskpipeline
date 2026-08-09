@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
-import { Loader2Icon, RefreshCwIcon } from "lucide-react";
-import { api, type JiraTaskCandidate } from "@/api";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import { useEffect, useState } from 'react'
+import { Loader2Icon, RefreshCwIcon } from 'lucide-react'
+import { api, type JiraTaskCandidate } from '@/api'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -13,7 +13,7 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle
-} from "@/components/ui/alert-dialog";
+} from '@/components/ui/alert-dialog'
 import {
   Dialog,
   DialogClose,
@@ -22,60 +22,64 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle
-} from "@/components/ui/dialog";
+} from '@/components/ui/dialog'
 
 export function JiraSyncDialog({
   open,
   onOpenChange,
   onImported
 }: {
-  open: boolean;
-  onOpenChange(open: boolean): void;
-  onImported(): void;
+  open: boolean
+  onOpenChange(open: boolean): void
+  onImported(): void
 }) {
-  const [candidates, setCandidates] = useState<JiraTaskCandidate[]>([]);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
+  const [candidates, setCandidates] = useState<JiraTaskCandidate[]>([])
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string>()
   // 选中的冲突任务（已存在且不在 TODO 列），等待用户确认覆盖。
-  const [pendingOverwrite, setPendingOverwrite] = useState<JiraTaskCandidate[]>([]);
+  const [pendingOverwrite, setPendingOverwrite] = useState<JiraTaskCandidate[]>([])
   useEffect(() => {
-    if (!open) return;
-    setBusy(true);
-    setError(undefined);
+    if (!open) return
+    setBusy(true)
+    setError(undefined)
     api
       .syncJiraTasks()
       .then((items) => {
-        setCandidates(items);
+        setCandidates(items)
         // 默认不勾选任何任务，由用户按需选择。
-        setSelected(new Set());
+        setSelected(new Set())
       })
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
-      .finally(() => setBusy(false));
-  }, [open]);
+      .finally(() => setBusy(false))
+  }, [open])
 
   const doImport = async (items: JiraTaskCandidate[]) => {
-    setBusy(true);
+    setBusy(true)
+    setError(undefined)
     try {
       if (items.length) {
-        await api.importJiraTasks(items);
-        onImported();
+        await api.importJiraTasks(items)
+        onImported()
       }
-      onOpenChange(false);
+      onOpenChange(false)
+    } catch (reason) {
+      // 导入失败（如 Token 失效）时在弹窗内展示错误，不静默关闭。
+      setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
-      setBusy(false);
+      setBusy(false)
     }
-  };
+  }
 
   const onImportClick = () => {
-    const items = candidates.filter((item) => selected.has(item.taskKey));
-    const conflicted = items.filter((item) => item.conflict);
+    const items = candidates.filter((item) => selected.has(item.taskKey))
+    const conflicted = items.filter((item) => item.conflict)
     if (conflicted.length > 0) {
-      setPendingOverwrite(conflicted);
-      return;
+      setPendingOverwrite(conflicted)
+      return
     }
-    void doImport(items);
-  };
+    void doImport(items)
+  }
 
   return (
     <>
@@ -85,7 +89,7 @@ export function JiraSyncDialog({
             <DialogTitle>同步 Jira 任务</DialogTitle>
             <DialogDescription>勾选需要导入的任务。</DialogDescription>
           </DialogHeader>
-          <div className="thin-scrollbar min-h-48 max-h-[55vh] overflow-y-auto px-1">
+          <div className="thin-scrollbar max-h-[55vh] min-h-48 overflow-y-auto px-1">
             {busy && (
               <div className="flex items-center justify-center gap-2 py-12 text-xs text-muted-foreground">
                 <Loader2Icon className="animate-spin-slow" size={13} />
@@ -93,9 +97,7 @@ export function JiraSyncDialog({
               </div>
             )}
             {error && (
-              <div className="rounded-md border border-red-500/30 bg-red-500/5 p-3 text-xs text-red-300">
-                {error}
-              </div>
+              <div className="rounded-md border border-red-500/30 bg-red-500/5 p-3 text-xs text-red-300">{error}</div>
             )}
             {!busy && !error && (
               <ul className="space-y-1">
@@ -109,23 +111,29 @@ export function JiraSyncDialog({
                         className="mt-0.5"
                         checked={selected.has(item.taskKey)}
                         onCheckedChange={(value) => {
-                          const next = new Set(selected);
-                          if (value === true) next.add(item.taskKey);
-                          else next.delete(item.taskKey);
-                          setSelected(next);
+                          const next = new Set(selected)
+                          if (value === true) next.add(item.taskKey)
+                          else next.delete(item.taskKey)
+                          setSelected(next)
                         }}
                       />
                       <span className="min-w-0">
                         <span className="flex items-center gap-1.5">
                           <b className="block font-mono text-xs text-muted-foreground">{item.taskKey}</b>
-                          {item.conflict && <Badge variant="warning" className="h-4 px-1 text-[10px]">已存在 · 导入将覆盖</Badge>}
-                          {item.existing && !item.conflict && <Badge variant="secondary" className="h-4 px-1 text-[10px]">已存在</Badge>}
+                          {item.conflict && (
+                            <Badge variant="warning" className="h-4 px-1 text-[10px]">
+                              已存在 · 导入将覆盖
+                            </Badge>
+                          )}
+                          {item.existing && !item.conflict && (
+                            <Badge variant="secondary" className="h-4 px-1 text-[10px]">
+                              已存在
+                            </Badge>
+                          )}
                         </span>
                         <span className="block truncate text-xs">{item.title}</span>
                         {item.keywords.length > 0 && (
-                          <small className="text-xs text-muted-foreground">
-                            {item.keywords.join(" · ")}
-                          </small>
+                          <small className="text-xs text-muted-foreground">{item.keywords.join(' · ')}</small>
                         )}
                       </span>
                     </label>
@@ -140,27 +148,31 @@ export function JiraSyncDialog({
                 取消
               </Button>
             </DialogClose>
-            <Button
-              size="sm"
-              disabled={busy || selected.size === 0}
-              onClick={onImportClick}
-            >
+            <Button size="sm" disabled={busy || selected.size === 0} onClick={onImportClick}>
               <RefreshCwIcon size={11} />
               导入 {selected.size} 项
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <AlertDialog open={pendingOverwrite.length > 0} onOpenChange={(open) => { if (!open) setPendingOverwrite([]); }}>
+      <AlertDialog
+        open={pendingOverwrite.length > 0}
+        onOpenChange={(open) => {
+          if (!open) setPendingOverwrite([])
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>覆盖已存在的任务？</AlertDialogTitle>
             <AlertDialogDescription>
-              以下 {pendingOverwrite.length} 个任务已存在于系统中且不在待办列表，导入将用 Jira 的最新内容覆盖它们的标题、描述与关键词：
+              以下 {pendingOverwrite.length} 个任务已存在于系统中且不在待办列表，导入将用 Jira
+              的最新内容覆盖它们的标题、描述与关键词：
             </AlertDialogDescription>
             <ul className="mt-2 space-y-1">
               {pendingOverwrite.map((item) => (
-                <li key={item.taskKey} className="font-mono text-[11px]">{item.taskKey}</li>
+                <li key={item.taskKey} className="font-mono text-[11px]">
+                  {item.taskKey}
+                </li>
               ))}
             </ul>
           </AlertDialogHeader>
@@ -169,9 +181,9 @@ export function JiraSyncDialog({
             <AlertDialogAction
               className="bg-primary text-primary-foreground hover:bg-primary/90"
               onClick={() => {
-                const items = candidates.filter((item) => selected.has(item.taskKey));
-                setPendingOverwrite([]);
-                void doImport(items);
+                const items = candidates.filter((item) => selected.has(item.taskKey))
+                setPendingOverwrite([])
+                void doImport(items)
               }}
             >
               确认覆盖
@@ -180,5 +192,5 @@ export function JiraSyncDialog({
         </AlertDialogContent>
       </AlertDialog>
     </>
-  );
+  )
 }

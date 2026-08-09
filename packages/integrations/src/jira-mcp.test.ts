@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { testAtlassianConnection, testAtlassianConnectionRest } from './jira-mcp.js'
+import { importJiraIssue, testAtlassianConnection, testAtlassianConnectionRest } from './jira-mcp.js'
 import type { McpClient } from './mcp.js'
 
 /** 构造只含 listTools / callTool / close 的 McpClient 桩。 */
@@ -94,6 +94,61 @@ describe('testAtlassianConnection', () => {
     const result = await testAtlassianConnection(client, 'jira')
     expect(result.ok).toBe(false)
     expect(result.message).toContain('Token 已失效或过期')
+  })
+})
+
+describe('importJiraIssue', () => {
+  /** 只实现 importJiraIssue 用到的 upsertJiraTask，记录是否被调用。 */
+  function stubStore() {
+    const upsertJiraTask = vi.fn((input: unknown) => input)
+    return { store: { upsertJiraTask } as never, upsertJiraTask }
+  }
+
+  it('rejects and skips import when get_issue returns 401 auth error text', async () => {
+    const { store, upsertJiraTask } = stubStore()
+    const client = stubClient({
+      content: [
+        {
+          type: 'text',
+          text: "Error calling tool 'get_issue': Authentication failed for Jira API (401). Token may be expired or invalid. Please verify credentials."
+        }
+      ]
+    })
+    await expect(importJiraIssue(client, 'OPS-12', store)).rejects.toThrow('Token 无效或已过期')
+    expect(upsertJiraTask).not.toHaveBeenCalled()
+  })
+
+  it('rejects with not-found message when the issue does not exist', async () => {
+    const { store, upsertJiraTask } = stubStore()
+    const client = stubClient({
+      content: [{ type: 'text', text: "Error calling tool 'get_issue': Jira API returned 404. Issue Does Not Exist." }]
+    })
+    await expect(importJiraIssue(client, 'OPS-12', store)).rejects.toThrow('OPS-12 不存在')
+    expect(upsertJiraTask).not.toHaveBeenCalled()
+  })
+
+  it('imports the issue when get_issue returns a valid payload', async () => {
+    const { store, upsertJiraTask } = stubStore()
+    const client = stubClient({
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            key: 'OPS-12',
+            url: 'https://jira.example.com/rest/api/2/issue/OPS-12',
+            fields: { summary: 'Fix export', description: 'desc', labels: ['audit'] }
+          })
+        }
+      ]
+    })
+    await importJiraIssue(client, 'OPS-12', store)
+    expect(upsertJiraTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskKey: 'OPS-12',
+        title: 'Fix export',
+        sourceUrl: 'https://jira.example.com/browse/OPS-12'
+      })
+    )
   })
 })
 
