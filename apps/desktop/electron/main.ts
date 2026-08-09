@@ -1139,7 +1139,7 @@ async function advanceAfterValidation(taskId: string, state: TaskState, signal?:
   }
   const updated = store.getTask(taskId)
   if (updated?.state === 'awaiting_commit' && taskWorkflow.shouldAutoCreateMergeRequestsFor(updated)) {
-    await deliveryService.submitMergeRequests(taskId, signal)
+    await submitMergeRequestsWithCredentialWatch(taskId, signal)
   }
 }
 
@@ -2308,13 +2308,23 @@ let qoderStatusCache: { at: number; token: string; status: QoderStatus } | null 
 
 async function getQoderStatus(): Promise<QoderStatus> {
   const token = protectedValue('qoderToken')
-  if (!token) return { enabled: false, connected: false, running: false, models: [] }
+  if (!token) {
+    updateCredential('qoder', { status: 'skipped', message: '未配置', checkedAt: Date.now() })
+    return { enabled: false, connected: false, running: false, models: [] }
+  }
   if (qoderStatusInflight) return qoderStatusInflight
   qoderStatusInflight = probeQoderStatus().finally(() => {
     qoderStatusInflight = null
   })
   const status = await qoderStatusInflight
   qoderStatusCache = { at: Date.now(), token, status }
+  // 回写全局凭据状态：UI 轮询 / 各处探测都会自动维持 qoder 项新鲜度。
+  updateCredential(
+    'qoder',
+    status.connected
+      ? { status: 'ok', message: undefined, checkedAt: Date.now() }
+      : { status: 'failed', message: status.error ?? '连接失败', checkedAt: Date.now() }
+  )
   return status
 }
 
@@ -2327,14 +2337,64 @@ function getQoderStatusForHealth(): Promise<QoderStatus> {
   return getQoderStatus()
 }
 
-// === 凭据有效性检查(进入系统时逐项探测各配置 Token 是否已过期/失效) ==========
+// === 凭据全局状态(单一数据源，进入系统时逐项探测各配置 Token 是否已过期/失效) ==
 
-type CredentialCheckResult = {
-  key: 'qoder' | 'gitlab' | 'jira' | 'confluence'
+type CredentialKey = 'qoder' | 'gitlab' | 'jira' | 'confluence'
+
+/** 凭据全局状态条目：主进程维护的唯一数据源，变化时广播快照给渲染进程。 */
+type CredentialState = {
+  key: CredentialKey
   label: string
-  /** ok=连通可用；failed=Token 失效/过期或连接失败；skipped=未配置或无法校验。 */
-  status: 'ok' | 'failed' | 'skipped'
+  /** unknown=未探测；checking=探测中；ok=连通可用；failed=Token 失效/连接失败；skipped=未配置。 */
+  status: 'unknown' | 'checking' | 'ok' | 'failed' | 'skipped'
   message?: string
+  checkedAt?: number
+}
+
+const CREDENTIAL_LABELS: Record<CredentialKey, string> = {
+  qoder: 'Qoder Token',
+  gitlab: 'GitLab Token',
+  jira: 'Jira Token',
+  confluence: 'Confluence Token'
+}
+
+const credentialStates = new Map<CredentialKey, CredentialState>(
+  (Object.keys(CREDENTIAL_LABELS) as CredentialKey[]).map((key) => [
+    key,
+    { key, label: CREDENTIAL_LABELS[key], status: 'unknown' as const }
+  ])
+)
+
+/** 凭据状态快照（固定顺序：qoder / gitlab / jira / confluence）。 */
+function credentialStateSnapshot(): CredentialState[] {
+  return (Object.keys(CREDENTIAL_LABELS) as CredentialKey[]).map((key) => ({ ...credentialStates.get(key)! }))
+}
+
+/** 合并更新一项凭据状态，并向渲染进程广播最新完整快照。 */
+function updateCredential(
+  key: CredentialKey,
+  patch: Partial<Pick<CredentialState, 'status' | 'message' | 'checkedAt'>>
+): void {
+  const current = credentialStates.get(key)
+  if (!current) return
+  credentialStates.set(key, { ...current, ...patch })
+  mainWindow?.webContents.send('credentials:state-changed', credentialStateSnapshot())
+}
+
+/** 运行时失败回写便捷入口（如提交 MR 时 GitLab 返回认证错误），无需等下一轮探测。 */
+function markCredentialFailed(key: CredentialKey, message: string): void {
+  updateCredential(key, { status: 'failed', message, checkedAt: Date.now() })
+}
+
+/** 提交 MR 并观察 GitLab 认证失败：Token 中途过期时立即把 gitlab 项标红。 */
+async function submitMergeRequestsWithCredentialWatch(taskId: string, signal?: AbortSignal): Promise<void> {
+  try {
+    await deliveryService.submitMergeRequests(taskId, signal)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/401|403|unauthori[sz]ed|forbidden/i.test(message)) markCredentialFailed('gitlab', message)
+    throw error
+  }
 }
 
 /** Promise 超时包装：MCP 探测（uvx 冷启动）可能长时间挂起，需要兜底超时。 */
@@ -2355,8 +2415,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 }
 
 /** GitLab Token 校验：优先用设置里配置的自建实例地址，其次从仓库 remoteUrl 推实例，最后回落 gitlab.com；调 /api/v4/user 验权。 */
-async function checkGitLabCredential(token: string): Promise<CredentialCheckResult> {
-  const base = { key: 'gitlab' as const, label: 'GitLab Token' }
+async function checkGitLabCredential(token: string): Promise<Pick<CredentialState, 'status' | 'message'>> {
   const configured = store.getSetting('gitlabUrl')?.trim()
   const remote = store
     .listRepositoryProfiles()
@@ -2368,110 +2427,82 @@ async function checkGitLabCredential(token: string): Promise<CredentialCheckResu
       headers: { 'PRIVATE-TOKEN': token },
       signal: AbortSignal.timeout(10_000)
     })
-    if (response.ok) return { ...base, status: 'ok' }
-    if (response.status === 401)
-      return { ...base, status: 'failed', message: 'Token 无效或已过期（401），请在设置中重新配置' }
-    if (response.status === 403) return { ...base, status: 'failed', message: 'Token 已被禁用或权限不足（403）' }
-    return { ...base, status: 'failed', message: `校验失败：HTTP ${response.status}` }
+    if (response.ok) return { status: 'ok' }
+    if (response.status === 401) return { status: 'failed', message: 'Token 无效或已过期（401），请在设置中重新配置' }
+    if (response.status === 403) return { status: 'failed', message: 'Token 已被禁用或权限不足（403）' }
+    return { status: 'failed', message: `校验失败：HTTP ${response.status}` }
   } catch (error) {
-    return { ...base, status: 'failed', message: error instanceof Error ? error.message : String(error) }
+    return { status: 'failed', message: error instanceof Error ? error.message : String(error) }
   }
 }
 
 /**
  * 汇总探测四类凭据：Qoder Token / GitLab Token / Jira / Confluence。
- * - 未配置的项返回 skipped，前端只针对 failed 弹框提示。
+ * - 各项结果（含未配置的 skipped）统一写入全局凭据状态并广播快照，
+ *   前端顶栏指示灯常驻展示，不再弹窗后消失。
  * - 各项互不阻塞，任一失败不影响其他项结果。
- * - 每项完成时立即通过 `credentials:check-item` 事件流式上报，
- *   前端先收到先展示（慢的 MCP 探测结果到达后追加进已打开的弹窗）。
  */
-async function checkCredentialHealth(): Promise<CredentialCheckResult[]> {
-  const checks: Array<Promise<CredentialCheckResult>> = []
-  const pendingMeta: Array<Pick<CredentialCheckResult, 'key' | 'label'>> = []
-  const tap = (promise: Promise<CredentialCheckResult>): Promise<CredentialCheckResult> =>
-    promise.then((result) => {
-      mainWindow?.webContents.send('credentials:check-item', result)
-      return result
-    })
-  /** 登记一项检查：进「检查中」清单，完成后逐项上报。 */
-  const start = (key: CredentialCheckResult['key'], label: string, promise: Promise<CredentialCheckResult>): void => {
-    pendingMeta.push({ key, label })
-    checks.push(tap(promise))
+async function checkCredentialHealth(): Promise<CredentialState[]> {
+  const checks: Array<Promise<void>> = []
+  /** 登记一项检查：先置为 checking，完成后把结果写入全局状态并广播。 */
+  const start = (key: CredentialKey, probe: Promise<Pick<CredentialState, 'status' | 'message'>>): void => {
+    updateCredential(key, { status: 'checking', message: undefined })
+    checks.push(
+      probe
+        .then((result) => updateCredential(key, { ...result, checkedAt: Date.now() }))
+        .catch((error) =>
+          updateCredential(key, {
+            status: 'failed',
+            message: error instanceof Error ? error.message : String(error),
+            checkedAt: Date.now()
+          })
+        )
+    )
   }
-  /** 未配置项：静默计为 skipped，不进「检查中」清单，但仍上报 item，
-   * 让前端能以最新一轮结果覆盖同 key 的旧失败记录。 */
-  const skip = (key: CredentialCheckResult['key'], label: string): void => {
-    checks.push(tap(Promise.resolve({ key, label, status: 'skipped' as const, message: '未配置' })))
+  /** 未配置项：静默计为 skipped，同样写入全局状态（供顶栏灰态展示）。 */
+  const skip = (key: CredentialKey): void => {
+    checks.push(Promise.resolve(updateCredential(key, { status: 'skipped', message: '未配置', checkedAt: Date.now() })))
   }
 
-  // Qoder：复用状态探测，connected 即 Token 有效。未配置时静默跳过。
+  // Qoder：复用状态探测，connected 即 Token 有效；探测本身也会回写全局状态。
   if (!protectedValue('qoderToken')) {
-    skip('qoder', 'Qoder Token')
+    skip('qoder')
   } else {
     start(
       'qoder',
-      'Qoder Token',
-      getQoderStatusForHealth()
-        .then((status): CredentialCheckResult => {
-          const base = { key: 'qoder' as const, label: 'Qoder Token' }
-          if (!status.enabled) return { ...base, status: 'skipped', message: '未配置' }
-          return status.connected
-            ? { ...base, status: 'ok' }
-            : { ...base, status: 'failed', message: status.error ?? '连接失败' }
-        })
-        .catch(
-          (error): CredentialCheckResult => ({
-            key: 'qoder',
-            label: 'Qoder Token',
-            status: 'failed',
-            message: error instanceof Error ? error.message : String(error)
-          })
-        )
+      getQoderStatusForHealth().then((status): Pick<CredentialState, 'status' | 'message'> => {
+        if (!status.enabled) return { status: 'skipped', message: '未配置' }
+        return status.connected ? { status: 'ok' } : { status: 'failed', message: status.error ?? '连接失败' }
+      })
     )
   }
 
   // GitLab：调 /api/v4/user 验证 Token 有效性。
   const gitlabToken = protectedValue('gitlabToken')
   if (!gitlabToken) {
-    skip('gitlab', 'GitLab Token')
+    skip('gitlab')
   } else {
-    start('gitlab', 'GitLab Token', checkGitLabCredential(gitlabToken))
+    start('gitlab', checkGitLabCredential(gitlabToken))
   }
 
   // Jira / Confluence：走 REST API 直接验权（/myself 等），秒级返回，不拉 MCP / uvx。
   for (const kind of ['jira', 'confluence'] as const) {
-    const label = kind === 'jira' ? 'Jira Token' : 'Confluence Token'
     const rest = atlassianFactory.restConfig(kind)
     if (!rest) {
-      skip(kind, label)
+      skip(kind)
       continue
     }
     start(
       kind,
-      label,
-      withTimeout(testAtlassianConnectionRest(kind, rest), 15_000, '连接测试超时（15s）')
-        .then(
-          (result): CredentialCheckResult => ({
-            key: kind,
-            label,
-            status: result.ok ? 'ok' : 'failed',
-            message: result.ok ? undefined : result.message
-          })
-        )
-        .catch(
-          (error): CredentialCheckResult => ({
-            key: kind,
-            label,
-            status: 'failed',
-            message: error instanceof Error ? error.message : String(error)
-          })
-        )
+      withTimeout(testAtlassianConnectionRest(kind, rest), 15_000, '连接测试超时（15s）').then(
+        (result): Pick<CredentialState, 'status' | 'message'> =>
+          result.ok ? { status: 'ok' } : { status: 'failed', message: result.message }
+      )
     )
   }
 
-  // 先上报本轮检查清单（前端展示「检查中」），各项完成时已逐项上报。
-  mainWindow?.webContents.send('credentials:check-start', pendingMeta)
-  return Promise.all(checks)
+  await Promise.all(checks)
+  return credentialStateSnapshot()
 }
 
 // === Memory 任务上下文(检索/注入/整理) ========================================
@@ -2813,7 +2844,7 @@ function registerIpc(): void {
   ipcMain.handle('tasks:reset-review', (_event, taskId: string) => taskWorkflow.resetReview(taskId))
   ipcMain.handle('tasks:reset-delivery', (_event, taskId: string) => deliveryService.resetDelivery(taskId))
   ipcMain.handle('tasks:submit-mrs', (_event, taskId: string) =>
-    runTaskOperation(taskId, (signal) => deliveryService.submitMergeRequests(taskId, signal))
+    runTaskOperation(taskId, (signal) => submitMergeRequestsWithCredentialWatch(taskId, signal))
   )
   ipcMain.handle('tasks:refresh-merge-status', () => mergeRefresher.refresh())
   ipcMain.handle('tasks:manual-complete', (_event, taskId: string) => taskCompleter.manualComplete(taskId))
@@ -2893,6 +2924,7 @@ function registerIpc(): void {
     return testAtlassianConnectionRest(kind, rest)
   })
   ipcMain.handle('settings:check-credentials', () => checkCredentialHealth())
+  ipcMain.handle('credentials:state', () => credentialStateSnapshot())
   ipcMain.handle('task:ui-response', (_event, response: Record<string, unknown>) =>
     pendingUi.get(String(response.id))?.(response)
   )

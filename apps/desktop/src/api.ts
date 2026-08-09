@@ -104,15 +104,14 @@ export type TaskRemovalMode = 'workspace' | 'all'
 export type TaskBackendId = 'jira' | 'github' | 'linear'
 export type TaskBackendInfo = { id: TaskBackendId; displayName: string; configured: boolean; description?: string }
 
-/**
- * 凭据健康检查结果（进入系统时逐项探测 Qoder / GitLab / Jira / Confluence）。
- * - ok：连通可用；failed：Token 失效/过期或连接失败；skipped：未配置或无法校验。
- */
-export type CredentialCheckResult = {
+/** 凭据全局状态条目（主进程单一数据源：Qoder / GitLab / Jira / Confluence）。 */
+export type CredentialState = {
   key: 'qoder' | 'gitlab' | 'jira' | 'confluence'
   label: string
-  status: 'ok' | 'failed' | 'skipped'
+  /** unknown=未探测；checking=探测中；ok=连通可用；failed=Token 失效/连接失败；skipped=未配置。 */
+  status: 'unknown' | 'checking' | 'ok' | 'failed' | 'skipped'
   message?: string
+  checkedAt?: number
 }
 
 // === Chat API surface ===
@@ -387,12 +386,12 @@ export type AgentApi = {
   syncJiraTasks(): Promise<JiraTaskCandidate[]>
   importJiraTasks(candidates: JiraTaskCandidate[]): Promise<Task[]>
   testAtlassian(kind: 'jira' | 'confluence'): Promise<{ ok: boolean; message: string }>
-  /** 进入系统时统一探测各配置 Token 是否已过期/失效。 */
-  checkCredentials(): Promise<CredentialCheckResult[]>
-  /** 凭据检查逐项完成事件（流式上报，先完成先收到）。 */
-  onCredentialCheckItem(callback: (result: CredentialCheckResult) => void): () => void
-  /** 凭据检查本轮清单事件（哪些项正在检查，供展示「检查中」）。 */
-  onCredentialCheckStart(callback: (items: Array<Pick<CredentialCheckResult, 'key' | 'label'>>) => void): () => void
+  /** 触发一轮凭据探测，完成后返回最新全局状态快照。 */
+  checkCredentials(): Promise<CredentialState[]>
+  /** 拉取当前凭据全局状态快照。 */
+  getCredentialState(): Promise<CredentialState[]>
+  /** 凭据状态变化事件（任一探测/回写完成后广播完整快照）。 */
+  onCredentialStateChange(callback: (states: CredentialState[]) => void): () => void
   openTaskEditor(taskId: string, editor: 'vscode' | 'qoder'): Promise<void>
   mergeBackToBase(taskId: string): Promise<void>
   revealTaskWorkspace(taskId: string): Promise<void>
@@ -852,12 +851,12 @@ export const api: AgentApi = window.agentApi ?? {
     return { ok: false, message: 'Electron is required' }
   },
   async checkCredentials() {
-    return [] as CredentialCheckResult[]
+    return [] as CredentialState[]
   },
-  onCredentialCheckItem() {
-    return () => undefined
+  async getCredentialState() {
+    return [] as CredentialState[]
   },
-  onCredentialCheckStart() {
+  onCredentialStateChange() {
     return () => undefined
   },
   async openTaskEditor() {
