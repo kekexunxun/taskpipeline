@@ -57,6 +57,7 @@ import type { AgentTemplate, QoderStatus } from '@/api'
 type Settings = {
   defaultModel: string
   qoderToken: string
+  gitlabUrl: string
   gitlabToken: string
   jiraUrl: string
   jiraEmail: string
@@ -85,6 +86,7 @@ type OpenAIDraft = {
 const defaults: Settings = {
   defaultModel: 'claude-sonnet-4.5',
   qoderToken: '',
+  gitlabUrl: '',
   gitlabToken: '',
   jiraUrl: '',
   jiraEmail: '',
@@ -101,6 +103,7 @@ const defaults: Settings = {
 }
 const ordinaryKeys = [
   'defaultModel',
+  'gitlabUrl',
   'jiraUrl',
   'jiraEmail',
   'confluenceUrl',
@@ -582,12 +585,18 @@ export function SettingsDialog({
   open,
   onOpenChange,
   qoder,
-  onQoderRefresh
+  onQoderRefresh,
+  onSaved,
+  initialTab
 }: {
   open: boolean
   onOpenChange(open: boolean): void
   qoder?: QoderStatus
   onQoderRefresh?(): void
+  /** 保存成功后回调（如触发凭据重新检查）。 */
+  onSaved?(): void
+  /** 打开时默认定位到的 Tab（如凭据失效提醒跳转）；不传默认「通用」。 */
+  initialTab?: string
 }) {
   const { showError, showSuccess } = useFeedback()
   const [settings, setSettings] = useState<Settings>(defaults)
@@ -676,6 +685,7 @@ export function SettingsDialog({
         onQoderRefresh?.()
       }
       showSuccess('设置已保存')
+      onSaved?.()
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -858,7 +868,7 @@ export function SettingsDialog({
             </div>
           ) : (
             <Tabs
-              defaultValue="general"
+              defaultValue={initialTab ?? 'general'}
               orientation="vertical"
               className="grid min-h-0 grid-cols-[148px_minmax(0,1fr)]"
             >
@@ -918,6 +928,13 @@ export function SettingsDialog({
                   </Section>
                   <Section title="GitLab" description="用于代码仓库和 Merge Request 集成。">
                     <FieldGroup className="gap-2.5">
+                      <SettingField label="GitLab URL">
+                        <Input
+                          value={settings.gitlabUrl}
+                          onChange={(event) => update('gitlabUrl', event.target.value)}
+                          placeholder="自建实例地址，如 https://gitlab.company.com"
+                        />
+                      </SettingField>
                       <SettingField label="GitLab Token">
                         <SecretInput
                           aria-label="GitLab Token"

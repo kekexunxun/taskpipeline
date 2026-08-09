@@ -47,11 +47,12 @@ import {
   openTaskEditor,
   OpenCodeReviewService,
   OpenAICompatReviewer,
+  parseGitLabRemote,
   redactSecrets,
   ReviewOrchestrator,
   TaskCompleter,
   TaskWorkflow,
-  testAtlassianConnection,
+  testAtlassianConnectionRest,
   asReviewer,
   type RepositoryCommandMap
 } from '@task-pipeline/integrations'
@@ -2230,7 +2231,7 @@ async function* holdQoderProbe(signal: AbortSignal): AsyncGenerator<never> {
   )) as never
 }
 
-async function getQoderStatus(): Promise<QoderStatus> {
+async function probeQoderStatus(): Promise<QoderStatus> {
   const token = protectedValue('qoderToken')
   if (!token) return { enabled: false, connected: false, running: false, models: [] }
   const probeAbort = activeQoderQuery ? undefined : new AbortController()
@@ -2293,6 +2294,180 @@ async function getQoderStatus(): Promise<QoderStatus> {
       }
     }
   }
+}
+
+// Qoder 探测并发去重 + 短效缓存：
+// 多个调用方（UI 轮询 / 保存后刷新 / 凭据健康检查）同时触发时会各自拉起 qodercli 探针进程，
+// 并发进程互相冲突曾导致 "Qoder CLI process exited with code 41" 误报已连接 Token 失效。
+let qoderStatusInflight: Promise<QoderStatus> | null = null
+let qoderStatusCache: { at: number; token: string; status: QoderStatus } | null = null
+
+async function getQoderStatus(): Promise<QoderStatus> {
+  const token = protectedValue('qoderToken')
+  if (!token) return { enabled: false, connected: false, running: false, models: [] }
+  if (qoderStatusInflight) return qoderStatusInflight
+  qoderStatusInflight = probeQoderStatus().finally(() => {
+    qoderStatusInflight = null
+  })
+  const status = await qoderStatusInflight
+  qoderStatusCache = { at: Date.now(), token, status }
+  return status
+}
+
+/** 凭据健康检查专用：同 Token 的 30s 内新鲜缓存直接复用（UI 刚探过），否则共享单次探针。 */
+function getQoderStatusForHealth(): Promise<QoderStatus> {
+  const token = protectedValue('qoderToken')
+  if (qoderStatusCache && qoderStatusCache.token === token && Date.now() - qoderStatusCache.at < 30_000) {
+    return Promise.resolve(qoderStatusCache.status)
+  }
+  return getQoderStatus()
+}
+
+// === 凭据有效性检查(进入系统时逐项探测各配置 Token 是否已过期/失效) ==========
+
+type CredentialCheckResult = {
+  key: 'qoder' | 'gitlab' | 'jira' | 'confluence'
+  label: string
+  /** ok=连通可用；failed=Token 失效/过期或连接失败；skipped=未配置或无法校验。 */
+  status: 'ok' | 'failed' | 'skipped'
+  message?: string
+}
+
+/** Promise 超时包装：MCP 探测（uvx 冷启动）可能长时间挂起，需要兜底超时。 */
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
+}
+
+/** GitLab Token 校验：优先用设置里配置的自建实例地址，其次从仓库 remoteUrl 推实例，最后回落 gitlab.com；调 /api/v4/user 验权。 */
+async function checkGitLabCredential(token: string): Promise<CredentialCheckResult> {
+  const base = { key: 'gitlab' as const, label: 'GitLab Token' }
+  const configured = store.getSetting('gitlabUrl')?.trim()
+  const remote = store
+    .listRepositoryProfiles()
+    .map((profile) => (profile.remoteUrl ? parseGitLabRemote(profile.remoteUrl) : undefined))
+    .find((parsed) => Boolean(parsed?.baseUrl))
+  const baseUrl = (configured || remote?.baseUrl || 'https://gitlab.com').replace(/\/$/, '')
+  try {
+    const response = await fetch(`${baseUrl}/api/v4/user`, {
+      headers: { 'PRIVATE-TOKEN': token },
+      signal: AbortSignal.timeout(10_000)
+    })
+    if (response.ok) return { ...base, status: 'ok' }
+    if (response.status === 401)
+      return { ...base, status: 'failed', message: 'Token 无效或已过期（401），请在设置中重新配置' }
+    if (response.status === 403) return { ...base, status: 'failed', message: 'Token 已被禁用或权限不足（403）' }
+    return { ...base, status: 'failed', message: `校验失败：HTTP ${response.status}` }
+  } catch (error) {
+    return { ...base, status: 'failed', message: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * 汇总探测四类凭据：Qoder Token / GitLab Token / Jira / Confluence。
+ * - 未配置的项返回 skipped，前端只针对 failed 弹框提示。
+ * - 各项互不阻塞，任一失败不影响其他项结果。
+ * - 每项完成时立即通过 `credentials:check-item` 事件流式上报，
+ *   前端先收到先展示（慢的 MCP 探测结果到达后追加进已打开的弹窗）。
+ */
+async function checkCredentialHealth(): Promise<CredentialCheckResult[]> {
+  const checks: Array<Promise<CredentialCheckResult>> = []
+  const pendingMeta: Array<Pick<CredentialCheckResult, 'key' | 'label'>> = []
+  const tap = (promise: Promise<CredentialCheckResult>): Promise<CredentialCheckResult> =>
+    promise.then((result) => {
+      mainWindow?.webContents.send('credentials:check-item', result)
+      return result
+    })
+  /** 登记一项检查：进「检查中」清单，完成后逐项上报。 */
+  const start = (key: CredentialCheckResult['key'], label: string, promise: Promise<CredentialCheckResult>): void => {
+    pendingMeta.push({ key, label })
+    checks.push(tap(promise))
+  }
+  /** 未配置项：静默计为 skipped，不进「检查中」清单，但仍上报 item，
+   * 让前端能以最新一轮结果覆盖同 key 的旧失败记录。 */
+  const skip = (key: CredentialCheckResult['key'], label: string): void => {
+    checks.push(tap(Promise.resolve({ key, label, status: 'skipped' as const, message: '未配置' })))
+  }
+
+  // Qoder：复用状态探测，connected 即 Token 有效。未配置时静默跳过。
+  if (!protectedValue('qoderToken')) {
+    skip('qoder', 'Qoder Token')
+  } else {
+    start(
+      'qoder',
+      'Qoder Token',
+      getQoderStatusForHealth()
+        .then((status): CredentialCheckResult => {
+          const base = { key: 'qoder' as const, label: 'Qoder Token' }
+          if (!status.enabled) return { ...base, status: 'skipped', message: '未配置' }
+          return status.connected
+            ? { ...base, status: 'ok' }
+            : { ...base, status: 'failed', message: status.error ?? '连接失败' }
+        })
+        .catch(
+          (error): CredentialCheckResult => ({
+            key: 'qoder',
+            label: 'Qoder Token',
+            status: 'failed',
+            message: error instanceof Error ? error.message : String(error)
+          })
+        )
+    )
+  }
+
+  // GitLab：调 /api/v4/user 验证 Token 有效性。
+  const gitlabToken = protectedValue('gitlabToken')
+  if (!gitlabToken) {
+    skip('gitlab', 'GitLab Token')
+  } else {
+    start('gitlab', 'GitLab Token', checkGitLabCredential(gitlabToken))
+  }
+
+  // Jira / Confluence：走 REST API 直接验权（/myself 等），秒级返回，不拉 MCP / uvx。
+  for (const kind of ['jira', 'confluence'] as const) {
+    const label = kind === 'jira' ? 'Jira Token' : 'Confluence Token'
+    const rest = atlassianFactory.restConfig(kind)
+    if (!rest) {
+      skip(kind, label)
+      continue
+    }
+    start(
+      kind,
+      label,
+      withTimeout(testAtlassianConnectionRest(kind, rest), 15_000, '连接测试超时（15s）')
+        .then(
+          (result): CredentialCheckResult => ({
+            key: kind,
+            label,
+            status: result.ok ? 'ok' : 'failed',
+            message: result.ok ? undefined : result.message
+          })
+        )
+        .catch(
+          (error): CredentialCheckResult => ({
+            key: kind,
+            label,
+            status: 'failed',
+            message: error instanceof Error ? error.message : String(error)
+          })
+        )
+    )
+  }
+
+  // 先上报本轮检查清单（前端展示「检查中」），各项完成时已逐项上报。
+  mainWindow?.webContents.send('credentials:check-start', pendingMeta)
+  return Promise.all(checks)
 }
 
 // === Memory 任务上下文(检索/注入/整理) ========================================
@@ -2708,9 +2883,12 @@ function registerIpc(): void {
     if (tasks.length > 0) store.setSetting('lastJiraSync', new Date().toISOString())
     return tasks
   })
-  ipcMain.handle('atlassian:test', async (_event, kind: 'jira' | 'confluence') =>
-    testAtlassianConnection(atlassianFactory.create(kind))
-  )
+  ipcMain.handle('atlassian:test', (_event, kind: 'jira' | 'confluence') => {
+    const rest = atlassianFactory.restConfig(kind)
+    if (!rest) return { ok: false, message: `请先配置 ${kind === 'jira' ? 'Jira' : 'Confluence'} URL 与 Token` }
+    return testAtlassianConnectionRest(kind, rest)
+  })
+  ipcMain.handle('settings:check-credentials', () => checkCredentialHealth())
   ipcMain.handle('task:ui-response', (_event, response: Record<string, unknown>) =>
     pendingUi.get(String(response.id))?.(response)
   )

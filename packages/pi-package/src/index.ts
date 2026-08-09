@@ -357,7 +357,7 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       const client = atlassianFactory.create('jira')
       try {
-        const result = await testAtlassianConnection(client)
+        const result = await testAtlassianConnection(client, 'jira')
         ctx.ui.notify(result.message, result.ok ? 'info' : 'error')
       } catch (error) {
         ctx.ui.notify(`连接失败：${error instanceof Error ? error.message : String(error)}`, 'error')

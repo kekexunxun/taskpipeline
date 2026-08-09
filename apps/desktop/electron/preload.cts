@@ -39,6 +39,17 @@ contextBridge.exposeInMainWorld('agentApi', {
   syncJiraTasks: () => ipcRenderer.invoke('jira:sync'),
   importJiraTasks: (candidates: unknown[]) => ipcRenderer.invoke('jira:import-many', candidates),
   testAtlassian: (kind: 'jira' | 'confluence') => ipcRenderer.invoke('atlassian:test', kind),
+  checkCredentials: () => ipcRenderer.invoke('settings:check-credentials'),
+  onCredentialCheckItem: (callback: (result: unknown) => void) => {
+    const listener = (_: unknown, result: unknown) => callback(result)
+    ipcRenderer.on('credentials:check-item', listener)
+    return () => ipcRenderer.removeListener('credentials:check-item', listener)
+  },
+  onCredentialCheckStart: (callback: (items: unknown) => void) => {
+    const listener = (_: unknown, items: unknown) => callback(items)
+    ipcRenderer.on('credentials:check-start', listener)
+    return () => ipcRenderer.removeListener('credentials:check-start', listener)
+  },
   openTaskEditor: (taskId: string, editor: 'vscode' | 'qoder') =>
     ipcRenderer.invoke('tasks:open-editor', taskId, editor),
   mergeBackToBase: (taskId: string) => ipcRenderer.invoke('tasks:merge-back-to-base', taskId),

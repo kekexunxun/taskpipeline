@@ -104,6 +104,17 @@ export type TaskRemovalMode = 'workspace' | 'all'
 export type TaskBackendId = 'jira' | 'github' | 'linear'
 export type TaskBackendInfo = { id: TaskBackendId; displayName: string; configured: boolean; description?: string }
 
+/**
+ * 凭据健康检查结果（进入系统时逐项探测 Qoder / GitLab / Jira / Confluence）。
+ * - ok：连通可用；failed：Token 失效/过期或连接失败；skipped：未配置或无法校验。
+ */
+export type CredentialCheckResult = {
+  key: 'qoder' | 'gitlab' | 'jira' | 'confluence'
+  label: string
+  status: 'ok' | 'failed' | 'skipped'
+  message?: string
+}
+
 // === Chat API surface ===
 
 /** Chat driver 标识,跨主进程 / IPC / 前端保持一致。 */
@@ -376,6 +387,12 @@ export type AgentApi = {
   syncJiraTasks(): Promise<JiraTaskCandidate[]>
   importJiraTasks(candidates: JiraTaskCandidate[]): Promise<Task[]>
   testAtlassian(kind: 'jira' | 'confluence'): Promise<{ ok: boolean; message: string }>
+  /** 进入系统时统一探测各配置 Token 是否已过期/失效。 */
+  checkCredentials(): Promise<CredentialCheckResult[]>
+  /** 凭据检查逐项完成事件（流式上报，先完成先收到）。 */
+  onCredentialCheckItem(callback: (result: CredentialCheckResult) => void): () => void
+  /** 凭据检查本轮清单事件（哪些项正在检查，供展示「检查中」）。 */
+  onCredentialCheckStart(callback: (items: Array<Pick<CredentialCheckResult, 'key' | 'label'>>) => void): () => void
   openTaskEditor(taskId: string, editor: 'vscode' | 'qoder'): Promise<void>
   mergeBackToBase(taskId: string): Promise<void>
   revealTaskWorkspace(taskId: string): Promise<void>
@@ -833,6 +850,15 @@ export const api: AgentApi = window.agentApi ?? {
   },
   async testAtlassian() {
     return { ok: false, message: 'Electron is required' }
+  },
+  async checkCredentials() {
+    return [] as CredentialCheckResult[]
+  },
+  onCredentialCheckItem() {
+    return () => undefined
+  },
+  onCredentialCheckStart() {
+    return () => undefined
   },
   async openTaskEditor() {
     throw new Error('Electron is required')
