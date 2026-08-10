@@ -1,178 +1,224 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentEvent, Task, TaskCard } from "@task-pipeline/core";
-import { api, type TaskDetail } from "../../../api";
-import { useFeedback } from "../../../hooks/useGlobalFeedback";
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { AgentEvent, Task, TaskCard } from '@task-pipeline/core'
+import { api, type TaskDetail } from '../../../api'
+import { useFeedback } from '../../../hooks/useGlobalFeedback'
 
-export type TimelineItem = AgentEvent | {
-  id: string;
-  taskId: string;
-  kind: AgentEvent["kind"];
-  title: string;
-  detail?: string;
-  createdAt: string;
-};
+export type TimelineItem =
+  | AgentEvent
+  | {
+      id: string
+      taskId: string
+      kind: AgentEvent['kind']
+      title: string
+      detail?: string
+      createdAt: string
+    }
 
 export type CodingPageState = {
-  tasks: TaskCard[];
-  selectedId?: string;
-  detail?: TaskDetail;
-  liveEvents: TimelineItem[];
-  prompt: string;
-  running: boolean;
-  sending: boolean;
-  search: string;
-  setSelectedId(id: string | undefined): void;
-  setSearch(value: string): void;
-  setPrompt(value: string): void;
-  refresh(): Promise<void>;
-  loadDetail(id: string): Promise<void>;
-  send(): Promise<void>;
-  run(action: () => Promise<unknown>): Promise<void>;
-};
+  tasks: TaskCard[]
+  selectedId?: string
+  detail?: TaskDetail
+  liveEvents: TimelineItem[]
+  prompt: string
+  running: boolean
+  sending: boolean
+  search: string
+  setSelectedId(id: string | undefined): void
+  setSearch(value: string): void
+  setPrompt(value: string): void
+  refresh(): Promise<void>
+  loadDetail(id: string): Promise<void>
+  send(): Promise<void>
+  run(action: () => Promise<unknown>): Promise<void>
+}
 
 export function useTasks(): CodingPageState {
-  const { showError, showSuccess } = useFeedback();
-  const [tasks, setTasks] = useState<TaskCard[]>([]);
-  const [selectedId, setSelectedId] = useState<string>();
-  const [detail, setDetail] = useState<TaskDetail>();
-  const [liveEvents, setLiveEvents] = useState<TimelineItem[]>([]);
-  const [prompt, setPrompt] = useState("");
-  const [running, setRunning] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [search, setSearch] = useState("");
+  const { showError, showSuccess } = useFeedback()
+  const [tasks, setTasks] = useState<TaskCard[]>([])
+  const [selectedId, setSelectedId] = useState<string>()
+  const [detail, setDetail] = useState<TaskDetail>()
+  const [liveEvents, setLiveEvents] = useState<TimelineItem[]>([])
+  const [prompt, setPrompt] = useState('')
+  const [running, setRunning] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [search, setSearch] = useState('')
 
-  const liveMessageId = useRef<string | undefined>(undefined);
-  const planningRef = useRef(false);
-  const notifiedPlanRef = useRef<string | undefined>(undefined);
-  const pendingTaskIdRef = useRef<string | undefined>(undefined);
+  const liveMessageId = useRef<string | undefined>(undefined)
+  const planningRef = useRef(false)
+  const notifiedPlanRef = useRef<string | undefined>(undefined)
+  const pendingTaskIdRef = useRef<string | undefined>(undefined)
 
-  const acceptDetail = useCallback((next: TaskDetail) => {
-    // 竞态保护：只接受当前选中任务的响应
-    if (next.task?.id && next.task.id !== pendingTaskIdRef.current) return;
-    setDetail(next);
-    planningRef.current = next.task?.state === "planning";
-    if (next.task?.state === "awaiting_plan_approval") {
-      const key = `${next.task.id}:${next.task.planRevision ?? 0}`;
-      if (notifiedPlanRef.current !== key) {
-        notifiedPlanRef.current = key;
-        showSuccess(`${next.task.title} 的计划已生成，等待确认`);
+  const acceptDetail = useCallback(
+    (next: TaskDetail) => {
+      // 竞态保护：只接受当前选中任务的响应
+      if (next.task?.id && next.task.id !== pendingTaskIdRef.current) return
+      setDetail(next)
+      planningRef.current = next.task?.state === 'planning'
+      if (next.task?.state === 'awaiting_plan_approval') {
+        const key = `${next.task.id}:${next.task.planRevision ?? 0}`
+        if (notifiedPlanRef.current !== key) {
+          notifiedPlanRef.current = key
+          showSuccess(`${next.task.title} 的计划已生成，等待确认`)
+        }
+      } else if (
+        next.task?.state === 'completed' &&
+        next.task.startMode === 'plan' &&
+        next.task.summary === '代码已满足任务要求，无需修改'
+      ) {
+        const key = `${next.task.id}:completed`
+        if (notifiedPlanRef.current !== key) {
+          notifiedPlanRef.current = key
+          showSuccess(`${next.task.title} 已满足要求，任务自动完成`)
+        }
       }
-    } else if (next.task?.state === "completed" && next.task.startMode === "plan" && next.task.summary === "代码已满足任务要求，无需修改") {
-      const key = `${next.task.id}:completed`;
-      if (notifiedPlanRef.current !== key) {
-        notifiedPlanRef.current = key;
-        showSuccess(`${next.task.title} 已满足要求，任务自动完成`);
-      }
-    }
-  }, [showSuccess]);
+    },
+    [showSuccess]
+  )
 
   const refresh = useCallback(async () => {
     try {
-      const list = await api.listTasks();
-      setTasks(list);
+      const list = await api.listTasks()
+      setTasks(list)
       if (selectedId && !list.some((item) => item.id === selectedId)) {
-        setSelectedId(undefined);
-        setDetail(undefined);
+        setSelectedId(undefined)
+        setDetail(undefined)
       }
     } catch (reason) {
-      showError(reason instanceof Error ? reason.message : String(reason));
+      showError(reason instanceof Error ? reason.message : String(reason))
     }
-  }, [selectedId, showError]);
+  }, [selectedId, showError])
 
-  const loadDetail = useCallback(async (id: string) => {
-    try {
-      acceptDetail(await api.getTask(id));
-    } catch (reason) {
-      showError(reason instanceof Error ? reason.message : String(reason));
-    }
-  }, [acceptDetail, showError]);
+  const loadDetail = useCallback(
+    async (id: string) => {
+      try {
+        acceptDetail(await api.getTask(id))
+      } catch (reason) {
+        showError(reason instanceof Error ? reason.message : String(reason))
+      }
+    },
+    [acceptDetail, showError]
+  )
 
-  // 初次 + 60s 轮询
+  // 初次 + 5min 轮询
   useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 60_000);
-    return () => window.clearInterval(timer);
-  }, [refresh]);
+    void refresh()
+    const timer = window.setInterval(() => void refresh(), 5 * 60_000)
+    return () => window.clearInterval(timer)
+  }, [refresh])
 
   // 任务事件订阅（与原 App.tsx 一致）
   useEffect(() => {
-    let changeTimer: number | undefined;
+    let changeTimer: number | undefined
     const off = api.onTaskEvent((event) => {
-      if (event.type === "extension_ui_request" && ["confirm", "select", "input", "editor"].includes(event.method)) {
+      if (event.type === 'extension_ui_request' && ['confirm', 'select', 'input', 'editor'].includes(event.method)) {
         // UI request 由 UiRequestDialog 统一处理，事件通过 customEvent 广播
-        window.dispatchEvent(new CustomEvent("task:ui-request", { detail: event }));
+        window.dispatchEvent(new CustomEvent('task:ui-request', { detail: event }))
       }
-      if (event.type === "agent_start") { setSending(false); setRunning(true); planningRef.current = event.phase === "planning"; liveMessageId.current = crypto.randomUUID(); }
-      if (event.type === "task_changed") {
-        const taskId = selectedId;
-        window.clearTimeout(changeTimer);
+      if (event.type === 'agent_start') {
+        setSending(false)
+        setRunning(true)
+        planningRef.current = event.phase === 'planning'
+        liveMessageId.current = crypto.randomUUID()
+      }
+      if (event.type === 'task_changed') {
+        const taskId = selectedId
+        window.clearTimeout(changeTimer)
         changeTimer = window.setTimeout(() => {
-          void refresh();
-          if (taskId && taskId === event.taskId) void api.getTask(taskId).then(acceptDetail);
-        }, 100);
+          void refresh()
+          if (taskId && taskId === event.taskId) void api.getTask(taskId).then(acceptDetail)
+        }, 100)
       }
-      if (["agent_end", "agent_error", "process_exit"].includes(event.type)) {
-        setSending(false);
-        setRunning(false);
-        liveMessageId.current = undefined;
+      if (['agent_end', 'agent_error', 'process_exit'].includes(event.type)) {
+        setSending(false)
+        setRunning(false)
+        liveMessageId.current = undefined
         // 任务会话结束：清空排队中的执行器确认请求（主进程已按取消处理）。
-        window.dispatchEvent(new CustomEvent("task:ui-clear"));
-        if (event.phase === "planning" || planningRef.current) setLiveEvents([]);
-        planningRef.current = false;
-        void refresh();
-        if (selectedId) void api.getTask(selectedId).then(acceptDetail);
+        window.dispatchEvent(new CustomEvent('task:ui-clear'))
+        if (event.phase === 'planning' || planningRef.current) setLiveEvents([])
+        planningRef.current = false
+        void refresh()
+        if (selectedId) void api.getTask(selectedId).then(acceptDetail)
       }
-      if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-        if (event.phase === "planning" || planningRef.current) return;
-        const id = liveMessageId.current ??= crypto.randomUUID();
+      if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
+        if (event.phase === 'planning' || planningRef.current) return
+        const id = (liveMessageId.current ??= crypto.randomUUID())
         setLiveEvents((items) => {
-          const last = items[items.length - 1];
-          if (last?.id === id) return [...items.slice(0, -1), { ...last, detail: `${last.detail ?? ""}${event.assistantMessageEvent.delta}` }];
-          return [...items, { id, taskId: selectedId ?? "", kind: "message", title: "AI", detail: event.assistantMessageEvent.delta, createdAt: new Date().toISOString() }];
-        });
+          const last = items[items.length - 1]
+          if (last?.id === id)
+            return [
+              ...items.slice(0, -1),
+              { ...last, detail: `${last.detail ?? ''}${event.assistantMessageEvent.delta}` }
+            ]
+          return [
+            ...items,
+            {
+              id,
+              taskId: selectedId ?? '',
+              kind: 'message',
+              title: 'AI',
+              detail: event.assistantMessageEvent.delta,
+              createdAt: new Date().toISOString()
+            }
+          ]
+        })
       }
-    });
-    return () => { window.clearTimeout(changeTimer); off(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, refresh, acceptDetail]);
+    })
+    return () => {
+      window.clearTimeout(changeTimer)
+      off()
+    }
+  }, [selectedId, refresh, acceptDetail])
 
   // 切换任务时清空 liveEvents 并加载详情（不清空 detail，避免闪烁）
   useEffect(() => {
-    setLiveEvents([]);
-    setSending(false);
+    setLiveEvents([])
+    setSending(false)
     if (selectedId) {
-      pendingTaskIdRef.current = selectedId;
-      void api.getTask(selectedId).then(acceptDetail);
+      pendingTaskIdRef.current = selectedId
+      void api.getTask(selectedId).then(acceptDetail)
     } else {
       // 没有选中任务时清空详情
-      pendingTaskIdRef.current = undefined;
-      setDetail(undefined);
+      pendingTaskIdRef.current = undefined
+      setDetail(undefined)
     }
-  }, [selectedId, acceptDetail]);
+  }, [selectedId, acceptDetail])
 
-  const run = useCallback(async (action: () => Promise<unknown>) => {
-    try {
-      await action();
-      await refresh();
-      if (selectedId) acceptDetail(await api.getTask(selectedId));
-    } catch (reason) {
-      showError(reason instanceof Error ? reason.message : String(reason));
-    }
-  }, [acceptDetail, refresh, selectedId, showError]);
+  const run = useCallback(
+    async (action: () => Promise<unknown>) => {
+      try {
+        await action()
+        await refresh()
+        if (selectedId) acceptDetail(await api.getTask(selectedId))
+      } catch (reason) {
+        showError(reason instanceof Error ? reason.message : String(reason))
+      }
+    },
+    [acceptDetail, refresh, selectedId, showError]
+  )
 
   const send = useCallback(async () => {
-    const selected = tasks.find((t) => t.id === selectedId);
-    if (!selected || !prompt.trim()) return;
-    const text = prompt;
-    setPrompt("");
-    setSending(true);
-    setLiveEvents((items) => [...items, { id: crypto.randomUUID(), taskId: selected.id, kind: "message", title: "你", detail: text, createdAt: new Date().toISOString() }]);
+    const selected = tasks.find((t) => t.id === selectedId)
+    if (!selected || !prompt.trim()) return
+    const text = prompt
+    setPrompt('')
+    setSending(true)
+    setLiveEvents((items) => [
+      ...items,
+      {
+        id: crypto.randomUUID(),
+        taskId: selected.id,
+        kind: 'message',
+        title: '你',
+        detail: text,
+        createdAt: new Date().toISOString()
+      }
+    ])
     try {
-      await run(() => api.sendTaskMessage(selected.id, text));
+      await run(() => api.sendTaskMessage(selected.id, text))
     } finally {
-      setSending(false);
+      setSending(false)
     }
-  }, [prompt, run, selectedId, tasks]);
+  }, [prompt, run, selectedId, tasks])
 
   return {
     tasks,
@@ -190,14 +236,16 @@ export function useTasks(): CodingPageState {
     loadDetail,
     send,
     run
-  };
+  }
 }
 
 export function selectTask(state: CodingPageState): Task | undefined {
-  return state.tasks.find((t) => t.id === state.selectedId);
+  return state.tasks.find((t) => t.id === state.selectedId)
 }
 
 export function filteredTasks(state: CodingPageState): TaskCard[] {
-  const q = state.search.toLowerCase();
-  return state.tasks.filter((task) => !q || `${task.title} ${task.taskKey ?? ""} ${task.keywords.join(" ")}`.toLowerCase().includes(q));
+  const q = state.search.toLowerCase()
+  return state.tasks.filter(
+    (task) => !q || `${task.title} ${task.taskKey ?? ''} ${task.keywords.join(' ')}`.toLowerCase().includes(q)
+  )
 }

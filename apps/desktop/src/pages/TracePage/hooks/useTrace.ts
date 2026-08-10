@@ -26,7 +26,7 @@ export function useTrace() {
 
   useEffect(() => {
     void refresh()
-    const timer = window.setInterval(() => void refresh(), 60_000)
+    const timer = window.setInterval(() => void refresh(), 5 * 60_000)
     return () => window.clearInterval(timer)
   }, [refresh])
 
