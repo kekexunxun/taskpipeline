@@ -15,8 +15,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@task-pipeline/core": "1.0.0",
-    "@task-pipeline/integrations": "1.0.0",
+    "@task-pipeline/core": "*",
+    "@task-pipeline/integrations": "*",
     "@earendil-works/pi-coding-agent": "0.82.1"
   },
   "devDependencies": {
