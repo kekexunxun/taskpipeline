@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } from 'electron'
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -3124,6 +3124,21 @@ function registerIpc(): void {
   ipcMain.handle('chats:abort', (_event, input) => chatService.abortChat(input))
 }
 
+// 统一应用图标：dev 环境取 build/icon.png 源文件，打包后取 vite 从 public/ 拷贝到 dist/ 的副本，
+// 保证 Windows/Linux 运行时窗口图标与 macOS dev Dock 图标和打包产物一致。
+function resolveAppIcon(): Electron.NativeImage | undefined {
+  for (const candidate of [
+    join(__dirname, '../build/icon.normalized.png'),
+    join(__dirname, '../build/icon.png'),
+    join(__dirname, '../dist/icon.png')
+  ]) {
+    if (!existsSync(candidate)) continue
+    const image = nativeImage.createFromPath(candidate)
+    if (!image.isEmpty()) return image
+  }
+  return undefined
+}
+
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
     width: 1500,
@@ -3131,6 +3146,7 @@ async function createWindow(): Promise<void> {
     minWidth: 900,
     minHeight: 640,
     backgroundColor: '#111210',
+    icon: resolveAppIcon(),
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false }
   })
@@ -3139,6 +3155,11 @@ async function createWindow(): Promise<void> {
 }
 
 app.whenReady().then(() => {
+  // macOS dev 环境 Dock 默认显示 Electron 默认图标，替换为应用图标保持与打包版一致。
+  if (process.platform === 'darwin' && process.env.VITE_DEV_SERVER_URL) {
+    const icon = resolveAppIcon()
+    if (icon) app.dock?.setIcon(icon)
+  }
   if (!resolveBundledOcrBinary()) {
     console.warn(
       '[ocr] @alibaba-group/open-code-review not found in node_modules; reviews will fall back to PATH lookup and may fail in packaged builds.'

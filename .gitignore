@@ -3,6 +3,8 @@ dist/
 dist-electron/
 release/
 .vite/
+apps/desktop/public/icon.png
+apps/desktop/build/icon.normalized.png
 apps/desktop/main.js
 .env
 .env.*
