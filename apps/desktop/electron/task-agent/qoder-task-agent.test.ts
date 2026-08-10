@@ -36,37 +36,83 @@ type SdkMessage = Record<string, unknown> & {
 }
 
 vi.mock('@qoder-ai/qoder-agent-sdk', () => {
-  const scripts: { messages: SdkMessage[]; throwAfter?: number; throwWith?: unknown }[] = []
+  const scripts: Array<{ messages: SdkMessage[]; throwAfter?: number; throwWith?: unknown; cursor: number }> = []
+  const scriptWaiters: Array<() => void> = []
   const queryCalls: unknown[] = []
+  const userMessages: string[] = []
+  let generation = 0
+  const wake = () => {
+    for (const w of scriptWaiters.splice(0)) w()
+  }
   return {
     accessToken: (token: string) => ({ token }),
-    query: (options: unknown) => {
-      queryCalls.push(options)
-      const script = scripts.shift() ?? { messages: [] }
+    query: (args: unknown) => {
+      queryCalls.push(args)
+      // closed 按 query 实例隔离:一次 close 只结束自己的会话,不影响新会话。
+      let queryClosed = false
+      const { prompt } = (args ?? {}) as { prompt?: unknown }
+      // 消费输入流:记录每个回合的用户消息文本(现在用户输入走异步消息流,不再拼接进 query.prompt)。
+      if (prompt && typeof (prompt as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === 'function') {
+        void (async () => {
+          try {
+            for await (const m of prompt as AsyncIterable<{ message?: { content?: Array<{ type?: string; text?: string }> } }>) {
+              const text = (m.message?.content ?? [])
+                .filter((b) => b.type === 'text')
+                .map((b) => b.text ?? '')
+                .join('')
+              if (text) userMessages.push(text)
+            }
+          } catch {
+            /* input stream closed */
+          }
+        })()
+      }
       return {
         [Symbol.asyncIterator]() {
-          let index = 0
+          const myGen = generation
           return {
             async next() {
-              if (script.throwAfter !== undefined && index >= script.throwAfter) {
-                if (script.throwWith) throw script.throwWith
+              while (true) {
+                // 旧测试残留的 consume 直接退出,不能抢新测试的脚本。
+                if (myGen !== generation || queryClosed) return { value: undefined as unknown as SdkMessage, done: true }
+                const script = scripts[0]
+                // throw 脚本:在消费任意消息之前按 throwAfter 触发(可对空脚本用)。
+                if (
+                  script &&
+                  script.throwAfter !== undefined &&
+                  script.throwWith !== undefined &&
+                  script.cursor >= script.throwAfter
+                ) {
+                  script.cursor++
+                  throw script.throwWith
+                }
+                if (script && script.cursor < script.messages.length) {
+                  return { value: script.messages[script.cursor++] as SdkMessage, done: false }
+                }
+                // 当前脚本耗尽:换下一个(若有);否则挂起等待新脚本 / close。
+                if (scripts.length > 1) {
+                  scripts.shift()
+                  continue
+                }
+                await new Promise<void>((resolve) => scriptWaiters.push(resolve))
               }
-              if (index < script.messages.length) return { value: script.messages[index++] as SdkMessage, done: false }
-              return { value: undefined as unknown as SdkMessage, done: true }
             },
             async return() {
+              queryClosed = true
+              wake()
               return { value: undefined as unknown as SdkMessage, done: true }
             },
             async throw(error: unknown) {
               throw error
-            },
-            async close() {
-              /* noop */
-            },
-            async interrupt() {
-              /* noop */
             }
           }
+        },
+        async close() {
+          queryClosed = true
+          wake()
+        },
+        async interrupt() {
+          /* noop */
         }
       }
     },
@@ -86,8 +132,19 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
         this.name = 'QoderCliProcessError'
       }
     },
-    __pushQueryScript: (s: { messages: SdkMessage[]; throwAfter?: number; throwWith?: unknown }) => scripts.push(s),
-    __queryCalls: queryCalls
+    __pushQueryScript: (s: { messages: SdkMessage[]; throwAfter?: number; throwWith?: unknown }) => {
+      scripts.push({ ...s, cursor: 0 })
+      wake()
+    },
+    __queryCalls: queryCalls,
+    __getUserMessages: () => [...userMessages],
+    __resetMock: () => {
+      queryCalls.length = 0
+      scripts.length = 0
+      userMessages.length = 0
+      generation++
+      wake()
+    }
   }
 })
 
@@ -96,6 +153,8 @@ const { QoderTaskAgentDriver, stripQoderModelPrefix } = await import('./qoder-ta
 const sdkMock = (await import('@qoder-ai/qoder-agent-sdk')) as unknown as {
   __pushQueryScript: (s: { messages: SdkMessage[]; throwAfter?: number; throwWith?: unknown }) => void
   __queryCalls: unknown[]
+  __getUserMessages: () => string[]
+  __resetMock: () => void
 }
 
 function assistantMsg(text: string, sessionId?: string): SdkMessage {
@@ -116,7 +175,7 @@ function fakeStore(): TaskStore {
   } as unknown as TaskStore
 }
 
-function fakeTask(): Task {
+function fakeTask(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
     source: 'local',
@@ -127,7 +186,8 @@ function fakeTask(): Task {
     state: 'draft',
     reviewStatus: 'pending',
     createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    ...overrides
   }
 }
 
@@ -169,7 +229,7 @@ describe('QoderTaskAgentDriver', () => {
   beforeEach(() => {
     savedLog = process.env.TASK_PIPELINE_QODER_LOG
     delete process.env.TASK_PIPELINE_QODER_LOG
-    sdkMock.__queryCalls.length = 0
+    sdkMock.__resetMock()
   })
 
   afterEach(() => {
@@ -177,7 +237,7 @@ describe('QoderTaskAgentDriver', () => {
     else process.env.TASK_PIPELINE_QODER_LOG = savedLog
   })
 
-  it('emits agent_start/agent_end and a single agent_text per assistant message', async () => {
+  it('emits agent_start/agent_end and merges text deltas into paragraph-level agent_text', async () => {
     sdkMock.__pushQueryScript({
       messages: [assistantMsg('Hello', 'sess-1'), assistantMsg('World', 'sess-1'), resultMsg('Final', 'sess-1')]
     })
@@ -187,18 +247,41 @@ describe('QoderTaskAgentDriver', () => {
     expect(types[0]).toBe('agent_start')
     expect(types[types.length - 1]).toBe('agent_end')
     const textEvents = events.filter((e) => e.type === 'agent_text')
-    expect(textEvents.length).toBeGreaterThanOrEqual(2)
-    const result = d.collectResult('plan')
+    // 连续文本(无工具调用/无空行边界)在回合结束时合并成一段,不再每条 delta 一条碎片。
+    expect(textEvents.length).toBe(1)
+    expect(textEvents[0]?.text).toContain('Hello')
+    expect(textEvents[0]?.text).toContain('World')
+    expect(textEvents[0]?.text).toContain('Final')
+    const result = d.collectResult('task-1', 'plan')
     expect(result.responseTexts).toContain('Hello')
     expect(result.responseTexts).toContain('World')
     expect(result.sessionId).toBe('sess-1')
+  })
+
+  it('flushes agent_text at markdown paragraph boundaries and tool calls', async () => {
+    sdkMock.__pushQueryScript({
+      messages: [
+        assistantMsg('第一段正文', 'sess-1'),
+        assistantMsg('\n\n第二段正文', 'sess-1'),
+        assistantMsg(' 后跟工具调用', 'sess-1'),
+        resultMsg('完毕', 'sess-1')
+      ]
+    })
+    const { driver: d, events } = driver()
+    await d.runPlan({ task: fakeTask(), repos: fakeRepos() })
+    const textEvents = events.filter((e) => e.type === 'agent_text')
+    // 空行 → 段落边界:至少两段(第一段 + 剩余部分);不会出现逐 delta 的碎片。
+    expect(textEvents.length).toBeGreaterThanOrEqual(2)
+    for (const event of textEvents) {
+      expect(String(event.text ?? '')).not.toBe('')
+    }
   })
 
   it('runImplementation collects responseTexts and forwards sessionId', async () => {
     sdkMock.__pushQueryScript({ messages: [assistantMsg('Implementing', 'impl-sess'), resultMsg('Done', 'impl-sess')] })
     const { driver: d } = driver()
     await d.runImplementation({ task: fakeTask(), repos: fakeRepos() })
-    const result = d.collectResult('implementation')
+    const result = d.collectResult('task-1', 'implementation')
     expect(result.responseTexts).toContain('Implementing')
     expect(result.sessionId).toBe('impl-sess')
   })
@@ -212,9 +295,93 @@ describe('QoderTaskAgentDriver', () => {
       resumeSessionId: 'resume-sess',
       extraPrompt: '继续'
     })
-    const result = d.collectResult('implementation')
+    const result = d.collectResult('task-1', 'implementation')
     expect(result.sessionId).toBe('resume-sess')
     expect(result.responseTexts).toContain('Resumed')
+  })
+
+  it('reuses the resident session across plan/implementation (三阶段共享会话)', async () => {
+    sdkMock.__pushQueryScript({ messages: [assistantMsg('plan output', 'sess-1'), resultMsg('{}', 'sess-1')] })
+    const { driver: d } = driver()
+    await d.runPlan({ task: fakeTask(), repos: fakeRepos() })
+    // implementation 复用 plan 会话:query 只创建一次(上下文由 Qoder 会话端管理,不重建)。
+    sdkMock.__pushQueryScript({ messages: [resultMsg('implemented', 'sess-1')] })
+    await d.runImplementation({ task: fakeTask(), repos: fakeRepos() })
+    expect(sdkMock.__queryCalls.length).toBe(1)
+    const implResult = d.collectResult('task-1', 'implementation')
+    expect(implResult.responseTexts.some((t) => t.includes('implemented'))).toBe(true)
+    expect(implResult.sessionId).toBe('sess-1')
+  })
+
+  it('closeSession releases the resident session and clears phase buffers', async () => {
+    sdkMock.__pushQueryScript({ messages: [assistantMsg('plan output', 'sess-1'), resultMsg('{}', 'sess-1')] })
+    const { driver: d } = driver()
+    await d.runPlan({ task: fakeTask(), repos: fakeRepos() })
+    expect(d.collectResult('task-1', 'plan').responseTexts.length).toBeGreaterThan(0)
+    d.closeSession('task-1')
+    // 会话与阶段产物都被释放:collectResult 回退为空。
+    expect(d.collectResult('task-1', 'plan').responseTexts).toEqual([])
+    // 释放后重新执行会重建全新会话(不残留旧上下文)。
+    sdkMock.__pushQueryScript({ messages: [assistantMsg('second plan', 'sess-2'), resultMsg('{}', 'sess-2')] })
+    await d.runPlan({ task: fakeTask(), repos: fakeRepos() })
+    expect(d.collectResult('task-1', 'plan').responseTexts.some((t) => t.includes('second plan'))).toBe(true)
+    // 会话重建:query 新建(sessionId 变化)。
+    expect(d.collectResult('task-1', 'plan').sessionId).toBe('sess-2')
+  })
+
+  it('reuses the plan session when revising with feedback (revise 追加消息,不走 Qoder Init)', async () => {
+    sdkMock.__pushQueryScript({
+      messages: [assistantMsg('第一版计划', 'sess-1'), resultMsg('{"outcome":"changes_required","plan":"第一版"}', 'sess-1')]
+    })
+    const { driver: d } = driver()
+    await d.runPlan({ task: fakeTask(), repos: fakeRepos() })
+    expect(sdkMock.__queryCalls.length).toBe(1)
+    // 计划调整(带 feedback):复用已存在会话,追加"调整意见"消息,不新建 query。
+    sdkMock.__pushQueryScript({
+      messages: [assistantMsg('第二版计划', 'sess-1'), resultMsg('{"outcome":"changes_required","plan":"第二版"}', 'sess-1')]
+    })
+    await d.runPlan({ task: fakeTask(), repos: fakeRepos(), feedback: '第二版要更详细' })
+    expect(sdkMock.__queryCalls.length).toBe(1)
+    const texts = sdkMock.__getUserMessages()
+    expect(texts.some((t) => t.includes('调整意见') && t.includes('第二版要更详细'))).toBe(true)
+  })
+
+  it('keeps appending to the resident session even without feedback (重新生成也追加消息)', async () => {
+    sdkMock.__pushQueryScript({
+      messages: [assistantMsg('第一版计划', 'sess-1'), resultMsg('{"outcome":"changes_required","plan":"第一版"}', 'sess-1')]
+    })
+    const { driver: d } = driver()
+    await d.runPlan({ task: fakeTask(), repos: fakeRepos() })
+    expect(sdkMock.__queryCalls.length).toBe(1)
+    // 无 feedback 的"重新生成"同样复用会话追加消息,不走 Qoder Init。
+    sdkMock.__pushQueryScript({
+      messages: [assistantMsg('第二版计划', 'sess-1'), resultMsg('{"outcome":"changes_required","plan":"第二版"}', 'sess-1')]
+    })
+    await d.runPlan({ task: fakeTask(), repos: fakeRepos() })
+    expect(sdkMock.__queryCalls.length).toBe(1)
+  })
+
+  it('resumes the saved session when no active session exists (应用重启后 resume)', async () => {
+    // 无活跃会话,但 task.qoderSessionId 已持久化 → 创建会话时 resume,不丢上下文。
+    sdkMock.__pushQueryScript({
+      messages: [assistantMsg('恢复后计划', 'saved-sess'), resultMsg('{"outcome":"changes_required","plan":"恢复后"}', 'saved-sess')]
+    })
+    const { driver: d } = driver()
+    await d.runPlan({ task: fakeTask({ qoderSessionId: 'saved-sess' }), repos: fakeRepos() })
+    const options = sdkMock.__queryCalls[0] as { options?: { resume?: string } }
+    expect(options?.options?.resume).toBe('saved-sess')
+  })
+
+  it('emits agent_session with taskId for session persistence', async () => {
+    sdkMock.__pushQueryScript({ messages: [assistantMsg('计划分析', 'sess-1'), resultMsg('{}', 'sess-1')] })
+    const { driver: d, events } = driver()
+    await d.runPlan({ task: fakeTask(), repos: fakeRepos() })
+    const sessionEvent = events.find((e) => e.type === 'agent_session') as
+      | { type: 'agent_session'; taskId?: string; sessionId?: string }
+      | undefined
+    expect(sessionEvent).toBeDefined()
+    expect(sessionEvent?.taskId).toBe('task-1')
+    expect(sessionEvent?.sessionId).toBe('sess-1')
   })
 
   it('runTestGeneration collects test response texts', async () => {
@@ -223,7 +390,7 @@ describe('QoderTaskAgentDriver', () => {
     })
     const { driver: d } = driver()
     await d.runTestGeneration({ task: fakeTask(), repos: fakeRepos() })
-    const result = d.collectResult('test')
+    const result = d.collectResult('task-1', 'test')
     expect(result.responseTexts.some((t) => t.includes('a_test.ts'))).toBe(true)
     expect(result.sessionId).toBe('test-sess')
   })
@@ -234,9 +401,10 @@ describe('QoderTaskAgentDriver', () => {
       resolveAgentContext: async () => ({ sections: ['## Agent 指引 — 仓库 repo（repo）\n遵循项目约定'] })
     })
     await d.runPlan({ task: fakeTask(), repos: fakeRepos() })
-    const prompt = String((sdkMock.__queryCalls[0] as { prompt?: unknown } | undefined)?.prompt ?? '')
-    expect(prompt).toContain('## Agent 指引 — 仓库 repo')
-    expect(prompt).toContain('遵循项目约定')
+    // 用户输入走异步消息流:首回合消息应包含注入的 Agent 指引。
+    const texts = sdkMock.__getUserMessages()
+    expect(texts[0]).toContain('## Agent 指引 — 仓库 repo')
+    expect(texts[0]).toContain('遵循项目约定')
   })
 
   it('runImplementation prepends agent context sections to the prompt', async () => {
@@ -245,8 +413,8 @@ describe('QoderTaskAgentDriver', () => {
       resolveAgentContext: async () => ({ sections: ['## Agent 指引 — 仓库 repo\n遵循项目约定'] })
     })
     await d.runImplementation({ task: fakeTask(), repos: fakeRepos() })
-    const prompt = String((sdkMock.__queryCalls[0] as { prompt?: unknown } | undefined)?.prompt ?? '')
-    expect(prompt).toContain('## Agent 指引')
+    const texts = sdkMock.__getUserMessages()
+    expect(texts[0]).toContain('## Agent 指引')
   })
 
   it('runImplementation with resumeSessionId skips agent context re-injection', async () => {
@@ -260,9 +428,9 @@ describe('QoderTaskAgentDriver', () => {
       resumeSessionId: 'r-sess',
       extraPrompt: '继续完成'
     })
-    const prompt = String((sdkMock.__queryCalls[0] as { prompt?: unknown } | undefined)?.prompt ?? '')
-    expect(prompt).not.toContain('## Agent 指引')
-    expect(prompt).toContain('继续完成')
+    const texts = sdkMock.__getUserMessages()
+    expect(texts[0]).not.toContain('## Agent 指引')
+    expect(texts[0]).toContain('继续完成')
   })
 
   it('runTestGeneration prepends agent context sections to the prompt', async () => {
@@ -271,8 +439,8 @@ describe('QoderTaskAgentDriver', () => {
       resolveAgentContext: async () => ({ sections: ['## Agent 指引 — 仓库 repo\n遵循项目约定'] })
     })
     await d.runTestGeneration({ task: fakeTask(), repos: fakeRepos() })
-    const prompt = String((sdkMock.__queryCalls[0] as { prompt?: unknown } | undefined)?.prompt ?? '')
-    expect(prompt).toContain('## Agent 指引')
+    const texts = sdkMock.__getUserMessages()
+    expect(texts[0]).toContain('## Agent 指引')
   })
 
   it('forwards resolveModel result as the query model', async () => {
@@ -306,7 +474,7 @@ describe('QoderTaskAgentDriver', () => {
   it('rejects an unknown collectResult phase gracefully (returns empty)', () => {
     const { driver: d } = driver()
     // @ts-expect-error 故意传入错误 phase 验证 driver 不抛
-    const result = d.collectResult('invalid-phase')
+    const result = d.collectResult('task-1', 'invalid-phase' as never)
     expect(result.responseTexts).toEqual([])
   })
 
@@ -320,7 +488,7 @@ describe('QoderTaskAgentDriver', () => {
       stderr: stderrTail
     })
     sdkMock.__pushQueryScript({ messages: [], throwAfter: 0, throwWith: sdkError })
-    const { driver: d } = driver()
+    const { driver: d, events } = driver()
     let caught: Error | undefined
     try {
       await d.runPlan({ task: fakeTask(), repos: fakeRepos() })
@@ -332,6 +500,9 @@ describe('QoderTaskAgentDriver', () => {
     expect(caught!.message).toContain('plan mode not allowed for this model')
     // 保留 cause 链,方便上层 instanceof QoderCliProcessError 仍然命中
     expect((caught as Error & { cause?: unknown }).cause).toBe(sdkError)
+    // 失败路径也必须配对收尾:agent_start 之后必有 agent_end(agent_session 无 sessionId 可不发)。
+    expect(events.some((e) => e.type === 'agent_start')).toBe(true)
+    expect(events.some((e) => e.type === 'agent_end')).toBe(true)
   })
 
   it('runPlan 阶段 SDK 抛非 QoderCliProcessError 时,原样上抛不附加 stderr', async () => {

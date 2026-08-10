@@ -56,26 +56,6 @@ type SdkMessage = Record<string, unknown> & {
   error?: string
 }
 
-function asyncIterFromArray<T>(items: T[]): AsyncIterable<T> {
-  return {
-    [Symbol.asyncIterator]() {
-      let index = 0
-      return {
-        async next() {
-          if (index < items.length) return { value: items[index++] as T, done: false }
-          return { value: undefined as unknown as T, done: true }
-        },
-        async return() {
-          return { value: undefined as unknown as T, done: true }
-        },
-        async throw(error: unknown) {
-          throw error
-        }
-      }
-    }
-  }
-}
-
 function textDelta(text: string, sessionId: string): SdkMessage {
   return {
     type: 'stream_event',
@@ -145,31 +125,54 @@ function systemSubtype(
 }
 
 vi.mock('@qoder-ai/qoder-agent-sdk', () => {
-  // 把脚本化的 SDKMessage 数组喂给 driver
-  const scripts: { messages: SdkMessage[] }[] = []
-  const captured: Array<{ options: Record<string, unknown> }> = []
+  // 把脚本化的 SDKMessage 数组喂给 driver。
+  // 输出流是"常驻"的:脚本消息耗尽后挂起等待新脚本(模拟真实 SDK 会话在回合间保持),
+  // close() 后才真正结束 —— 这是常驻会话引擎测试的关键。
+  const scripts: Array<{ messages: SdkMessage[]; cursor: number }> = []
+  const scriptWaiters: Array<() => void> = []
+  const captured: Array<{ options: Record<string, unknown>; prompt?: string }> = []
+  let closed = false
+  let generation = 0
+  const wake = () => {
+    for (const w of scriptWaiters.splice(0)) w()
+  }
   return {
     accessToken: (token: string) => ({ token }),
     query: (args: { prompt?: string; options?: Record<string, unknown> }) => {
-      const script = scripts.shift() ?? { messages: [] }
-      captured.push({ options: args.options ?? {} })
+      captured.push({ options: args.options ?? {}, prompt: args.prompt })
       return {
         [Symbol.asyncIterator]() {
-          const iter = asyncIterFromArray(script.messages)[Symbol.asyncIterator]()
+          const myGen = generation
           return {
             async next() {
-              return iter.next()
+              while (true) {
+                // 先检查世代:被唤醒的旧会话 consume 直接退出,不能抢新测试的脚本。
+                if (myGen !== generation || closed) return { value: undefined, done: true }
+                const script = scripts[0]
+                if (script && script.cursor < script.messages.length) {
+                  return { value: script.messages[script.cursor++] as SdkMessage, done: false }
+                }
+                // 当前脚本已耗尽:换下一个脚本(如果有);否则挂起等待新脚本 / close。
+                if (scripts.length > 1) {
+                  scripts.shift()
+                  continue
+                }
+                await new Promise<void>((resolve) => scriptWaiters.push(resolve))
+              }
             },
             async return() {
-              return iter.return ? iter.return() : { value: undefined, done: true }
+              closed = true
+              wake()
+              return { value: undefined, done: true }
             },
             async throw(error: unknown) {
-              return iter.throw ? iter.throw(error) : Promise.reject(error)
+              throw error
             }
           }
         },
         async close() {
-          /* noop */
+          closed = true
+          wake()
         },
         async interrupt() {
           /* noop */
@@ -182,10 +185,19 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
     }),
     createSdkMcpServer: (config: { name: string; tools: unknown[] }) => ({ name: config.name, tools: config.tools }),
     // 暴露给测试用
-    __pushScript: (script: { messages: SdkMessage[] }) => scripts.push(script),
+    __pushScript: (script: { messages: SdkMessage[] }) => {
+      scripts.push({ messages: script.messages, cursor: 0 })
+      wake()
+    },
     __getLastQueryOptions: () => captured[captured.length - 1]?.options,
+    __getLastQueryPrompt: () => captured[captured.length - 1]?.prompt,
+    __getQueryCallCount: () => captured.length,
     __resetCaptured: () => {
       captured.length = 0
+      scripts.length = 0
+      closed = false
+      generation++
+      wake()
     }
   }
 })
@@ -195,6 +207,8 @@ const { QoderChatDriver } = await import('./qoder-chat-driver.js')
 const sdkMock = (await import('@qoder-ai/qoder-agent-sdk')) as unknown as {
   __pushScript: (script: { messages: SdkMessage[] }) => void
   __getLastQueryOptions: () => Record<string, unknown> | undefined
+  __getLastQueryPrompt: () => string | undefined
+  __getQueryCallCount: () => number
   __resetCaptured: () => void
 }
 
@@ -218,6 +232,12 @@ async function collect<T>(gen: AsyncGenerator<T>): Promise<T[]> {
   for await (const x of gen) out.push(x)
   return out
 }
+
+// mock 的脚本/世代状态在所有 describe 间共享:每个测试前必须重置,
+// 否则旧测试残留的 consume(挂起在脚本等待上)会污染后续测试。
+beforeEach(() => {
+  sdkMock.__resetCaptured()
+})
 
 describe('QoderChatDriver', () => {
   it('emits text parts in order and session part on first message', async () => {
@@ -302,6 +322,48 @@ describe('QoderChatDriver', () => {
     }
   })
 
+  it('emits task-created only once when both tool_result and result describe a task', async () => {
+    // tool_result 与 result 都携带可描述的产出(含 key)→ 去重后只发一次 task-created。
+    sdkMock.__pushScript({
+      messages: [
+        assistantMessageWithToolUse('createJiraIssue', {}, 'tc-dup', 'sess-4'),
+        assistantMessageWithToolResult('tc-dup', { key: 'BSADAPT-99' }, false),
+        { type: 'result', session_id: 'sess-4', result: { key: 'BSADAPT-99' } }
+      ]
+    })
+    const events = await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'create', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal,
+        toolSource: {
+          id: 'jira',
+          displayName: 'Jira',
+          systemPrompt: () => '',
+          tools: () => [],
+          describeResult: (output: unknown) => {
+            if (output && typeof output === 'object' && 'key' in (output as Record<string, unknown>)) {
+              const key = (output as Record<string, { toString(): string }>).key.toString()
+              return {
+                backend: 'jira',
+                externalKey: key,
+                summary: 'dup check',
+                projectKey: 'BSADAPT',
+                issueType: '任务'
+              }
+            }
+            return undefined
+          },
+          close: () => undefined
+        }
+      })
+    )
+    const taskCreated = events.filter((e) => e.type === 'task-created')
+    expect(taskCreated.length).toBe(1)
+  })
+
   it('returns no models when Qoder is not enabled/connected', async () => {
     const offline = new QoderChatDriver(
       () => 'token',
@@ -334,7 +396,7 @@ describe('QoderChatDriver', () => {
   })
 })
 
-describe('QoderChatDriver resume', () => {
+describe('QoderChatDriver multi-turn history', () => {
   function storedUser(id: string, text: string): StoredMessage {
     return {
       id,
@@ -366,11 +428,7 @@ describe('QoderChatDriver resume', () => {
     }
   }
 
-  beforeEach(() => {
-    sdkMock.__resetCaptured()
-  })
-
-  it('passes resume=sessionId when history ends with qoder.session, and truncates prompt history', async () => {
+  it('resumes from the last qoder.session id in history (会话恢复作为底层能力)', async () => {
     sdkMock.__pushScript({
       messages: [textDelta('second reply', 'sess-Y'), resultMessage('second reply', 'sess-Y')]
     })
@@ -391,6 +449,7 @@ describe('QoderChatDriver resume', () => {
       })
     )
     const options = sdkMock.__getLastQueryOptions()
+    // 历史末尾有 qoder.session → 用最后 sessionId resume,上下文由 Qoder 会话端恢复(不拼历史)。
     expect(options?.resume).toBe('sess-Y')
   })
 
@@ -414,6 +473,66 @@ describe('QoderChatDriver resume', () => {
     expect(options?.resume).toBe('sess-Y')
   })
 
+  it('reuses the resident session across turns in the same conversation (多轮对话执行引擎)', async () => {
+    sdkMock.__pushScript({
+      messages: [textDelta('first answer', 'sess-1'), resultMessage('first answer', 'sess-1')]
+    })
+    const d = driver()
+    const common = { model: 'qoder:claude-sonnet-4.5', history: [], signal: new AbortController().signal }
+    const first = await collect(
+      d.streamChat({ conversationId: 'c', ...common, userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() } })
+    )
+    // 第二次回合:先发起 streamChat(回合挂起等输出),再注入第二个脚本 —— 模拟真实时序:
+    // 用户发消息 → SDK 会话产出该轮输出(不是回合开始前就产出)。
+    const secondPromise = (async () =>
+      collect(
+        d.streamChat({ conversationId: 'c', ...common, userInput: { id: 'u2', text: 'again', createdAt: new Date().toISOString() } })
+      ))()
+    sdkMock.__pushScript({
+      messages: [textDelta('second answer', 'sess-1'), resultMessage('second answer', 'sess-1')]
+    })
+    const second = await secondPromise
+    const firstText = first.filter((e) => e.type === 'part' && e.part.type === 'text').map((e) => (e.type === 'part' ? e.part.text : ''))
+    const secondText = second.filter((e) => e.type === 'part' && e.part.type === 'text').map((e) => (e.type === 'part' ? e.part.text : ''))
+    expect(firstText.join('')).toContain('first answer')
+    expect(secondText.join('')).toContain('second answer')
+    // 两次 streamChat 复用同一会话:query 只创建一次(多轮由消息流驱动,不新建会话)。
+    expect(sdkMock.__getQueryCallCount()).toBe(1)
+  })
+
+  it('abort stops the current turn immediately and keeps the session reusable', async () => {
+    // 只给一条 textDelta、不给 result:回合挂起(模拟 SDK 卡住 / 长时间无输出)。
+    sdkMock.__pushScript({ messages: [textDelta('partial answer', 's1')] })
+    const d = driver()
+    const abort = new AbortController()
+    const common = { conversationId: 'c', model: 'qoder:claude-sonnet-4.5', history: [], signal: abort.signal }
+    const turnPromise = (async () =>
+      collect(
+        d.streamChat({ ...common, userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() } })
+      ))()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    // abort 必须唤醒挂起的回合(此前只靠 SDK 继续产出消息才能退出)。
+    abort.abort()
+    const events = await turnPromise
+    const texts = events.filter((e) => e.type === 'part' && e.part.type === 'text')
+    expect(texts.length).toBeGreaterThan(0)
+    // 会话保留:还能开下一回合。
+    sdkMock.__pushScript({ messages: [textDelta('after abort', 's1'), resultMessage('after abort', 's1')] })
+    const second = await collect(
+      d.streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        signal: new AbortController().signal,
+        userInput: { id: 'u2', text: 'again', createdAt: new Date().toISOString() }
+      })
+    )
+    const secondText = second.filter((e) => e.type === 'part' && e.part.type === 'text').map((e) => (e.type === 'part' ? e.part.text : ''))
+    expect(secondText.join('')).toContain('after abort')
+    // 复用同一会话:query 仍只创建一次。
+    expect(sdkMock.__getQueryCallCount()).toBe(1)
+  })
+
   it('does not pass resume when history has no qoder.session part', async () => {
     sdkMock.__pushScript({ messages: [textDelta('hi', 'sess-1'), resultMessage('hi', 'sess-1')] })
     const history: StoredMessage[] = [storedUser('u1', 'hi')]
@@ -428,6 +547,36 @@ describe('QoderChatDriver resume', () => {
     )
     const options = sdkMock.__getLastQueryOptions()
     expect(options?.resume).toBeUndefined()
+  })
+
+  it('passes the conversation cwd to the SDK query options', async () => {
+    sdkMock.__pushScript({ messages: [textDelta('hi', 'sess-1'), resultMessage('hi', 'sess-1')] })
+    await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal,
+        cwd: '/project/foo'
+      })
+    )
+    const options = sdkMock.__getLastQueryOptions()
+    expect(options?.cwd).toBe('/project/foo')
+  })
+
+  it('defaults cwd to process.cwd() for plain chats', async () => {
+    sdkMock.__pushScript({ messages: [textDelta('hi', 'sess-1'), resultMessage('hi', 'sess-1')] })
+    await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    expect(sdkMock.__getLastQueryOptions()?.cwd).toBe(process.cwd())
   })
 })
 
@@ -528,7 +677,9 @@ describe('QoderChatDriver sub-task lifecycle', () => {
     expect(parts.some((p) => p.type === 'qoder.subtask-end')).toBe(false)
   })
 
-  it('resets tool_use_id -> task_id mapping between streamChat calls', async () => {
+  it('new session does not leak tool_use_id -> task_id mapping across streamChat calls', async () => {
+    // 该映射是会话级(taskIdByToolUseId):新会话(新的 driver 实例 / 新 conversationId)不残留旧映射;
+    // 同一会话跨回合保留映射是设计意图 —— 同一 Qoder 会话内 tool_use_id 是 UUID,不会复用撞车。
     // 第一次流:注册 tool_use_id -> task_id
     sdkMock.__pushScript({
       messages: [

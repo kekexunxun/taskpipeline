@@ -25,6 +25,41 @@ describe('PartRenderer', () => {
     expect(document.querySelector('[data-subtask-id]')).toBeNull()
   })
 
+  it('merges consecutive text parts into a single block (正文不再分块)', () => {
+    render(
+      <PartRenderer
+        parts={[
+          { driverId: 'qoder', type: 'text', text: '第一段内容' },
+          { driverId: 'qoder', type: 'text', text: '，第二段内容' },
+          { driverId: 'qoder', type: 'text', text: '。第三段内容' }
+        ]}
+      />
+    )
+    // 流式 text_delta 拆成的多个 part 必须合并为完整正文,不能渲染成多个分块。
+    expect(screen.getByText('第一段内容，第二段内容。第三段内容')).toBeInTheDocument()
+    expect(screen.getAllByText(/内容/).length).toBe(1)
+  })
+
+  it('merges consecutive qoder.thinking parts into a single collapsible block', () => {
+    render(
+      <PartRenderer
+        parts={[
+          { driverId: 'qoder', type: 'qoder.thinking', text: '第一步思考' },
+          { driverId: 'qoder', type: 'qoder.thinking', text: '第二步思考' },
+          { driverId: 'qoder', type: 'qoder.thinking', text: '第三步思考' },
+          { driverId: 'qoder', type: 'text', text: '最终答案' }
+        ]}
+      />
+    )
+    // 流式 thinking_delta 被拆成多个 part:必须合并成 1 个「思考过程」折叠块,不能刷屏。
+    expect(screen.getAllByText('思考过程').length).toBe(1)
+    // 正文仍然独立渲染。
+    expect(screen.getByText('最终答案')).toBeInTheDocument()
+    // 展开后能看到完整的拼接推理文本。
+    fireEvent.click(screen.getByText('思考过程'))
+    expect(screen.getByText(/第一步思考\s*第二步思考\s*第三步思考/)).toBeInTheDocument()
+  })
+
   it('wraps a full subtask (start + in-task parts + end) in a SubTaskGroup, default collapsed', () => {
     render(
       <PartRenderer

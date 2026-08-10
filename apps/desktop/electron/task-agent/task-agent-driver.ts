@@ -39,7 +39,7 @@ export type TaskAgentEvent =
   | { type: "agent_start"; phase: TaskAgentPhase }
   | { type: "agent_end"; phase: TaskAgentPhase }
   | { type: "agent_text"; phase: TaskAgentPhase; text: string }
-  | { type: "agent_session"; sessionId: string }
+  | { type: "agent_session"; taskId: string; sessionId: string }
   | { type: "agent_usage"; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd?: number; durationMs?: number; turns?: number }
   | { type: "agent_log"; message: unknown }
   | { type: "agent_error"; message: string };
@@ -110,10 +110,10 @@ export interface TaskAgentDriver {
    */
   runTestGeneration(input: RunTestGenerationInput): Promise<void>;
   /**
-   * 取出 driver 内部累积的阶段产物。driver 内部按 (phase) 缓存最近一次 runXxx 的结果。
-   * 主流程拿 responseTexts 去 parse 各种决策 JSON。
+   * 取出 driver 内部累积的阶段产物。driver 是进程级单例,可能同时服务多个任务:
+   * 产物按 (taskId, phase) 隔离,主流程拿 responseTexts 去 parse 各种决策 JSON。
    */
-  collectResult(phase: "plan" | "implementation" | "test"): TaskAgentResult;
+  collectResult(taskId: string, phase: "plan" | "implementation" | "test"): TaskAgentResult;
   /** 释放 driver 持有的资源。 */
   dispose(): void;
 }

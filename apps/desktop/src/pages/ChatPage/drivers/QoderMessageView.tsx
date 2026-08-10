@@ -1,5 +1,5 @@
-import type { ChatMessage } from "@/api";
-import { PartRenderer } from "./PartRenderer";
+import { PartRenderer } from './PartRenderer'
+import type { ChatMessage } from '@/api'
 
 /**
  * Qoder 专属消息视图。
@@ -10,12 +10,6 @@ import { PartRenderer } from "./PartRenderer";
  *  - 不在此处叠加 metadata (status / taskCreation),那些由共享的 `ChatMessageView`
  *    统一加在外层。
  */
-export function QoderMessageView({
-  message,
-  isAnimating
-}: {
-  message: ChatMessage;
-  isAnimating?: boolean;
-}) {
-  return <PartRenderer parts={message.parts} isStreaming={isAnimating} />;
+export function QoderMessageView({ message, isAnimating }: { message: ChatMessage; isAnimating?: boolean }) {
+  return <PartRenderer parts={message.parts} isStreaming={isAnimating} />
 }

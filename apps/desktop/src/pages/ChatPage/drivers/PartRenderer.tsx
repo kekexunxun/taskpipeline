@@ -73,28 +73,65 @@ function resultPayloadOf(part: DriverPart | undefined): { output?: unknown; isEr
  *  - `text` part 由 `TextPart` 渲染(`MessageResponse` 流式 markdown),不区分 driver。
  */
 export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isStreaming?: boolean }) {
+  // 合并相邻的同类型流式增量 part:
+  //  - qoder.thinking:SDK 按 thinking_delta 拆分,每条渲染一个折叠块会刷屏(8+ 个空标题块);
+  //  - text:SDK 按 text_delta 拆分,每条渲染一个独立 markdown 块会让正文分段、代码块/列表断裂。
+  // 合并后只保留一个「思考过程」折叠块、一个完整正文段。
+  const mergedParts = useMemo(() => {
+    const out: DriverPart[] = []
+    for (const part of parts) {
+      const last = out[out.length - 1]
+      if (part.type === 'qoder.thinking' && last?.type === 'qoder.thinking') {
+        const signature = part.signature && last.signature !== part.signature ? part.signature : last.signature
+        const parentTaskId = part.parentTaskId ?? last.parentTaskId
+        out[out.length - 1] = {
+          driverId: part.driverId,
+          type: 'qoder.thinking',
+          text: `${last.text}\n${part.text}`,
+          ...(signature ? { signature } : {}),
+          ...(parentTaskId ? { parentTaskId } : {})
+        } as DriverPart
+      } else if (
+        part.type === 'text' &&
+        last?.type === 'text' &&
+        (part.parentTaskId ?? null) === (last.parentTaskId ?? null)
+      ) {
+        const parentTaskId = part.parentTaskId ?? last.parentTaskId
+        out[out.length - 1] = {
+          driverId: part.driverId,
+          type: 'text',
+          text: `${last.text}${part.text}`,
+          ...(parentTaskId ? { parentTaskId } : {})
+        } as DriverPart
+      } else {
+        out.push(part)
+      }
+    }
+    return out
+  }, [parts])
+
   // 同一次 interleaveTimeline 调用内要拿回原始 DriverPart,需要 ParentedItem 引用一致。
-  // interleaveTimeline 内部 push 的就是这里传入的对象,所以 parts.map(parentedPartOf) 这一份
+  // interleaveTimeline 内部 push 的就是这里传入的对象,所以 mergedParts.map(parentedPartOf) 这一份
   // 就是"唯一来源",byParented 与 blocks 都按它索引,引用相同才能 hit。
-  const parentedList = useMemo(() => parts.map(parentedPartOf), [parts])
+  const parentedList = useMemo(() => mergedParts.map(parentedPartOf), [mergedParts])
   const blocks = useMemo(() => interleaveTimeline(parentedList), [parentedList])
   const byParented = useMemo(() => {
     const out = new Map<ParentedItem, DriverPart>()
-    parentedList.forEach((p, index) => out.set(p, parts[index]!))
+    parentedList.forEach((p, index) => out.set(p, mergedParts[index]!))
     return out
-  }, [parentedList, parts])
+  }, [parentedList, mergedParts])
 
   // 全局工具配对上下文:tool-result 按 callId 索引,tool-use 的 callId 集合用于孤儿判断。
   const toolCtx = useMemo(() => {
     const resultByCallId = new Map<string, DriverPart>()
     const useCallIds = new Set<string>()
-    for (const part of parts) {
+    for (const part of mergedParts) {
       if (part.type === 'qoder.tool-result' || part.type === 'openai.tool-result')
         resultByCallId.set(part.toolCallId, part)
       if (part.type === 'qoder.tool-use' || part.type === 'openai.tool-call') useCallIds.add(part.toolCallId)
     }
     return { resultByCallId, useCallIds }
-  }, [parts])
+  }, [mergedParts])
 
   // 主流程里发起子任务的工具调用(subtask-start.toolUseId → taskId)。
   // 这些调用不再单独渲染成行 —— 子任务折叠卡就是它们的呈现(跟 Qoder 一致)。

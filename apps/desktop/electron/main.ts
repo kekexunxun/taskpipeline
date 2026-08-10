@@ -270,6 +270,10 @@ function updateState(task: Task, state: Task['state']): Task {
   if (task.state !== state) transitionTask(task.state, state)
   const updated = store.updateTask(task.id, { state })
   addTaskEvent({ taskId: task.id, kind: 'status', title: `状态更新为 ${taskStateLabels[state]}` })
+  // 任务进入终态:释放该任务常驻的 Qoder 会话(qodercli 进程),避免悬挂到应用退出。
+  if (['failed', 'completed', 'cancelled'].includes(state)) {
+    qoderTaskAgent?.closeSession(task.id)
+  }
   return updated
 }
 
@@ -517,8 +521,10 @@ function createQoderTaskAgent(): QoderTaskAgentDriver {
     emitPi,
     emit: (event) => {
       // TaskAgentEvent 透传给 UI 通道(以及失败后续接 session id 持久化)。
-      if (event.type === 'agent_session' && activeTaskId) {
-        store.updateTask(activeTaskId, { qoderSessionId: event.sessionId })
+      if (event.type === 'agent_session') {
+        // 优先用事件自带的 taskId,不依赖全局 activeTaskId(任务串行切换/并发时避免写错任务)。
+        const taskId = event.taskId || activeTaskId
+        if (taskId) store.updateTask(taskId, { qoderSessionId: event.sessionId })
       }
       // agent_start / agent_end 仍走 emitPi,让 task:event 通道能识别阶段。
       if (event.type === 'agent_start' || event.type === 'agent_end') {
@@ -586,6 +592,10 @@ function createQoderTaskAgent(): QoderTaskAgentDriver {
     }
   })
 }
+
+// 任务 agent 单例:内部持有按 taskId 常驻的 Qoder 会话注册表,
+// plan / implementation / test_generation 三阶段共享同一会话(多轮执行引擎)。
+const qoderTaskAgent = createQoderTaskAgent()
 
 // === Review 实现(Qoder / OpenAI 兼容) =========================================
 
@@ -1004,28 +1014,22 @@ async function runQoder(
   const repos = store.listTaskRepositories(task.id)
   if (repos.length === 0) throw new Error('任务未关联代码仓库')
   activeTaskId = task.id
-  activeQoderAbort?.abort()
-  const qoderAbort = new AbortController()
-  activeQoderAbort = qoderAbort
-  const abortFromTask = () => qoderAbort.abort(signal?.reason)
   signal?.throwIfAborted()
-  signal?.addEventListener('abort', abortFromTask, { once: true })
   addTaskEvent({
     taskId,
     kind: 'status',
     title: '执行环境:Qoder Agent SDK',
     detail: '使用应用随附运行时,并在已配置仓库目录中执行'
   })
-  const agent = createQoderTaskAgent()
   try {
-    await agent.runImplementation({
+    await qoderTaskAgent.runImplementation({
       task,
       repos,
       signal,
       ...(resumeSessionId ? { resumeSessionId } : {}),
       ...(extraPrompt ? { extraPrompt } : {})
     })
-    const { responseTexts } = agent.collectResult('implementation')
+    const { responseTexts } = qoderTaskAgent.collectResult(taskId, 'implementation')
     await finishImplementation(task.id, responseTexts, signal)
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
@@ -1035,10 +1039,6 @@ async function runQoder(
     addTaskEvent({ taskId, kind: 'error', title: 'Qoder 执行失败', detail })
     if (['implementing', 'validating'].includes(current?.state ?? '')) updateState(current!, 'failed')
     emitPi({ type: 'agent_error', taskId, message: detail })
-  } finally {
-    signal?.removeEventListener('abort', abortFromTask)
-    activeQoderAbort = undefined
-    activeQoderQuery = undefined
   }
 }
 
@@ -1051,22 +1051,10 @@ async function runQoderTestCases(taskId: string, signal?: AbortSignal): Promise<
   if (repos.length === 0) throw new Error('任务未关联代码仓库')
   activeTaskId = task.id
   addTaskEvent({ taskId, kind: 'status', title: '正在生成测试用例' })
-  activeQoderAbort?.abort()
-  const qoderAbort = new AbortController()
-  activeQoderAbort = qoderAbort
-  const abortFromTask = () => qoderAbort.abort(signal?.reason)
   signal?.throwIfAborted()
-  signal?.addEventListener('abort', abortFromTask, { once: true })
-  const agent = createQoderTaskAgent()
-  try {
-    await agent.runTestGeneration({ task, repos, signal })
-    const { responseTexts } = agent.collectResult('test')
-    return parseTestCaseGeneration(responseTexts)
-  } finally {
-    signal?.removeEventListener('abort', abortFromTask)
-    activeQoderAbort = undefined
-    activeQoderQuery = undefined
-  }
+  await qoderTaskAgent.runTestGeneration({ task, repos, signal })
+  const { responseTexts } = qoderTaskAgent.collectResult(taskId, 'test')
+  return parseTestCaseGeneration(responseTexts)
 }
 
 async function runQoderPlan(taskId: string, feedback?: string, signal?: AbortSignal): Promise<void> {
@@ -1075,42 +1063,18 @@ async function runQoderPlan(taskId: string, feedback?: string, signal?: AbortSig
   const repos = store.listTaskRepositories(task.id)
   if (repos.length === 0) throw new Error('任务未关联代码仓库')
 
-  // === 二次执行计划卡死的关键修复 ============================
-  // 1) 把上一个 activeQoderQuery 立即释放(最多等 5s),避免 SDK 内部残留会话;
-  // 2) 上一轮的 AbortController 先 abort,保证旧 for-await 能退出;
-  // 3) 新 AbortController 在旧资源完全释放后再替换 activeQoderAbort。
-  const previousQuery = activeQoderQuery
-  const previousAbort = activeQoderAbort
-  activeQoderQuery = undefined
-  activeQoderAbort = undefined
-  previousAbort?.abort()
-  if (previousQuery) {
-    try {
-      await previousQuery.interrupt()
-    } catch {
-      /* may already be closed */
-    }
-    await closeQoderQuerySafely(previousQuery, 5_000)
-  }
-  // ============================================================
-
   activeTaskId = task.id
   activePlanningTaskId = task.id
   activePlanText = ''
-  const abort = new AbortController()
-  const abortFromTask = () => abort.abort(signal?.reason)
   signal?.throwIfAborted()
-  signal?.addEventListener('abort', abortFromTask, { once: true })
-  activeQoderAbort = abort
-  const agent = createQoderTaskAgent()
   try {
-    await agent.runPlan({ task, repos, signal, ...(feedback ? { feedback } : {}) })
-    const { responseTexts } = agent.collectResult('plan')
+    await qoderTaskAgent.runPlan({ task, repos, signal, ...(feedback ? { feedback } : {}) })
+    const { responseTexts } = qoderTaskAgent.collectResult(taskId, 'plan')
     await savePlanDecision(taskId, responseTexts)
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     addTaskEvent({ taskId, kind: 'error', title: '计划生成失败', detail })
-    abort.abort()
+    qoderTaskAgent.interruptSession(taskId)
     const current = store.getTask(taskId)
     if (current?.state === 'planning') {
       store.updateTask(taskId, { failureStage: 'planning' })
@@ -1118,9 +1082,6 @@ async function runQoderPlan(taskId: string, feedback?: string, signal?: AbortSig
     }
     throw error
   } finally {
-    signal?.removeEventListener('abort', abortFromTask)
-    if (activeQoderAbort === abort) activeQoderAbort = undefined
-    activeQoderQuery = undefined
     activePlanningTaskId = undefined
   }
 }
@@ -1793,17 +1754,9 @@ async function pauseTask(taskId: string): Promise<void> {
   const operation = activeTaskOperations.get(taskId)
   operation?.controller.abort(new Error('任务已暂停'))
   if (activeTaskId === taskId) {
+    // 常驻会话:只中断当前回复、保留会话(上下文不丢),恢复时直接续跑,无需 resume。
     activeQoderAbort?.abort(new Error('任务已暂停'))
-    const qoderQuery = activeQoderQuery
-    activeQoderQuery = undefined
-    if (qoderQuery) {
-      try {
-        await qoderQuery.interrupt()
-      } catch {
-        /* may already be closed */
-      }
-      await closeQoderQuerySafely(qoderQuery, 5_000)
-    }
+    qoderTaskAgent.interruptSession(taskId)
     await stopPi()
     activeTaskId = undefined
     store.setSetting('activeTaskId', '')
@@ -1963,6 +1916,8 @@ async function stopTaskOperations(taskId: string, markFailed: boolean): Promise<
   const task = store.getTask(taskId)
   if (markFailed && task && ['planning', 'implementing', 'validating', 'generating_tests'].includes(task.state))
     updateState(task, 'failed')
+  // 释放该任务常驻的 Qoder 会话(停止/删除都会走到这里;failed 分支 updateState 也会触发,幂等)。
+  qoderTaskAgent.closeSession(taskId)
 
   if (activeTaskId === taskId) {
     const qoderAbort = activeQoderAbort
@@ -3110,18 +3065,27 @@ function registerIpc(): void {
   // === Chat 对话(Codex 样式) =================================================
   ipcMain.handle('chats:list', () => chatService.listChats())
   ipcMain.handle('chats:get', (_event, id: string) => chatService.getChat(id))
-  ipcMain.handle('chats:create', (_event, input?: { driverId?: ChatDriverId; model?: string }) =>
-    chatService.createChat(input?.driverId, input?.model)
+  ipcMain.handle('chats:create', (_event, input?: { driverId?: ChatDriverId; model?: string; workingDirectory?: string }) =>
+    chatService.createChat(input?.driverId, input?.model, input?.workingDirectory)
   )
   ipcMain.handle('chats:delete', (_event, id: string) => {
     chatService.deleteChat(id)
     memoryService.deleteConversationMemories(id)
   })
+  ipcMain.handle('chats:set-directory', (_event, id: string, workingDirectory?: string) =>
+    chatService.setChatWorkingDirectory(id, workingDirectory)
+  )
   ipcMain.handle('chats:list-models', () => chatService.listModels())
   ipcMain.handle('chats:start-stream', (_event, input) => {
     void chatService.startChatStream(input).catch((reason) => console.error('[chat] stream failed', reason))
   })
   ipcMain.handle('chats:abort', (_event, input) => chatService.abortChat(input))
+  // 纯目录选择(项目对话绑定用,不校验 git;repos:choose-folder 才校验仓库)。
+  ipcMain.handle('dialog:choose-directory', async () => {
+    if (!mainWindow) return undefined
+    const localPath = (await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })).filePaths[0]
+    return localPath || undefined
+  })
 }
 
 // 统一应用图标：dev 环境取 build/icon.png 源文件，打包后取 vite 从 public/ 拷贝到 dist/ 的副本，

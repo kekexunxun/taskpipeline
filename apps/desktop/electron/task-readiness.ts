@@ -18,37 +18,39 @@ export const implementationOutcomeInstruction = [
 ].join("\n");
 
 export function parseImplementationDecision(texts: string[]): ImplementationDecision {
-  const candidates = [...texts].map((text) => text.trim()).filter(Boolean).reverse();
-  for (const text of candidates) {
-    const marker = text.match(outcomeMarker)?.[1] as Exclude<ImplementationOutcome, "unknown"> | undefined;
-    if (marker) return { outcome: marker, content: text.replace(outcomeMarker, "").trim() };
+  // 先把流式增量片段按顺序拼成完整文本再解析(兼容消息粒度与 delta 碎片粒度):
+  // outcome marker 或 JSON 可能横跨多条碎片,逐条解析会漏判,导致实现结果被误判。
+  const full = texts.join("").trim();
+  const marker = full.match(outcomeMarker)?.[1] as Exclude<ImplementationOutcome, "unknown"> | undefined;
+  if (marker) return { outcome: marker, content: full.replace(outcomeMarker, "").trim() };
 
-    const start = text.lastIndexOf("{");
-    const end = text.lastIndexOf("}");
-    if (start >= 0 && end > start) {
+  const start = full.lastIndexOf("{");
+  const end = full.lastIndexOf("}");
+  let parsedValue: { outcome?: string; summary?: string; question?: string } | undefined;
+  if (start >= 0 && end > start) {
+    try {
+      parsedValue = JSON.parse(full.slice(start, end + 1));
+    } catch {
+      // 模型常见瑕疵:尾逗号。修复后重试。
       try {
-        const value = JSON.parse(text.slice(start, end + 1)) as { outcome?: string; summary?: string; question?: string };
-        if (["needs_input", "already_satisfied", "completed"].includes(value.outcome ?? "")) {
-          return {
-            outcome: value.outcome as Exclude<ImplementationOutcome, "unknown">,
-            content: String(value.summary || value.question || text).trim()
-          };
-        }
-      } catch { /* Compatibility fallback for agents that return natural language. */ }
+        parsedValue = JSON.parse(full.replace(/,\s*([}\]])/g, "$1").slice(start, end + 1));
+      } catch { /* fall through to natural-language heuristics */ }
     }
+  }
+  if (parsedValue && ["needs_input", "already_satisfied", "completed"].includes(parsedValue.outcome ?? "")) {
+    return {
+      outcome: parsedValue.outcome as Exclude<ImplementationOutcome, "unknown">,
+      content: String(parsedValue.summary || parsedValue.question || full).trim()
+    };
   }
 
-  for (const content of candidates) {
-    if (/(?:需要|请)(?:你|您)?(?:补充|提供|确认|说明|澄清)|信息(?:不足|缺失|不完整)|无法(?:开始|继续|确定)|等待(?:你|您)?(?:回复|确认)|before I can (?:start|continue|proceed)|(?:need|require)(?:s|ed)? (?:more |additional )?(?:information|details|requirements|clarification)|could you (?:share|provide|clarify|confirm)|acceptance criteria (?:appears? )?(?:empty|missing)/i.test(content)) {
-      return { outcome: "needs_input", content };
-    }
+  if (/(?:需要|请)(?:你|您)?(?:补充|提供|确认|说明|澄清)|信息(?:不足|缺失|不完整)|无法(?:开始|继续|确定)|等待(?:你|您)?(?:回复|确认)|before I can (?:start|continue|proceed)|(?:need|require)(?:s|ed)? (?:more |additional )?(?:information|details|requirements|clarification)|could you (?:share|provide|clarify|confirm)|acceptance criteria (?:appears? )?(?:empty|missing)/i.test(full)) {
+    return { outcome: "needs_input", content: full };
   }
-  for (const content of candidates) {
-    if (/(?:该任务|当前代码|代码|仓库)?(?:已经|已)(?:满足|实现)(?:任务|需求|要求)|无需(?:任何)?(?:代码)?修改|无需改动|already satisfied|no (?:code )?changes? (?:are )?required/i.test(content)) {
-      return { outcome: "already_satisfied", content };
-    }
+  if (/(?:该任务|当前代码|代码|仓库)?(?:已经|已)(?:满足|实现)(?:任务|需求|要求)|无需(?:任何)?(?:代码)?修改|无需改动|already satisfied|no (?:code )?changes? (?:are )?required/i.test(full)) {
+    return { outcome: "already_satisfied", content: full };
   }
-  return { outcome: "unknown", content: candidates[0] ?? "" };
+  return { outcome: "unknown", content: full };
 }
 
 export function nextStepForImplementation(outcome: ImplementationOutcome, changedFileCount: number): ImplementationNextStep {

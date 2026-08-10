@@ -1,0 +1,604 @@
+/**
+ * Qoder 常驻会话引擎 — 多轮对话的统一执行底座。
+ *
+ * 背景:
+ *  - 对话板块(QoderChatDriver)与任务板块(QoderTaskAgentDriver)都调 `@qoder-ai/qoder-agent-sdk`
+ *    的 `query()`,但此前各自"每次调用新建一个 query + 用 resume 续接",与官方多轮语义
+ *    (同一 query 会话内连续送用户消息,见 https://docs.qoder.com/zh/cli/sdk/multi-turn-conversation)
+ *    不符:resume 依赖本地 session 文件,`persistSession:false` 时第二轮会因
+ *    "Error resuming session" 直接空回复。
+ *
+ * 设计(官方 TS SDK 多轮方式):
+ *  - 每个逻辑会话(conversationId / taskId)常驻一个 `QoderSession`,内部持有唯一的 `query()`;
+ *  - 用户消息通过异步输入流(AsyncGenerator<SDKUserMessage>)按顺序送入,输入流在会话 close
+ *    前永不结束,因此会话不会自动关闭;
+ *  - 消费循环独占 `for await (const msg of query)`(SDK 输出流只能迭代一次),把输出按
+ *    "回合"分发:一次 `turn()` 调用 = 一个回合,`result` 消息 = 回合结束;
+ *  - 会话控制作为底层能力: `resume`(恢复历史会话)、`interrupt`(停止当前回复、保留会话)、
+ *    `close`(结束会话)、`dispose`(应用退出统一清理)。
+ */
+
+import { accessToken, query, type Query, type SDKMessage, type SDKUserMessage } from '@qoder-ai/qoder-agent-sdk'
+import type { ChatStreamChunk, ChatTaskCreationResult, DriverPart } from '../chat/chat-types.js'
+import type { ToolSource } from '../chat/drivers/tool-source.js'
+
+/** SDK query options(用于让会话 options 与 SDK 类型严格对齐)。 */
+type SdkQueryOptions = NonNullable<Parameters<typeof query>[0]['options']>
+type SdkMcpServers = NonNullable<SdkQueryOptions['mcpServers']>
+
+// === SDK 消息形态(与 qoder-chat-driver 同源) =================================
+
+type SdkContentBlock = {
+  type: string
+  text?: string
+  thinking?: string
+  signature?: string
+  id?: string
+  name?: string
+  input?: unknown
+  tool_use_id?: string
+  content?: unknown
+  is_error?: boolean
+}
+
+export type RawSdkMessage = {
+  type?: string
+  session_id?: string
+  subtype?: string
+  task_id?: string
+  tool_use_id?: string
+  description?: string
+  task_type?: string
+  subagent_type?: string
+  workflow_name?: string
+  prompt?: string
+  last_tool_name?: string
+  status?: string
+  output_file?: string
+  summary?: string
+  usage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number }
+  parent_tool_use_id?: string | null
+  event?: {
+    type?: string
+    delta?: { type?: string; text?: string; thinking?: string; signature?: string }
+    content_block?: SdkContentBlock
+    index?: number
+    error?: { message?: string } | string
+  }
+  message?: { content?: SdkContentBlock[]; usage?: unknown; parent_tool_use_id?: string | null }
+  result?: string | unknown
+  error?: string
+}
+
+/** 从任意位置读一个非空字符串(避开 SDK 在多处的字段摇移)。 */
+function readNonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/** 抽取 SDKMessage 上的 parent_tool_use_id(SDK 可能挂在顶层或 message 顶层)。 */
+function parentToolUseIdOf(message: RawSdkMessage): string | undefined {
+  return readNonEmptyString(message.parent_tool_use_id) ?? readNonEmptyString(message.message?.parent_tool_use_id)
+}
+
+// === 回合 =====================================================================
+
+export type QoderTurnStatus = 'active' | 'done' | 'error' | 'aborted' | 'closed'
+
+type ActiveTurn = {
+  seq: number
+  status: QoderTurnStatus
+  error?: unknown
+  /** 待消费循环分发给回合调用方的 chunk(part / task-created)。 */
+  queue: ChatStreamChunk[]
+  /** part 到达 / 状态变化时唤醒回合调用方。 */
+  waiters: Array<() => void>
+  /** 回合内累积的 parts(跨消息去重 / taskIdByToolUseId 反查用)。 */
+  parts: DriverPart[]
+  /** 回合级文本 buffer(SDK 文本增量去重,防止 result 与流式文本重复)。 */
+  buffer: string
+  /** 已派发过 task-created(去重:tool_result 与 result 都携带产出时只发一次)。 */
+  taskCreated?: boolean
+  toolSource?: ToolSource
+}
+
+// === 会话 ====================================================================
+
+export type QoderSessionOptions = {
+  token: string
+  cwd?: string
+  additionalDirectories?: string[]
+  model?: string
+  /** 恢复已有会话(底层能力)。 */
+  resume?: string
+  permissionMode?: SdkQueryOptions['permissionMode']
+  settings?: SdkQueryOptions['settings']
+  /** 透传给 SDK 的 hooks(任务板块的 PermissionRequest HITL 等)。 */
+  hooks?: SdkQueryOptions['hooks']
+  allowedTools?: SdkQueryOptions['allowedTools']
+  systemPrompt?: SdkQueryOptions['systemPrompt']
+  mcpServers?: SdkMcpServers
+  allowedMcpServerNames?: SdkQueryOptions['allowedMcpServerNames']
+  maxTurns?: SdkQueryOptions['maxTurns']
+  controlRequestTimeoutMs?: number
+  /** 每条 SDK 消息的回调(任务板块记录日志 / 上报 / 持久化用;对话板块不需要)。 */
+  onMessage?: (message: SDKMessage) => void
+  /** 会话创建时回调(让上层持有 query 句柄,用于中断/状态探测)。 */
+  onQueryStarted?: (query: Query, abort: AbortController) => void
+  /** 会话关闭时回调。 */
+  onQueryFinished?: (query: Query) => void
+}
+
+export type QoderTurnInput = {
+  text: string
+  toolSource?: ToolSource
+  signal?: AbortSignal
+}
+
+/**
+ * 一个常驻 Qoder 会话。
+ *
+ * 生命周期:
+ *  - 构造:创建 `query()`(输入流为异步用户消息流)+ 启动消费循环;
+ *  - `turn()`:一次用户输入,消费到本回合 `result` / `error` / abort;
+ *  - `interrupt()`:停止当前回复,保留会话(abort 时由 driver 调用);
+ *  - `close()`:结束会话(删除对话 / 任务完成 / 应用退出)。
+ */
+export class QoderSession {
+  readonly id: string
+
+  private readonly query: Query
+  private readonly consumer: Promise<void>
+  private readonly options: QoderSessionOptions
+  private readonly abortController = new AbortController()
+  private readonly taskIdByToolUseId = new Map<string, string>()
+  private sessionId: string | undefined
+  private closed = false
+  private turnSeq = 0
+  private activeTurn: ActiveTurn | undefined
+  /** 回合间隙到达的消息(早于回合开始 / interrupt 残留)。回合开始时重放,避免被丢弃。 */
+  private readonly pendingMessages: RawSdkMessage[] = []
+  /** 回合前消费循环抛出的错误(竞态:consume 早于回合结束)。回合开始时注入。 */
+  private pendingError: unknown
+  private readonly inputQueue: SDKUserMessage[] = []
+  private readonly inputWaiters: Array<(msg: SDKUserMessage | undefined) => void> = []
+
+  constructor(id: string, options: QoderSessionOptions) {
+    this.id = id
+    this.options = options
+    this.query = query({
+      prompt: this.inputStream(),
+      options: {
+        auth: accessToken(options.token),
+        ...(options.cwd ? { cwd: options.cwd } : {}),
+        ...(options.additionalDirectories && options.additionalDirectories.length
+          ? { additionalDirectories: options.additionalDirectories }
+          : {}),
+        ...(options.model ? { model: options.model } : {}),
+        ...(options.resume ? { resume: options.resume } : {}),
+        ...(options.permissionMode ? { permissionMode: options.permissionMode } : {}),
+        ...(options.settings ? { settings: options.settings } : {}),
+        ...(options.hooks ? { hooks: options.hooks } : {}),
+        ...(options.allowedTools && options.allowedTools.length ? { allowedTools: options.allowedTools } : {}),
+        ...(options.systemPrompt ? { systemPrompt: options.systemPrompt } : {}),
+        ...(options.mcpServers ? { mcpServers: options.mcpServers } : {}),
+        ...(options.allowedMcpServerNames && options.allowedMcpServerNames.length
+          ? { allowedMcpServerNames: options.allowedMcpServerNames }
+          : {}),
+        ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
+        ...(options.controlRequestTimeoutMs !== undefined
+          ? { controlRequestTimeoutMs: options.controlRequestTimeoutMs }
+          : {}),
+        abortController: this.abortController,
+        // 流式输出(打字机效果 / 推理过程 / 工具入参增量)是回合实时转发的基础。
+        includePartialMessages: true
+      }
+    })
+    this.consumer = this.consume()
+    this.options.onQueryStarted?.(this.query, this.abortController)
+  }
+
+  /** 已恢复 / 已捕获的 sessionId(resume 的锚点)。 */
+  getSessionId(): string | undefined {
+    return this.sessionId
+  }
+
+  /**
+   * 执行一个回合:入队用户消息,实时 yield 本回合输出,直到回合结束 / abort / 错误。
+   * 回合结束后会话保留,可继续 `turn()` —— 这是"多轮对话作为执行引擎"的核心。
+   */
+  async *turn(input: QoderTurnInput): AsyncGenerator<ChatStreamChunk> {
+    if (this.closed) throw new Error('Qoder 会话已关闭')
+    if (this.activeTurn && this.activeTurn.status === 'active') {
+      throw new Error('Qoder 会话已有进行中的回合')
+    }
+    const turn: ActiveTurn = {
+      seq: ++this.turnSeq,
+      status: 'active',
+      queue: [],
+      waiters: [],
+      parts: [],
+      buffer: '',
+      toolSource: input.toolSource
+    }
+    this.activeTurn = turn
+    // 竞态兜底:消费循环在回合开始前就已报错 → 注入本回合(原样上抛,保留错误类型)。
+    if (this.pendingError !== undefined) {
+      const error = this.pendingError
+      this.pendingError = undefined
+      turn.status = 'error'
+      turn.error = error
+      this.wakeTurn(turn)
+    }
+    // 重放回合间隙缓冲的消息(会话元信息 / 残留 part / 竞态时提前到达的回合完整输出)。
+    // 不过滤 result/error:竞态下消费循环可能抢先把本回合输出(含 result)全部缓冲,
+    // 过滤 result 会导致回合永不结束;result/error 由 handleMessage 自然收尾。
+    const buffered = this.pendingMessages.splice(0)
+    for (const message of buffered) {
+      this.handleMessage(message, turn)
+    }
+    this.pushUserMessage(input.text)
+    try {
+      while (true) {
+        // 先 drain 队列:回合结束(result)后可能还有已入队未 yield 的 part,不能丢。
+        if (turn.queue.length) {
+          yield turn.queue.shift()!
+          continue
+        }
+        if (input.signal?.aborted) {
+          turn.status = 'aborted'
+          break
+        }
+        if (turn.status === 'done' || turn.status === 'closed') break
+        if (turn.status === 'error') {
+          // 原样抛原始错误(如 QoderCliProcessError),让上层能做 stderr 增强。
+          throw turn.error instanceof Error ? turn.error : new Error(turn.error !== undefined ? String(turn.error) : 'Qoder SDK 错误')
+        }
+        // 队列空且回合仍 active:挂起,等消费循环推 chunk / 改状态后唤醒;
+        // 同时监听 abort —— 否则 abort/interrupt 后若 SDK 不再产出消息,回合会永久挂起。
+        const onAbort = () => this.wakeTurn(turn)
+        input.signal?.addEventListener('abort', onAbort, { once: true })
+        await new Promise<void>((resolve) => turn.waiters.push(resolve))
+        input.signal?.removeEventListener('abort', onAbort)
+      }
+    } finally {
+      if (this.activeTurn === turn) this.activeTurn = undefined
+    }
+    if (turn.status === 'aborted') await this.interrupt()
+  }
+
+  /** 停止当前回复,保留会话(后续仍可 turn())。 */
+  async interrupt(): Promise<void> {
+    try {
+      await this.query.interrupt()
+    } catch {
+      /* may already be interrupted / closed */
+    }
+  }
+
+  /** 结束会话:关闭 query、唤醒所有挂起等待。关闭带超时保护,避免 qodercli 子进程异常时悬挂。 */
+  async close(): Promise<void> {
+    if (this.closed) return
+    this.closed = true
+    for (const resolve of this.inputWaiters.splice(0)) resolve(undefined)
+    if (this.activeTurn) {
+      this.activeTurn.status = 'closed'
+      this.wakeTurn(this.activeTurn)
+    }
+    let closeTimer: ReturnType<typeof setTimeout> | undefined
+    const closed = await Promise.race([
+      this.query.close().then(() => true).catch(() => true),
+      new Promise<false>((resolve) => {
+        closeTimer = setTimeout(() => resolve(false), 5_000)
+      })
+    ])
+    if (closeTimer) clearTimeout(closeTimer)
+    if (!closed) {
+      console.warn(`[qoder-session] close() 超时(5s):会话 ${this.id} 的 qodercli 进程可能未完全回收`)
+    }
+    this.options.onQueryFinished?.(this.query)
+  }
+
+  // === 内部 ==================================================================
+
+  /** 异步用户消息流:close 前永不结束(会话不自动关闭),消息从队列取。 */
+  private async *inputStream(): AsyncGenerator<SDKUserMessage> {
+    while (true) {
+      const next = await this.nextInput()
+      if (next === undefined) return
+      yield next
+    }
+  }
+
+  private async nextInput(): Promise<SDKUserMessage | undefined> {
+    const queued = this.inputQueue.shift()
+    if (queued) return queued
+    if (this.closed) return undefined
+    return new Promise<SDKUserMessage | undefined>((resolve) => this.inputWaiters.push(resolve))
+  }
+
+  private pushUserMessage(text: string): void {
+    const message: SDKUserMessage = {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text }] },
+      parent_tool_use_id: null
+    }
+    const waiter = this.inputWaiters.shift()
+    if (waiter) waiter(message)
+    else this.inputQueue.push(message)
+  }
+
+  private wakeTurn(turn: ActiveTurn): void {
+    for (const waiter of turn.waiters.splice(0)) waiter()
+  }
+
+  private pushChunk(turn: ActiveTurn, chunk: ChatStreamChunk): void {
+    turn.queue.push(chunk)
+    this.wakeTurn(turn)
+  }
+
+  /** 消费循环:独占 query 输出,把消息转成 chunk 分发给当前回合。 */
+  private async consume(): Promise<void> {
+    try {
+      for await (const raw of this.query) {
+        const message = raw as SDKMessage
+        this.options.onMessage?.(message)
+        const turn = this.activeTurn
+        if (!turn || turn.status !== 'active') {
+          // 无活跃回合:缓冲,回合开始时重放(竞态/残留消息不丢失)。
+          this.pendingMessages.push(message as RawSdkMessage)
+          continue
+        }
+        this.handleMessage(message as RawSdkMessage, turn)
+      }
+    } catch (error) {
+      const turn = this.activeTurn
+      if (turn && turn.status === 'active') {
+        turn.status = 'error'
+        turn.error = error
+        this.wakeTurn(turn)
+      } else {
+        // 回合尚未开始就出错:保留,回合开始时注入。
+        this.pendingError = error
+      }
+    }
+    // query 流结束(close / CLI 进程退出 / resume 失败):结束当前回合。
+    this.failTurn(new Error('Qoder 会话已结束'))
+  }
+
+  private failTurn(error: unknown): void {
+    const turn = this.activeTurn
+    if (!turn || turn.status !== 'active') return
+    turn.status = 'error'
+    turn.error = error
+    this.wakeTurn(turn)
+  }
+
+  /**
+   * 把一条 SDKMessage 解析成 chunk 推入当前回合(解析逻辑自 qoder-chat-driver 搬迁)。
+   * - `yield` 语义 → `pushChunk`;
+   * - `throw` 语义 → `failTurn`(仅在无文本产出时,避免把半截回复当成错误)。
+   */
+  private handleMessage(message: RawSdkMessage, turn: ActiveTurn): void {
+    const parentTaskId = this.resolveParentTaskId(message)
+    const pushPart = (part: DriverPart): DriverPart => {
+      const stamped: DriverPart = parentTaskId ? ({ ...part, parentTaskId } as DriverPart) : part
+      turn.parts.push(stamped)
+      this.pushChunk(turn, { type: 'part', part: stamped })
+      return stamped
+    }
+
+    if (typeof message.session_id === 'string' && message.session_id && message.session_id !== this.sessionId) {
+      this.sessionId = message.session_id
+      const sessionPart: DriverPart = { driverId: 'qoder', type: 'qoder.session', sessionId: message.session_id }
+      turn.parts.push(sessionPart)
+      this.pushChunk(turn, { type: 'part', part: sessionPart })
+    }
+
+    if (message.type === 'system') {
+      if (message.subtype === 'task_started' && message.task_id) {
+        const toolUseId = readNonEmptyString(message.tool_use_id)
+        if (toolUseId) this.taskIdByToolUseId.set(toolUseId, message.task_id)
+        const startPart: DriverPart = {
+          driverId: 'qoder',
+          type: 'qoder.subtask-start',
+          taskId: message.task_id,
+          parentTaskId: message.task_id,
+          ...(readNonEmptyString(message.task_type) ? { taskType: message.task_type } : {}),
+          ...(readNonEmptyString(message.subagent_type) ? { subagentType: message.subagent_type } : {}),
+          ...(readNonEmptyString(message.description) ? { description: message.description } : {}),
+          ...(toolUseId ? { toolUseId } : {})
+        }
+        turn.parts.push(startPart)
+        this.pushChunk(turn, { type: 'part', part: startPart })
+      } else if (message.subtype === 'task_progress' && message.task_id) {
+        const progressPart: DriverPart = {
+          driverId: 'qoder',
+          type: 'qoder.subtask-progress',
+          taskId: message.task_id,
+          parentTaskId: message.task_id,
+          ...(readNonEmptyString(message.description) ? { description: message.description } : {}),
+          ...(readNonEmptyString(message.last_tool_name) ? { lastToolName: message.last_tool_name } : {}),
+          ...(message.usage ? { usage: message.usage } : {})
+        }
+        turn.parts.push(progressPart)
+        this.pushChunk(turn, { type: 'part', part: progressPart })
+      } else if (message.subtype === 'task_notification' && message.task_id) {
+        const status = readNonEmptyString(message.status) ?? 'unknown'
+        const endPart: DriverPart = {
+          driverId: 'qoder',
+          type: 'qoder.subtask-end',
+          taskId: message.task_id,
+          parentTaskId: message.task_id,
+          status,
+          ...(readNonEmptyString(message.summary) ? { summary: message.summary } : {}),
+          ...(readNonEmptyString(message.output_file) ? { outputFile: message.output_file } : {}),
+          ...(message.usage ? { usage: message.usage } : {})
+        }
+        turn.parts.push(endPart)
+        this.pushChunk(turn, { type: 'part', part: endPart })
+      }
+      return
+    }
+
+    if (message.type === 'stream_event') {
+      const event = message.event
+      if (event?.type === 'content_block_delta') {
+        const delta = event.delta
+        if (delta?.type === 'text_delta' && delta.text) {
+          turn.buffer += delta.text
+          pushPart({ driverId: 'qoder', type: 'text', text: delta.text })
+        } else if (delta?.type === 'thinking_delta' && delta.thinking) {
+          pushPart({
+            driverId: 'qoder',
+            type: 'qoder.thinking',
+            text: delta.thinking,
+            ...(delta.signature ? { signature: delta.signature } : {})
+          })
+        }
+      } else if (event?.type === 'content_block_start' && event.content_block) {
+        const block = event.content_block
+        if (block.type === 'text' && block.text) {
+          turn.buffer += block.text
+          pushPart({ driverId: 'qoder', type: 'text', text: block.text })
+        } else if (block.type === 'thinking' && block.thinking) {
+          pushPart({ driverId: 'qoder', type: 'qoder.thinking', text: block.thinking })
+        } else if (block.type === 'tool_use' && block.name) {
+          const toolCallId = typeof block.id === 'string' ? block.id : `qoder-${turn.parts.length}`
+          pushPart({
+            driverId: 'qoder',
+            type: 'qoder.tool-use',
+            toolCallId,
+            name: block.name,
+            input: block.input ?? {}
+          })
+        }
+      } else if (event?.type === 'error' && !turn.buffer) {
+        const errorText =
+          typeof event.error === 'string' ? event.error : (event.error?.message ?? 'Qoder SDK 流式错误')
+        turn.status = 'error'
+        turn.error = errorText
+        this.wakeTurn(turn)
+      }
+      return
+    }
+
+    if (message.type === 'assistant' && Array.isArray(message.message?.content)) {
+      for (const block of message.message.content) {
+        if (block.type === 'text' && block.text) {
+          if (!turn.buffer.includes(block.text)) {
+            turn.buffer += block.text
+            pushPart({ driverId: 'qoder', type: 'text', text: block.text })
+          }
+        } else if (block.type === 'tool_use' && block.name) {
+          const toolCallId = typeof block.id === 'string' ? block.id : `qoder-${turn.parts.length}`
+          const toolUsePart: DriverPart = {
+            driverId: 'qoder',
+            type: 'qoder.tool-use',
+            toolCallId,
+            name: block.name,
+            input: block.input ?? {}
+          }
+          if (!turn.parts.some((existing) => existing.type === 'qoder.tool-use' && existing.toolCallId === toolCallId)) {
+            turn.parts.push(toolUsePart)
+            this.pushChunk(turn, { type: 'part', part: toolUsePart })
+          }
+        } else if (block.type === 'tool_result') {
+          const toolCallId = typeof block.tool_use_id === 'string' ? block.tool_use_id : `qoder-${turn.parts.length}`
+          const output = block.content
+          const toolResultPart: DriverPart = {
+            driverId: 'qoder',
+            type: 'qoder.tool-result',
+            toolCallId,
+            output,
+            ...(block.is_error ? { isError: true } : {})
+          }
+          turn.parts.push(toolResultPart)
+          this.pushChunk(turn, { type: 'part', part: toolResultPart })
+          if (turn.toolSource && !turn.taskCreated) {
+            const described = turn.toolSource.describeResult(output)
+            if (described) {
+              turn.taskCreated = true
+              this.pushChunk(turn, { type: 'task-created', result: described as ChatTaskCreationResult })
+            }
+          }
+        } else if (block.type === 'thinking' && block.thinking) {
+          const thinkingPart: DriverPart = { driverId: 'qoder', type: 'qoder.thinking', text: block.thinking }
+          if (!turn.parts.some((existing) => existing.type === 'qoder.thinking' && existing.text === block.thinking)) {
+            turn.parts.push(thinkingPart)
+            this.pushChunk(turn, { type: 'part', part: thinkingPart })
+          }
+        }
+      }
+      return
+    }
+
+    if (message.type === 'result') {
+      const resultText = typeof message.result === 'string' ? message.result : ''
+      if (resultText && !turn.buffer.includes(resultText)) {
+        const extra = resultText.startsWith(turn.buffer) ? resultText.slice(turn.buffer.length) : resultText
+        turn.buffer += extra
+        if (extra) pushPart({ driverId: 'qoder', type: 'text', text: extra })
+      }
+      if (turn.toolSource && !turn.taskCreated) {
+        const described = turn.toolSource.describeResult(message.result)
+        if (described) {
+          turn.taskCreated = true
+          this.pushChunk(turn, { type: 'task-created', result: described as ChatTaskCreationResult })
+        }
+      }
+      turn.status = 'done'
+      this.wakeTurn(turn)
+      return
+    }
+
+    if (message.type === 'error' && !turn.buffer) {
+      turn.status = 'error'
+      turn.error = message.error ?? 'Qoder SDK 错误'
+      this.wakeTurn(turn)
+    }
+  }
+
+  /** 根据 parent_tool_use_id 反查当前消息所属子任务(undefined = 主流程)。 */
+  private resolveParentTaskId(message: RawSdkMessage): string | undefined {
+    const parent = parentToolUseIdOf(message)
+    return parent ? this.taskIdByToolUseId.get(parent) : undefined
+  }
+}
+
+// === 注册表 ==================================================================
+
+/**
+ * 会话注册表:按 conversationId / taskId 持有常驻会话。
+ * 对话板块与任务板块各自持有一个实例,互不干扰。
+ */
+export class QoderSessionRegistry {
+  private readonly sessions = new Map<string, QoderSession>()
+
+  get(id: string): QoderSession | undefined {
+    return this.sessions.get(id)
+  }
+
+  /** 创建会话并登记(幂等:已存在则直接返回)。 */
+  register(id: string, session: QoderSession): QoderSession {
+    const existing = this.sessions.get(id)
+    if (existing) {
+      void session.close()
+      return existing
+    }
+    this.sessions.set(id, session)
+    return session
+  }
+
+  async close(id: string): Promise<void> {
+    const session = this.sessions.get(id)
+    if (!session) return
+    this.sessions.delete(id)
+    await session.close()
+  }
+
+  async dispose(): Promise<void> {
+    const all = [...this.sessions.values()]
+    this.sessions.clear()
+    await Promise.all(all.map((session) => session.close().catch(() => undefined)))
+  }
+}

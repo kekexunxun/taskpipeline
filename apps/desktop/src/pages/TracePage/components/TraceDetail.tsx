@@ -357,7 +357,28 @@ function TraceEntryTimeline({ entries }: { entries: TraceEntry[] }) {
     const indexed = entries
       .filter((entry) => !isHiddenTimelineEvent(entry.title))
       .map((entry): IndexedEntry => ({ entry, meta: subtaskMetaOf(entry) }))
-    const parented = indexed.map(({ entry, meta }) => ({
+    // 旧数据兼容:流式 agent_text 曾按 delta 粒度落库,相邻 agent 消息碎片合并成完整段落。
+    // 仅合并 events 源的 Qoder/OpenAI agent 消息(chat 源是完整对话消息,不能并)。
+    const isAgentMsg = (e: IndexedEntry) =>
+      e.entry.source === 'events' &&
+      e.entry.type === 'message' &&
+      /^(?:qoder agent|openai agent|ai)$/i.test(e.entry.title.trim())
+    const merged: IndexedEntry[] = []
+    for (const current of indexed) {
+      const last = merged[merged.length - 1]
+      if (last && isAgentMsg(current) && isAgentMsg(last)) {
+        merged[merged.length - 1] = {
+          ...last,
+          entry: {
+            ...last.entry,
+            detail: [last.entry.detail, current.entry.detail].filter(Boolean).join('')
+          }
+        }
+        continue
+      }
+      merged.push(current)
+    }
+    const parented = merged.map(({ entry, meta }) => ({
       id: entry.id,
       parentTaskId: entry.parentTaskId ?? meta.parentTaskId,
       taskId: entry.taskId ?? meta.subtaskId,

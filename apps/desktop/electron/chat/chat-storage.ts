@@ -104,6 +104,22 @@ export class ChatStorage {
     return next;
   }
 
+  /**
+   * 更新会话 meta 的若干字段(项目对话绑定/解绑工作目录用),不动 messages。
+   */
+  updateMeta(id: string, patch: Partial<ChatConversationMeta>): ChatConversation | undefined {
+    const current = this.getConversation(id);
+    if (!current) return undefined;
+    const next: ChatConversation = {
+      ...current,
+      ...patch,
+      messageCount: current.messages.length,
+      updatedAt: patch.updatedAt ?? new Date().toISOString()
+    };
+    this.saveConversation(next);
+    return next;
+  }
+
   deleteConversation(id: string): void {
     this.ensureDir();
     const file = conversationPath(this.dataDir, id);

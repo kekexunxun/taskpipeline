@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ElectronChatTransport } from "../chat-transport";
 import {
   api,
   type ChatAgentMode,
@@ -13,7 +14,6 @@ import {
 } from "@/api";
 import { useChatModels } from "@/hooks/useChatModels";
 import { useFeedback } from "@/hooks/useGlobalFeedback";
-import { ElectronChatTransport } from "../chat-transport";
 
 const transport = new ElectronChatTransport();
 
@@ -151,22 +151,25 @@ export function useChat() {
     [loadConversation]
   );
 
-  const create = useCallback(async () => {
-    try {
-      activeStream.current?.abort();
-      activeStream.current = undefined;
-      setStatus("idle");
-      const next = await api.createChat({ driverId, model });
-      setActiveId(next.id);
-      setConversation(next);
-      setMessages([]);
-      await refreshMetas();
-      return next.id;
-    } catch (reason) {
-      showError(reason instanceof Error ? reason.message : String(reason));
-      return undefined;
-    }
-  }, [driverId, model, refreshMetas, showError]);
+  const create = useCallback(
+    async (workingDirectory?: string) => {
+      try {
+        activeStream.current?.abort();
+        activeStream.current = undefined;
+        setStatus("idle");
+        const next = await api.createChat({ driverId, model, workingDirectory });
+        setActiveId(next.id);
+        setConversation(next);
+        setMessages([]);
+        await refreshMetas();
+        return next.id;
+      } catch (reason) {
+        showError(reason instanceof Error ? reason.message : String(reason));
+        return undefined;
+      }
+    },
+    [driverId, model, refreshMetas, showError]
+  );
 
   const remove = useCallback(
     async (id: string) => {

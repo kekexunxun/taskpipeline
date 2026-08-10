@@ -1,5 +1,6 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { BrowserWindow } from "electron";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatService } from "./chat-service.js";
 import { ChatDriverRegistry } from "./drivers/driver-registry.js";
@@ -26,10 +27,11 @@ type FakeDriverOptions = {
   models?: ChatModelInfo[];
 };
 
-function createFakeDriver(opts: FakeDriverOptions): ChatDriver & { received: { history: StoredMessage[]; model: string; toolSource?: unknown }[] } {
-  const received: { history: StoredMessage[]; model: string; toolSource?: unknown }[] = [];
+function createFakeDriver(opts: FakeDriverOptions): ChatDriver & { received: { history: StoredMessage[]; model: string; toolSource?: unknown; cwd?: string }[] } {
+  const received: { history: StoredMessage[]; model: string; toolSource?: unknown; cwd?: string }[] = [];
   let scriptIndex = 0;
   return {
+    received,
     id: opts.id,
     displayName: opts.displayName,
     async listModels() { return opts.models ?? []; },
@@ -43,12 +45,12 @@ function createFakeDriver(opts: FakeDriverOptions): ChatDriver & { received: { h
       return { id: input.id, role: "assistant", createdAt: input.createdAt, driverId: opts.id, raw: { kind: "assistant", parts: input.parts } };
     },
     async *streamChat(input) {
-      received.push({ history: input.history, model: input.model, toolSource: input.toolSource });
+      received.push({ history: input.history, model: input.model, toolSource: input.toolSource, cwd: input.cwd });
       const script = opts.scripts[scriptIndex++] ?? { emit: [] };
       for (const chunk of script.emit) yield chunk;
     },
     dispose() { /* noop */ }
-  } as ChatDriver & { received: { history: StoredMessage[]; model: string; toolSource?: unknown }[] };
+  } as ChatDriver & { received: { history: StoredMessage[]; model: string; toolSource?: unknown; cwd?: string }[] };
 }
 
 function fakeStore(): TaskStore {
@@ -83,7 +85,7 @@ describe("ChatService (driver-based)", () => {
     const sent: ChatStreamChunk[] = [];
     const win = {
       webContents: { send: (_channel: string, payload: { chunk?: ChatStreamChunk }) => { if (payload.chunk) sent.push(payload.chunk); } }
-    } as unknown as import("electron").BrowserWindow;
+    } as unknown as BrowserWindow;
     const service = new ChatService(fakeStore(), dataDir, registry, () => win);
     const conv = service.createChat("qoder", "qoder:test");
     await service.startChatStream({
@@ -124,7 +126,7 @@ describe("ChatService (driver-based)", () => {
     let captured: { channel: string; payload: unknown }[] = [];
     const win = {
       webContents: { send: (channel: string, payload: unknown) => { captured.push({ channel, payload }); } }
-    } as unknown as import("electron").BrowserWindow;
+    } as unknown as BrowserWindow;
     const service = new ChatService(fakeStore(), dataDir, registry, () => win);
 
     const conv = service.createChat("qoder", "qoder:test");
@@ -170,7 +172,7 @@ describe("ChatService (driver-based)", () => {
     });
     const registry = new ChatDriverRegistry();
     registry.register(driver);
-    const win = { webContents: { send: () => undefined } } as unknown as import("electron").BrowserWindow;
+    const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow;
     const service = new ChatService(fakeStore(), dataDir, registry, () => win);
     const conv = service.createChat("qoder", "qoder:test");
     await service.startChatStream({
@@ -212,5 +214,125 @@ describe("ChatService (driver-based)", () => {
       model: "qoder:test",
       message: { id: "u1", text: "hi", createdAt: new Date().toISOString() }
     })).rejects.toThrow(/对话不存在/);
+  });
+
+  it("persists workingDirectory when creating a project chat and reloads it", async () => {
+    const registry = new ChatDriverRegistry();
+    const service = new ChatService(fakeStore(), dataDir, registry, () => undefined);
+    const conv = service.createChat("qoder", "qoder:test", "/some/project");
+    expect(conv.workingDirectory).toBe("/some/project");
+    // 读回:meta + conversation 都应带目录
+    expect(service.listChats()[0]?.workingDirectory).toBe("/some/project");
+    expect(service.getChat(conv.id)?.conversation.workingDirectory).toBe("/some/project");
+  });
+
+  it("passes the conversation workingDirectory as cwd to the driver on stream", async () => {
+    const driver = createFakeDriver({
+      id: "qoder",
+      displayName: "Qoder",
+      scripts: [{ emit: [{ type: "done", status: "done" }] }]
+    });
+    const registry = new ChatDriverRegistry();
+    registry.register(driver);
+    const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow;
+    const service = new ChatService(fakeStore(), dataDir, registry, () => win);
+    const conv = service.createChat("qoder", "qoder:test", "/project/a");
+    await service.startChatStream({
+      streamId: "stream-1",
+      chatId: conv.id,
+      driverId: "qoder",
+      model: "qoder:test",
+      message: { id: "u1", text: "hello", createdAt: new Date().toISOString() }
+    });
+    expect(driver.received[0]?.cwd).toBe("/project/a");
+  });
+
+  it("does not pass cwd for plain chats", async () => {
+    const driver = createFakeDriver({
+      id: "qoder",
+      displayName: "Qoder",
+      scripts: [{ emit: [{ type: "done", status: "done" }] }]
+    });
+    const registry = new ChatDriverRegistry();
+    registry.register(driver);
+    const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow;
+    const service = new ChatService(fakeStore(), dataDir, registry, () => win);
+    const conv = service.createChat("qoder", "qoder:test");
+    await service.startChatStream({
+      streamId: "stream-1",
+      chatId: conv.id,
+      driverId: "qoder",
+      model: "qoder:test",
+      message: { id: "u1", text: "hello", createdAt: new Date().toISOString() }
+    });
+    expect(driver.received[0]?.cwd).toBeUndefined();
+  });
+
+  it("binds and unbinds workingDirectory via setChatWorkingDirectory", async () => {
+    const registry = new ChatDriverRegistry();
+    const service = new ChatService(fakeStore(), dataDir, registry, () => undefined);
+    const conv = service.createChat("qoder", "qoder:test");
+    const bound = service.setChatWorkingDirectory(conv.id, "/bound/dir");
+    expect(bound?.workingDirectory).toBe("/bound/dir");
+    expect(service.getChat(conv.id)?.conversation.workingDirectory).toBe("/bound/dir");
+    // 解绑:回到普通对话
+    const unbound = service.setChatWorkingDirectory(conv.id, undefined);
+    expect(unbound?.workingDirectory).toBeUndefined();
+    expect(service.getChat(conv.id)?.conversation.workingDirectory).toBeUndefined();
+  });
+
+  it("does not reuse a directory-bound empty chat when creating a plain chat", async () => {
+    const registry = new ChatDriverRegistry();
+    const service = new ChatService(fakeStore(), dataDir, registry, () => undefined);
+    const project = service.createChat("qoder", "qoder:test", "/some/project");
+    // 同为空对话,但带目录 —— 普通 createChat 不应复用
+    const plain = service.createChat("qoder", "qoder:test");
+    expect(plain.id).not.toBe(project.id);
+    expect(plain.workingDirectory).toBeUndefined();
+    expect(service.listChats()).toHaveLength(2);
+  });
+
+  it("reuses the empty chat of the same directory instead of piling up project chats", async () => {
+    const registry = new ChatDriverRegistry();
+    const service = new ChatService(fakeStore(), dataDir, registry, () => undefined);
+    const first = service.createChat("qoder", "qoder:test", "/project/a");
+    // 同一目录下再点「+」:复用已有的空项目对话,不无限新增
+    const second = service.createChat("qoder", "qoder:test", "/project/a");
+    expect(second.id).toBe(first.id);
+    // 不同目录互不复用
+    const other = service.createChat("qoder", "qoder:test", "/project/b");
+    expect(other.id).not.toBe(first.id);
+    expect(service.listChats()).toHaveLength(2);
+  });
+
+  it("refuses to rebind the directory while streaming", async () => {
+    let release = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const base = createFakeDriver({ id: "qoder", displayName: "Qoder", scripts: [] });
+    const gated: ChatDriver = {
+      ...base,
+      async *streamChat(_input) {
+        await gate;
+        yield { type: "done", status: "done" };
+      }
+    };
+    const registry = new ChatDriverRegistry();
+    registry.register(gated);
+    const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow;
+    const service = new ChatService(fakeStore(), dataDir, registry, () => win);
+    const conv = service.createChat("qoder", "qoder:test");
+    const streamPromise = service.startChatStream({
+      streamId: "stream-1",
+      chatId: conv.id,
+      driverId: "qoder",
+      model: "qoder:test",
+      message: { id: "u1", text: "hello", createdAt: new Date().toISOString() }
+    });
+    // 等流进入 activeStreams
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(service.setChatWorkingDirectory(conv.id, "/while-streaming")).toBeUndefined();
+    expect(service.getChat(conv.id)?.conversation.workingDirectory).toBeUndefined();
+    release();
+    await streamPromise;
   });
 });

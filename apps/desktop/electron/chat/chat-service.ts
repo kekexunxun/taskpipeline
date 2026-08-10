@@ -79,8 +79,10 @@ export class ChatService {
     return groups;
   }
 
-  createChat(driverId?: ChatDriverId, model?: string): ChatConversation {
-    const existing = this.storage.listMetas().find((item) => item.messageCount === 0);
+  createChat(driverId?: ChatDriverId, model?: string, workingDirectory?: string): ChatConversation {
+    // 统一复用规则:普通对话(无目录)复用无目录空对话,项目对话复用同目录空对话 ——
+    // 避免反复点「+」无限新增空会话。匹配条件是 workingDirectory 全等。
+    const existing = this.storage.listMetas().find((item) => item.messageCount === 0 && item.workingDirectory === workingDirectory);
     if (existing) {
       const conversation = this.storage.getConversation(existing.id);
       if (conversation) return conversation;
@@ -94,6 +96,7 @@ export class ChatService {
       messageCount: 0,
       model,
       driverId,
+      workingDirectory,
       messages: []
     };
     this.storage.saveConversation(conversation);
@@ -102,7 +105,21 @@ export class ChatService {
 
   deleteChat(id: string): void {
     this.activeStreams.get(id)?.abort.abort();
+    // 关闭该对话对应的常驻 Qoder 会话(qodercli 进程),避免随应用生命周期悬挂。
+    const conversation = this.storage.getConversation(id);
+    if (conversation?.driverId) {
+      this.driverRegistry.tryGet(conversation.driverId)?.closeSession?.(id);
+    }
     this.storage.deleteConversation(id);
+  }
+
+  /**
+   * 绑定/解绑对话的工作目录(项目对话)。
+   * 传 undefined 即解绑,回到普通对话;正在流式时返回 undefined。
+   */
+  setChatWorkingDirectory(id: string, workingDirectory?: string): ChatConversation | undefined {
+    if (this.activeStreams.has(id)) return undefined;
+    return this.storage.updateMeta(id, { workingDirectory });
   }
 
   abortChat(input: AbortChatStreamInput): void {
@@ -158,6 +175,7 @@ export class ChatService {
         history,
         userInput: { id: input.message.id, text: input.message.text, createdAt: now },
         signal: abort.signal,
+        cwd: conversation.workingDirectory,
         ...(toolSource ? { toolSource } : {})
       })) {
         if (abort.signal.aborted) break;

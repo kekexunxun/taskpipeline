@@ -45,6 +45,11 @@ export type StreamChatInput = {
   userInput: { id: string; text: string; createdAt: string };
   signal: AbortSignal;
   toolSource?: ToolSource;
+  /**
+   * 对话绑定的工作目录(项目对话)。driver 应让 Agent 在该目录下执行;
+   * 缺省时回退到进程当前目录。
+   */
+  cwd?: string;
 };
 
 /**
@@ -81,6 +86,11 @@ export interface ChatDriver {
    *  - 调 `signal.aborted` 主动停止自己内部的子进程 / 请求。
    */
   streamChat(input: StreamChatInput): AsyncGenerator<ChatStreamChunk>;
+  /**
+   * 关闭一个逻辑会话(删除对话 / 任务结束)。支持常驻会话的 driver(如 Qoder)实现;
+   * 无状态 driver(如 OpenAI,每轮全量发送)可不实现。
+   */
+  closeSession?(id: string): void;
   /** 释放 driver 持有的资源(MCP client / HTTP pool / SDK 子进程)。 */
   dispose(): void;
 }

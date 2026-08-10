@@ -193,7 +193,10 @@ export class OpenAIChatDriver implements ChatDriver {
 
     const taskSource = input.toolSource;
     const tools = taskSource ? buildAiTools(taskSource) : undefined;
-    const messages: ModelMessage[] = historyToModelMessages(input.history);
+    const messages: ModelMessage[] = [];
+    // 项目对话:把工作目录作为 system 上下文注入,让模型感知所在目录。
+    if (input.cwd) messages.push({ role: "system", content: `当前工作目录: ${input.cwd}` });
+    messages.push(...historyToModelMessages(input.history));
     messages.push({ role: "user", content: input.userInput.text });
 
     const parts: DriverPart[] = [];

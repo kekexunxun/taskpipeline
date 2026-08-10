@@ -235,6 +235,8 @@ export type ChatConversationMeta = {
   model?: string
   driverId?: ChatDriverId
   messageCount: number
+  /** 绑定的本地工作目录(项目对话);无值 = 普通对话。 */
+  workingDirectory?: string
 }
 
 export type ChatConversation = ChatConversationMeta & { messages: StoredMessageRecord[] }
@@ -356,6 +358,8 @@ export type AgentApi = {
   saveRepository(profile: RepositoryProfile): Promise<void>
   deleteRepository(id: string): Promise<void>
   chooseRepositoryFolder(): Promise<RepositoryFolder | undefined>
+  /** 纯目录选择(不校验 git),用于项目对话绑定工作目录。 */
+  chooseDirectory(): Promise<string | undefined>
   attachRepository(taskId: string, repositoryId: string): Promise<TaskRepository>
   detachRepository(taskId: string, repositoryId: string): Promise<void>
   updateTaskRepositoryCommands(
@@ -421,8 +425,10 @@ export type AgentApi = {
   // chat
   listChats(): Promise<ChatConversationMeta[]>
   getChat(id: string): Promise<{ conversation: ChatConversation; messages: ChatMessage[] } | undefined>
-  createChat(input?: { driverId?: ChatDriverId; model?: string }): Promise<ChatConversation>
+  createChat(input?: { driverId?: ChatDriverId; model?: string; workingDirectory?: string }): Promise<ChatConversation>
   deleteChat(id: string): Promise<void>
+  /** 绑定/解绑对话的工作目录(undefined = 解绑,回到普通对话)。 */
+  setChatDirectory(id: string, workingDirectory?: string): Promise<ChatConversation | undefined>
   listChatModels(): Promise<ChatModelGroup[]>
   startChatStream(input: StartChatStreamInput): Promise<void>
   abortChat(input: AbortChatStreamInput): Promise<void>
@@ -781,6 +787,9 @@ export const api: AgentApi = window.agentApi ?? {
   async chooseRepositoryFolder() {
     return undefined
   },
+  async chooseDirectory() {
+    return undefined
+  },
   async attachRepository(taskId, repositoryId) {
     const profile = demoRepositories.find((item) => item.id === repositoryId)
     if (!profile) throw new Error('Repository not found')
@@ -964,6 +973,7 @@ export const api: AgentApi = window.agentApi ?? {
       messageCount: 0,
       model: input?.model,
       driverId: input?.driverId,
+      workingDirectory: input?.workingDirectory,
       messages: []
     }
     memoryChats.set(id, conv)
@@ -971,6 +981,13 @@ export const api: AgentApi = window.agentApi ?? {
   },
   async deleteChat(id) {
     memoryChats.delete(id)
+  },
+  async setChatDirectory(id, workingDirectory) {
+    const conv = memoryChats.get(id)
+    if (!conv) return undefined
+    conv.workingDirectory = workingDirectory
+    conv.updatedAt = nowIso()
+    return conv
   },
   async listChatModels() {
     return defaultModelGroups

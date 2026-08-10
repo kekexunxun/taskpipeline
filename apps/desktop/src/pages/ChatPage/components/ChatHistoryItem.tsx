@@ -18,11 +18,14 @@ import { formatRelative } from '@/utils/format'
 export function ChatHistoryItem({
   meta,
   active,
+  showDirectory = true,
   onClick,
   onDelete
 }: {
   meta: ChatConversationMeta
   active: boolean
+  /** 是否在条目内显示目录名(分组场景下组头已显示,传 false 避免重复)。 */
+  showDirectory?: boolean
   onClick(): void
   onDelete(): void
 }) {
@@ -40,7 +43,13 @@ export function ChatHistoryItem({
         />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-xs font-medium">{meta.title || '新对话'}</span>
-          <span className="mt-0.5 block text-[10px] text-muted-foreground">
+          <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
+            {meta.workingDirectory && showDirectory ? (
+              <>
+                <span className="text-amber-400/80">{meta.workingDirectory.split(/[\\/]/).filter(Boolean).pop()}</span>
+                {' · '}
+              </>
+            ) : null}
             {formatRelative(meta.updatedAt)} · {meta.messageCount} 条
           </span>
         </span>

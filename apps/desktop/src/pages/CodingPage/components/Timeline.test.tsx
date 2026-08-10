@@ -46,6 +46,25 @@ describe('normalizeTimelineItems', () => {
       ])[0]?.detail
     ).toBe('请补充信息')
   })
+
+  it('merges adjacent agent messages (旧数据 delta 碎片) into one paragraph', () => {
+    const fragments = [
+      item('1', 'message', 'Qoder Agent', '第一段'),
+      item('2', 'message', 'Qoder Agent', '第二段'),
+      item('3', 'message', 'Qoder Agent', '第三段')
+    ]
+    const merged = normalizeTimelineItems(fragments)
+    expect(merged.length).toBe(1)
+    expect(merged[0]?.detail).toBe('第一段第二段第三段')
+  })
+
+  it('does not merge adjacent non-agent messages (用户消息保持独立)', () => {
+    const items = [
+      item('1', 'message', '你', '问题一'),
+      item('2', 'message', '你', '问题二')
+    ]
+    expect(normalizeTimelineItems(items).length).toBe(2)
+  })
 })
 
 describe('Timeline', () => {

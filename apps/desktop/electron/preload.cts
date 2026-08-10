@@ -81,9 +81,12 @@ contextBridge.exposeInMainWorld('agentApi', {
   getChat: (id: string) => ipcRenderer.invoke('chats:get', id),
   createChat: (model?: string) => ipcRenderer.invoke('chats:create', model),
   deleteChat: (id: string) => ipcRenderer.invoke('chats:delete', id),
+  setChatDirectory: (id: string, workingDirectory?: string) =>
+    ipcRenderer.invoke('chats:set-directory', id, workingDirectory),
   listChatModels: () => ipcRenderer.invoke('chats:list-models'),
   startChatStream: (input: unknown) => ipcRenderer.invoke('chats:start-stream', input),
   abortChat: (input: unknown) => ipcRenderer.invoke('chats:abort', input),
+  chooseDirectory: () => ipcRenderer.invoke('dialog:choose-directory'),
   onChatStreamEvent: (callback: (event: unknown) => void) => {
     const listener = (_: unknown, event: unknown) => callback(event)
     ipcRenderer.on('chat:stream-event', listener)

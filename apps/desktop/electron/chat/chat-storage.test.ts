@@ -119,4 +119,17 @@ describe("ChatStorage v3", () => {
     const loaded = storage.getConversation("qoder-1");
     expect(loaded?.messages[0]?.raw).toEqual(qoderRaw); // 完全透传
   });
+
+  it("updateMeta binds/unbinds workingDirectory without touching messages", () => {
+    const root = temporaryRoot();
+    const storage = new ChatStorage(root);
+    storage.saveConversation(conversation("c"));
+    const bound = storage.updateMeta("c", { workingDirectory: "/project/x" });
+    expect(bound?.workingDirectory).toBe("/project/x");
+    expect(bound?.messages).toHaveLength(1); // messages 不变
+    expect(storage.listMetas()[0]?.workingDirectory).toBe("/project/x"); // index meta 同步
+    const unbound = storage.updateMeta("c", { workingDirectory: undefined });
+    expect(unbound?.workingDirectory).toBeUndefined();
+    expect(storage.getConversation("c")?.messages).toHaveLength(1);
+  });
 });

@@ -157,6 +157,12 @@ export type ChatConversationMeta = {
   model?: string
   driverId?: ChatDriverId
   messageCount: number
+  /**
+   * 绑定的本地工作目录(项目对话)。
+   * 有值 = 项目对话,Agent 在该目录下执行(类 Codex 的 cwd 语义);
+   * 无值/undefined = 普通对话。
+   */
+  workingDirectory?: string
 }
 /**
  * 对话完整形态。`messages` 是 driver 透传的 record 列表(不包含运行时 `parts`),

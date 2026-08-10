@@ -69,10 +69,30 @@ function duplicateKey(item: TimelineItem): string {
 }
 
 /**
+ * 相邻的 agent 消息合并为一条:流式 agent_text 曾按 delta 粒度落库(旧数据),
+ * detail 是连续文本碎片;合并后执行 tab 展示为完整段落,不再一条 delta 一条消息。
+ * 仅合并"相邻且同为 agent 消息"的条目(中间隔了工具/状态事件则不动)。
+ */
+function mergeAdjacentAgentMessages(items: TimelineItem[]): TimelineItem[] {
+  const out: TimelineItem[] = []
+  for (const item of items) {
+    const last = out[out.length - 1]
+    if (last && isAgentMessage(item) && isAgentMessage(last)) {
+      const detail = [last.detail, item.detail].filter(Boolean).join('')
+      out[out.length - 1] = { ...last, detail: detail || undefined } as TimelineItem
+      continue
+    }
+    out.push(item)
+  }
+  return out
+}
+
+/**
  * 归一化时间线条目:
  * 1. 去掉 outcome marker 注释(避免污染 UI);
  * 2. 同 kind + title + detail + 5 秒内重复 → 合并,防流式重放刷屏;
- * 3. 保持 createdAt 升序。
+ * 3. 相邻 agent 消息合并(修复旧数据 delta 碎片);
+ * 4. 保持 createdAt 升序。
  */
 export function normalizeTimelineItems(items: TimelineItem[]): TimelineItem[] {
   const sorted = items
@@ -82,7 +102,7 @@ export function normalizeTimelineItems(items: TimelineItem[]): TimelineItem[] {
       return (Number.isNaN(byTime) ? 0 : byTime) || left.index - right.index
     })
   const seen = new Map<string, number>()
-  return sorted.flatMap(({ item }) => {
+  const deduped = sorted.flatMap(({ item }) => {
     const key = duplicateKey(item)
     const time = Date.parse(item.createdAt)
     const previousTime = seen.get(key)
@@ -90,6 +110,7 @@ export function normalizeTimelineItems(items: TimelineItem[]): TimelineItem[] {
     seen.set(key, time)
     return [item]
   })
+  return mergeAdjacentAgentMessages(deduped)
 }
 
 /** TimelineItem 转 ParentedItem(interleaveTimeline 需要的形态)。子任务元信息走共享 subtaskMetaOf。 */

@@ -98,13 +98,9 @@ function CredentialStatusPopover({
               )}
               {item.status === 'failed' && (
                 <div className="mt-1 pl-6">
-                  <button
-                    type="button"
-                    className="text-[11px] text-primary hover:underline"
-                    onClick={() => onOpenCredentialSettings([item])}
-                  >
+                  <Button size="sm" variant="ghost" onClick={() => onOpenCredentialSettings([item])}>
                     前往设置
-                  </button>
+                  </Button>
                 </div>
               )}
             </div>

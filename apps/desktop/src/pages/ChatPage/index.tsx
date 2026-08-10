@@ -1,12 +1,13 @@
 import { useEffect } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ChatHistoryList } from "./components/ChatHistoryList";
 import { ChatConversation } from "./components/ChatConversation";
 import { ChatComposer } from "./components/ChatComposer";
 import { ChatModelSelector } from "./components/ChatModelSelector";
+import { ChatDirectoryBadge } from "./components/ChatDirectoryBadge";
 import { TaskCreationTool } from "./components/TaskCreationTool";
 import { useChat } from "./hooks/useChat";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { api } from "@/api";
 import { useFeedback } from "@/hooks/useGlobalFeedback";
 
@@ -44,6 +45,25 @@ function ChatPageInner() {
     if (id) navigate(`/chat/${id}`);
   };
 
+  /**
+   * 项目对话入口:选目录(或直接传入已有目录)→ 在该目录下新建会话。
+   * Codex 式:一个目录可挂多个会话。
+   */
+  const createProject = async (directory?: string) => {
+    let dir = directory;
+    if (!dir) {
+      try {
+        dir = await api.chooseDirectory();
+      } catch (reason) {
+        showError(reason instanceof Error ? reason.message : String(reason));
+        return;
+      }
+    }
+    if (!dir) return;
+    const id = await chat.create(dir);
+    if (id) navigate(`/chat/${id}`);
+  };
+
   const handleSend = async (value: string) => {
     const wasEmpty = !chat.activeId;
     const newId = await chat.send(value);
@@ -63,6 +83,7 @@ function ChatPageInner() {
         activeId={chat.activeId}
         onSelect={(id) => navigate(`/chat/${id}`)}
         onCreate={() => void create()}
+        onCreateInDirectory={(dir) => void createProject(dir)}
         onDelete={(id) => void chat.remove(id)}
       />
       <section className="grid min-w-0 grid-rows-[52px_minmax(0,1fr)_auto] overflow-hidden">
@@ -75,12 +96,17 @@ function ChatPageInner() {
               {headerSubtitle}
             </p>
           </div>
-          {chat.streaming && (
-            <span className="inline-flex items-center gap-1.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-300">
-              <span className="inline-block size-1.5 animate-caret-blink rounded-full bg-current" />
-              生成中
-            </span>
-          )}
+          <div className="flex shrink-0 items-center gap-1.5">
+            {chat.conversation?.workingDirectory && (
+              <ChatDirectoryBadge workingDirectory={chat.conversation.workingDirectory} />
+            )}
+            {chat.streaming && (
+              <span className="inline-flex items-center gap-1.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-300">
+                <span className="inline-block size-1.5 animate-caret-blink rounded-full bg-current" />
+                生成中
+              </span>
+            )}
+          </div>
         </header>
 
         <ChatConversation
