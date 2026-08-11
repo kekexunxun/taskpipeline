@@ -46,6 +46,19 @@ export function chatEntries(chatId: string, messages: StoredMessage[]): TraceEnt
           type: 'message',
           title: roleTitle,
           detail: part.text,
+          // assistant 消息的流式用量（openai driver 落盘在 message.usage），
+          // 形态对齐 TraceDetail extractMeta 的 `{ input, output, cost }` 读取约定。
+          ...(message.usage && message.role === 'assistant'
+            ? {
+                payload: {
+                  usage: {
+                    input: message.usage.inputTokens,
+                    output: message.usage.outputTokens,
+                    ...(typeof message.usage.costUsd === 'number' ? { cost: message.usage.costUsd } : {})
+                  }
+                }
+              }
+            : {}),
           parentTaskId
         })
       } else if (part.type === 'qoder.thinking') {

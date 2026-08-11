@@ -22,6 +22,8 @@ export type TaskDetail = {
   task?: Task
   repositories: TaskRepository[]
   events: AgentEvent[]
+  /** Pi/OpenAI 独立表（openai_events）的事件，与 events 表分开存储、分开渲染。 */
+  openAiEvents: AgentEvent[]
   approvals: Approval[]
   changedFiles: ChangedFile[]
 }
@@ -187,7 +189,16 @@ export type DriverPart =
       parentTaskId?: string
     }
   | { driverId: 'openai'; type: 'openai.tool-result'; toolCallId: string; output: unknown; parentTaskId?: string }
+  | { driverId: 'openai'; type: 'openai.thinking'; text: string; parentTaskId?: string }
   | { driverId: ChatDriverId; type: 'text'; text: string; parentTaskId?: string }
+
+/** 单条消息的流式用量（openai driver 从 ai-sdk finish chunk 收集；qoder 暂无数据）。 */
+export type ChatUsage = {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  costUsd?: number
+}
 
 /** 持久化形态: driver 自己的 raw + 共用元数据。 */
 export type StoredMessageRecord = {
@@ -197,6 +208,10 @@ export type StoredMessageRecord = {
   driverId: ChatDriverId
   /** driver 自己的序列化形态,任意 JSON。 */
   raw: unknown
+  /** assistant 消息的流式用量（Trace 展示用，其它角色无）。 */
+  usage?: ChatUsage
+  /** assistant 消息的接口异常详情（驱动失败时落盘，界面红色错误块展示）。 */
+  errorMessage?: string
 }
 
 /** 运行时消息: 在 `StoredMessageRecord` 基础上多一份 `parts` 供 UI 渲染。 */
@@ -225,6 +240,10 @@ export type ChatMessageMetadata = {
   status?: ChatMessageStatus
   agentMode?: ChatAgentMode
   taskCreation?: ChatTaskCreationResult
+  /** 本次回复的流式用量（openai driver 提供，Trace 展示用）。 */
+  usage?: ChatUsage
+  /** 本次回复的接口异常详情（流期间在飞消息标记用，持久化走 StoredMessageRecord.errorMessage）。 */
+  errorMessage?: string
 }
 
 export type ChatConversationMeta = {
@@ -274,7 +293,7 @@ export type ChatStreamChunk =
   | { type: 'model'; model: string }
   | { type: 'task-created'; result: ChatTaskCreationResult }
   | { type: 'error'; message: string }
-  | { type: 'done'; status: ChatMessageStatus }
+  | { type: 'done'; status: ChatMessageStatus; usage?: ChatUsage; model?: string }
 
 export type ChatStreamEvent = {
   streamId: string
@@ -324,7 +343,7 @@ export type AgentGenerationRepository = {
   defaultBranch?: string
 }
 export type AgentGenerationInput = {
-  /** 该 Agent 选定的首选模型（与 ChatModelSelector 的 value 一致：`qoder:xxx` / `openai:default`）。 */
+  /** 该 Agent 选定的首选模型（与 ChatModelSelector 的 value 一致：`qoder:xxx` / `openai:<model>`）。 */
   model: string
   /** 用户自然语言描述。 */
   description: string
@@ -726,7 +745,8 @@ export const api: AgentApi = window.agentApi ?? {
                 createdAt: new Date(Date.now() - 60000).toISOString()
               }
             ]
-          : []
+          : [],
+      openAiEvents: []
     }
   },
   async createTask(input) {

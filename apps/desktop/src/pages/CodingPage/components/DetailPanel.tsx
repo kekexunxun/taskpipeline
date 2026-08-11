@@ -30,6 +30,7 @@ import { Button } from '@/components/ui/button'
 
 const detailTabClass =
   'relative h-full gap-1.5 rounded-none border-0 px-3 text-xs! after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0 data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:after:bg-foreground'
+
 type Props = {
   card?: TaskCard
   detail?: TaskDetail
@@ -126,7 +127,13 @@ export function DetailPanel({
     task?.planContent || (taskState && ['planning', 'awaiting_plan_approval'].includes(taskState))
   )
   const allEvents = useMemo(() => [...(detail?.events ?? []), ...liveEvents], [detail?.events, liveEvents])
-  const executionEvents = useMemo(() => allEvents.filter((item) => !isPlanningEvent(item)), [allEvents])
+  // 执行 Tab 数据源：events 表 + openai_events 表（Pi 独立存储、独立渲染）平铺合并，
+  // 与 live 流一起交给 Timeline（内部按 createdAt 排序 + 去重）。
+  const executionEvents = useMemo(() => {
+    return [...(detail?.events ?? []), ...(detail?.openAiEvents ?? []), ...liveEvents].filter(
+      (item) => !isPlanningEvent(item)
+    )
+  }, [detail?.events, detail?.openAiEvents, liveEvents])
   useEffect(() => {
     setActiveTab(hasPlan ? 'plan' : 'activity')
   }, [taskId, hasPlan])

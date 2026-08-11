@@ -208,12 +208,18 @@ export class AgentService {
    * 计算任务执行路径与模型。
    *
    * 优先级链：
-   *  1. 任务显式指定 task.qoderModel → qoder 路径（沿用现有逻辑）；
+   *  1. 任务显式指定 task.qoderModel → 按 value 前缀路由（`openai:` → OpenAI 路径；
+   *     `qoder:` 或无前缀 → Qoder 路径）。模型选择器统一产出 `qoder:xxx` / `openai:<model>`
+   *     两种 value，必须按前缀识别 provider，否则用户选了 OpenAI 模型也会被当成
+   *     Qoder 模型传给 qodercli（报 `Invalid model "openai:default"`）。
    *  2. primary 仓库 Agent 配置了 preferredProvider + preferredModel → 按 Agent 路由；
    *  3. 均未配置 → provider 返回 undefined，调用方回退系统 modelProfile。
    */
   resolveRuntime(task: Task, repos: TaskRepository[]): AgentRuntime {
-    if (task.qoderModel) return { provider: "qoder", model: task.qoderModel };
+    if (task.qoderModel) {
+      if (task.qoderModel.startsWith('openai:')) return { provider: 'openai', model: task.qoderModel }
+      return { provider: 'qoder', model: task.qoderModel }
+    }
     const agent = this.resolveAgentFor(repos[0]?.repositoryId ?? "", task.agentProfileId, task.repoAgentIds?.[repos[0]?.repositoryId ?? ""]);
     if (agent?.preferredProvider && agent.preferredModel) {
       return {
@@ -225,7 +231,7 @@ export class AgentService {
     return { agent };
   }
 
-  /** 任务模型覆盖：仅当 Agent 配置了成对的 provider+model 且任务未显式指定时返回。 */
+  /** 任务模型覆盖：仅当任务显式指定或 Agent 配置了成对的 provider+model 时返回。 */
   resolveModelForTask(task: Task, repos: TaskRepository[]): string | undefined {
     if (task.qoderModel) return task.qoderModel;
     const agent = this.resolveAgentFor(repos[0]?.repositoryId ?? "", task.agentProfileId, task.repoAgentIds?.[repos[0]?.repositoryId ?? ""]);

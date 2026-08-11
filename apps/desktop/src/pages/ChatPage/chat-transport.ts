@@ -1,4 +1,4 @@
-import { api, type ChatStreamEvent } from "@/api";
+import { api, type ChatStreamEvent } from '@/api'
 
 /**
  * 单次 chat 流的回调订阅。
@@ -19,54 +19,69 @@ export class ElectronChatTransport {
    * 调用方需要把 onEvent 的回调妥善转发到自己的 state。
    */
   start(input: {
-    streamId: string;
-    chatId: string;
-    driverId: "qoder" | "openai";
-    model: string;
-    message: { id: string; text: string; createdAt: string };
-    mode?: "chat" | "task-create";
-    onEvent(event: ChatStreamEvent): void;
-    onError?(error: Error): void;
+    streamId: string
+    chatId: string
+    driverId: 'qoder' | 'openai'
+    model: string
+    message: { id: string; text: string; createdAt: string }
+    mode?: 'chat' | 'task-create'
+    onEvent(event: ChatStreamEvent): void
+    onError?(error: Error): void
   }): { abort(): void; closed: Promise<void> } {
-    let unsubscribe: (() => void) | undefined;
-    let closed = false;
-    const close = () => { if (closed) return; closed = true; unsubscribe?.(); };
+    let unsubscribe: (() => void) | undefined
+    let closed = false
+    const close = () => {
+      if (closed) return
+      closed = true
+      unsubscribe?.()
+    }
     const closedPromise = new Promise<void>((resolve) => {
       unsubscribe = api.onChatStreamEvent((event) => {
-        if (event.streamId !== input.streamId || event.chatId !== input.chatId) return;
+        if (event.streamId !== input.streamId || event.chatId !== input.chatId) return
         if (event.error) {
-          input.onError?.(new Error(event.error));
-          close();
-          resolve();
-          return;
+          input.onError?.(new Error(event.error))
+          close()
+          resolve()
+          return
         }
-        input.onEvent(event);
+        // 主进程错误链路只发 chunk 形态({ type: 'error', message }),顶层 error 字段从不出现;
+        // 这里把 chunk error 统一转成 onError,与顶层 error 行为一致(关闭流)。
+        const chunk = event.chunk
+        if (chunk?.type === 'error') {
+          input.onError?.(new Error(chunk.message))
+          close()
+          resolve()
+          return
+        }
+        input.onEvent(event)
         if (event.done) {
-          close();
-          resolve();
+          close()
+          resolve()
         }
-      });
-    });
-    void api.startChatStream({
-      streamId: input.streamId,
-      chatId: input.chatId,
-      driverId: input.driverId,
-      model: input.model,
-      message: input.message,
-      mode: input.mode
-    }).catch((reason) => {
-      if (closed) return;
-      const error = reason instanceof Error ? reason : new Error(String(reason));
-      input.onError?.(error);
-      close();
-      closedPromise.then(() => undefined);
-    });
+      })
+    })
+    void api
+      .startChatStream({
+        streamId: input.streamId,
+        chatId: input.chatId,
+        driverId: input.driverId,
+        model: input.model,
+        message: input.message,
+        mode: input.mode
+      })
+      .catch((reason) => {
+        if (closed) return
+        const error = reason instanceof Error ? reason : new Error(String(reason))
+        input.onError?.(error)
+        close()
+        closedPromise.then(() => undefined)
+      })
     return {
       abort() {
-        if (closed) return;
-        void api.abortChat({ streamId: input.streamId, chatId: input.chatId });
+        if (closed) return
+        void api.abortChat({ streamId: input.streamId, chatId: input.chatId })
       },
       closed: closedPromise
-    };
+    }
   }
 }

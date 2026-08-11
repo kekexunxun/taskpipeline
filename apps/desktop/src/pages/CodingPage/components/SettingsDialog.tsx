@@ -20,8 +20,9 @@ import type { AgentProfile, Memory, MemoryScope, RepositoryProfile } from '@task
 import { RepositoryDialog, TestButton, type RepoDraft } from './RepositoryDialog'
 import { AgentDialog } from './AgentDialog'
 import { MemoryDialog } from './MemoryDialog'
-import { OpenAIProfileDialog, OpenAIProfileTrigger, type OpenAIProfile } from './OpenAIProfileDialog'
+import { OpenAIProfileDialog, type OpenAIProfile } from './OpenAIProfileDialog'
 import { ModelBadges } from '@/components/ModelBadges'
+import { detectVendor, type ModelVendor } from '@/utils/model-vendors'
 import { api, type MemorySearchResult } from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
 import { useAgents } from '@/hooks/useAgents'
@@ -78,10 +79,13 @@ type Settings = {
   modelApiKey?: string
 }
 type OpenAIDraft = {
+  id: string
+  vendor?: ModelVendor
   baseUrl: string
   model: string
   displayName: string
   apiKeyConfigured: boolean
+  isDefault: boolean
 }
 const defaults: Settings = {
   defaultModel: 'claude-sonnet-4.5',
@@ -622,8 +626,8 @@ export function SettingsDialog({
   const [agentTemplates, setAgentTemplates] = useState<AgentTemplate[]>([])
   const [agentDialog, setAgentDialog] = useState<{ open: boolean; initial?: AgentProfile }>({ open: false })
   const [deleteAgent, setDeleteAgent] = useState<AgentProfile | undefined>(undefined)
-  const [openAIDraft, setOpenAIDraft] = useState<OpenAIDraft | null>(null)
-  const [openAIDialog, setOpenAIDialog] = useState<{ open: boolean; mode: 'create' | 'edit' }>({
+  const [openAIProfiles, setOpenAIProfiles] = useState<OpenAIDraft[]>([])
+  const [openAIDialog, setOpenAIDialog] = useState<{ open: boolean; mode: 'create' | 'edit'; editing?: OpenAIDraft }>({
     open: false,
     mode: 'create'
   })
@@ -646,21 +650,77 @@ export function SettingsDialog({
       for (const repository of repositoryList)
         counts[repository.id] = (await api.listRepoWikiDocs(repository.id)).length
       setWikiCounts(counts)
-      const profile = await api.getSetting('modelProfile')
-      if (profile) {
+      const profilesRaw = await api.getSetting('modelProfiles')
+      if (profilesRaw) {
         try {
-          const parsed = JSON.parse(profile) as { baseUrl?: string; model?: string; displayName?: string }
-          setOpenAIDraft({
-            baseUrl: parsed.baseUrl ?? '',
-            model: parsed.model ?? '',
-            displayName: parsed.displayName ?? '',
-            apiKeyConfigured: Boolean(await api.getSetting('modelApiKey'))
-          })
+          const parsed = JSON.parse(profilesRaw) as unknown
+          if (Array.isArray(parsed)) {
+            const list = parsed
+              .filter(
+                (
+                  item
+                ): item is {
+                  baseUrl: string
+                  model: string
+                  vendor?: string
+                  displayName?: string
+                  isDefault?: boolean
+                } =>
+                  Boolean(item) &&
+                  typeof item === 'object' &&
+                  typeof (item as { baseUrl?: unknown }).baseUrl === 'string'
+              )
+              .map((item, index) => ({
+                id: (item as { id?: string }).id ?? `legacy-${index}`,
+                vendor: item.vendor ? (item.vendor as ModelVendor) : detectVendor(item.baseUrl),
+                baseUrl: item.baseUrl,
+                model: item.model,
+                displayName: item.displayName ?? '',
+                apiKeyConfigured: false,
+                // 历史数据缺 id 的配置视为默认（与主进程读取约定一致：无 id/默认 → 回退 modelApiKey）
+                isDefault: item.isDefault ?? !(item as { id?: string }).id
+              }))
+            // 每个 profile 的 API Key 是否已配置：优先 `modelApiKey:<id>`，默认配置回退历史 `modelApiKey`
+            const keyStates = await Promise.all(
+              list.map(async (profile) => {
+                const scoped = await api.getSetting(`modelApiKey:${profile.id}`)
+                return Boolean(scoped) || (profile.isDefault ? Boolean(await api.getSetting('modelApiKey')) : false)
+              })
+            )
+            setOpenAIProfiles(
+              list.map((profile, index) => ({ ...profile, apiKeyConfigured: keyStates[index] ?? false }))
+            )
+          }
         } catch {
           // 忽略历史脏数据
         }
       } else {
-        setOpenAIDraft(null)
+        // 兼容旧格式 modelProfile（单个对象 → 单条默认配置）
+        const profile = await api.getSetting('modelProfile')
+        if (profile) {
+          try {
+            const parsed = JSON.parse(profile) as { baseUrl?: string; model?: string; displayName?: string }
+            if (parsed.baseUrl && parsed.model) {
+              const apiKeyConfigured = Boolean(await api.getSetting('modelApiKey'))
+              setOpenAIProfiles([
+                {
+                  id: 'company-openai',
+                  baseUrl: parsed.baseUrl,
+                  model: parsed.model,
+                  displayName: parsed.displayName ?? '',
+                  apiKeyConfigured,
+                  isDefault: true
+                }
+              ])
+            } else {
+              setOpenAIProfiles([])
+            }
+          } catch {
+            setOpenAIProfiles([])
+          }
+        } else {
+          setOpenAIProfiles([])
+        }
       }
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason))
@@ -693,39 +753,82 @@ export function SettingsDialog({
     }
   }
   const saveOpenAIProfile = async (input: {
+    id?: string
+    vendor?: ModelVendor
     baseUrl: string
     model: string
     displayName?: string
     apiKey: string | undefined
+    isDefault: boolean
   }) => {
     try {
-      await api.setSetting(
-        'modelProfile',
-        JSON.stringify({
-          provider: 'company-openai',
-          baseUrl: input.baseUrl,
-          model: input.model,
-          displayName: input.displayName
-        })
-      )
-      if (input.apiKey) await api.setSetting('modelApiKey', input.apiKey, true)
-      setOpenAIDraft({
+      const id = input.id ?? `openai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+      // isDefault 互斥：新设为默认的配置成为唯一默认；编辑默认时取消默认 → 自动提升第一个其它配置（保证始终有默认）
+      let next = openAIProfiles
+        .filter((profile) => profile.id !== id)
+        .map((profile) => ({ ...profile, isDefault: input.isDefault ? false : profile.isDefault }))
+      const willBeDefault = input.isDefault || next.length === 0
+      if (!willBeDefault && !next.some((profile) => profile.isDefault) && next.length > 0) {
+        next = next.map((profile, index) => (index === 0 ? { ...profile, isDefault: true } : profile))
+      }
+      next.push({
+        id,
+        vendor: input.vendor,
         baseUrl: input.baseUrl,
         model: input.model,
         displayName: input.displayName ?? '',
-        apiKeyConfigured: input.apiKey ? true : (openAIDraft?.apiKeyConfigured ?? false)
+        apiKeyConfigured: input.apiKey ? true : (openAIProfiles.find((p) => p.id === id)?.apiKeyConfigured ?? false),
+        isDefault: willBeDefault
       })
+      // key 始终按 profile 存 `modelApiKey:<id>`（默认/非默认一致，切换默认无需迁移）；历史 `modelApiKey` 仅作读取回退
+      if (input.apiKey !== undefined) await api.setSetting(`modelApiKey:${id}`, input.apiKey, true)
+      await api.setSetting(
+        'modelProfiles',
+        JSON.stringify(
+          next.map(({ id: pid, vendor, baseUrl, model, displayName, isDefault }) => ({
+            id: pid,
+            provider: 'company-openai',
+            vendor,
+            baseUrl,
+            model,
+            displayName,
+            isDefault
+          }))
+        )
+      )
+      setOpenAIProfiles(next)
       setOpenAIDialog({ open: false, mode: 'create' })
+      window.dispatchEvent(new CustomEvent('app:models-changed'))
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason))
     }
   }
-  const deleteOpenAIProfile = async () => {
+  const deleteOpenAIProfile = async (id: string) => {
     try {
-      await api.setSetting('modelProfile', '')
-      await api.setSetting('modelApiKey', '')
-      setOpenAIDraft(null)
+      const target = openAIProfiles.find((profile) => profile.id === id)
+      let next = openAIProfiles.filter((profile) => profile.id !== id)
+      // 删除的是默认配置时，把第一个剩余配置提升为默认
+      if (target?.isDefault && next.length > 0)
+        next = next.map((profile, index) => (index === 0 ? { ...profile, isDefault: true } : profile))
+      await api.setSetting(`modelApiKey:${id}`, '')
+      if (target?.isDefault) await api.setSetting('modelApiKey', '')
+      await api.setSetting(
+        'modelProfiles',
+        JSON.stringify(
+          next.map(({ id: pid, vendor, baseUrl, model, displayName, isDefault }) => ({
+            id: pid,
+            provider: 'company-openai',
+            vendor,
+            baseUrl,
+            model,
+            displayName,
+            isDefault
+          }))
+        )
+      )
+      setOpenAIProfiles(next)
       setOpenAIDialog({ open: false, mode: 'create' })
+      window.dispatchEvent(new CustomEvent('app:models-changed'))
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason))
     }
@@ -833,21 +936,15 @@ export function SettingsDialog({
       setRebuildingWiki(undefined)
     }
   }
-  const openAIConfigured = Boolean(openAIDraft?.baseUrl && openAIDraft?.model)
   const userMemories = memories.filter((memory) => memory.scope === 'user')
-  // const openMemoryCreate = () => {
-  //   const activeRepo = repositories.find((repository) => repository.id === activeMemoryTab)
-  //   setMemoryDialog({
-  //     open: true,
-  //     initial: activeRepo ? { scope: 'repo', repositoryId: activeRepo.id } : { scope: 'user' }
-  //   })
-  // }
-  const openAIInitial: OpenAIProfile | undefined = openAIDraft
+  const openAIInitial: OpenAIProfile | undefined = openAIDialog.editing
     ? {
-        baseUrl: openAIDraft.baseUrl,
-        model: openAIDraft.model,
-        displayName: openAIDraft.displayName || undefined,
-        apiKeyConfigured: openAIDraft.apiKeyConfigured
+        id: openAIDialog.editing.id,
+        baseUrl: openAIDialog.editing.baseUrl,
+        model: openAIDialog.editing.model,
+        displayName: openAIDialog.editing.displayName || undefined,
+        apiKeyConfigured: openAIDialog.editing.apiKeyConfigured,
+        isDefault: openAIDialog.editing.isDefault
       }
     : undefined
 
@@ -1327,45 +1424,73 @@ export function SettingsDialog({
                       )}
                     </FieldGroup>
                   </Section>
-                  <Section title="OpenAI-Compatible" description="连接兼容 OpenAI API 格式的模型服务。">
-                    <div className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
-                      <div className="flex min-w-0 items-center gap-2.5">
-                        <div className="grid size-8 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
-                          <ExternalLinkIcon size={14} />
-                        </div>
-                        <div className="min-w-0">
-                          {openAIConfigured && openAIDraft ? (
-                            <>
-                              <div className="flex items-center gap-1.5">
-                                <h4 className="truncate text-xs font-semibold text-foreground">
-                                  {openAIDraft.displayName || openAIDraft.model}
-                                </h4>
-                                <Badge variant="muted" className="text-[9px]">
-                                  已配置
-                                </Badge>
+                  <Section
+                    title="OpenAI-Compatible"
+                    description="连接兼容 OpenAI API 格式的模型服务，可配置多个并指定系统级调用使用的默认配置。"
+                  >
+                    <FieldGroup className="gap-2">
+                      {openAIProfiles.length > 0 ? (
+                        openAIProfiles.map((profile) => (
+                          <div
+                            key={profile.id}
+                            className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5"
+                          >
+                            <div className="flex min-w-0 items-center gap-2.5">
+                              <div className="grid size-8 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
+                                <ExternalLinkIcon size={14} />
                               </div>
-                              <p
-                                className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground"
-                                title={openAIDraft.baseUrl}
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                  <h4 className="truncate text-xs font-semibold text-foreground">
+                                    {profile.displayName || profile.model}
+                                  </h4>
+                                  <Badge variant="muted" className="text-[9px]">
+                                    已配置
+                                  </Badge>
+                                  {profile.isDefault && <Badge className="text-[9px]">默认</Badge>}
+                                </div>
+                                <p
+                                  className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground"
+                                  title={profile.baseUrl}
+                                >
+                                  {profile.model} · {profile.baseUrl}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-1.5">
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => setOpenAIDialog({ open: true, mode: 'edit', editing: profile })}
                               >
-                                {openAIDraft.model} · {openAIDraft.baseUrl}
-                              </p>
-                            </>
-                          ) : (
-                            <>
-                              <h4 className="text-xs font-semibold text-foreground">尚未配置</h4>
-                              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                                点击新增填写 URL / API Key / 名称 / Model。
-                              </p>
-                            </>
-                          )}
+                                <PencilIcon size={11} />
+                                编辑
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-muted-foreground hover:text-destructive"
+                                onClick={() => void deleteOpenAIProfile(profile.id)}
+                              >
+                                <Trash2Icon size={11} />
+                              </Button>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
+                          尚未配置 OpenAI-Compatible 模型，点击下方新增。
                         </div>
-                      </div>
-                      <OpenAIProfileTrigger
-                        configured={openAIConfigured}
-                        onClick={() => setOpenAIDialog({ open: true, mode: openAIConfigured ? 'edit' : 'create' })}
-                      />
-                    </div>
+                      )}
+                      <Button
+                        size="sm"
+                        variant={openAIProfiles.length > 0 ? 'secondary' : 'default'}
+                        onClick={() => setOpenAIDialog({ open: true, mode: 'create' })}
+                      >
+                        <PlusIcon size={11} />
+                        新增 OpenAI-Compatible
+                      </Button>
+                    </FieldGroup>
                   </Section>
                 </TabsContent>
               </div>
@@ -1413,7 +1538,9 @@ export function SettingsDialog({
         initial={openAIInitial}
         onOpenChange={(next) => setOpenAIDialog((current) => ({ ...current, open: next }))}
         onSaved={(profile) => void saveOpenAIProfile(profile)}
-        onDeleted={() => void deleteOpenAIProfile()}
+        onDeleted={() => {
+          if (openAIDialog.editing) void deleteOpenAIProfile(openAIDialog.editing.id)
+        }}
         onError={(reason) => showError(reason instanceof Error ? reason.message : String(reason))}
       />
       <MemoryDialog

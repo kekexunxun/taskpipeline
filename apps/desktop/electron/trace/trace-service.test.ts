@@ -407,7 +407,7 @@ describe('TraceService', () => {
     expect(viaPiTrace[0]!.title).toBe('执行会话开始')
   })
 
-  it('D6：pi_session_path 文件名匹配关联任务', async () => {
+  it('D6：pi_session_path 匹配关联任务 → Pi 会话并入任务 Trace，不再单列', async () => {
     const dataDir = temporaryRoot('d6')
     const agentDir = temporaryRoot('d6a')
     const store = new TaskStore(':memory:')
@@ -416,8 +416,18 @@ describe('TraceService', () => {
     writePiTraceSession(agentDir, 'sess-pi', PI_TRACE_EVENTS)
 
     const service = new TraceService(store, fakeChatService(), dataDir, agentDir)
-    const summary = (await service.listSummaries()).find((s) => s.kind === 'pi_session' && s.traceId === 'sess-pi')
-    expect(summary?.linkedTaskId).toBe(task.id)
+    // 关联任务的 Pi 会话不再单列为独立记录（一个任务只对应一条 Trace 记录）。
+    const summaries = await service.listSummaries()
+    expect(summaries.some((s) => s.kind === 'pi_session' && s.traceId === 'sess-pi')).toBe(false)
+    const taskSummary = summaries.find((s) => s.kind === 'task' && s.traceId === task.id)
+    expect(taskSummary).toBeDefined()
+    // 任务详情按时间顺序合并 Pi 执行条目（pi-trace 解析，无折叠分组字段）。
+    const entries = await service.getTrace(task.id, 'task')
+    expect(entries.some((e) => e.source === 'pi_trace' && e.type === 'tool_call')).toBe(true)
+    expect(entries.some((e) => e.source === 'pi_trace' && e.parentTaskId !== undefined)).toBe(false)
+    for (let i = 1; i < entries.length; i += 1) {
+      expect(Date.parse(entries[i - 1]!.createdAt) <= Date.parse(entries[i]!.createdAt)).toBe(true)
+    }
   })
 
   it('未知 trace 返回空数组', async () => {

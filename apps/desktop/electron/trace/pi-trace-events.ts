@@ -132,16 +132,49 @@ export async function summarizePiTrace(eventsFile: string): Promise<PiTraceStats
   return stats
 }
 
+/** 递归深度上限：子 agent 最多嵌套 5 层，防循环 / 异常目录结构。 */
+const MAX_SUBAGENT_DEPTH = 5
+
+/**
+ * 解析上下文（主文件与递归子文件共享 seq 计数器）。
+ *
+ * 平铺策略（对齐「一条 Trace 按时间顺序展示」）：不再生成 turn / 子 agent 折叠组，
+ * 所有条目（含递归子 agent 文件）保持执行顺序平铺为同一条时间线。
+ */
+type ParseContext = {
+  sessionId: string
+  /** 全局递增 seq（主文件 + 子文件共享，保证 entry id 唯一）。 */
+  seqRef: { current: number }
+  /** 主文件才做子 agent 挂载；子文件不再递归。 */
+  isRoot: boolean
+  /** 主 events.jsonl 所在目录（解析子 agent 相对路径用）。 */
+  rootDir: string
+  /** 递归深度。 */
+  depth: number
+}
+
 /** 逐行解析 events.jsonl → TraceEntry[]（流式，可处理大文件）。 */
 export async function parsePiTraceEvents(filePath: string): Promise<TraceEntry[]> {
   const sessionId = basenameWithoutExt(filePath)
   const out: TraceEntry[] = []
-  let seq = 0
+  const ctx: ParseContext = {
+    sessionId,
+    seqRef: { current: 0 },
+    isRoot: true,
+    rootDir: dirnameOf(filePath),
+    depth: 0
+  }
+  await parseEventsWithContext(filePath, ctx, out)
+  return out
+}
+
+/** 递归解析单文件（主文件 / 子 agent 文件共用）。 */
+async function parseEventsWithContext(filePath: string, ctx: ParseContext, out: TraceEntry[]): Promise<void> {
   let stream: ReturnType<typeof createReadStream>
   try {
     stream = createReadStream(filePath, { encoding: 'utf8' })
   } catch {
-    return []
+    return
   }
   const lines = createInterface({ input: stream, crlfDelay: Infinity })
   for await (const line of lines) {
@@ -152,12 +185,68 @@ export async function parsePiTraceEvents(filePath: string): Promise<TraceEntry[]
     } catch {
       continue // 未知/损坏行跳过，不中断整体解析
     }
-    for (const entry of mapEvent(event, sessionId, seq)) {
+    const seq = ctx.seqRef.current
+    ctx.seqRef.current += 1
+    for (const entry of mapEvent(event, ctx, seq)) {
       out.push(entry)
-      seq += 1
+    }
+    // 子 agent 挂载：tool_end 携带 subagent 时递归解析子文件（平铺，无折叠组）。
+    if (ctx.isRoot && event.type === 'tool_end' && event.subagent && ctx.depth < MAX_SUBAGENT_DEPTH) {
+      await attachSubagent(event, ctx, out)
     }
   }
-  return out
+}
+
+/** 递归解析子 agent 文件并平铺：开始标记 → 子文件事件 → 结束标记（无折叠组）。 */
+async function attachSubagent(event: Record<string, unknown>, ctx: ParseContext, out: TraceEntry[]): Promise<void> {
+  const subagent = event.subagent as
+    | { id?: string; childTraces?: Array<{ id?: string; dir?: string; startTs?: number }> }
+    | undefined
+  if (!subagent || !Array.isArray(subagent.childTraces) || subagent.childTraces.length === 0) return
+  const headerTs = timestampOf(event)
+  for (const child of subagent.childTraces) {
+    if (!child.id) continue
+    // 开始标记：锚定在 spawner 工具（tool_end）之后，作为普通 status 条目平铺。
+    out.push({
+      id: `pt-${ctx.sessionId}-${ctx.seqRef.current++}`,
+      traceId: ctx.sessionId,
+      kind: 'pi_session',
+      type: 'status',
+      title: `Pi Agent ${child.id.slice(0, 8)} 开始`,
+      createdAt: headerTs,
+      source: 'pi_trace',
+      payload: {
+        subagentId: child.id,
+        toolCallId: typeof event.toolCallId === 'string' ? event.toolCallId : undefined,
+        toolName: event.toolName
+      }
+    })
+    // 递归子 agent 执行文件（dir 可能是绝对路径，也可能是相对 traces 根的路径）。
+    if (child.dir) {
+      const childFile = join(isAbsolutePath(child.dir) ? child.dir : join(ctx.rootDir, child.dir), 'events.jsonl')
+      await parseEventsWithContext(childFile, { ...ctx, isRoot: false, depth: ctx.depth + 1 }, out)
+    }
+    // 结束标记：普通 status 条目。
+    out.push({
+      id: `pt-${ctx.sessionId}-${ctx.seqRef.current++}`,
+      traceId: ctx.sessionId,
+      kind: 'pi_session',
+      type: 'status',
+      title: `Pi Agent ${child.id.slice(0, 8)} 结束`,
+      createdAt: headerTs,
+      source: 'pi_trace',
+      payload: { subagentId: child.id }
+    })
+  }
+}
+
+function dirnameOf(filePath: string): string {
+  const idx = filePath.lastIndexOf('/')
+  return idx >= 0 ? filePath.slice(0, idx) : '.'
+}
+
+function isAbsolutePath(p: string): boolean {
+  return p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p)
 }
 
 // === 事件映射 =================================================================
@@ -181,17 +270,18 @@ function asNum(value: unknown): number | undefined {
   return typeof value === 'number' ? value : undefined
 }
 
-function mapEvent(event: Record<string, unknown>, sessionId: string, seq: number): TraceEntry[] {
+function mapEvent(event: Record<string, unknown>, ctx: ParseContext, seq: number): TraceEntry[] {
   const type = String(event.type ?? 'unknown')
   const turn = event.turnIndex
   const step = event.stepIndex
   const tag = [step !== undefined ? `step ${step}` : undefined, turn !== undefined ? `turn ${turn}` : undefined]
     .filter(Boolean)
     .join(' · ')
-  const id = `pt-${sessionId}-${seq}`
+  const id = `pt-${ctx.sessionId}-${seq}`
+  // 全部条目平铺为同一条时间线（不做 turn / 子 agent 分组折叠）。
   const base: TraceEntry = {
     id,
-    traceId: sessionId,
+    traceId: ctx.sessionId,
     kind: 'pi_session',
     type: 'status',
     title: '',

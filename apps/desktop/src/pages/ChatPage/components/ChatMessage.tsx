@@ -33,7 +33,9 @@ function ChatMessageImpl({
   )
   const metaStatus = message.metadata?.status
   const isAborted = metaStatus === 'aborted'
-  const isError = metaStatus === 'error'
+  // 双通道:流期间异常挂在 metadata(不持久化),历史消息读落盘的 errorMessage。
+  const errorMessage = message.metadata?.errorMessage ?? message.errorMessage
+  const isError = metaStatus === 'error' || Boolean(errorMessage)
   const isStreaming = Boolean(isAnimating) && !isAborted && !isError
   const taskCreation = message.metadata?.taskCreation
   const taskKey = taskCreation?.externalKey
@@ -76,6 +78,10 @@ function ChatMessageImpl({
               <div className="flex items-center gap-2 rounded-xl border border-border/40 bg-muted/30 px-3.5 py-2.5 text-xs text-muted-foreground">
                 <Loader2Icon className="animate-spin-slow" size={12} />
                 {driverLabel(message.driverId)} 正在思考…
+              </div>
+            ) : isError ? (
+              <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-3.5 py-2.5 text-xs leading-5 break-words whitespace-pre-wrap text-destructive">
+                {errorMessage ?? '模型返回异常，请稍后重试'}
               </div>
             ) : (
               <DriverMessageBody message={message} isAnimating={isStreaming} />

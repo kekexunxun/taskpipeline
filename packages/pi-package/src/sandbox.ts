@@ -50,12 +50,35 @@ export class DockerToolRouter {
     return this.mode
   }
 
+  /**
+   * Docker 沙箱不可用（docker 存在但镜像拉取/容器启动/命令执行失败）时降级为本机执行。
+   * 降级是持久的（本次进程内不再重试 docker），并写一条任务状态事件告知用户。
+   */
+  private degrade(reason: string): void {
+    this.mode = 'host'
+    this.containerName = undefined
+    console.warn(`[sandbox] Docker 沙箱不可用，回退到本机执行：${reason}`)
+    const task = this.getTask()
+    if (task)
+      this.store.addEvent({
+        taskId: task.id,
+        kind: 'status',
+        title: '执行环境：回退本机',
+        detail: `Docker 沙箱启动失败（${reason}），已自动回退到本机直接执行`
+      })
+  }
+
   async container(): Promise<string | undefined> {
     if ((await this.check()) !== 'docker') return undefined
     if (this.startPromise) return this.startPromise
-    this.startPromise = this.startContainer().finally(() => {
-      this.startPromise = undefined
-    })
+    this.startPromise = this.startContainer()
+      .catch((error) => {
+        this.degrade(error instanceof Error ? error.message : String(error))
+        return undefined
+      })
+      .finally(() => {
+        this.startPromise = undefined
+      })
     return this.startPromise
   }
 
@@ -102,9 +125,9 @@ export class DockerToolRouter {
     return { stdout: result.stdout.toString('utf8'), stderr: result.stderr.toString('utf8'), exitCode: result.exitCode }
   }
 
-  private async readOperations(): Promise<ReadOperations> {
+  private async readOperations(): Promise<ReadOperations | undefined> {
     const name = await this.container()
-    if (!name) throw new Error('Docker sandbox is unavailable')
+    if (!name) return undefined
     return {
       readFile: (path) => this.docker.exec(name, ['cat', '--', path]),
       access: async (path) => {
@@ -114,9 +137,9 @@ export class DockerToolRouter {
     }
   }
 
-  private async writeOperations(): Promise<WriteOperations> {
+  private async writeOperations(): Promise<WriteOperations | undefined> {
     const name = await this.container()
-    if (!name) throw new Error('Docker sandbox is unavailable')
+    if (!name) return undefined
     return {
       writeFile: async (path, content) => {
         await this.docker.exec(name, ['sh', '-c', 'mkdir -p "$(dirname "$1")"; cat > "$1"', 'sh', path], content)
@@ -127,21 +150,22 @@ export class DockerToolRouter {
     }
   }
 
-  private async editOperations(): Promise<EditOperations> {
+  private async editOperations(): Promise<EditOperations | undefined> {
     const read = await this.readOperations()
     const write = await this.writeOperations()
+    if (!read || !write) return undefined
     return { readFile: read.readFile, writeFile: write.writeFile, access: read.access }
   }
 
-  private async bashOperations(): Promise<BashOperations> {
+  private async bashOperations(): Promise<BashOperations | undefined> {
     const name = await this.container()
-    if (!name) throw new Error('Docker sandbox is unavailable')
+    if (!name) return undefined
     return { exec: (command, cwd, options) => this.docker.execStreaming(name, cwd, command, options) }
   }
 
-  private async lsOperations(): Promise<LsOperations> {
+  private async lsOperations(): Promise<LsOperations | undefined> {
     const name = await this.container()
-    if (!name) throw new Error('Docker sandbox is unavailable')
+    if (!name) return undefined
     return {
       exists: async (path) => (await this.docker.execResult(name, ['test', '-e', path])).exitCode === 0,
       stat: async (path) => ({
@@ -158,9 +182,9 @@ export class DockerToolRouter {
     }
   }
 
-  private async findOperations(): Promise<FindOperations> {
+  private async findOperations(): Promise<FindOperations | undefined> {
     const name = await this.container()
-    if (!name) throw new Error('Docker sandbox is unavailable')
+    if (!name) return undefined
     return {
       exists: async (path) => (await this.docker.execResult(name, ['test', '-e', path])).exitCode === 0,
       glob: async (pattern, cwd, options) => {
@@ -188,10 +212,8 @@ export class DockerToolRouter {
       ...localRead,
       execute: async (id, params, signal, update) => {
         const cwd = this.activeCwd(initialCwd)
-        const tool =
-          (await this.check()) === 'docker'
-            ? createReadTool(cwd, { operations: await this.readOperations() })
-            : createReadTool(cwd)
+        const ops = (await this.check()) === 'docker' ? await this.readOperations() : undefined
+        const tool = ops ? createReadTool(cwd, { operations: ops }) : createReadTool(cwd)
         return tool.execute(id, params, signal, update)
       }
     })
@@ -199,10 +221,8 @@ export class DockerToolRouter {
       ...localWrite,
       execute: async (id, params, signal, update) => {
         const cwd = this.activeCwd(initialCwd)
-        const tool =
-          (await this.check()) === 'docker'
-            ? createWriteTool(cwd, { operations: await this.writeOperations() })
-            : createWriteTool(cwd)
+        const ops = (await this.check()) === 'docker' ? await this.writeOperations() : undefined
+        const tool = ops ? createWriteTool(cwd, { operations: ops }) : createWriteTool(cwd)
         return tool.execute(id, params, signal, update)
       }
     })
@@ -210,10 +230,8 @@ export class DockerToolRouter {
       ...localEdit,
       execute: async (id, params, signal, update) => {
         const cwd = this.activeCwd(initialCwd)
-        const tool =
-          (await this.check()) === 'docker'
-            ? createEditTool(cwd, { operations: await this.editOperations() })
-            : createEditTool(cwd)
+        const ops = (await this.check()) === 'docker' ? await this.editOperations() : undefined
+        const tool = ops ? createEditTool(cwd, { operations: ops }) : createEditTool(cwd)
         return tool.execute(id, params, signal, update)
       }
     })
@@ -221,10 +239,8 @@ export class DockerToolRouter {
       ...localBash,
       execute: async (id, params, signal, update) => {
         const cwd = this.activeCwd(initialCwd)
-        const tool =
-          (await this.check()) === 'docker'
-            ? createBashTool(cwd, { operations: await this.bashOperations() })
-            : createBashTool(cwd)
+        const ops = (await this.check()) === 'docker' ? await this.bashOperations() : undefined
+        const tool = ops ? createBashTool(cwd, { operations: ops }) : createBashTool(cwd)
         return tool.execute(id, params, signal, update)
       }
     })
@@ -232,10 +248,8 @@ export class DockerToolRouter {
       ...localLs,
       execute: async (id, params, signal, update) => {
         const cwd = this.activeCwd(initialCwd)
-        const tool =
-          (await this.check()) === 'docker'
-            ? createLsTool(cwd, { operations: await this.lsOperations() })
-            : createLsTool(cwd)
+        const ops = (await this.check()) === 'docker' ? await this.lsOperations() : undefined
+        const tool = ops ? createLsTool(cwd, { operations: ops }) : createLsTool(cwd)
         return tool.execute(id, params, signal, update)
       }
     })
@@ -243,10 +257,8 @@ export class DockerToolRouter {
       ...localFind,
       execute: async (id, params, signal, update) => {
         const cwd = this.activeCwd(initialCwd)
-        const tool =
-          (await this.check()) === 'docker'
-            ? createFindTool(cwd, { operations: await this.findOperations() })
-            : createFindTool(cwd)
+        const ops = (await this.check()) === 'docker' ? await this.findOperations() : undefined
+        const tool = ops ? createFindTool(cwd, { operations: ops }) : createFindTool(cwd)
         return tool.execute(id, params, signal, update)
       }
     })
@@ -256,7 +268,7 @@ export class DockerToolRouter {
         const cwd = this.activeCwd(initialCwd)
         if ((await this.check()) !== 'docker') return createGrepTool(cwd).execute(id, params, signal, update)
         const name = await this.container()
-        if (!name) throw new Error('Docker sandbox is unavailable')
+        if (!name) return createGrepTool(cwd).execute(id, params, signal, update)
         const path = resolve(cwd, params.path ?? '.')
         const args = [
           'rg',
@@ -287,8 +299,10 @@ export class DockerToolRouter {
       }
     })
 
-    pi.on('user_bash', async () =>
-      (await this.check()) === 'docker' ? { operations: await this.bashOperations() } : undefined
-    )
+    pi.on('user_bash', async () => {
+      if ((await this.check()) !== 'docker') return undefined
+      const operations = await this.bashOperations()
+      return operations ? { operations } : undefined
+    })
   }
 }

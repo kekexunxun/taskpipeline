@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import { Loader2Icon, PencilIcon, PlusIcon, SaveIcon, Trash2Icon } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { useEffect, useState } from 'react'
+import { Loader2Icon, SaveIcon, Trash2Icon } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogClose,
@@ -9,22 +9,30 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle
-} from "@/components/ui/dialog";
-import { Field, FieldGroup } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
-import { SecretInput } from "@/components/ui/secret-input";
-import { Badge } from "@/components/ui/badge";
+} from '@/components/ui/dialog'
+import { Field, FieldGroup } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
+import { SecretInput } from '@/components/ui/secret-input'
+import { Badge } from '@/components/ui/badge'
+import { Switch } from '@/components/ui/switch'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { MODEL_VENDORS, detectVendor, type ModelVendor } from '@/utils/model-vendors'
 
 export type OpenAIProfile = {
-  baseUrl: string;
-  model: string;
-  displayName?: string;
-  apiKeyConfigured: boolean;
-};
+  id?: string
+  vendor?: ModelVendor
+  baseUrl: string
+  model: string
+  displayName?: string
+  apiKeyConfigured: boolean
+  isDefault?: boolean
+}
 
 /**
  * OpenAI-Compatible 模型配置弹窗：
- * - 填写 URL（Base URL）、API Key、显示名称、Model ID。
+ * - 选择厂商（DeepSeek / OpenAI 官方 / 其它兼容端点）自动填充默认 URL；
+ * - 填写 URL（Base URL）、API Key、显示名称、Model ID；
+ * - 「设为默认」：系统级调用（关键词提取 / 记忆整理 / 计划 / 实现 / Review）使用默认配置；
  * - 支持新增/编辑两种模式，编辑时若 API Key 为空则保留已有值。
  */
 export function OpenAIProfileDialog({
@@ -36,62 +44,111 @@ export function OpenAIProfileDialog({
   onDeleted,
   onError
 }: {
-  open: boolean;
-  onOpenChange(open: boolean): void;
-  initial?: OpenAIProfile;
-  mode: "create" | "edit";
-  onSaved(profile: { baseUrl: string; model: string; displayName?: string; apiKey: string | undefined }): void;
-  onDeleted?(): void;
-  onError?(reason: unknown): void;
+  open: boolean
+  onOpenChange(open: boolean): void
+  initial?: OpenAIProfile
+  mode: 'create' | 'edit'
+  onSaved(profile: {
+    id?: string
+    vendor?: ModelVendor
+    baseUrl: string
+    model: string
+    displayName?: string
+    apiKey: string | undefined
+    isDefault: boolean
+  }): void
+  onDeleted?(): void
+  onError?(reason: unknown): void
 }) {
-  const [baseUrl, setBaseUrl] = useState("");
-  const [model, setModel] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [deleting, setDeleting] = useState(false);
+  const [baseUrl, setBaseUrl] = useState('')
+  const [vendor, setVendor] = useState<ModelVendor>('openai-compatible')
+  const [model, setModel] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [isDefault, setIsDefault] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   useEffect(() => {
-    if (!open) return;
-    setBaseUrl(initial?.baseUrl ?? "");
-    setModel(initial?.model ?? "");
-    setDisplayName(initial?.displayName ?? "");
-    setApiKey(initial?.apiKeyConfigured ? "__configured__" : "");
-  }, [open, initial]);
-  const trimmedBase = baseUrl.trim();
-  const trimmedModel = model.trim();
-  const canSave = trimmedBase.length > 0 && trimmedModel.length > 0 && !saving && !deleting;
+    if (!open) return
+    setBaseUrl(initial?.baseUrl ?? '')
+    setVendor(initial?.vendor ?? detectVendor(initial?.baseUrl))
+    setModel(initial?.model ?? '')
+    setDisplayName(initial?.displayName ?? '')
+    setApiKey(initial?.apiKeyConfigured ? '__configured__' : '')
+    setIsDefault(initial?.isDefault ?? false)
+  }, [open, initial])
+  const trimmedBase = baseUrl.trim()
+  const trimmedModel = model.trim()
+  const canSave = trimmedBase.length > 0 && trimmedModel.length > 0 && !saving && !deleting
   const save = async () => {
-    if (!canSave) return;
-    setSaving(true);
+    if (!canSave) return
+    setSaving(true)
     try {
-      const apiKeyValue = apiKey === "__configured__" ? undefined : apiKey;
-      onSaved({ baseUrl: trimmedBase, model: trimmedModel, displayName: displayName.trim() || undefined, apiKey: apiKeyValue });
+      const apiKeyValue = apiKey === '__configured__' ? undefined : apiKey
+      onSaved({
+        id: initial?.id,
+        vendor,
+        baseUrl: trimmedBase,
+        model: trimmedModel,
+        displayName: displayName.trim() || undefined,
+        apiKey: apiKeyValue,
+        isDefault
+      })
     } catch (reason) {
-      onError?.(reason);
+      onError?.(reason)
     } finally {
-      setSaving(false);
+      setSaving(false)
     }
-  };
+  }
   const remove = async () => {
-    if (!onDeleted) return;
-    setDeleting(true);
+    if (!onDeleted) return
+    setDeleting(true)
     try {
-      onDeleted();
+      onDeleted()
     } catch (reason) {
-      onError?.(reason);
+      onError?.(reason)
     } finally {
-      setDeleting(false);
+      setDeleting(false)
     }
-  };
+  }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="!w-[520px] !max-w-[520px] grid max-h-[min(560px,calc(100vh-64px))] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 p-0">
-        <DialogHeader className="space-y-1 border-b px-5 pb-3 pt-3.5">
-          <DialogTitle className="text-sm">{mode === "create" ? "新增 OpenAI-Compatible 模型" : "编辑 OpenAI-Compatible 模型"}</DialogTitle>
+      <DialogContent className="grid max-h-[min(560px,calc(100vh-64px))] !w-[520px] !max-w-[520px] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 p-0">
+        <DialogHeader className="space-y-1 border-b px-5 pt-3.5 pb-3">
+          <DialogTitle className="text-sm">
+            {mode === 'create' ? '新增 OpenAI-Compatible 模型' : '编辑 OpenAI-Compatible 模型'}
+          </DialogTitle>
           <DialogDescription>配置兼容 OpenAI API 格式的模型服务，可用于对话与任务执行。</DialogDescription>
         </DialogHeader>
         <div className="thin-scrollbar min-h-0 overflow-y-auto px-5 py-4">
           <FieldGroup className="gap-3">
+            <Field label="厂商">
+              <Select
+                value={vendor}
+                onValueChange={(value) => {
+                  setVendor(value as ModelVendor)
+                  // 切换厂商时自动填充默认 URL（仅当 URL 为空或还是旧厂商默认值时）
+                  const def = MODEL_VENDORS.find((v) => v.id === value)?.defaultBaseUrl ?? ''
+                  const oldDef = MODEL_VENDORS.find((v) => v.id !== value)?.defaultBaseUrl
+                  const trimmed = baseUrl.trim()
+                  if (def && (!trimmed || trimmed === oldDef)) setBaseUrl(def)
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="选择厂商" />
+                </SelectTrigger>
+                <SelectContent>
+                  {MODEL_VENDORS.map((v) => (
+                    <SelectItem key={v.id} value={v.id}>
+                      {v.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] leading-4 text-muted-foreground">
+                官方端点使用专用 SDK（更完整的推理/结构化解析）；未知网关请选「其它兼容端点」。
+              </p>
+            </Field>
             <Field label="URL">
               <Input
                 value={baseUrl}
@@ -104,6 +161,7 @@ export function OpenAIProfileDialog({
                 aria-label="API Key"
                 value={apiKey}
                 onChange={(event) => setApiKey(event.target.value)}
+                placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxx"
               />
             </Field>
             <Field label="名称">
@@ -114,23 +172,22 @@ export function OpenAIProfileDialog({
               />
             </Field>
             <Field label="使用的模型 (Model)">
-              <Input
-                value={model}
-                onChange={(event) => setModel(event.target.value)}
-                placeholder="gpt-4o-mini"
-              />
+              <Input value={model} onChange={(event) => setModel(event.target.value)} placeholder="gpt-4o-mini" />
+            </Field>
+            <Field label="设为默认（系统级调用使用）">
+              <Switch checked={isDefault} onCheckedChange={setIsDefault} />
             </Field>
             {trimmedModel && (
               <div className="flex items-center gap-2 rounded-md border bg-card/40 px-2.5 py-1.5 text-xs text-muted-foreground">
                 <span className="font-medium text-foreground/80">预览</span>
-                <Badge variant="outline">{displayName.trim() || "OpenAI-Compatible"}</Badge>
+                <Badge variant="outline">{displayName.trim() || 'OpenAI-Compatible'}</Badge>
                 <span className="truncate font-mono text-xs text-foreground/80">{trimmedModel}</span>
               </div>
             )}
           </FieldGroup>
         </div>
         <DialogFooter className="border-t px-5 py-2.5">
-          {mode === "edit" && onDeleted && (
+          {mode === 'edit' && onDeleted && (
             <Button
               variant="ghost"
               size="sm"
@@ -139,7 +196,7 @@ export function OpenAIProfileDialog({
               onClick={() => void remove()}
             >
               {deleting ? <Loader2Icon className="animate-spin-slow" size={11} /> : <Trash2Icon size={11} />}
-              {deleting ? "删除中" : "删除配置"}
+              {deleting ? '删除中' : '删除配置'}
             </Button>
           )}
           <DialogClose asChild>
@@ -149,36 +206,10 @@ export function OpenAIProfileDialog({
           </DialogClose>
           <Button size="sm" disabled={!canSave} onClick={() => void save()}>
             {saving ? <Loader2Icon className="animate-spin-slow" size={11} /> : <SaveIcon size={11} />}
-            {saving ? "保存中" : "保存"}
+            {saving ? '保存中' : '保存'}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
-}
-
-/**
- * 触发按钮：区分空状态（新增） 与 已配置（编辑） 两种用法。
- */
-export function OpenAIProfileTrigger({
-  configured,
-  onClick
-}: {
-  configured: boolean;
-  onClick(): void;
-}) {
-  if (configured) {
-    return (
-      <Button variant="secondary" size="sm" onClick={onClick}>
-        <PencilIcon size={11} />
-        编辑
-      </Button>
-    );
-  }
-  return (
-    <Button size="sm" onClick={onClick}>
-      <PlusIcon size={11} />
-      新增 OpenAI-Compatible
-    </Button>
-  );
+  )
 }

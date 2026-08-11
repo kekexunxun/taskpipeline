@@ -58,6 +58,11 @@ function resultPayloadOf(part: DriverPart | undefined): { output?: unknown; isEr
   return { output: part.output, isError: 'isError' in part ? part.isError === true : undefined }
 }
 
+/** text part 渲染入口：走流式 markdown。 */
+function TextPartOrDSML({ part, isAnimating }: { part: Extract<DriverPart, { type: 'text' }>; isAnimating?: boolean }) {
+  return <TextPart part={part} isAnimating={isAnimating} />
+}
+
 /**
  * 按 `DriverPart.type` 路由到具体 part 渲染器。
  *
@@ -81,6 +86,11 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
     const out: DriverPart[] = []
     for (const part of parts) {
       const last = out[out.length - 1]
+      // qoder.thinking / openai.thinking 都是流式增量拆分,合并成单个「思考过程」折叠块,
+      // 避免流式渲染时刷屏(8+ 个空标题块)。
+      // 拼接方式不同:qoder 按行推送 delta(每条是独立一行,用 \n 分隔);
+      // openai 的 reasoning-delta 按 token 粒度推送(每条一个词),直接拼接,
+      // 否则每个词都会变成独立一行、思考过程被拆碎。
       if (part.type === 'qoder.thinking' && last?.type === 'qoder.thinking') {
         const signature = part.signature && last.signature !== part.signature ? part.signature : last.signature
         const parentTaskId = part.parentTaskId ?? last.parentTaskId
@@ -89,6 +99,14 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
           type: 'qoder.thinking',
           text: `${last.text}\n${part.text}`,
           ...(signature ? { signature } : {}),
+          ...(parentTaskId ? { parentTaskId } : {})
+        } as DriverPart
+      } else if (part.type === 'openai.thinking' && last?.type === 'openai.thinking') {
+        const parentTaskId = part.parentTaskId ?? last.parentTaskId
+        out[out.length - 1] = {
+          driverId: part.driverId,
+          type: 'openai.thinking',
+          text: `${last.text}${part.text}`,
           ...(parentTaskId ? { parentTaskId } : {})
         } as DriverPart
       } else if (
@@ -160,9 +178,9 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
   /** 单个 part 渲染(subtask-* 控制 part 与被吸收的 spawner 调用返回 null)。 */
   const renderSinglePart = (part: DriverPart, key: string): ReactNode => {
     if (part.type === 'text') {
-      return <TextPart key={key} part={part} isAnimating={isStreaming} />
+      return <TextPartOrDSML key={key} part={part} isAnimating={isStreaming} />
     }
-    if (part.type === 'qoder.thinking') {
+    if (part.type === 'qoder.thinking' || part.type === 'openai.thinking') {
       return <ThinkingPart key={key} part={part} isStreaming={isStreaming} />
     }
     if (part.type === 'qoder.session') {

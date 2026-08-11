@@ -358,15 +358,22 @@ function TraceEntryTimeline({ entries }: { entries: TraceEntry[] }) {
       .filter((entry) => !isHiddenTimelineEvent(entry.title))
       .map((entry): IndexedEntry => ({ entry, meta: subtaskMetaOf(entry) }))
     // 旧数据兼容:流式 agent_text 曾按 delta 粒度落库,相邻 agent 消息碎片合并成完整段落。
-    // 仅合并 events 源的 Qoder/OpenAI agent 消息(chat 源是完整对话消息,不能并)。
+    // - events 源：Qoder/OpenAI 流式文本碎片，直接合并；
+    // - chat 源：openai driver 早期按 delta 落盘导致的碎 part，仅同一条消息（createdAt 相同）合并，
+    //   跨消息不合并（相邻 AI 消息必被 user 消息隔开，createdAt 即消息归属）。
     const isAgentMsg = (e: IndexedEntry) =>
-      e.entry.source === 'events' &&
       e.entry.type === 'message' &&
-      /^(?:qoder agent|openai agent|ai)$/i.test(e.entry.title.trim())
+      /^(?:qoder agent|openai agent|ai)$/i.test(e.entry.title.trim()) &&
+      (e.entry.source === 'events' || e.entry.source === 'chat')
     const merged: IndexedEntry[] = []
     for (const current of indexed) {
       const last = merged[merged.length - 1]
-      if (last && isAgentMsg(current) && isAgentMsg(last)) {
+      if (
+        last &&
+        isAgentMsg(current) &&
+        isAgentMsg(last) &&
+        (last.entry.source === 'events' || last.entry.createdAt === current.entry.createdAt)
+      ) {
         merged[merged.length - 1] = {
           ...last,
           entry: {

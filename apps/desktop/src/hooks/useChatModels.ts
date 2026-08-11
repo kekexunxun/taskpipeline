@@ -31,5 +31,12 @@ export function useChatModels(): ChatModelsSnapshot {
     void refresh();
   }, [refresh]);
 
+  // 设置中增删/修改模型配置（OpenAI-Compatible profile）后广播 `app:models-changed`，
+  // 已挂载的对话页 / 详情页 / Agent 弹窗据此刷新模型列表，否则弹窗会一直显示旧快照。
+  useEffect(() => {
+    window.addEventListener("app:models-changed", refresh);
+    return () => window.removeEventListener("app:models-changed", refresh);
+  }, [refresh]);
+
   return { modelGroups, loading, refresh };
 }

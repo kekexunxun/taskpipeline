@@ -43,6 +43,10 @@ export class TaskStore {
         id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
         kind TEXT NOT NULL, title TEXT NOT NULL, detail TEXT, payload TEXT, created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS openai_events (
+        id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL, title TEXT NOT NULL, detail TEXT, payload TEXT, created_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS approvals (
         id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
         kind TEXT NOT NULL, status TEXT NOT NULL, context TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -388,6 +392,35 @@ export class TaskStore {
       )
       .run({ ...item, payload: item.payload === undefined ? undefined : JSON.stringify(item.payload) })
     return item
+  }
+
+  /** OpenAI/Pi 会话事件落库（独立表，与 Qoder events 分离；结构与 events 一致）。 */
+  addOpenAiEvent(event: Omit<AgentEvent, 'id' | 'createdAt'>): AgentEvent {
+    const item = { detail: undefined, payload: undefined, ...event, id: randomUUID(), createdAt: this.now() }
+    this.db
+      .prepare(
+        'INSERT INTO openai_events (id,task_id,kind,title,detail,payload,created_at) VALUES (@id,@taskId,@kind,@title,@detail,@payload,@createdAt)'
+      )
+      .run({ ...item, payload: item.payload === undefined ? undefined : JSON.stringify(item.payload) })
+    return item
+  }
+  listOpenAiEvents(taskId: string): AgentEvent[] {
+    return (
+      this.db
+        .prepare(
+          'SELECT id,task_id as taskId,kind,title,detail,payload,created_at as createdAt FROM openai_events WHERE task_id = ? ORDER BY created_at ASC'
+        )
+        .all(taskId) as Record<string, unknown>[]
+    ).map((r) => ({
+      ...r,
+      id: String(r.id),
+      taskId: String(r.taskId),
+      kind: r.kind as AgentEvent['kind'],
+      title: String(r.title),
+      detail: r.detail ? String(r.detail) : undefined,
+      payload: r.payload ? JSON.parse(String(r.payload)) : undefined,
+      createdAt: String(r.createdAt)
+    }))
   }
   listEvents(taskId: string): AgentEvent[] {
     return (

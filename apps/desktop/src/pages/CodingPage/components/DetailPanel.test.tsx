@@ -64,6 +64,7 @@ const detail: TaskDetail = {
   task: card,
   repositories: [],
   events: [],
+  openAiEvents: [],
   approvals: [],
   changedFiles: []
 }

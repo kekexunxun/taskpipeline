@@ -162,10 +162,81 @@ let activeQoderQuery: Query | undefined
 let activeQoderAbort: AbortController | undefined
 let activePlanningTaskId: string | undefined
 let activePlanText = ''
+/**
+ * planning 期间最近一次 assistant 错误消息（pi 在模型流式错误如
+ * `Stream ended without finish_reason` 时不抛异常，而是生成 stopReason=error
+ * 的 assistant 消息正常返回；这里由 emitPi 检测 message_end 记录，runOpenAIPlan
+ * 在 prompt 返回后读取并显式抛错，避免任务静默卡在 planning）。
+ */
+let activePlanError: string | undefined
 type ActiveTaskOperation = { controller: AbortController; promise: Promise<unknown> }
 const activeTaskOperations = new Map<string, ActiveTaskOperation>()
 
-type ModelProfile = { provider?: string; baseUrl?: string; model?: string; apiKeyEnv?: string }
+type ModelProfile = {
+  id?: string
+  provider?: string
+  /** ai-sdk 厂商类型（deepseek / openai / openai-compatible），缺省时按 baseUrl 自动识别。 */
+  vendor?: string
+  baseUrl?: string
+  model?: string
+  displayName?: string
+  apiKeyEnv?: string
+  isDefault?: boolean
+}
+
+/**
+ * 读取全部 OpenAI-Compatible 配置。
+ * - 新格式 `modelProfiles`：JSON 数组 `[{ id, provider, vendor, baseUrl, model, displayName, isDefault }]`；
+ * - 兼容旧格式 `modelProfile`：单个对象 → 视为单元素列表（惰性迁移，首次保存 modelProfiles 后旧值废弃）。
+ */
+function readOpenAIProfiles(): ModelProfile[] {
+  const raw = store.getSetting('modelProfiles')
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      if (Array.isArray(parsed)) {
+        return parsed.filter(
+          (item): item is ModelProfile =>
+            Boolean(item) && typeof item === 'object' && typeof (item as ModelProfile).baseUrl === 'string'
+        )
+      }
+    } catch {
+      /* 忽略脏数据，走旧格式兼容 */
+    }
+  }
+  const legacy = store.getSetting('modelProfile')
+  if (legacy) {
+    try {
+      const profile = JSON.parse(legacy) as ModelProfile
+      if (profile.baseUrl && profile.model) return [{ ...profile, isDefault: true }]
+    } catch {
+      /* 忽略历史脏数据 */
+    }
+  }
+  return []
+}
+
+/** 系统级调用使用的默认 OpenAI 配置：显式 isDefault 优先，否则取第一个。 */
+function defaultOpenAIProfile(): ModelProfile | undefined {
+  const profiles = readOpenAIProfiles()
+  if (profiles.length === 0) return undefined
+  return profiles.find((profile) => profile.isDefault) ?? profiles[0]
+}
+
+/**
+ * 取某个 profile 的 API Key（apiKeyEnv 优先，其次 keyStore）。
+ * 读取顺序：`modelApiKey:<id>` → （默认或历史无 id 配置）`modelApiKey` 兼容回退。
+ * 这样切换默认 profile 时无需迁移 key —— key 始终跟 profile id 走。
+ */
+function openAIApiKeyFor(profile: ModelProfile): string | undefined {
+  if (profile.apiKeyEnv && process.env[profile.apiKeyEnv]) return process.env[profile.apiKeyEnv]
+  if (profile.id) {
+    const scoped = protectedValue(`modelApiKey:${profile.id}`)
+    if (scoped) return scoped
+  }
+  if (profile.isDefault || !profile.id) return protectedValue('modelApiKey')
+  return undefined
+}
 type QoderStatus = {
   enabled: boolean
   connected: boolean
@@ -305,13 +376,7 @@ function runTaskOperation<T>(taskId: string, action: (signal: AbortSignal) => Pr
 }
 
 function modelProvider(): 'qoder' | 'openai' {
-  const raw = store.getSetting('modelProfile')
-  if (!raw) return 'qoder'
-  try {
-    return JSON.parse(raw).provider === 'qoder' ? 'qoder' : 'openai'
-  } catch {
-    return 'qoder'
-  }
+  return readOpenAIProfiles().length > 0 ? 'openai' : 'qoder'
 }
 
 /**
@@ -439,7 +504,16 @@ const atlassianFactory = new AtlassianClientFactory(desktopResolver)
 // Chat driver registry — 统一装 Qoder / OpenAI 两份 driver；后续接入更多 driver 仅需改此处。
 const chatDriverRegistry = new ChatDriverRegistry()
 chatDriverRegistry.register(new QoderChatDriver(() => protectedValue('qoderToken'), getQoderStatus))
-chatDriverRegistry.register(new OpenAIChatDriver(store, () => protectedValue('modelApiKey')))
+chatDriverRegistry.register(
+  new OpenAIChatDriver(store, (profile) => {
+    if (profile?.id) {
+      const scoped = protectedValue(`modelApiKey:${profile.id}`)
+      if (scoped) return scoped
+    }
+    if (profile?.isDefault || !profile?.id) return protectedValue('modelApiKey')
+    return undefined
+  })
+)
 
 /**
  * 生产环境下的关键词改写器：按当前 system model 选 driver，调 LLM 提取。
@@ -447,7 +521,7 @@ chatDriverRegistry.register(new OpenAIChatDriver(store, () => protectedValue('mo
  * 不会拖垃检索链路。任务上下文 / 会话上下文 / dev probe 共用这一个实例。
  *
  * 模型选择：关键词提取只是几行 JSON，Qoder 走 lite 模型节省 credits，
- * OpenAI 跟随系统 defaultOpenAIModel（用户在 chat 设置里选什么就用什么）。
+ * OpenAI 跟随用户配置的 modelProfile（`openai:<model>`）。
  */
 const keywordRewriter: KeywordRewriter = async (query) => {
   const { driverId } = resolveTaskChatModel()
@@ -461,7 +535,7 @@ const keywordRewriter: KeywordRewriter = async (query) => {
  * 轻量任务的模型选择策略（关键词提取 / MR 描述生成等短输出场景共用）：
  * - Qoder: 从 getQoderStatus() 拉模型列表，挑名字含 lite / haiku / mini / flash 的；
  *   找不到或 Qoder 未连接时回落到系统 defaultModel。
- * - OpenAI: 跟随系统 defaultOpenAIModel。
+ * - OpenAI: 跟随用户配置的 modelProfile（`openai:<model>` 形态）。
  */
 async function resolveLiteModel(driverId: ChatDriverId): Promise<string> {
   if (driverId === 'qoder') {
@@ -480,7 +554,27 @@ async function resolveLiteModel(driverId: ChatDriverId): Promise<string> {
     }
     return store.getSetting('defaultModel') ?? 'claude-sonnet-4.5'
   }
-  return store.getSetting('defaultOpenAIModel') ?? 'gpt-4o'
+  return resolveOpenAIModelValue()
+}
+
+/** 去掉 model value 上的 `openai:` provider 前缀,让 /chat/completions 能识别真实模型名。 */
+function stripOpenAIModelPrefix(model: string | undefined): string | undefined {
+  if (!model) return undefined
+  return model.startsWith('openai:') ? model.slice('openai:'.length) : model
+}
+
+/**
+ * OpenAI 兼容模型当前的 value 形态：`openai:<model>`（model 为用户配置的真实模型名）。
+ * 关键词提取 / 记忆整理等轻量 LLM 调用统一用它 —— 之前这里固定回退到
+ * `defaultOpenAIModel ?? 'gpt-4o'`，与用户实际选择的模型脱节，且 `gpt-4o` 不是
+ * `openai:` 前缀 value，OpenAIChatDriver 会直接拒绝（关键词提取永远走不到 LLM）。
+ * 多个配置时取默认 profile（isDefault 优先，否则第一个）。
+ * 未配置时返回兼容占位 `openai:default`（driver 内部映射到 profile.model）。
+ */
+function resolveOpenAIModelValue(): string {
+  const profile = defaultOpenAIProfile()
+  if (profile?.model) return `openai:${profile.model}`
+  return 'openai:default'
 }
 
 const chatService = new ChatService(
@@ -679,7 +773,8 @@ function callQoderOrOpenAIReviewer(
   const repos = task ? store.listTaskRepositories(taskId) : []
   const { roleBody } = agentService.resolveOperationAgent('review', task ?? undefined, repos)
   const prompt = buildReviewPromptForQoder(input, roleBody)
-  if (providerForTask(taskId) !== 'qoder') return openAIReviewer.call(input, taskId, model, signal, prompt)
+  if (providerForTask(taskId) !== 'qoder')
+    return openAIReviewer.call(input, taskId, stripOpenAIModelPrefix(model), signal, prompt)
   // Review 逐仓库执行：按 input.repo 匹配仓库，注入该仓库 Agent 的指引（领域约定）。
   let finalPrompt = prompt
   if (task) {
@@ -878,13 +973,11 @@ async function callOpenAIForPrompt(
   options: { timeoutMs?: number } = {}
 ): Promise<string> {
   const { timeoutMs = 180_000 } = options
-  const raw = store.getSetting('modelProfile')
-  if (!raw) throw new Error('未配置 modelProfile')
-  const profile = JSON.parse(raw) as ModelProfile
-  if (!profile.baseUrl || !profile.model) throw new Error('modelProfile 缺少 baseUrl 或 model')
-  const apiKey =
-    (profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : undefined) ?? desktopResolver.getSecret('modelApiKey')
-  if (!apiKey) throw new Error('未配置 modelApiKey')
+  const profile = defaultOpenAIProfile()
+  if (!profile) throw new Error('未配置 OpenAI-Compatible 模型')
+  if (!profile.baseUrl || !profile.model) throw new Error('默认 OpenAI 配置缺少 baseUrl 或 model')
+  const apiKey = openAIApiKeyFor(profile)
+  if (!apiKey) throw new Error('未配置默认 OpenAI 配置的 API Key')
   const url = `${profile.baseUrl.replace(/\/$/, '')}/chat/completions`
   const abort = new AbortController()
   const timer = setTimeout(
@@ -902,7 +995,7 @@ async function callOpenAIForPrompt(
       signal: signal ? AbortSignal.any([abort.signal, signal]) : abort.signal,
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: model ?? profile.model,
+        model: stripOpenAIModelPrefix(model) ?? profile.model,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0
       })
@@ -937,7 +1030,8 @@ async function runOperationAgent(
   const prompt = [roleBody, contextBody, body].filter(Boolean).join('\n\n')
   if (providerForTask(taskId) !== 'qoder') {
     // OpenAI 路径跟随：preferredModel 未配置时 callOpenAIForPrompt 内部回落系统 modelProfile.model。
-    return callOpenAIForPrompt(prompt, taskId, roleAgent.preferredModel, signal)
+    // preferredModel 是 `openai:<model>` 形态的 value，需剥离前缀再传给 /chat/completions。
+    return callOpenAIForPrompt(prompt, taskId, stripOpenAIModelPrefix(roleAgent.preferredModel), signal)
   }
   // MR 描述生成只是短文本 JSON 输出，Qoder 走 lite 模型节省 credits（与关键词提取同策略）；
   // 其它操作（review / test）仍尊重角色 Agent 的 preferredModel。
@@ -1084,6 +1178,50 @@ async function runQoderPlan(taskId: string, feedback?: string, signal?: AbortSig
   } finally {
     activePlanningTaskId = undefined
   }
+}
+
+/**
+ * OpenAI 路径的计划生成（与 runQoderPlan 对齐的失败语义）。
+ *
+ * pi 的模型流式错误（如 `Stream ended without finish_reason`、网络中断）**不会**让
+ * `piSession.prompt()` 抛异常：pi-agent 会把失败包装成 stopReason=error 的 assistant
+ * 消息并正常结束 turn。因此 prompt 返回后必须检查 planning 期间的错误事件
+ * （emitPi 已写入 activePlanError）与 plan 文本，显式抛错，让调用方统一走
+ * failPlanGeneration（写错误事件 + failureStage=planning + 状态置 failed），
+ * 否则任务会静默卡在 planning。
+ */
+async function runOpenAIPlan(taskId: string, prompt: string, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted()
+  activePlanningTaskId = taskId
+  activePlanText = ''
+  activePlanError = undefined
+  try {
+    await startPi(taskId)
+    if (!piSession) throw new Error('OpenAI agent session is unavailable')
+    await piSession!.prompt(prompt, { source: 'rpc' })
+    signal.throwIfAborted()
+    const planError = activePlanError
+    if (planError) throw new Error(planError)
+    const plan = activePlanText.trim()
+    if (!plan) throw new Error('Agent 未返回有效计划')
+    await savePlanDecision(taskId, [plan])
+  } finally {
+    activePlanningTaskId = undefined
+    activePlanError = undefined
+  }
+}
+
+/**
+ * OpenAI 路径计划生成失败的统一落点：错误事件 + failureStage=planning + 状态置 failed。
+ * 用户主动停止/删除时 stopTaskOperations 已把状态置 failed，这里不再覆盖、不重复报错。
+ */
+function failPlanGeneration(taskId: string, error: unknown): void {
+  const detail = error instanceof Error ? error.message : String(error)
+  const current = store.getTask(taskId)
+  if (current?.state !== 'planning') return
+  addTaskEvent({ taskId, kind: 'error', title: '计划生成失败', detail })
+  store.updateTask(taskId, { failureStage: 'planning' })
+  updateState(current, 'failed')
 }
 
 async function advanceAfterValidation(taskId: string, state: TaskState, signal?: AbortSignal): Promise<void> {
@@ -1337,9 +1475,9 @@ async function runTestCaseGenerationThenValidate(taskId: string, signal?: AbortS
 
 // === Pi Session 集成(留在 desktop) ============================================
 
-function syncPiModelConfig(raw: string): void {
-  const profile = JSON.parse(raw) as ModelProfile
-  if (!profile.baseUrl || !profile.model) return
+function syncPiModelConfig(): void {
+  const profiles = readOpenAIProfiles()
+  if (profiles.length === 0) return
   const agentDir = store.getSetting('piAgentDir') ?? getAgentDir()
   mkdirSync(agentDir, { recursive: true })
   const modelsPath = join(agentDir, 'models.json')
@@ -1350,31 +1488,149 @@ function syncPiModelConfig(raw: string): void {
     current.providers && typeof current.providers === 'object' && !Array.isArray(current.providers)
       ? (current.providers as Record<string, unknown>)
       : {}
-  const provider = profile.provider ?? 'company-openai'
-  const next = {
-    ...current,
-    providers: {
-      ...providers,
-      [provider]: {
-        baseUrl: profile.baseUrl,
-        api: 'openai-completions',
-        apiKey: `$${profile.apiKeyEnv ?? 'OPENAI_API_KEY'}`,
-        models: [
-          {
-            id: profile.model,
-            name: profile.model,
-            reasoning: true,
-            input: ['text', 'image'],
-            contextWindow: 128000,
-            maxTokens: 32768
-          }
-        ]
-      }
-    }
+  // 清理旧的 company-openai* provider（含已删除 profile 的残留），再写入当前配置；
+  // 其它 provider（用户自装）保留不动。
+  const providersNext: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(providers)) {
+    if (key.startsWith('company-openai')) continue
+    providersNext[key] = value
   }
+  let wrote = false
+  for (const profile of profiles) {
+    if (!profile.baseUrl || !profile.model) continue
+    // 每个 profile 一个唯一 provider key：有 id 用 `company-openai:<id>`，无 id（历史）用 `company-openai`。
+    const providerKey = profile.id ? `company-openai:${profile.id}` : 'company-openai'
+    providersNext[providerKey] = {
+      baseUrl: profile.baseUrl,
+      api: 'openai-completions',
+      apiKey: `$${profile.apiKeyEnv ?? 'OPENAI_API_KEY'}`,
+      models: [
+        {
+          id: profile.model,
+          name: profile.model,
+          reasoning: true,
+          input: ['text', 'image'],
+          contextWindow: 128000,
+          maxTokens: 32768
+        }
+      ]
+    }
+    wrote = true
+  }
+  if (!wrote) return
+  const next = { ...current, providers: providersNext }
   const temporaryPath = `${modelsPath}.tmp`
   writeFileSync(temporaryPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
   renameSync(temporaryPath, modelsPath)
+}
+
+/**
+ * Pi 会话事件 → openai_events 表（OpenAI 任务路径，对称 recordQoderMessage）。
+ *
+ * Pi 会话事件原本只走 live 通道（sendTaskEvent），执行 Tab / Trace 详情刷新后即丢；
+ * 这里把关键事件独立落库 openai_events 表（与 Qoder events 分离，按时间顺序合并展示），
+ * 让执行 Tab 与 Qoder 任务一样可回放：
+ * - message_end（assistant）→ kind=message（含 stopReason / usage）；stopReason=error 追加 error 条目；
+ * - tool_execution_start / end → kind=tool，按 toolCallId + phase 配对（对齐 Qoder 的 toolUseId 约定）；
+ * - agent_start / end → kind=status 阶段边界。
+ *
+ * 任务不存在时跳过（openai_events 表 task_id 有 FK 约束，recordQoderMessage 同款防御）。
+ */
+function recordPiMessage(taskId: string, record: Record<string, unknown>): void {
+  if (!store.getTask(taskId)) return
+  switch (record.type) {
+    case 'message_end': {
+      const message = record.message as
+        | { role?: string; stopReason?: string; errorMessage?: string; usage?: unknown }
+        | undefined
+      if (message?.role !== 'assistant') return
+      const text = agentMessageText(message)
+      const payload: Record<string, unknown> = {
+        ...(message.stopReason ? { stopReason: message.stopReason } : {}),
+        ...(message.usage && typeof message.usage === 'object' ? { usage: message.usage } : {})
+      }
+      store.addOpenAiEvent({
+        taskId,
+        kind: 'message',
+        title: 'OpenAI Agent',
+        ...(typeof text === 'string' && text ? { detail: text } : {}),
+        ...(Object.keys(payload).length > 0 ? { payload } : {})
+      })
+      if (message.stopReason === 'error' || message.errorMessage) {
+        store.addOpenAiEvent({
+          taskId,
+          kind: 'error',
+          title: '执行错误',
+          detail: message.errorMessage || '模型流式输出异常结束'
+        })
+      }
+      break
+    }
+    case 'tool_execution_start': {
+      const tool = record as { toolCallId?: string; toolName?: string; args?: unknown }
+      store.addOpenAiEvent({
+        taskId,
+        kind: 'tool',
+        title: tool.toolName ?? '工具',
+        detail: safeStringify(tool.args).slice(0, 2000),
+        payload: {
+          toolName: tool.toolName,
+          toolUseId: tool.toolCallId,
+          phase: 'use' as const,
+          input: tool.args
+        }
+      })
+      break
+    }
+    case 'tool_execution_end': {
+      const tool = record as { toolCallId?: string; toolName?: string; result?: unknown; isError?: boolean }
+      store.addOpenAiEvent({
+        taskId,
+        kind: 'tool',
+        title: tool.toolName ?? '工具',
+        detail: safeStringify(tool.result).slice(0, 2000),
+        payload: {
+          toolName: tool.toolName,
+          toolUseId: tool.toolCallId,
+          phase: 'result' as const,
+          output: tool.result,
+          ...(tool.isError ? { isError: true } : {})
+        }
+      })
+      break
+    }
+    case 'agent_start':
+      store.addOpenAiEvent({ taskId, kind: 'status', title: 'Agent 执行开始' })
+      break
+    case 'agent_end':
+      store.addOpenAiEvent({ taskId, kind: 'status', title: 'Agent 执行结束' })
+      break
+  }
+}
+
+/** 从 AgentMessage 提取可见文本（content 可能为 string 或 block 数组，防御式处理）。 */
+function agentMessageText(message: unknown): string | undefined {
+  if (!message || typeof message !== 'object') return undefined
+  const content = (message as { content?: unknown }).content
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    const texts = content
+      .filter((part): part is { text: string } =>
+        Boolean(part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string')
+      )
+      .map((part) => (part as { text: string }).text)
+    if (texts.length > 0) return texts.join('\n')
+  }
+  return undefined
+}
+
+function safeStringify(value: unknown): string {
+  if (value === undefined) return ''
+  try {
+    return typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+  } catch {
+    return '[unserializable]'
+  }
 }
 
 function emitPi(event: unknown): void {
@@ -1384,6 +1640,19 @@ function emitPi(event: unknown): void {
     const update = record.assistantMessageEvent as { type?: string; delta?: string } | undefined
     if (update?.type === 'text_delta' && update.delta) activePlanText += update.delta
   }
+  // pi 的流式错误（如 `Stream ended without finish_reason`）不会让 prompt() 抛异常：
+  // agent 会生成 stopReason=error 的 assistant 消息并正常结束。planning 期间记录它，
+  // 由 runOpenAIPlan 在 prompt 返回后读取并显式报错（错误后成功重试的消息会清掉标记）。
+  if (activePlanningTaskId && record.type === 'message_end') {
+    const message = record.message as { role?: string; stopReason?: string; errorMessage?: string } | undefined
+    if (message?.role === 'assistant') {
+      if (message.stopReason === 'error') {
+        activePlanError = message.errorMessage || '模型流式输出异常结束'
+      } else if (activePlanError) {
+        activePlanError = undefined
+      }
+    }
+  }
   if (activePlanningTaskId) record.phase = 'planning'
   if (
     activeTaskId &&
@@ -1392,6 +1661,8 @@ function emitPi(event: unknown): void {
   )
     updatePiUsage(activeTaskId)
   if (activeTaskId && record.type === 'tool_execution_end') emitTaskChanged(activeTaskId)
+  // OpenAI 任务：Pi 会话事件落库 events 表（执行 Tab / Trace 详情可回放，刷新不丢）。
+  if (activeTaskId && providerForTask(activeTaskId) === 'openai') recordPiMessage(activeTaskId, record)
   // Qoder 任务消息流 → 本地 trace 文件（thinking / 工具 / 文本 / result 汇总）。
   if (record.type === 'qoder_event' && typeof record.taskId === 'string')
     qoderTraceSink.append(record.taskId, record.message)
@@ -1549,12 +1820,13 @@ async function startPi(taskId: string): Promise<void> {
     authPath: join(agentDir, 'auth.json'),
     modelsPath: join(agentDir, 'models.json')
   })
-  const modelRaw = store.getSetting('modelProfile')
-  if (modelRaw) {
-    const profile = JSON.parse(modelRaw) as ModelProfile
-    const localKey = keyStore.resolve(store.getSetting('modelApiKey'), 'modelApiKey')
-    const apiKey = (profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : undefined) ?? localKey
-    if (apiKey) await modelRuntime.setRuntimeApiKey(profile.provider ?? 'company-openai', apiKey)
+  const profiles = readOpenAIProfiles()
+  if (profiles.length > 0) {
+    for (const profile of profiles) {
+      const providerKey = profile.id ? `company-openai:${profile.id}` : 'company-openai'
+      const apiKey = openAIApiKeyFor(profile)
+      if (apiKey) await modelRuntime.setRuntimeApiKey(providerKey, apiKey)
+    }
   }
   const created = await createAgentSession({
     cwd,
@@ -1635,23 +1907,22 @@ async function startTask(
         emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
       )
     else {
-      await runTaskOperation(taskId, async (signal) => {
-        signal.throwIfAborted()
-        activePlanningTaskId = taskId
-        activePlanText = ''
-        await startPi(taskId)
-        await piSession!.prompt(
-          await buildAgentPrompt(
-            task,
-            `你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${task.title}\n${task.description}`
-          ),
-          { source: 'rpc' }
-        )
-        signal.throwIfAborted()
-        const plan = activePlanText.trim()
-        activePlanningTaskId = undefined
-        if (plan) await savePlanDecision(taskId, [plan])
-      })
+      try {
+        await runTaskOperation(taskId, async (signal) => {
+          signal.throwIfAborted()
+          await runOpenAIPlan(
+            taskId,
+            await buildAgentPrompt(
+              task,
+              `你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${task.title}\n${task.description}`
+            ),
+            signal
+          )
+        })
+      } catch (error) {
+        failPlanGeneration(taskId, error)
+        emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
+      }
     }
     return
   }
@@ -1699,21 +1970,17 @@ async function resumeTask(taskId: string): Promise<void> {
     }
     await runTaskOperation(taskId, async (signal) => {
       signal.throwIfAborted()
-      activePlanningTaskId = taskId
-      activePlanText = ''
-      await startPi(taskId)
-      if (!piSession) throw new Error('OpenAI agent session is unavailable')
-      await piSession!.prompt(
+      await runOpenAIPlan(
+        taskId,
         await buildAgentPrompt(
           task,
           `你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${task.title}\n${task.description}`
         ),
-        { source: 'rpc' }
+        signal
       )
-      signal.throwIfAborted()
-      const plan = activePlanText.trim()
-      activePlanningTaskId = undefined
-      if (plan) await savePlanDecision(taskId, [plan])
+    }).catch((error) => {
+      failPlanGeneration(taskId, error)
+      emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     })
     return
   }
@@ -1843,24 +2110,22 @@ async function reviseTaskPlan(taskId: string, feedback: string): Promise<void> {
     }
     return
   }
-  await runTaskOperation(taskId, async (signal) => {
-    signal.throwIfAborted()
-    activePlanningTaskId = taskId
-    activePlanText = ''
-    await startPi(taskId)
-    await piSession!.prompt(
-      await buildAgentPrompt(
-        task,
-        `你处于只读计划模式。根据调整意见重新判断，禁止修改文件。最终只输出 JSON：无需修改时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n任务：${task.title}\n${task.description}\n\n上一版计划：\n${task.planContent ?? ''}\n\n调整意见：\n${feedback}`
-      ),
-      { source: 'rpc' }
-    )
-    signal.throwIfAborted()
-    const plan = activePlanText.trim()
-    activePlanningTaskId = undefined
-    if (!plan) throw new Error('Agent 未返回有效计划')
-    await savePlanDecision(taskId, [plan])
-  })
+  try {
+    await runTaskOperation(taskId, async (signal) => {
+      signal.throwIfAborted()
+      await runOpenAIPlan(
+        taskId,
+        await buildAgentPrompt(
+          task,
+          `你处于只读计划模式。根据调整意见重新判断，禁止修改文件。最终只输出 JSON：无需修改时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n任务：${task.title}\n${task.description}\n\n上一版计划：\n${task.planContent ?? ''}\n\n调整意见：\n${feedback}`
+        ),
+        signal
+      )
+    })
+  } catch (error) {
+    failPlanGeneration(taskId, error)
+    emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
+  }
 }
 
 async function retryTaskValidation(taskId: string): Promise<void> {
@@ -2465,11 +2730,11 @@ async function checkCredentialHealth(): Promise<CredentialState[]> {
 /**
  * 选择当前任务执行(consolidate memory)用的 chat 模型:固定跟随系统 modelProfile 决定 driver。
  * - driverId = "qoder" / "openai"
- * - model 是 OpenAI 协议下的具体模型名(Qoder 模式下不使用,driver 内部自己拿默认)
+ * - model 是 OpenAI 协议下的具体模型 value（`openai:<model>`，Qoder 模式下不使用,driver 内部自己拿默认）
  */
 function resolveTaskChatModel(): { driverId: ChatDriverId; model: string } {
   if (modelProvider() === 'openai') {
-    return { driverId: 'openai', model: store.getSetting('defaultOpenAIModel') ?? 'gpt-4o' }
+    return { driverId: 'openai', model: resolveOpenAIModelValue() }
   }
   return { driverId: 'qoder', model: store.getSetting('defaultModel') ?? 'claude-sonnet-4.5' }
 }
@@ -2695,6 +2960,7 @@ function registerIpc(): void {
       task: store.getTask(id),
       repositories: store.listTaskRepositories(id),
       events: store.listEvents(id),
+      openAiEvents: store.listOpenAiEvents(id),
       approvals: store.listApprovals(id),
       changedFiles: await taskChangedFiles(id)
     }
@@ -2766,7 +3032,7 @@ function registerIpc(): void {
   )
   ipcMain.handle('settings:set', (_event, key: string, value: string, secret = false) => {
     store.setSetting(key, secret ? keyStore.protect(value, key) : value)
-    if (key === 'modelProfile') syncPiModelConfig(value)
+    if (key === 'modelProfiles' || key === 'modelProfile') syncPiModelConfig()
   })
   ipcMain.handle(
     'tasks:start',
@@ -3013,7 +3279,7 @@ function registerIpc(): void {
       // 启用只读工具（Read / Glob / Grep）让模型按需补充细节。
       const repoContext = await loadRepoContext(repositories)
       const prompt = buildAgentGenerationPrompt({ description, repositories, repoContext })
-      // model 形如 `qoder:xxx` / `openai:default` / 其它自由字符串；按 `qoder:` 前缀判定驱动。
+      // model 形如 `qoder:xxx` / `openai:<model>` / 其它自由字符串；按 `qoder:` 前缀判定驱动。
       // qoder 路径走专用轻量调用（只读工具 / maxTurns=3 / 120s 超时）——见 callQoderForAgentGeneration 注释。
       // openai 路径走纯 prompt fetch（不启工具，超时也压到 120s 与 Qoder 对齐）。
       const isQoder = model.startsWith('qoder:')
@@ -3065,8 +3331,10 @@ function registerIpc(): void {
   // === Chat 对话(Codex 样式) =================================================
   ipcMain.handle('chats:list', () => chatService.listChats())
   ipcMain.handle('chats:get', (_event, id: string) => chatService.getChat(id))
-  ipcMain.handle('chats:create', (_event, input?: { driverId?: ChatDriverId; model?: string; workingDirectory?: string }) =>
-    chatService.createChat(input?.driverId, input?.model, input?.workingDirectory)
+  ipcMain.handle(
+    'chats:create',
+    (_event, input?: { driverId?: ChatDriverId; model?: string; workingDirectory?: string }) =>
+      chatService.createChat(input?.driverId, input?.model, input?.workingDirectory)
   )
   ipcMain.handle('chats:delete', (_event, id: string) => {
     chatService.deleteChat(id)

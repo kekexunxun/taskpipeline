@@ -15,8 +15,8 @@
  *    `StreamChatInput.onTaskCreated` 回调给 ChatService,后者写入消息元数据。
  */
 
-import type { z } from "zod";
-import type { ChatTaskCreationResult } from "../chat-types.js";
+import type { z } from 'zod'
+import type { ChatTaskCreationResult } from '../chat-types.js'
 
 /**
  * driver-agnostic 工具声明。
@@ -26,16 +26,16 @@ import type { ChatTaskCreationResult } from "../chat-types.js";
  * - `execute` 由 driver 在自己的执行环境里调用(ai-sdk: 由 ai 决定调用;Qoder MCP: 在 CLI 子进程里调用)。
  */
 export type ToolDeclaration = {
-  name: string;
-  description: string;
-  schema: Record<string, z.ZodTypeAny>;
+  name: string
+  description: string
+  schema: Record<string, z.ZodTypeAny>
   annotations?: {
-    readOnlyHint?: boolean;
-    destructiveHint?: boolean;
-    openWorldHint?: boolean;
-  };
-  execute: (input: Record<string, unknown>) => Promise<unknown>;
-};
+    readOnlyHint?: boolean
+    destructiveHint?: boolean
+    openWorldHint?: boolean
+  }
+  execute: (input: Record<string, unknown>) => Promise<unknown>
+}
 
 /**
  * 工具集来源 — 通常由 `TaskCreationBackend.toToolSource()` 返回。
@@ -46,15 +46,15 @@ export type ToolDeclaration = {
  *   返回 `undefined` 表示这个结果不是任务创建,driver 继续按普通 tool-result 走。
  */
 export interface ToolSource {
-  readonly id: "jira" | "github" | "linear";
-  readonly displayName: string;
-  systemPrompt(): string;
-  tools(): ToolDeclaration[];
+  readonly id: 'jira' | 'github' | 'linear' | 'project'
+  readonly displayName: string
+  systemPrompt(): string
+  tools(): ToolDeclaration[]
   /**
    * driver 在 tool 执行完后调用,后端判断这次执行是否产生了"任务已创建"事件。
    * 返回 `undefined` 表示没有任务创建(普通查询/读操作)。
    */
-  describeResult(output: unknown): ChatTaskCreationResult | undefined;
+  describeResult(output: unknown): ChatTaskCreationResult | undefined
   /** 释放后端资源(MCP client / HTTP pool)。 */
-  close(): void;
+  close(): void
 }

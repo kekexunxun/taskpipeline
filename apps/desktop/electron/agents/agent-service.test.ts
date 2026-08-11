@@ -134,6 +134,24 @@ describe("AgentService resolveRuntime", () => {
     });
   });
 
+  it("routes `openai:` prefixed task model to the openai path", () => {
+    const service = makeService();
+    // Task 页面模型选择器保存的 value 是 `openai:<model>`（如 openai:DeepSeek-V4-Flash），
+    // 必须按前缀识别 provider —— 否则会把 openai 模型当 Qoder 模型传给 qodercli。
+    expect(service.resolveRuntime(task("openai:DeepSeek-V4-Flash"), [repo])).toEqual({
+      provider: "openai",
+      model: "openai:DeepSeek-V4-Flash"
+    });
+    // 历史占位值 `openai:default` 同样走 openai 路径
+    expect(service.resolveRuntime(task("openai:default"), [repo]).provider).toBe("openai");
+    expect(service.resolveModelForTask(task("openai:DeepSeek-V4-Flash"), [repo])).toBe("openai:DeepSeek-V4-Flash");
+  });
+
+  it("treats a legacy prefix-less task model as qoder", () => {
+    const service = makeService();
+    expect(service.resolveRuntime(task("claude-sonnet-4.5"), [repo]).provider).toBe("qoder");
+  });
+
   it("routes through the agent preferred provider when paired", () => {
     const service = makeService();
     service.save({ ...createAgentDraft("A"), repositoryIds: ["r1"], preferredProvider: "qoder", preferredModel: "qoder:gpt-5" });

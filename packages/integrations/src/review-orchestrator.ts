@@ -1,8 +1,48 @@
 import type { Task, TaskEventSink, TaskRepository, SettingResolver } from "@task-pipeline/core";
 import { blockingSeveritiesFor } from "@task-pipeline/core";
-import { GitService } from "./git.js";
-import { OpenCodeReviewService, extractFirstJsonObject, type ReviewResult } from "./review.js";
+import type { GitService } from "./git.js";
+import type { OpenCodeReviewService } from "./review.js";
+import { extractFirstJsonObject, type ReviewResult } from "./review.js";
 import { redactSecrets } from "./process.js";
+
+/** 去掉 model value 上的 `openai:` provider 前缀,让 /chat/completions 能识别真实模型名。 */
+function stripOpenAIModelPrefix(model: string | undefined): string | undefined {
+  if (!model) return undefined
+  return model.startsWith('openai:') ? model.slice('openai:'.length) : model
+}
+
+/**
+ * 读取默认 OpenAI-Compatible 配置（供系统级调用使用）。
+ * - 新格式 `modelProfiles`（数组）：isDefault 优先，否则第一个；
+ * - 兼容旧格式 `modelProfile`（单个对象）。
+ */
+function readDefaultOpenAIProfile(resolver: SettingResolver): { id?: string; baseUrl: string; model: string; apiKeyEnv?: string; isDefault?: boolean } | undefined {
+  const raw = resolver.get('modelProfiles')
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      if (Array.isArray(parsed)) {
+        const profiles = parsed.filter(
+          (item): item is { id?: string; baseUrl: string; model: string; apiKeyEnv?: string; isDefault?: boolean } =>
+            Boolean(item) && typeof item === 'object' && typeof (item as { baseUrl?: unknown }).baseUrl === 'string'
+        )
+        const profile = profiles.find((p) => p.isDefault) ?? profiles[0]
+        if (profile?.baseUrl && profile.model) return profile
+      }
+    } catch {
+      /* 忽略脏数据，走旧格式兼容 */
+    }
+  }
+  const legacy = resolver.get('modelProfile')
+  if (!legacy) return undefined
+  try {
+    const profile = JSON.parse(legacy) as { id?: string; baseUrl?: string; model?: string; apiKeyEnv?: string }
+    if (profile.baseUrl && profile.model) return { ...profile, isDefault: true } as { id?: string; baseUrl: string; model: string; apiKeyEnv?: string; isDefault?: boolean }
+  } catch {
+    /* 忽略历史脏数据 */
+  }
+  return undefined
+}
 
 /**
  * 委托模式 review 的输入。
@@ -103,11 +143,13 @@ export function parseReviewResult(text: string): ReviewResult {
 export class OpenAICompatReviewer implements Reviewer {
   constructor(private readonly resolver: SettingResolver, private readonly timeoutMs: number = 3 * 60_000, private readonly fetcher: typeof fetch = fetch) {}
   call = async (input: DelegateReviewerInput, _taskId: string, model?: string, externalSignal?: AbortSignal, prompt?: string): Promise<string> => {
-    const raw = this.resolver.get("modelProfile");
-    if (!raw) throw new Error("未配置 modelProfile,无法在 OpenAI 兼容模式下做委托 Review");
-    const profile = JSON.parse(raw) as { baseUrl?: string; model?: string; apiKeyEnv?: string };
-    if (!profile.baseUrl || !profile.model) throw new Error("modelProfile 缺少 baseUrl 或 model");
-    const apiKey = (profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : undefined) ?? this.resolver.getSecret("modelApiKey");
+    const profile = readDefaultOpenAIProfile(this.resolver);
+    if (!profile) throw new Error("未配置 OpenAI-Compatible 模型,无法在 OpenAI 兼容模式下做委托 Review");
+    const scoped = profile.id ? this.resolver.getSecret(`modelApiKey:${profile.id}`) : undefined;
+    const apiKey =
+      (profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : undefined) ??
+      scoped ??
+      (profile.isDefault || !profile.id ? this.resolver.getSecret("modelApiKey") : undefined);
     if (!apiKey) throw new Error("未配置 modelApiKey 或 apiKeyEnv");
     const url = `${profile.baseUrl.replace(/\/$/, "")}/chat/completions`;
     const abort = new AbortController();
@@ -118,7 +160,9 @@ export class OpenAICompatReviewer implements Reviewer {
         signal: externalSignal ? AbortSignal.any([abort.signal, externalSignal]) : abort.signal,
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: model ?? profile.model,
+          // model 可能来自 ChatModelSelector 的 value（`openai:<model>` / 历史 `openai:default`），
+          // 必须剥离 `openai:` 前缀，否则 /chat/completions 会收到非法模型名。
+          model: stripOpenAIModelPrefix(model) ?? profile.model,
           messages: [{ role: "user", content: prompt ?? buildReviewPrompt(input) }],
           response_format: { type: "json_object" },
           temperature: 0

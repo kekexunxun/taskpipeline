@@ -315,6 +315,47 @@ describe('PartRenderer', () => {
     expect(screen.getByText('搜索结果')).toBeInTheDocument()
   })
 
+  it('merges consecutive openai.thinking deltas into one collapsible block and renders it', () => {
+    render(
+      <PartRenderer
+        isStreaming
+        parts={[
+          { driverId: 'openai', type: 'openai.thinking', text: '第一段推理' },
+          { driverId: 'openai', type: 'openai.thinking', text: '第二段推理' },
+          { driverId: 'openai', type: 'text', text: '最终回答' }
+        ]}
+      />
+    )
+    // 流式期间显示「思考中…」折叠块,两条 thinking 合并成一块
+    expect(screen.getByText('思考中…')).toBeInTheDocument()
+    const blocks = screen.getAllByText(/第一段推理/)
+    expect(blocks).toHaveLength(1)
+    // reasoning-delta 按 token 粒度推送:合并必须直接拼接,不能插入换行(否则每个词一行)
+    expect(screen.getByText('第一段推理第二段推理')).toBeInTheDocument()
+    expect(screen.getByText('最终回答')).toBeInTheDocument()
+  })
+
+  it('merges token-level openai.thinking deltas without breaking lines (思考过程不再每词一行)', () => {
+    render(
+      <PartRenderer
+        isStreaming
+        parts={[
+          // 模拟 DeepSeek reasoning 流:每个 chunk 一个词/短语,其中一段自带换行
+          { driverId: 'openai', type: 'openai.thinking', text: '用户' },
+          { driverId: 'openai', type: 'openai.thinking', text: '询问' },
+          { driverId: 'openai', type: 'openai.thinking', text: '模型身份\n' },
+          { driverId: 'openai', type: 'openai.thinking', text: '简洁' },
+          { driverId: 'openai', type: 'openai.thinking', text: '回应' },
+          { driverId: 'openai', type: 'text', text: '最终回答' }
+        ]}
+      />
+    )
+    // token 间直接拼接,只有模型自带的换行保留(归一化后表现为一个空格分隔)
+    expect(screen.getByText('用户询问模型身份 简洁回应')).toBeInTheDocument()
+    // 仍是单个「思考中…」折叠块
+    expect(screen.getAllByText('思考中…').length).toBe(1)
+  })
+
   it('renders an orphan tool-result (no matching tool-use) as a fallback row', () => {
     render(
       <PartRenderer parts={[{ driverId: 'qoder', type: 'qoder.tool-result', toolCallId: 'c-x', output: '孤立输出' }]} />

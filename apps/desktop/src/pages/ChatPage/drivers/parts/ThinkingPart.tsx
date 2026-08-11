@@ -7,7 +7,7 @@ import type { DriverPart } from '@/api'
 /**
  * 折叠式 thinking / reasoning part。
  *  - Qoder: `type === "qoder.thinking"` (text + 可选 signature)
- *  - 未来其它 driver 可以在 type 上加分支
+ *  - OpenAI 兼容: `type === "openai.thinking"` (text)
  *
  * 设计:流式时默认展开(让用户看到推理过程),流结束后默认收起(只保留"思考过程"
  * 摘要);用户可以随时手动展开/收起,且一旦用户主动点过,后续以用户选择为准 —
@@ -20,7 +20,7 @@ export function ThinkingPart({
   part,
   isStreaming
 }: {
-  part: Extract<DriverPart, { type: 'qoder.thinking' }>
+  part: Extract<DriverPart, { type: 'qoder.thinking' | 'openai.thinking' }>
   isStreaming?: boolean
 }) {
   // 用户的点击一旦发生(非 null)就以用户选择为准,不再被 isStreaming 覆盖。

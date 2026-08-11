@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ActivityIcon, Code2Icon, Link2Icon, MessageSquareTextIcon, SparklesIcon, type LucideIcon } from 'lucide-react'
+import { ActivityIcon, Code2Icon, MessageSquareTextIcon, SparklesIcon, type LucideIcon } from 'lucide-react'
 import type { TraceKind, TraceSummary } from '@task-pipeline/core'
 import type { TraceKindFilter } from './TraceFilters'
 import { cn } from '@/lib/utils'
@@ -24,6 +24,29 @@ function matches(summary: TraceSummary, kind: TraceKindFilter, query: string): b
     .join(' ')
     .toLowerCase()
   return haystack.includes(query.trim().toLowerCase())
+}
+
+/** 统计摘要：模型 / Token / 成本。 */
+function StatsBadges({ stats }: { stats: TraceSummary['stats'] }) {
+  if (!stats) return null
+  return (
+    <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+      {stats.model && (
+        <Badge variant="outline" className="max-w-36 truncate px-1 py-0 font-mono text-[9px]">
+          {stats.model}
+        </Badge>
+      )}
+      {stats.tokens && stats.tokens.total > 0 && (
+        <span title={`输入 ${stats.tokens.input} · 输出 ${stats.tokens.output}`}>
+          ↑{formatTokens(stats.tokens.input)} ↓{formatTokens(stats.tokens.output)}
+        </span>
+      )}
+      {typeof stats.costUsd === 'number' && stats.costUsd > 0 && (
+        <span className="text-emerald-600 dark:text-emerald-400">${stats.costUsd.toFixed(4)}</span>
+      )}
+      {typeof stats.durationMs === 'number' && stats.durationMs > 0 && <span>{formatDuration(stats.durationMs)}</span>}
+    </span>
+  )
 }
 
 /** 左列 Trace 列表：聚合任务 / 对话 / Pi 会话。 */
@@ -90,34 +113,7 @@ export function TraceList({
                   <span>{formatTime(summary.updatedAt)}</span>
                   <span>· {summary.entryCount} 条</span>
                 </span>
-                {summary.stats && (
-                  <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
-                    {summary.stats.model && (
-                      <Badge variant="outline" className="max-w-40 truncate px-1 py-0 font-mono text-[9px]">
-                        {summary.stats.model}
-                      </Badge>
-                    )}
-                    {summary.stats.tokens && summary.stats.tokens.total > 0 && (
-                      <span title={`输入 ${summary.stats.tokens.input} · 输出 ${summary.stats.tokens.output}`}>
-                        ↑{formatTokens(summary.stats.tokens.input)} ↓{formatTokens(summary.stats.tokens.output)}
-                      </span>
-                    )}
-                    {typeof summary.stats.costUsd === 'number' && summary.stats.costUsd > 0 && (
-                      <span className="text-emerald-600 dark:text-emerald-400">
-                        ${summary.stats.costUsd.toFixed(4)}
-                      </span>
-                    )}
-                    {typeof summary.stats.durationMs === 'number' && summary.stats.durationMs > 0 && (
-                      <span>{formatDuration(summary.stats.durationMs)}</span>
-                    )}
-                  </span>
-                )}
-                {summary.kind === 'pi_session' && summary.linkedTaskId && (
-                  <span className="mt-1 flex items-center gap-1 text-[10px] text-muted-foreground">
-                    <Link2Icon size={10} />
-                    关联任务 {summary.linkedTaskId.slice(0, 8)}
-                  </span>
-                )}
+                {summary.stats && <StatsBadges stats={summary.stats} />}
               </span>
             </button>
           </li>

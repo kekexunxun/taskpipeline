@@ -1,10 +1,10 @@
-import { randomUUID } from "node:crypto";
-import type { BrowserWindow } from "electron";
-import type { TaskStore } from "@task-pipeline/core";
-import { ChatStorage } from "./chat-storage.js";
-import type { ChatDriverRegistry } from "./drivers/driver-registry.js";
-import type { ChatDriver } from "./drivers/chat-driver.js";
-import type { ToolSource } from "./drivers/tool-source.js";
+import { randomUUID } from 'node:crypto'
+import type { BrowserWindow } from 'electron'
+import type { TaskStore } from '@task-pipeline/core'
+import { ChatStorage } from './chat-storage.js'
+import type { ChatDriverRegistry } from './drivers/driver-registry.js'
+import { createProjectQueryToolSource } from './drivers/project-query-tools.js'
+import type { ToolSource } from './drivers/tool-source.js'
 import type {
   AbortChatStreamInput,
   ChatConversation,
@@ -13,17 +13,23 @@ import type {
   ChatStreamEvent,
   ChatStreamChunk,
   ChatDriverId,
+  ChatUsage,
   DriverPart,
   StartChatStreamInput,
   StoredMessage,
   StoredMessageRecord
-} from "./chat-types.js";
-import type { TaskCreationBackend, TaskCreatedResult } from "./task-backends/index.js";
+} from './chat-types.js'
+import type { TaskCreationBackend } from './task-backends/index.js'
 
-type ActiveStream = { streamId: string; abort: AbortController };
-type TaskBackendFactory = () => TaskCreationBackend | undefined;
-type MemoryContextProvider = (input: { conversationId: string; query: string }) => Promise<string | undefined>;
-type ConversationConsolidator = (input: { conversation: ChatConversation; signal: AbortSignal; driverId: ChatDriverId; model: string }) => Promise<void>;
+type ActiveStream = { streamId: string; abort: AbortController }
+type TaskBackendFactory = () => TaskCreationBackend | undefined
+type MemoryContextProvider = (input: { conversationId: string; query: string }) => Promise<string | undefined>
+type ConversationConsolidator = (input: {
+  conversation: ChatConversation
+  signal: AbortSignal
+  driverId: ChatDriverId
+  model: string
+}) => Promise<void>
 
 /**
  * ChatService — 编排层。
@@ -37,8 +43,8 @@ type ConversationConsolidator = (input: { conversation: ChatConversation; signal
  *  5. 单会话切换 driver:历史 messages 按各自 driverId 反序列化渲染,新消息用新 driverId 生成。
  */
 export class ChatService {
-  private readonly storage: ChatStorage;
-  private readonly activeStreams = new Map<string, ActiveStream>();
+  private readonly storage: ChatStorage
+  private readonly activeStreams = new Map<string, ActiveStream>()
 
   constructor(
     private readonly store: TaskStore,
@@ -49,48 +55,54 @@ export class ChatService {
     private readonly memoryContext?: MemoryContextProvider,
     private readonly consolidateConversation?: ConversationConsolidator
   ) {
-    this.storage = new ChatStorage(dataDir);
+    this.storage = new ChatStorage(dataDir)
   }
 
-  listChats() { return this.storage.listMetas(); }
+  listChats() {
+    return this.storage.listMetas()
+  }
 
   /**
    * 加载会话并把每条 message 按 `driverId` 反序列化为 `StoredMessage`(带 parts)。
    * `ChatConversation.messages` 本身是 record 列表(无 parts),这里补齐 parts 给 UI 用。
    */
   getChat(id: string): { conversation: ChatConversation; messages: StoredMessage[] } | undefined {
-    const conversation = this.storage.getConversation(id);
-    if (!conversation) return undefined;
-    const messages = conversation.messages.map((record) => this.deserializeRecord(record));
-    return { conversation, messages };
+    const conversation = this.storage.getConversation(id)
+    if (!conversation) return undefined
+    const messages = conversation.messages.map((record) => this.deserializeRecord(record))
+    return { conversation, messages }
   }
 
   /**
    * 列出所有 driver 提供的模型,按 driverId 分组。
    */
   async listModels(): Promise<ChatModelGroup[]> {
-    const groups: ChatModelGroup[] = [];
+    const groups: ChatModelGroup[] = []
     for (const driver of this.driverRegistry.list()) {
       try {
-        const models = await driver.listModels();
-        if (models.length) groups.push({ driverId: driver.id, displayName: driver.displayName, models });
-      } catch { /* driver 列表失败不影响其他 driver */ }
+        const models = await driver.listModels()
+        if (models.length) groups.push({ driverId: driver.id, displayName: driver.displayName, models })
+      } catch {
+        /* driver 列表失败不影响其他 driver */
+      }
     }
-    return groups;
+    return groups
   }
 
   createChat(driverId?: ChatDriverId, model?: string, workingDirectory?: string): ChatConversation {
     // 统一复用规则:普通对话(无目录)复用无目录空对话,项目对话复用同目录空对话 ——
     // 避免反复点「+」无限新增空会话。匹配条件是 workingDirectory 全等。
-    const existing = this.storage.listMetas().find((item) => item.messageCount === 0 && item.workingDirectory === workingDirectory);
+    const existing = this.storage
+      .listMetas()
+      .find((item) => item.messageCount === 0 && item.workingDirectory === workingDirectory)
     if (existing) {
-      const conversation = this.storage.getConversation(existing.id);
-      if (conversation) return conversation;
+      const conversation = this.storage.getConversation(existing.id)
+      if (conversation) return conversation
     }
-    const now = new Date().toISOString();
+    const now = new Date().toISOString()
     const conversation: ChatConversation = {
       id: randomUUID(),
-      title: "新对话",
+      title: '新对话',
       createdAt: now,
       updatedAt: now,
       messageCount: 0,
@@ -98,19 +110,19 @@ export class ChatService {
       driverId,
       workingDirectory,
       messages: []
-    };
-    this.storage.saveConversation(conversation);
-    return conversation;
+    }
+    this.storage.saveConversation(conversation)
+    return conversation
   }
 
   deleteChat(id: string): void {
-    this.activeStreams.get(id)?.abort.abort();
+    this.activeStreams.get(id)?.abort.abort()
     // 关闭该对话对应的常驻 Qoder 会话(qodercli 进程),避免随应用生命周期悬挂。
-    const conversation = this.storage.getConversation(id);
+    const conversation = this.storage.getConversation(id)
     if (conversation?.driverId) {
-      this.driverRegistry.tryGet(conversation.driverId)?.closeSession?.(id);
+      this.driverRegistry.tryGet(conversation.driverId)?.closeSession?.(id)
     }
-    this.storage.deleteConversation(id);
+    this.storage.deleteConversation(id)
   }
 
   /**
@@ -118,56 +130,76 @@ export class ChatService {
    * 传 undefined 即解绑,回到普通对话;正在流式时返回 undefined。
    */
   setChatWorkingDirectory(id: string, workingDirectory?: string): ChatConversation | undefined {
-    if (this.activeStreams.has(id)) return undefined;
-    return this.storage.updateMeta(id, { workingDirectory });
+    if (this.activeStreams.has(id)) return undefined
+    return this.storage.updateMeta(id, { workingDirectory })
   }
 
   abortChat(input: AbortChatStreamInput): void {
-    const active = this.activeStreams.get(input.chatId);
-    if (active?.streamId === input.streamId) active.abort.abort();
+    const active = this.activeStreams.get(input.chatId)
+    if (active?.streamId === input.streamId) active.abort.abort()
   }
 
   async startChatStream(input: StartChatStreamInput): Promise<void> {
-    const conversation = this.storage.getConversation(input.chatId);
-    if (!conversation) throw new Error("对话不存在");
-    const driver = this.driverRegistry.tryGet(input.driverId);
-    if (!driver) throw new Error(`未注册的 chat driver: ${input.driverId}`);
+    const conversation = this.storage.getConversation(input.chatId)
+    if (!conversation) throw new Error('对话不存在')
+    const driver = this.driverRegistry.tryGet(input.driverId)
+    if (!driver) throw new Error(`未注册的 chat driver: ${input.driverId}`)
 
-    const prior = this.activeStreams.get(input.chatId);
-    if (prior) prior.abort.abort();
-    const abort = new AbortController();
-    this.activeStreams.set(input.chatId, { streamId: input.streamId, abort });
+    const prior = this.activeStreams.get(input.chatId)
+    if (prior) prior.abort.abort()
+    const abort = new AbortController()
+    this.activeStreams.set(input.chatId, { streamId: input.streamId, abort })
 
-    const now = input.message.createdAt;
-    const userRecord = driver.serializeUserMessage({ id: input.message.id, text: input.message.text, createdAt: now });
-    const existing = conversation.messages.filter((message) => message.id !== userRecord.id);
-    const messages: StoredMessageRecord[] = [...existing, userRecord];
-    const assistantId = randomUUID();
-    const parts: DriverPart[] = [];
-    let status: ChatMessageMetadata["status"] = "done";
-    let taskCreation: ChatMessageMetadata["taskCreation"];
-    let capturedSessionId: string | undefined;
-    let userPersisted = false;
-    const taskBackend = input.mode === "task-create" ? this.resolveTaskBackend?.() : undefined;
-    const toolSource: ToolSource | undefined = taskBackend?.toToolSource();
+    const now = input.message.createdAt
+    const userRecord = driver.serializeUserMessage({ id: input.message.id, text: input.message.text, createdAt: now })
+    const existing = conversation.messages.filter((message) => message.id !== userRecord.id)
+    const messages: StoredMessageRecord[] = [...existing, userRecord]
+    const assistantId = randomUUID()
+    const parts: DriverPart[] = []
+    let status: ChatMessageMetadata['status'] = 'done'
+    let capturedSessionId: string | undefined
+    let streamUsage: ChatUsage | undefined
+    let errorMessage: string | undefined
+    let userPersisted = false
+    const taskBackend = input.mode === 'task-create' ? this.resolveTaskBackend?.() : undefined
+    // task-create 优先注入任务后端工具（Jira 等）；否则项目对话（绑定了工作目录）注入只读
+    // 查询工具集，让模型能真正读取代码回答项目问题；普通对话仍无工具（行为不变）。
+    const toolSource: ToolSource | undefined =
+      taskBackend?.toToolSource() ??
+      (conversation.workingDirectory ? createProjectQueryToolSource(conversation.workingDirectory) : undefined)
 
     try {
-      const isFirstUserMessage = !conversation.messages.some((m) => m.role === "user");
-      const title = isFirstUserMessage ? titleOf(input.message.text) : conversation.title;
-      this.storage.replaceMessages(input.chatId, messages, { title, model: input.model, driverId: input.driverId, updatedAt: now });
-      userPersisted = true;
+      const isFirstUserMessage = !conversation.messages.some((m) => m.role === 'user')
+      const title = isFirstUserMessage ? titleOf(input.message.text) : conversation.title
+      this.storage.replaceMessages(input.chatId, messages, {
+        title,
+        model: input.model,
+        driverId: input.driverId,
+        updatedAt: now
+      })
+      userPersisted = true
 
-      const memoryContext = await this.memoryContext?.({ conversationId: input.chatId, query: input.message.text });
+      const memoryContext = await this.memoryContext?.({ conversationId: input.chatId, query: input.message.text })
       const historyRecords = memoryContext
         ? [
             ...messages.slice(0, -1),
-            { id: randomUUID(), role: "system", createdAt: now, driverId: input.driverId, raw: { kind: "system", text: memoryContext } } as StoredMessageRecord,
+            {
+              id: randomUUID(),
+              role: 'system',
+              createdAt: now,
+              driverId: input.driverId,
+              raw: { kind: 'system', text: memoryContext }
+            } as StoredMessageRecord,
             userRecord
           ]
-        : messages;
-      const history = historyRecords.map((record) => this.deserializeRecord(record));
+        : messages
+      const history = historyRecords.map((record) => this.deserializeRecord(record))
 
-      this.dispatch(input, { type: "start", messageId: assistantId, messageMetadata: { createdAt: now, model: input.model, agentMode: input.mode ?? "chat" } });
+      this.dispatch(input, {
+        type: 'start',
+        messageId: assistantId,
+        messageMetadata: { createdAt: now, model: input.model, agentMode: input.mode ?? 'chat' }
+      })
 
       for await (const chunk of driver.streamChat({
         conversationId: input.chatId,
@@ -178,52 +210,64 @@ export class ChatService {
         cwd: conversation.workingDirectory,
         ...(toolSource ? { toolSource } : {})
       })) {
-        if (abort.signal.aborted) break;
+        if (abort.signal.aborted) break
         // 累积 parts
-        if (chunk.type === "part") {
-          parts.push(chunk.part);
-          if (chunk.part.type === "qoder.session") capturedSessionId = chunk.part.sessionId;
-        } else if (chunk.type === "task-created") {
-          taskCreation = mapTaskCreation(chunk.result);
+        if (chunk.type === 'part') {
+          parts.push(chunk.part)
+          if (chunk.part.type === 'qoder.session') capturedSessionId = chunk.part.sessionId
+        } else if (chunk.type === 'task-created') {
+          // task-created 已随 dispatch 透传给前端，无需本地累积。
+        } else if (chunk.type === 'done') {
+          // driver 在流结束时带回用量（openai 路径），供 Trace 元信息展示与落盘。
+          if (chunk.usage) streamUsage = chunk.usage
         }
-        this.dispatch(input, chunk);
+        this.dispatch(input, chunk)
       }
-      if (abort.signal.aborted) status = "aborted";
-      if (status === "done" && parts.length === 0) throw new Error("模型返回了空响应");
+      if (abort.signal.aborted) status = 'aborted'
+      if (status === 'done' && parts.length === 0) throw new Error('模型返回了空响应')
     } catch (reason) {
-      if (abort.signal.aborted) status = "aborted";
+      if (abort.signal.aborted) status = 'aborted'
       else {
-        status = "error";
-        const message = reason instanceof Error ? reason.message : String(reason);
-        this.dispatch(input, { type: "error", message });
+        status = 'error'
+        const message = reason instanceof Error ? reason.message : String(reason)
+        errorMessage = message
+        this.dispatch(input, { type: 'error', message })
       }
     } finally {
-      const metadata: ChatMessageMetadata = {
-        createdAt: now,
-        model: input.model,
-        status,
-        agentMode: input.mode ?? "chat",
-        ...(taskCreation ? { taskCreation } : {})
-      };
+      // 用量/模型已在 done chunk 里随 dispatch 透传给前端，此处只负责落盘（见下方 serializeAssistantMessage）。
       try {
         if (userPersisted) {
-          const assistantRecord = driver.serializeAssistantMessage({ id: assistantId, parts, createdAt: now, ...(capturedSessionId ? { sessionId: capturedSessionId } : {}) });
-          this.storage.appendMessage(input.chatId, assistantRecord, { model: input.model, driverId: input.driverId });
+          const serialized = driver.serializeAssistantMessage({
+            id: assistantId,
+            parts,
+            createdAt: now,
+            ...(capturedSessionId ? { sessionId: capturedSessionId } : {}),
+            ...(streamUsage ? { usage: streamUsage } : {})
+          })
+          // 错误详情不依赖 driver 的序列化实现(各 driver 挑字段返回,可能丢弃多余 input),
+          // 统一在编排层合并进 record,保证历史消息重新加载后仍能展示接口异常。
+          const assistantRecord = errorMessage ? { ...serialized, errorMessage } : serialized
+          this.storage.appendMessage(input.chatId, assistantRecord, { model: input.model, driverId: input.driverId })
         }
       } catch (reason) {
-        const message = reason instanceof Error ? reason.message : String(reason);
-        this.dispatch(input, { type: "error", message: `保存聊天失败:${message}` });
+        const message = reason instanceof Error ? reason.message : String(reason)
+        this.dispatch(input, { type: 'error', message: `保存聊天失败:${message}` })
       } finally {
-        toolSource?.close();
-        taskBackend?.close();
-        if (status === "aborted") this.dispatch(input, { type: "done", status: "aborted" });
-        else this.dispatch(input, { type: "done", status });
-        this.finish(input);
-        if (this.activeStreams.get(input.chatId)?.streamId === input.streamId) this.activeStreams.delete(input.chatId);
-        if (status === "done" && parts.length) {
-          const conversation = this.storage.getConversation(input.chatId);
+        toolSource?.close()
+        taskBackend?.close()
+        if (status === 'aborted') this.dispatch(input, { type: 'done', status: 'aborted' })
+        else this.dispatch(input, { type: 'done', status })
+        this.finish(input)
+        if (this.activeStreams.get(input.chatId)?.streamId === input.streamId) this.activeStreams.delete(input.chatId)
+        if (status === 'done' && parts.length) {
+          const conversation = this.storage.getConversation(input.chatId)
           if (conversation) {
-            void this.consolidateConversation?.({ conversation, signal: abort.signal, driverId: input.driverId, model: input.model }).catch((reason) => console.warn("[memory] chat consolidate failed:", reason));
+            void this.consolidateConversation?.({
+              conversation,
+              signal: abort.signal,
+              driverId: input.driverId,
+              model: input.model
+            }).catch((reason) => console.warn('[memory] chat consolidate failed:', reason))
           }
         }
       }
@@ -235,38 +279,43 @@ export class ChatService {
    * 单会话切换 driver 时,历史消息按各自 driverId 各自反序列化。
    */
   private deserializeRecord(record: StoredMessageRecord): StoredMessage {
-    const driver = this.driverRegistry.tryGet(record.driverId);
+    const driver = this.driverRegistry.tryGet(record.driverId)
     if (!driver) {
       // 未注册的 driver (例如旧 driverId) 兜底:parts = []
-      return { ...record, parts: [] };
+      return { ...record, parts: [] }
     }
-    return driver.deserializeMessage(record);
+    return driver.deserializeMessage(record)
   }
 
-  private dispatch(input: Pick<StartChatStreamInput, "streamId" | "chatId" | "driverId">, chunk: ChatStreamChunk): void {
-    this.getMainWindow()?.webContents.send("chat:stream-event", { streamId: input.streamId, chatId: input.chatId, driverId: input.driverId, chunk } satisfies ChatStreamEvent);
+  private dispatch(
+    input: Pick<StartChatStreamInput, 'streamId' | 'chatId' | 'driverId'>,
+    chunk: ChatStreamChunk
+  ): void {
+    this.getMainWindow()?.webContents.send('chat:stream-event', {
+      streamId: input.streamId,
+      chatId: input.chatId,
+      driverId: input.driverId,
+      chunk
+    } satisfies ChatStreamEvent)
   }
 
-  private finish(input: Pick<StartChatStreamInput, "streamId" | "chatId" | "driverId">): void {
-    this.getMainWindow()?.webContents.send("chat:stream-event", { streamId: input.streamId, chatId: input.chatId, driverId: input.driverId, done: true } satisfies ChatStreamEvent);
+  private finish(input: Pick<StartChatStreamInput, 'streamId' | 'chatId' | 'driverId'>): void {
+    this.getMainWindow()?.webContents.send('chat:stream-event', {
+      streamId: input.streamId,
+      chatId: input.chatId,
+      driverId: input.driverId,
+      done: true
+    } satisfies ChatStreamEvent)
   }
 
   /** 释放所有 driver 的资源(给 main.ts 退出时用)。 */
   dispose(): void {
-    for (const driver of this.driverRegistry.list()) driver.dispose();
+    for (const driver of this.driverRegistry.list()) driver.dispose()
   }
 }
 
-function titleOf(text: string): string { return text.slice(0, 32).replace(/\s+/g, " ").trim() || "新对话"; }
-
-function mapTaskCreation(result: TaskCreatedResult): ChatMessageMetadata["taskCreation"] {
-  return {
-    backend: result.backend,
-    externalKey: result.externalKey,
-    summary: result.summary,
-    projectKey: result.projectKey ?? "",
-    issueType: result.issueType ?? ""
-  };
+function titleOf(text: string): string {
+  return text.slice(0, 32).replace(/\s+/g, ' ').trim() || '新对话'
 }
 
-export type { ChatDriver } from "./drivers/chat-driver.js";
+export type { ChatDriver } from './drivers/chat-driver.js'
