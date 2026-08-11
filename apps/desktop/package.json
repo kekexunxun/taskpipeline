@@ -73,6 +73,10 @@
         "nsis"
       ]
     },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false
+    },
     "linux": {
       "category": "Development",
       "target": [
