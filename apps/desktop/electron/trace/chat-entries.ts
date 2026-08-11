@@ -11,13 +11,45 @@
 import type { TraceEntry } from '@task-pipeline/core'
 import type { StoredMessage } from '../chat/chat-types.js'
 
+/**
+ * 合并同一消息内的流式碎片 part（对齐 ChatPage PartRenderer 的合并规则）：
+ * - 相邻 `text` part 直接拼接（SDK 按 delta 落盘，正文/代码块会被拆碎）；
+ * - 相邻同源 `thinking` part 合并（qoder 按行推送用 `\n` 分隔，openai 按 token 粒度直接拼接）；
+ * - parentTaskId 不同的 part 不合并（分属不同子任务作用域）。
+ * 这样 chatEntries 输出的 message/thinking 是完整段落，Trace 展示无需依赖前端二次合并。
+ */
+function mergeFragmentedParts(parts: StoredMessage['parts']): StoredMessage['parts'] {
+  const out: StoredMessage['parts'] = []
+  for (const part of parts) {
+    const last = out[out.length - 1]
+    if (part.type === 'text' && last?.type === 'text' && part.parentTaskId === last.parentTaskId) {
+      out[out.length - 1] = { ...last, text: `${last.text}${part.text}` } as StoredMessage['parts'][number]
+    } else if (
+      (part.type === 'qoder.thinking' || part.type === 'openai.thinking') &&
+      last?.type === part.type &&
+      part.parentTaskId === last.parentTaskId
+    ) {
+      const join = part.type === 'qoder.thinking' ? '\n' : ''
+      const signature = part.type === 'qoder.thinking' && part.signature ? part.signature : undefined
+      out[out.length - 1] = {
+        ...last,
+        text: `${last.text}${join}${part.text}`,
+        ...(signature ? { signature } : {})
+      } as StoredMessage['parts'][number]
+    } else {
+      out.push(part)
+    }
+  }
+  return out
+}
+
 /** 对话消息（StoredMessage，含 parts）→ TraceEntry[]。 */
 export function chatEntries(chatId: string, messages: StoredMessage[]): TraceEntry[] {
   const out: TraceEntry[] = []
   let seq = 0
   for (const message of messages) {
     const roleTitle = message.role === 'user' ? '用户' : message.role === 'system' ? '系统' : 'AI'
-    const parts = message.parts
+    const parts = mergeFragmentedParts(message.parts)
     if (parts.length === 0) {
       // 未注册 driver / 兜底：直接按 role 输出文本
       out.push({
@@ -61,14 +93,14 @@ export function chatEntries(chatId: string, messages: StoredMessage[]): TraceEnt
             : {}),
           parentTaskId
         })
-      } else if (part.type === 'qoder.thinking') {
+      } else if (part.type === 'qoder.thinking' || part.type === 'openai.thinking') {
         out.push({
           ...base,
           id: `chat-${chatId}-${seq++}`,
           type: 'thinking',
           title: '思考',
           detail: truncate(part.text, 4000),
-          payload: { signature: part.signature },
+          payload: 'signature' in part && part.signature ? { signature: part.signature } : undefined,
           parentTaskId
         })
       } else if (part.type === 'qoder.session') {

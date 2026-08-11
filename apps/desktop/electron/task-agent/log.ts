@@ -77,6 +77,26 @@ function readNonEmptyString(value: unknown): string | undefined {
 }
 
 /**
+ * 是否为"文件变更"类工具（B1：成功执行时额外落一条 kind='diff' 事件）。
+ * 大小写不敏感;覆盖 Qoder / Claude Code 风格的 edit / write / replace / insert / delete。
+ * 刻意不含 read / grep / bash 等只读或命令型工具。
+ */
+function isFileMutationTool(toolName: string): boolean {
+  return /^(edit|write|create|str_replace|replace|insert|delete|multiedit|patch|apply_patch)$/i.test(toolName)
+}
+
+/** 从工具输入里提取目标文件路径（edit/write 类工具的 input 字段名有多种写法）。 */
+function filePathFromToolInput(input: unknown): string | undefined {
+  if (!input || typeof input !== 'object') return undefined
+  const record = input as Record<string, unknown>
+  for (const key of ['file_path', 'filePath', 'path', 'file', 'filename', 'file_name', 'target']) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return undefined
+}
+
+/**
  * 进程级 `tool_use_id -> task_id` 映射,跨 `recordQoderMessage` 多次调用累积。
  *
  * - 写到该 Map 的唯一入口:`task_started` 消息处理时,以其 `tool_use_id` 为键。
@@ -90,9 +110,12 @@ const recordQoderSubtaskCtx: {
   taskIdByToolUseId: Map<string, string>
   /** tool_use_id -> tool_name,用于在 tool_result 反查时携带名字(SDK 协议里 tool_result 不带 name)。 */
   toolNameByToolUseId: Map<string, string>
+  /** tool_use_id -> input,用于 result 阶段提取文件路径(B1 diff 事件;tool_result block 不带 input)。 */
+  toolInputByToolUseId: Map<string, unknown>
 } = {
   taskIdByToolUseId: new Map<string, string>(),
-  toolNameByToolUseId: new Map<string, string>()
+  toolNameByToolUseId: new Map<string, string>(),
+  toolInputByToolUseId: new Map<string, unknown>()
 }
 
 /**
@@ -111,7 +134,7 @@ export function recordQoderMessage(
     recordText: boolean
     addTaskEvent: (event: {
       taskId: string
-      kind: 'message' | 'status' | 'error' | 'tool'
+      kind: 'message' | 'status' | 'error' | 'tool' | 'diff'
       title: string
       detail?: string
       parentTaskId?: string
@@ -286,6 +309,7 @@ export function recordQoderMessage(
         const toolName = b.name
         ctx.toolNameByToolUseId.set(toolUseId, toolName)
         toolBlocks.push({ toolUseId, toolName, phase: 'use', input: b.input })
+        ctx.toolInputByToolUseId.set(toolUseId, b.input)
       } else if (message.type === 'user' && b.type === 'tool_result' && typeof b.tool_use_id === 'string') {
         const toolUseId = b.tool_use_id
         const toolName = ctx.toolNameByToolUseId.get(toolUseId) ?? 'tool'
@@ -423,6 +447,29 @@ export function recordQoderMessage(
               }
             })
     })
+    // 文件变更事件(B1):编辑/写入/替换类工具成功执行 → 额外写一条 kind='diff',
+    // 让任务 trace 有「文件变更」分类(此前该 kind 零写入)。仅 result 阶段写一次,失败不记。
+    // 文件路径从 use 阶段缓存的 input 提取(tool_result 本身不带 input)。
+    if (!isUse && block.isError !== true && isFileMutationTool(block.toolName)) {
+      const filePath = filePathFromToolInput(block.input ?? ctx.toolInputByToolUseId.get(block.toolUseId))
+      options.addTaskEvent({
+        taskId,
+        kind: 'diff',
+        title: `edit ${filePath ?? block.toolName}`,
+        ...(typeof filePath === 'string' ? { detail: filePath } : {}),
+        ...(resolvedParentTaskId || subtaskId
+          ? {
+              payload: {
+                ...(resolvedParentTaskId ? { parentTaskId: resolvedParentTaskId } : {}),
+                ...(subtaskId ? { subtaskId } : {}),
+                toolName: block.toolName,
+                toolUseId: block.toolUseId,
+                filePath
+              }
+            }
+          : { payload: { toolName: block.toolName, toolUseId: block.toolUseId, filePath } })
+      })
+    }
   }
   options.emitPi({ type: 'qoder_event', taskId, message })
 }

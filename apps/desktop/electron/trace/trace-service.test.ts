@@ -6,7 +6,7 @@ import { TaskStore, type TraceEntry } from '@task-pipeline/core'
 import type { ChatService } from '../chat/chat-service.js'
 import type { StoredMessage } from '../chat/chat-types.js'
 import { parsePiSessionFile, sessionIdFromFile } from './pi-session-trace.js'
-import { listPiTraceSessions, parsePiTraceEvents } from './pi-trace-events.js'
+import { listPiTraceSessions, parsePiTraceEvents, summarizePiTrace } from './pi-trace-events.js'
 import { QoderTraceSink } from './qoder-trace.js'
 import { TraceService, eventToTraceEntry } from './trace-service.js'
 
@@ -41,7 +41,14 @@ const PI_TRACE_EVENTS = [
     turnIndex: 0,
     stepIndex: 1,
     type: 'llm_request',
-    input: { model: 'gpt-5', tools: [{ name: 'read' }, { name: 'edit' }] }
+    input: {
+      model: 'gpt-5',
+      tools: [{ name: 'read' }, { name: 'edit' }],
+      messages: [
+        { role: 'developer', content: 'You are an expert coding assistant.' },
+        { role: 'user', content: [{ type: 'text', text: '修复登录 bug 的完整复现步骤' }] }
+      ]
+    }
   },
   {
     ts: 1750000008000,
@@ -93,9 +100,25 @@ const PI_TRACE_EVENTS = [
     type: 'turn_summary',
     stepCount: 1,
     durationMs: 10000,
+    model: 'gpt-5',
     filesChanged: [{ path: 'src/login.ts', op: 'edit', count: 1 }],
     toolsUsed: [{ name: 'grep', count: 1, errors: 0, totalMs: 1000 }],
-    usage: { input: 100, output: 50, cost: 0.001 },
+    usage: { input: 100, output: 50, cacheRead: 30, cacheWrite: 5, cost: 0.001 },
+    steps: [
+      {
+        stepIndex: 1,
+        durationMs: 8000,
+        thinking: 'Let me trace the login flow first.',
+        thinkingSource: 'message',
+        thinkingDeltaCount: 42
+      },
+      // 仅存在于 turn_summary 的 step（step_end 缺失时兜底）：应展开为独立 thinking 条目。
+      {
+        stepIndex: 2,
+        durationMs: 2000,
+        thinking: 'Step 2 thinking only in summary.'
+      }
+    ],
     finalText: '修复完成'
   },
   { ts: 1750000013000, sessionId: 'sess-pi', turnIndex: 0, type: 'turn_end', durationMs: 11000 },
@@ -221,11 +244,54 @@ describe('pi-trace-events', () => {
     // 摘要信息（tokens / 工具统计）
     const turnSummary = entries.find((e) => e.type === 'status' && e.title.includes('汇总'))
     expect(turnSummary?.detail).toContain('tokens: in 100 / out 50')
+    expect(turnSummary?.detail).toContain('cache读 30')
     expect(turnSummary?.detail).toContain('grep×1')
+
+    // A1：llm_request 展示完整 user prompt（仅 user 消息,不含 system）
+    const llmRequest = entries.find((e) => e.type === 'thinking' && e.title.includes('LLM 请求'))
+    expect(llmRequest?.detail).toContain('修复登录 bug 的完整复现步骤')
+    expect(llmRequest?.detail).not.toContain('You are an expert')
+    expect((llmRequest?.payload as { messages?: unknown[] }).messages).toHaveLength(2)
+
+    // A2：step_end.toolCalls 兜底出 tool_call 条目（带 toolCallId 供前端配对）
+    const toolFromStepEnd = entries.find(
+      (e) => e.type === 'tool_call' && e.title === '工具 grep' && (e.payload as { toolCallId?: string }).toolCallId === 'tc1'
+    )
+    expect(toolFromStepEnd).toBeDefined()
+    // A3：turn_summary.steps[].thinking 展开为独立 thinking 条目
+    // - step 1 的 thinking 已由 step_end 产出（turn 0 · step 1）→ 跳过，防双写；
+    // - step 2 仅存在于 turn_summary → 展开。
+    const stepThinking = entries.find((e) => e.type === 'thinking' && e.title.includes('step 1') && e.detail === 'Let me trace the login flow first.')
+    expect(stepThinking).toBeUndefined()
+    const stepThinking2 = entries.find((e) => e.type === 'thinking' && e.title.includes('step 2') && e.detail === 'Step 2 thinking only in summary.')
+    expect(stepThinking2).toBeDefined()
+    // 汇总条目 id 与派生 thinking 条目 id 不同（React key 不冲突）
+    expect(stepThinking2!.id).not.toBe(turnSummary!.id)
+    // 所有 entry 的 traceId 与会话目录名一致（sessionId 修复）
+    expect(entries.every((e) => e.traceId === 'sess-pi')).toBe(true)
+
+    // A4：summarizePiTrace 聚合 cache tokens / toolStats / duration
+    const stats = await summarizePiTrace(sessions[0]!.eventsFile)
+    expect(stats.tokens).toEqual({ input: 100, output: 50, total: 150, cacheRead: 30, cacheWrite: 5 })
+    expect(stats.toolStats).toEqual([{ name: 'grep', count: 1, errors: 0 }])
+    expect(stats.model).toBe('gpt-5')
+    expect(stats.durationMs).toBe(14000)
   })
 
   it('目录不存在时返回空列表', () => {
     expect(listPiTraceSessions(temporaryRoot('empty'))).toEqual([])
+  })
+
+  it('Windows 风格路径也能解析出 sessionId（dirnameOf 跨平台回归）', async () => {
+    // 直接解析一个 Windows 路径形式的 events.jsonl：sessionId 应从父目录名取，而非 'events'。
+    const entries = await parsePiTraceEvents('C:\\Users\\robin\\.pi\\agent\\traces\\sess-win\\events.jsonl')
+    // 文件不存在 → 返回空，但验证不抛错（历史 basenameWithoutExt 只按 / 分割会得到 '.'）
+    expect(entries).toEqual([])
+    // 用真实文件验证：unix 路径下目录名正确
+    const agentDir = temporaryRoot('win')
+    const dir = writePiTraceSession(agentDir, 'sess-win', [PI_TRACE_EVENTS[0]!])
+    const unixEntries = await parsePiTraceEvents(join(dir, 'events.jsonl'))
+    expect(unixEntries[0]!.traceId).toBe('sess-win')
   })
 
   it('损坏行不中断整体解析', async () => {
@@ -382,6 +448,52 @@ describe('TraceService', () => {
     const entries = await service.getTrace('chat-1', 'chat')
     expect(entries.map((e) => e.type)).toEqual(['message', 'tool_call', 'tool_result'])
     expect(entries[1]!.title).toBe('工具 read')
+  })
+
+  it('getTrace chat 不混入 qoder-chat 碎片(回归:防止 text 分块/thinking 重复)', async () => {
+    const dataDir = temporaryRoot('g2b')
+    // 对话 parts 是完整消息
+    const chatService = {
+      listChats: () => [
+        {
+          id: 'chat-1',
+          title: '对话',
+          createdAt: '2025-01-01T00:00:00Z',
+          updatedAt: '2025-01-01T00:00:01Z',
+          messageCount: 1,
+          model: 'qoder:m1',
+          driverId: 'qoder'
+        }
+      ],
+      getChat: () => ({
+        conversation: { id: 'chat-1' },
+        messages: [
+          {
+            id: 'm1',
+            role: 'assistant',
+            createdAt: '2025-01-01T00:00:00.000Z',
+            driverId: 'qoder',
+            raw: {},
+            parts: [
+              { driverId: 'qoder', type: 'text', text: '第一段' },
+              { driverId: 'qoder', type: 'text', text: '第二段' }
+            ]
+          }
+        ]
+      })
+    } as unknown as ChatService
+    // qoder-chat 目录存在碎片(理论上不该混入)
+    const sink = new QoderTraceSink(dataDir)
+    sink.appendChat('chat-1', {
+      type: 'stream_event',
+      event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: '碎片思考' } }
+    })
+    const service = new TraceService(new TaskStore(':memory:'), chatService, dataDir, temporaryRoot('g2c'))
+    const entries = await service.getTrace('chat-1', 'chat')
+    // 只有 chats-v3 parts 的两条 text 碎片,chatEntries 层已合并为一条完整 message;无 qoder-chat 的 thinking 碎片
+    expect(entries.map((e) => e.type)).toEqual(['message'])
+    expect(entries[0]!.detail).toBe('第一段第二段')
+    expect(entries.every((e) => e.detail !== '碎片思考')).toBe(true)
   })
 
   it('getTrace pi_session 优先 pi-trace 执行视图，缺省回退官方 session', async () => {
@@ -545,5 +657,61 @@ describe('eventToTraceEntry', () => {
     expect(entry.sdkSubtype).toBeUndefined()
     // payload 原样保留
     expect(entry.payload).toEqual({ usage: { total_tokens: 100 } })
+  })
+
+  it('task summary 的 toolStats/errorCount: 同 toolUseId 的 use/result 只计一次,result 失败计错', async () => {
+    const store = new TaskStore(':memory:')
+    const task = store.createTask({ title: '工具统计', description: 'desc' })
+    // 工具 A：use + result(成功) → 计 1 次
+    store.addEvent({
+      taskId: task.id,
+      kind: 'tool',
+      title: 'Edit',
+      payload: { toolName: 'Edit', toolUseId: 'ta', phase: 'use', input: { path: '/a.ts' } }
+    })
+    store.addEvent({
+      taskId: task.id,
+      kind: 'tool',
+      title: 'Edit',
+      payload: { toolName: 'Edit', toolUseId: 'ta', phase: 'result', output: 'ok' }
+    })
+    // 工具 B：use + result(失败) → 计 1 次 + errors 1
+    store.addEvent({
+      taskId: task.id,
+      kind: 'tool',
+      title: 'Bash',
+      payload: { toolName: 'Bash', toolUseId: 'tb', phase: 'use', input: { command: 'false' } }
+    })
+    store.addEvent({
+      taskId: task.id,
+      kind: 'tool',
+      title: 'Bash',
+      payload: { toolName: 'Bash', toolUseId: 'tb', phase: 'result', output: 'failed', isError: true }
+    })
+    // 独立 error 事件 → errorCount 计入
+    store.addEvent({ taskId: task.id, kind: 'error', title: '执行错误', detail: 'boom' })
+    // 无 toolUseId 的旧数据：use/result 各计一次（可接受）
+    store.addEvent({
+      taskId: task.id,
+      kind: 'tool',
+      title: 'Grep',
+      payload: { toolName: 'Grep', phase: 'use', input: { pattern: 'x' } }
+    })
+    store.addEvent({
+      taskId: task.id,
+      kind: 'tool',
+      title: 'Grep',
+      payload: { toolName: 'Grep', phase: 'result', output: 'line', isError: true }
+    })
+
+    const service = new TraceService(store, fakeChatService(), temporaryRoot('ts'), temporaryRoot('ta'))
+    const summaries = await service.listSummaries()
+    const taskSummary = summaries.find((s) => s.kind === 'task' && s.traceId === task.id)
+    expect(taskSummary?.stats?.toolStats).toEqual([
+      { name: 'Grep', count: 2, errors: 1 },
+      { name: 'Edit', count: 1, errors: 0 },
+      { name: 'Bash', count: 1, errors: 1 }
+    ])
+    expect(taskSummary?.stats?.errorCount).toBe(1)
   })
 })

@@ -19,8 +19,17 @@ export function qoderTraceDir(dataDir: string): string {
   return join(dataDir, 'traces', 'qoder')
 }
 
+/** chat 路径的 trace 目录（与任务分离，避免 taskId/chatId 撞名）。 */
+export function qoderChatTraceDir(dataDir: string): string {
+  return join(dataDir, 'traces', 'qoder-chat')
+}
+
 export function qoderTraceFile(dataDir: string, taskId: string): string {
   return join(qoderTraceDir(dataDir), `${taskId}.jsonl`)
+}
+
+export function qoderChatTraceFile(dataDir: string, chatId: string): string {
+  return join(qoderChatTraceDir(dataDir), `${chatId}.jsonl`)
 }
 
 /** 落盘 Sink：追加写一行。失败静默（trace 可用性低于主流程）。 */
@@ -28,10 +37,18 @@ export class QoderTraceSink {
   constructor(private readonly dataDir: string) {}
 
   append(taskId: string, message: unknown): void {
+    this.appendLine(qoderTraceFile(this.dataDir, taskId), taskId, message)
+  }
+
+  /** chat 路径：SDKMessage 逐条落盘到独立目录（B2：对话执行细节可追溯）。 */
+  appendChat(chatId: string, message: unknown): void {
+    this.appendLine(qoderChatTraceFile(this.dataDir, chatId), chatId, message)
+  }
+
+  private appendLine(file: string, id: string, message: unknown): void {
     try {
-      const file = qoderTraceFile(this.dataDir, taskId)
       mkdirSync(dirname(file), { recursive: true })
-      appendFileSync(file, `${JSON.stringify({ t: new Date().toISOString(), taskId, message })}\n`, 'utf8')
+      appendFileSync(file, `${JSON.stringify({ t: new Date().toISOString(), taskId: id, message })}\n`, 'utf8')
     } catch {
       /* 忽略：trace 写失败不能影响主流程 */
     }
@@ -141,20 +158,21 @@ function resolveParentTaskId(ctx: ParseContext, message: RawSdkMessage): string 
 
 /** 单条 SDKMessage → 0..n 条 TraceEntry（流式碎片由 mergeFragments 合并）。 */
 function messageToEntries(
-  taskId: string,
+  id: string,
+  kind: 'task' | 'chat',
   createdAt: string,
   message: RawSdkMessage,
   startSeq: number,
   ctx: ParseContext
 ): TraceEntry[] {
   const out: TraceEntry[] = []
-  const seq = () => `qoder-${taskId}-${startSeq + out.length}`
+  const seq = () => `qoder-${id}-${startSeq + out.length}`
   // parentTaskId 为 undefined 表示"主流程";有值表示"嵌套在该子任务内"。
   // 把它铺到 base 上,后续所有 push 自然携带,渲染层按字段一键分组。
   const resolvedParentTaskId = resolveParentTaskId(ctx, message)
   const base = {
-    traceId: taskId,
-    kind: 'task' as const,
+    traceId: id,
+    kind,
     createdAt,
     source: 'qoder' as const,
     ...(resolvedParentTaskId ? { parentTaskId: resolvedParentTaskId } : {})
@@ -539,9 +557,17 @@ function pairToolCalls(entries: TraceEntry[]): TraceEntry[] {
   return out
 }
 
-/** 解析某任务的 qoder trace JSONL → TraceEntry[]（按写入顺序，碎片已合并）。 */
-export async function parseQoderTraceFile(dataDir: string, taskId: string): Promise<TraceEntry[]> {
-  const file = qoderTraceFile(dataDir, taskId)
+/**
+ * 解析 qoder trace JSONL → TraceEntry[]（按写入顺序，碎片已合并）。
+ * - kind='task'（默认）：读 `traces/qoder/<id>.jsonl`，entry.kind='task'；
+ * - kind='chat'（B2）：读 `traces/qoder-chat/<id>.jsonl`，entry.kind='chat'。
+ */
+export async function parseQoderTraceFile(
+  dataDir: string,
+  id: string,
+  kind: 'task' | 'chat' = 'task'
+): Promise<TraceEntry[]> {
+  const file = kind === 'chat' ? qoderChatTraceFile(dataDir, id) : qoderTraceFile(dataDir, id)
   if (!existsSync(file)) return []
   const out: TraceEntry[] = []
   // 运行期维护的 parent_tool_use_id → task_id 映射;
@@ -564,7 +590,7 @@ export async function parseQoderTraceFile(dataDir: string, taskId: string): Prom
       continue
     }
     if (!record.message) continue
-    out.push(...messageToEntries(taskId, record.t ?? new Date().toISOString(), record.message, out.length, ctx))
+    out.push(...messageToEntries(id, kind, record.t ?? new Date().toISOString(), record.message, out.length, ctx))
   }
   // 顺序:先 pair 掉 tool_call / tool_result 的散乱分列,再 merge 流式 message/thinking 碎片。
   return mergeFragments(pairToolCalls(out))

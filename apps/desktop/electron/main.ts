@@ -503,7 +503,14 @@ const atlassianFactory = new AtlassianClientFactory(desktopResolver)
 
 // Chat driver registry — 统一装 Qoder / OpenAI 两份 driver；后续接入更多 driver 仅需改此处。
 const chatDriverRegistry = new ChatDriverRegistry()
-chatDriverRegistry.register(new QoderChatDriver(() => protectedValue('qoderToken'), getQoderStatus))
+chatDriverRegistry.register(
+  new QoderChatDriver(
+    () => protectedValue('qoderToken'),
+    getQoderStatus,
+    // B2：对话路径 SDKMessage 逐条落盘到 traces/qoder-chat/，让对话执行细节可追溯。
+    (conversationId, message) => qoderTraceSink.appendChat(conversationId, message)
+  )
+)
 chatDriverRegistry.register(
   new OpenAIChatDriver(store, (profile) => {
     if (profile?.id) {

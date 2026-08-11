@@ -601,4 +601,27 @@ describe('qoder-trace', () => {
     expect(msg).toBeDefined()
     expect(msg?.parentTaskId).toBeUndefined()
   })
+
+  it('B2：appendChat 落盘到独立目录,parseQoderTraceFile(kind=chat) 解析为 kind=chat 条目', async () => {
+    const dataDir = temporaryRoot()
+    const sink = new QoderTraceSink(dataDir)
+    sink.appendChat('chat-1', {
+      type: 'stream_event',
+      event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: '对话里的思考' } }
+    })
+    sink.appendChat('chat-1', {
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id: 'c-tc1', name: 'Edit', input: { file_path: '/tmp/a.ts' } }] }
+    })
+    // 任务目录不出现 chat 数据
+    expect(parseQoderTraceFile(dataDir, 'chat-1')).resolves.toEqual([])
+    const entries = await parseQoderTraceFile(dataDir, 'chat-1', 'chat')
+    expect(entries.length).toBeGreaterThan(0)
+    expect(entries.every((e) => e.kind === 'chat')).toBe(true)
+    expect(entries.every((e) => e.traceId === 'chat-1')).toBe(true)
+    expect(entries.some((e) => e.type === 'thinking' && e.detail === '对话里的思考')).toBe(true)
+    expect(entries.some((e) => e.type === 'tool_call' && e.title === '工具 Edit')).toBe(true)
+    // 任务路径的 parseQoderTraceFile(kind=task) 不受影响
+    expect(entries.some((e) => e.kind === 'task')).toBe(false)
+  })
 })

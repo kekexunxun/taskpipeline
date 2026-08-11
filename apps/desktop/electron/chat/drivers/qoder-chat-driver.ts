@@ -17,12 +17,12 @@
  * 上层 (ChatService) 完全不感知 SDK 协议。
  */
 
+import type { z } from 'zod'
 import {
   createSdkMcpServer,
   tool as qoderTool,
   type SdkMcpToolDefinition
 } from '@qoder-ai/qoder-agent-sdk'
-import type { z } from 'zod'
 import type {
   ChatModelInfo,
   ChatStreamChunk,
@@ -30,9 +30,9 @@ import type {
   StoredMessage,
   StoredMessageRecord
 } from '../chat-types.js'
+import { QoderSession, QoderSessionRegistry } from '../../qoder/qoder-session.js'
 import type { ChatDriver, StreamChatInput } from './chat-driver.js'
 import type { ToolSource } from './tool-source.js'
-import { QoderSession, QoderSessionRegistry } from '../../qoder/qoder-session.js'
 
 type QoderStatus = {
   enabled: boolean
@@ -136,7 +136,9 @@ export class QoderChatDriver implements ChatDriver {
 
   constructor(
     private readonly tokenProvider: QoderTokenProvider,
-    private readonly statusProvider: QoderStatusProvider
+    private readonly statusProvider: QoderStatusProvider,
+    /** B2：逐条 SDKMessage 回调（chat trace 落盘用），透传给常驻会话。 */
+    private readonly onSdkMessage?: (conversationId: string, message: unknown) => void
   ) {
     if (!tokenProvider) throw new Error('QoderChatDriver requires a token provider')
     if (!statusProvider) throw new Error('QoderChatDriver requires a status provider')
@@ -244,6 +246,18 @@ export class QoderChatDriver implements ChatDriver {
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
       permissionMode: 'default' as const,
       controlRequestTimeoutMs: 15_000,
+      // B2：逐条 SDKMessage 透传（chat trace 落盘 / 未来复用），失败不影响主流程。
+      ...(this.onSdkMessage
+        ? {
+            onMessage: (message: unknown) => {
+              try {
+                this.onSdkMessage?.(input.conversationId, message)
+              } catch {
+                /* 忽略:trace 采集失败不能影响对话 */
+              }
+            }
+          }
+        : {}),
       ...(taskSource && mcpSetup
         ? {
             systemPrompt: taskSource.systemPrompt(),

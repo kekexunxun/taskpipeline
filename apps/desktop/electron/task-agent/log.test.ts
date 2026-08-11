@@ -312,4 +312,89 @@ describe('recordQoderMessage — tool_use / tool_result 事件', () => {
     // description 是空字符串,readNonEmptyString 过滤后变 undefined
     expect(event.payload.description).toBeUndefined()
   })
+
+  it('edit/write 类工具成功执行额外写一条 kind=diff 事件(B1 文件变更分类)', () => {
+    const { store, addTaskEvent } = makeStore()
+    // use 阶段:只写 tool 事件,不写 diff
+    recordQoderMessage(
+      store,
+      'real-task',
+      {
+        type: 'assistant',
+        message: {
+          content: [{ type: 'tool_use', id: 'toolu_edit', name: 'Edit', input: { file_path: '/tmp/a.ts', old_string: 'x', new_string: 'y' } }]
+        }
+      } as unknown as SDKMessage,
+      {
+        recordText: true,
+        addTaskEvent: addTaskEvent as never,
+        emitPi: vi.fn() as never
+      }
+    )
+    expect(addTaskEvent.mock.calls.map((c) => c[0]).some((e: { kind?: string }) => e?.kind === 'diff')).toBe(false)
+    addTaskEvent.mockClear()
+    // result 阶段:成功 → diff 事件带 filePath;失败 → 不写 diff
+    recordQoderMessage(
+      store,
+      'real-task',
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_edit', content: 'done', is_error: false }]
+        }
+      } as unknown as SDKMessage,
+      {
+        recordText: true,
+        addTaskEvent: addTaskEvent as never,
+        emitPi: vi.fn() as never
+      }
+    )
+    const diffEvent = addTaskEvent.mock.calls.map((c) => c[0]).find((e: { kind?: string }) => e?.kind === 'diff')
+    expect(diffEvent).toBeTruthy()
+    expect(diffEvent.title).toBe('edit /tmp/a.ts')
+    expect(diffEvent.detail).toBe('/tmp/a.ts')
+    expect(diffEvent.payload.toolName).toBe('Edit')
+    expect(diffEvent.payload.filePath).toBe('/tmp/a.ts')
+    addTaskEvent.mockClear()
+    // 失败结果:不落 diff
+    recordQoderMessage(
+      store,
+      'real-task',
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_edit', content: 'permission denied', is_error: true }]
+        }
+      } as unknown as SDKMessage,
+      {
+        recordText: true,
+        addTaskEvent: addTaskEvent as never,
+        emitPi: vi.fn() as never
+      }
+    )
+    expect(addTaskEvent.mock.calls.map((c) => c[0]).some((e: { kind?: string }) => e?.kind === 'diff')).toBe(false)
+  })
+
+  it('只读工具(read/grep)不写 diff 事件', () => {
+    const { store, addTaskEvent } = makeStore()
+    recordQoderMessage(
+      store,
+      'real-task',
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_read', content: 'ok', is_error: false }]
+        }
+      } as unknown as SDKMessage,
+      {
+        recordText: true,
+        addTaskEvent: addTaskEvent as never,
+        emitPi: vi.fn() as never
+      }
+    )
+    expect(addTaskEvent.mock.calls.map((c) => c[0]).some((e: { kind?: string }) => e?.kind === 'diff')).toBe(false)
+  })
 })

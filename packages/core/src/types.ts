@@ -395,10 +395,14 @@ export type TraceSummary = {
   /** 执行统计：Token / 成本 / 时长 / 模型等关键指标。 */
   stats?: {
     turns?: number
-    tokens?: { input: number; output: number; total: number }
+    tokens?: { input: number; output: number; total: number; cacheRead?: number; cacheWrite?: number }
     costUsd?: number
     model?: string
     durationMs?: number
+    /** 工具调用统计（analysis 用）：工具名 → 次数 / 失败数。 */
+    toolStats?: Array<{ name: string; count: number; errors: number }>
+    /** 错误 / 失败事件计数（analysis 用）。 */
+    errorCount?: number
   }
   lastEntry?: Pick<TraceEntry, 'type' | 'title' | 'createdAt'>
   /** pi-trace 源存在 trace.html 时给出（前端"在浏览器打开"用）。 */

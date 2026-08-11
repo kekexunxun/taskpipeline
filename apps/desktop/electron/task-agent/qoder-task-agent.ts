@@ -20,6 +20,8 @@ import { QoderCliProcessError, type Query, type SDKMessage } from '@qoder-ai/qod
 import type { HookCallback, HookCallbackMatcher, HookEvent, HookJSONOutput } from '@qoder-ai/qoder-agent-sdk'
 import type { Task, TaskRepository, TaskStore } from '@task-pipeline/core'
 import { implementationOutcomeInstruction } from '../task-readiness.js'
+import { QoderSession, QoderSessionRegistry } from '../qoder/qoder-session.js'
+import type { DriverPart } from '../chat/chat-types.js'
 import type {
   TaskAgentDriver,
   TaskAgentDeps,
@@ -31,8 +33,6 @@ import type {
   RunTestGenerationInput
 } from './task-agent-driver.js'
 import { logQoderMessage, qoderLogFile, recordQoderMessage } from './log.js'
-import { QoderSession, QoderSessionRegistry } from '../qoder/qoder-session.js'
-import type { DriverPart } from '../chat/chat-types.js'
 
 /**
  * Driver 注入的依赖(由 main.ts 在构造时传入,driver 不 import 顶层常量)。
@@ -48,7 +48,7 @@ export type QoderTaskAgentDeps = TaskAgentDeps & {
   dataDir: string
   addTaskEvent: (event: {
     taskId: string
-    kind: 'message' | 'status' | 'error' | 'tool'
+    kind: 'message' | 'status' | 'error' | 'tool' | 'diff'
     title: string
     detail?: string
     parentTaskId?: string

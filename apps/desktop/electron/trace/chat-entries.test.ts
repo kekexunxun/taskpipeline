@@ -133,4 +133,75 @@ describe('chatEntries', () => {
     expect(entries).toHaveLength(1)
     expect(entries[0]).toMatchObject({ type: 'message', title: '用户', detail: '你好' })
   })
+
+  it('openai.thinking part 映射为 thinking 条目(修复:openai 思考/消耗此前完全不展示)', () => {
+    const entries = chatEntries('c1', [
+      message(
+        [
+          { driverId: 'openai', type: 'openai.thinking', text: '思考中…' },
+          { driverId: 'openai', type: 'text', text: '用 openai 回复你' }
+        ],
+        { driverId: 'openai' }
+      )
+    ])
+    const thinking = entries.find((e) => e.type === 'thinking')
+    expect(thinking).toBeDefined()
+    expect(thinking!.detail).toBe('思考中…')
+  })
+
+  it('流式碎片合并:相邻 text 拼接、相邻 thinking 合并(修复:Qoder 消息按 delta 分块)', () => {
+    const entries = chatEntries('c1', [
+      message([
+        { driverId: 'qoder', type: 'qoder.thinking', text: '思考行1' },
+        { driverId: 'qoder', type: 'qoder.thinking', text: '思考行2' },
+        { driverId: 'qoder', type: 'text', text: '正文片段1' },
+        { driverId: 'qoder', type: 'text', text: '正文片段2' },
+        { driverId: 'qoder', type: 'text', text: '正文片段3' }
+      ])
+    ])
+    // 93 碎片场景的缩样:5 个碎片 → 1 条 message + 1 条 thinking
+    expect(entries.filter((e) => e.type === 'message')).toHaveLength(1)
+    expect(entries.filter((e) => e.type === 'thinking')).toHaveLength(1)
+    expect(entries.find((e) => e.type === 'message')?.detail).toBe('正文片段1正文片段2正文片段3')
+    // qoder thinking 按行推送,用 \n 分隔(与 ChatPage PartRenderer 一致)
+    expect(entries.find((e) => e.type === 'thinking')?.detail).toBe('思考行1\n思考行2')
+  })
+
+  it('碎片合并不跨消息、不跨 parentTaskId', () => {
+    const entries = chatEntries('c1', [
+      message([{ driverId: 'qoder', type: 'text', text: '第一条' }]),
+      message([{ driverId: 'qoder', type: 'text', text: '第二条' }]),
+      message([
+        { driverId: 'qoder', type: 'text', text: '主流程', parentTaskId: 't1' },
+        { driverId: 'qoder', type: 'text', text: '子任务', parentTaskId: 't2' }
+      ])
+    ])
+    expect(entries.filter((e) => e.type === 'message')).toHaveLength(4)
+    expect(entries.map((e) => e.detail)).toEqual(['第一条', '第二条', '主流程', '子任务'])
+  })
+
+  it('混合会话(qoder + openai):openai 消息 usage 进 message entry payload,消耗可展示', () => {
+    const entries = chatEntries('c1', [
+      message(
+        [{ driverId: 'qoder', type: 'text', text: '好的，我来写。' }],
+        { driverId: 'qoder' }
+      ),
+      message(
+        [
+          { driverId: 'openai', type: 'openai.thinking', text: '思考中…' },
+          { driverId: 'openai', type: 'text', text: '用 openai 回复你' }
+        ],
+        {
+          driverId: 'openai',
+          usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150, costUsd: 0.002 }
+        }
+      )
+    ])
+    expect(entries).toHaveLength(3)
+    const openaiMsg = entries.find((e) => e.type === 'message' && e.detail === '用 openai 回复你')
+    expect(openaiMsg?.payload).toMatchObject({ usage: { input: 100, output: 50, cost: 0.002 } })
+    // 两条思考(qoder + openai)都在
+    expect(entries.filter((e) => e.type === 'thinking')).toHaveLength(1)
+    expect(entries.some((e) => e.type === 'thinking' && e.detail === '思考中…')).toBe(true)
+  })
 })

@@ -1,4 +1,4 @@
-import { Fragment, useMemo, type ReactNode } from 'react'
+import { Fragment, useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import {
   ActivityIcon,
@@ -10,6 +10,7 @@ import {
   LightbulbIcon,
   Link2Icon,
   Loader2Icon,
+  SearchIcon,
   ShieldIcon,
   SparklesIcon,
   XIcon,
@@ -19,6 +20,7 @@ import type { TraceEntry, TraceEntryType, TraceKind, TraceSummary } from '@task-
 import { api } from '../../../api'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
 import {
   SubTaskGroup,
   SubTaskHeader,
@@ -60,6 +62,8 @@ type EntryMeta = {
   durationMs?: number
   inputTokens?: number
   outputTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
   costUsd?: number
   stopReason?: string
   isError?: boolean
@@ -72,10 +76,14 @@ function extractMeta(entry: TraceEntry): EntryMeta {
   if (typeof p.durationMs === 'number') meta.durationMs = p.durationMs
   if (typeof p.stopReason === 'string') meta.stopReason = p.stopReason
   if (p.isError === true) meta.isError = true
-  const usage = p.usage as { input?: number; output?: number; cost?: number } | undefined
+  const usage = p.usage as
+    | { input?: number; output?: number; cost?: number; cacheRead?: number; cacheWrite?: number }
+    | undefined
   if (usage && (typeof usage.input === 'number' || typeof usage.output === 'number')) {
     meta.inputTokens = usage.input ?? 0
     meta.outputTokens = usage.output ?? 0
+    if (typeof usage.cacheRead === 'number' && usage.cacheRead > 0) meta.cacheReadTokens = usage.cacheRead
+    if (typeof usage.cacheWrite === 'number' && usage.cacheWrite > 0) meta.cacheWriteTokens = usage.cacheWrite
     if (typeof usage.cost === 'number') meta.costUsd = usage.cost
   }
   return meta
@@ -88,6 +96,8 @@ function mergeMeta(target: EntryMeta, source: EntryMeta): EntryMeta {
     durationMs: target.durationMs ?? source.durationMs,
     inputTokens: target.inputTokens ?? source.inputTokens,
     outputTokens: target.outputTokens ?? source.outputTokens,
+    cacheReadTokens: target.cacheReadTokens ?? source.cacheReadTokens,
+    cacheWriteTokens: target.cacheWriteTokens ?? source.cacheWriteTokens,
     costUsd: target.costUsd ?? source.costUsd,
     stopReason: target.stopReason ?? source.stopReason,
     isError: target.isError ?? source.isError
@@ -119,9 +129,12 @@ function MetaBadges({ meta }: { meta: EntryMeta }) {
         <Badge
           variant="secondary"
           className="px-1 py-0 text-[10px]"
-          title={`输入 ${meta.inputTokens} · 输出 ${meta.outputTokens ?? 0}`}
+          title={`输入 ${meta.inputTokens} · 输出 ${meta.outputTokens ?? 0}${meta.cacheReadTokens ? ` · 缓存读 ${meta.cacheReadTokens}` : ''}${meta.cacheWriteTokens ? ` · 缓存写 ${meta.cacheWriteTokens}` : ''}`}
         >
           ↑{formatTokens(meta.inputTokens)} ↓{formatTokens(meta.outputTokens ?? 0)}
+          {meta.cacheReadTokens !== undefined && (
+            <span className="text-sky-600 dark:text-sky-400"> C{formatTokens(meta.cacheReadTokens)}</span>
+          )}
         </Badge>
       )}
       {meta.costUsd !== undefined && meta.costUsd > 0 && (
@@ -365,6 +378,9 @@ function TraceEntryTimeline({ entries }: { entries: TraceEntry[] }) {
       e.entry.type === 'message' &&
       /^(?:qoder agent|openai agent|ai)$/i.test(e.entry.title.trim()) &&
       (e.entry.source === 'events' || e.entry.source === 'chat')
+    // 归一化 parentTaskId：undefined 与 undefined 相等（主流程），有值按值比较；
+    // 跨子任务作用域的相邻 AI 消息不得拼接（否则子任务文本被并入主流程并从折叠卡消失）。
+    const scopeOf = (e: IndexedEntry) => e.entry.parentTaskId ?? e.meta.parentTaskId ?? ''
     const merged: IndexedEntry[] = []
     for (const current of indexed) {
       const last = merged[merged.length - 1]
@@ -372,6 +388,7 @@ function TraceEntryTimeline({ entries }: { entries: TraceEntry[] }) {
         last &&
         isAgentMsg(current) &&
         isAgentMsg(last) &&
+        scopeOf(last) === scopeOf(current) &&
         (last.entry.source === 'events' || last.entry.createdAt === current.entry.createdAt)
       ) {
         merged[merged.length - 1] = {
@@ -392,7 +409,9 @@ function TraceEntryTimeline({ entries }: { entries: TraceEntry[] }) {
       subtaskId: meta.subtaskId,
       sdkSubtype: entry.sdkSubtype ?? meta.sdkSubtype
     }))
-    const byId = new Map(indexed.map((x) => [x.entry.id, x]))
+    // byId 必须映射 merged(合并后)而非 indexed:渲染时按 id 取回的是已拼接 detail 的条目,
+    // 否则上面相邻碎片合并白做 —— 每条 still 渲染成独立小块(历史 bug:Qoder 消息按 delta 分块)。
+    const byId = new Map(merged.map((x) => [x.entry.id, x]))
     return interleaveTimeline(parented).map((block) =>
       block.kind === 'main'
         ? { kind: 'main' as const, item: byId.get(block.item.id) as IndexedEntry }
@@ -496,7 +515,9 @@ function StatsOverview({ stats }: { stats: TraceSummary['stats'] }) {
     stats.model ||
     (stats.tokens && stats.tokens.total > 0) ||
     typeof stats.costUsd === 'number' ||
-    typeof stats.durationMs === 'number'
+    typeof stats.durationMs === 'number' ||
+    (stats.toolStats && stats.toolStats.length > 0) ||
+    typeof stats.errorCount === 'number'
   if (!hasAny) return null
   return (
     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
@@ -506,8 +527,15 @@ function StatsOverview({ stats }: { stats: TraceSummary['stats'] }) {
         </Badge>
       )}
       {stats.tokens && stats.tokens.total > 0 && (
-        <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+        <Badge
+          variant="secondary"
+          className="px-1.5 py-0 text-[10px]"
+          title={`输入 ${stats.tokens.input} · 输出 ${stats.tokens.output}${stats.tokens.cacheRead ? ` · 缓存读 ${stats.tokens.cacheRead}` : ''}${stats.tokens.cacheWrite ? ` · 缓存写 ${stats.tokens.cacheWrite}` : ''}`}
+        >
           ↑{formatTokens(stats.tokens.input)} ↓{formatTokens(stats.tokens.output)}（{formatTokens(stats.tokens.total)}）
+          {typeof stats.tokens.cacheRead === 'number' && stats.tokens.cacheRead > 0 && (
+            <span className="text-sky-600 dark:text-sky-400"> C{formatTokens(stats.tokens.cacheRead)}</span>
+          )}
         </Badge>
       )}
       {typeof stats.costUsd === 'number' && stats.costUsd > 0 && (
@@ -523,6 +551,20 @@ function StatsOverview({ stats }: { stats: TraceSummary['stats'] }) {
       {typeof stats.turns === 'number' && (
         <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
           {stats.turns} 轮
+        </Badge>
+      )}
+      {stats.toolStats && stats.toolStats.length > 0 && (
+        <Badge
+          variant="outline"
+          className="max-w-64 truncate px-1.5 py-0 text-[10px]"
+          title={stats.toolStats.map((t) => `${t.name}×${t.count}${t.errors ? `（错${t.errors}）` : ''}`).join('\n')}
+        >
+          🛠 {stats.toolStats.length} 种工具
+        </Badge>
+      )}
+      {typeof stats.errorCount === 'number' && stats.errorCount > 0 && (
+        <Badge variant="destructive" className="px-1.5 py-0 text-[10px]">
+          ✕ {stats.errorCount} 次错误
         </Badge>
       )}
     </div>
@@ -547,6 +589,24 @@ export function TraceDetail({
 }) {
   const isTask = kind === 'task'
   const isChat = kind === 'chat'
+  // 详情全文搜索：匹配 title / detail / payload 的 JSON 文本，纯前端过滤。
+  const [searchQuery, setSearchQuery] = useState('')
+  const filteredEntries = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (!q) return entries
+    return entries.filter((entry) => {
+      const haystack = [
+        entry.title,
+        entry.detail,
+        entry.payload ? JSON.stringify(entry.payload) : '',
+        entry.source
+      ]
+        .filter(Boolean)
+        .join('\n')
+        .toLowerCase()
+      return haystack.includes(q)
+    })
+  }, [entries, searchQuery])
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -565,6 +625,23 @@ export function TraceDetail({
           <StatsOverview stats={summary?.stats} />
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          {searchQuery.trim() && !loading && (
+            <span className="text-[10px] text-muted-foreground">
+              匹配 {filteredEntries.length}/{entries.length}
+            </span>
+          )}
+          <div className="relative">
+            <SearchIcon
+              size={13}
+              className="pointer-events-none absolute top-1/2 left-2 -translate-y-1/2 text-muted-foreground"
+            />
+            <Input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="搜索详情…"
+              className="h-7 w-36 pl-7 text-xs!"
+            />
+          </div>
           {summary?.linkedTaskId && (
             <Button asChild size="sm" variant="outline" className="h-7 gap-1 text-xs">
               <Link to={`/coding/${summary.linkedTaskId}`}>
@@ -609,14 +686,16 @@ export function TraceDetail({
             <Loader2Icon size={14} className="animate-spin" />
             加载中…
           </div>
-        ) : entries.length === 0 ? (
+        ) : filteredEntries.length === 0 ? (
           <div className="flex min-h-48 flex-col items-center justify-center gap-1 text-muted-foreground">
             <SparklesIcon size={20} />
-            <strong className="text-xs">暂无执行记录</strong>
-            <span className="text-xs">该 Trace 尚未产生事件</span>
+            <strong className="text-xs">{entries.length === 0 ? '暂无执行记录' : '无匹配条目'}</strong>
+            <span className="text-xs">
+              {entries.length === 0 ? '该 Trace 尚未产生事件' : `没有包含「${searchQuery.trim()}」的记录`}
+            </span>
           </div>
         ) : (
-          <TraceEntryTimeline entries={entries} />
+          <TraceEntryTimeline entries={filteredEntries} />
         )}
       </div>
     </div>

@@ -26,7 +26,7 @@ function matches(summary: TraceSummary, kind: TraceKindFilter, query: string): b
   return haystack.includes(query.trim().toLowerCase())
 }
 
-/** 统计摘要：模型 / Token / 成本。 */
+/** 统计摘要：模型 / Token / 成本 / 错误。 */
 function StatsBadges({ stats }: { stats: TraceSummary['stats'] }) {
   if (!stats) return null
   return (
@@ -37,14 +37,22 @@ function StatsBadges({ stats }: { stats: TraceSummary['stats'] }) {
         </Badge>
       )}
       {stats.tokens && stats.tokens.total > 0 && (
-        <span title={`输入 ${stats.tokens.input} · 输出 ${stats.tokens.output}`}>
+        <span
+          title={`输入 ${stats.tokens.input} · 输出 ${stats.tokens.output}${stats.tokens.cacheRead ? ` · 缓存读 ${stats.tokens.cacheRead}` : ''}${stats.tokens.cacheWrite ? ` · 缓存写 ${stats.tokens.cacheWrite}` : ''}`}
+        >
           ↑{formatTokens(stats.tokens.input)} ↓{formatTokens(stats.tokens.output)}
+          {typeof stats.tokens.cacheRead === 'number' && stats.tokens.cacheRead > 0 && (
+            <span className="text-sky-600 dark:text-sky-400"> C{formatTokens(stats.tokens.cacheRead)}</span>
+          )}
         </span>
       )}
       {typeof stats.costUsd === 'number' && stats.costUsd > 0 && (
         <span className="text-emerald-600 dark:text-emerald-400">${stats.costUsd.toFixed(4)}</span>
       )}
       {typeof stats.durationMs === 'number' && stats.durationMs > 0 && <span>{formatDuration(stats.durationMs)}</span>}
+      {typeof stats.errorCount === 'number' && stats.errorCount > 0 && (
+        <span className="text-red-500">✕{stats.errorCount}</span>
+      )}
     </span>
   )
 }

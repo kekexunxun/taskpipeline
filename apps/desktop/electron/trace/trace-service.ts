@@ -55,15 +55,24 @@ export class TraceService {
         updatedAt: task.updatedAt,
         entryCount: events.length + openAiEvents.length,
         state: task.state,
-        stats: usage
-          ? {
-              turns: usage.turns,
-              tokens: { input: usage.inputTokens, output: usage.outputTokens, total: usage.totalTokens },
-              costUsd: usage.costUsd,
-              durationMs: usage.durationMs,
-              model: task.qoderModel ?? usage.provider
-            }
-          : undefined,
+        stats: {
+          ...(usage
+            ? {
+                turns: usage.turns,
+                tokens: {
+                  input: usage.inputTokens,
+                  output: usage.outputTokens,
+                  total: usage.totalTokens,
+                  cacheRead: usage.cacheReadTokens,
+                  cacheWrite: usage.cacheWriteTokens
+                },
+                costUsd: usage.costUsd,
+                durationMs: usage.durationMs,
+                model: task.qoderModel ?? usage.provider
+              }
+            : {}),
+          ...toolAndErrorStats(events, openAiEvents)
+        },
         lastEntry: lastOf(events, (event) => ({
           type: mapEventKind(event.kind),
           title: event.title,
@@ -86,6 +95,7 @@ export class TraceService {
         },
         { input: 0, output: 0, total: 0 }
       )
+      const costUsd = messages.reduce((acc, m) => acc + (m.usage?.costUsd ?? 0), 0)
       summaries.push({
         traceId: chat.id,
         kind: 'chat',
@@ -94,10 +104,11 @@ export class TraceService {
         updatedAt: chat.updatedAt,
         entryCount: chat.messageCount,
         stats:
-          chat.model || tokens.total > 0
+          chat.model || tokens.total > 0 || costUsd > 0
             ? {
                 model: chat.model,
-                ...(tokens.total > 0 ? { tokens } : {})
+                ...(tokens.total > 0 ? { tokens } : {}),
+                ...(costUsd > 0 ? { costUsd } : {})
               }
             : undefined
       })
@@ -161,7 +172,14 @@ export class TraceService {
       const pi = await this.piEntriesForTask(traceId)
       return mergeTaskTrace(events, qoder, pi)
     }
-    if (kind === 'chat') return chatEntries(traceId, this.chatService.getChat(traceId)?.messages ?? [])
+    if (kind === 'chat') {
+      // chats-v3 的 parts 已含完整执行细节（text / qoder.thinking / qoder.tool-use / qoder.tool-result /
+      // openai.thinking / openai.tool-call / openai.tool-result / subtask-*），直接映射即可。
+      // 注意：不要混入 qoder-chat JSONL 的碎片条目 —— 那会插进 text 碎片之间破坏前端
+      // `last.createdAt === current.createdAt` 的相邻合并（展示变成逐 delta 分块），
+      // 且 thinking 与 parts 已有的 qoder.thinking 重复。qoder-chat 文件仅作原始备份。
+      return chatEntries(traceId, this.chatService.getChat(traceId)?.messages ?? [])
+    }
     if (kind === 'other') {
       const event = this.store.getTraceEvent(traceId)
       return event ? [traceEventToEntry(event)] : []
@@ -322,6 +340,56 @@ function traceEventToEntry(event: TraceEvent): TraceEntry {
 function lastOf<T, R>(items: T[], map: (item: T) => R | undefined): R | undefined {
   const last = items.at(-1)
   return last ? map(last) : undefined
+}
+
+/**
+ * 从 events + openai_events 聚合工具调用 / 错误统计（TraceSummary.stats 分析用）。
+ * - toolStats：kind='tool' 的事件按 toolName 计数；同一次调用有 use/result 两条（同 toolUseId），
+ *   result 的 isError 计入 errors。无 toolUseId 时按 detail 判重不可靠,直接各计一次（旧数据可接受）。
+ * - errorCount：kind='error' 事件 + 工具 result 失败数。
+ */
+function toolAndErrorStats(
+  events: AgentEvent[],
+  openAiEvents: AgentEvent[]
+): { toolStats?: Array<{ name: string; count: number; errors: number }>; errorCount?: number } {
+  const all = [...events, ...openAiEvents]
+  if (all.length === 0) return {}
+  const toolIndex = new Map<string, { count: number; errors: number }>()
+  let errorCount = 0
+  // 同 toolUseId 的 use/result 只计一次调用;result 的 isError 再计入 errors。
+  const countedCalls = new Set<string>()
+  for (const event of all) {
+    if (event.kind === 'error') {
+      errorCount += 1
+      continue
+    }
+    if (event.kind !== 'tool') continue
+    const payload = (event.payload ?? {}) as Record<string, unknown>
+    const name = (typeof payload.toolName === 'string' && payload.toolName) || event.title || '工具'
+    const toolUseId = typeof payload.toolUseId === 'string' ? payload.toolUseId : undefined
+    const isResult = payload.phase === 'result'
+    const callKey = toolUseId ? `${name}:${toolUseId}` : undefined
+
+    const hit = toolIndex.get(name) ?? { count: 0, errors: 0 }
+    if (callKey && countedCalls.has(callKey)) {
+      // 已计数过的同一次调用（use 已计 / 重复的 result）:只补 errors。
+      if (isResult && payload.isError === true) hit.errors += 1
+    } else {
+      // use 计一次;只有 result 无 use（异常中断）也计一次。
+      hit.count += 1
+      if (isResult && payload.isError === true) hit.errors += 1
+      if (callKey) countedCalls.add(callKey)
+    }
+    toolIndex.set(name, hit)
+  }
+  const out: { toolStats?: Array<{ name: string; count: number; errors: number }>; errorCount?: number } = {}
+  if (toolIndex.size > 0) {
+    out.toolStats = [...toolIndex.entries()]
+      .map(([name, { count, errors }]) => ({ name, count, errors }))
+      .sort((a, b) => b.count - a.count)
+  }
+  if (errorCount > 0) out.errorCount = errorCount
+  return out
 }
 
 function firstCreatedAt(entries: TraceEntry[]): string | undefined {

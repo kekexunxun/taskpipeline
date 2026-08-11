@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { TraceEntry, TraceSummary } from '@task-pipeline/core'
 import { TraceDetail } from './components/TraceDetail'
 import { TraceList } from './components/TraceList'
@@ -393,5 +393,100 @@ describe('TracePage 组件', () => {
     )
     expect(screen.getByText('修复登录')).toBeInTheDocument()
     expect(screen.queryByText('升级依赖')).not.toBeInTheDocument()
+  })
+
+  it('TraceDetail 详情全文搜索：按关键词过滤条目，展示匹配计数', () => {
+    const entries: TraceEntry[] = [
+      {
+        id: 's1',
+        traceId: 't1',
+        kind: 'pi_session',
+        type: 'thinking',
+        title: '思考',
+        detail: '先定位登录模块',
+        createdAt: '2025-01-01T00:00:01Z',
+        source: 'pi_trace'
+      },
+      {
+        id: 's2',
+        traceId: 't1',
+        kind: 'pi_session',
+        type: 'tool_call',
+        title: '工具 bash',
+        detail: 'npm test',
+        createdAt: '2025-01-01T00:00:02Z',
+        source: 'pi_trace'
+      }
+    ]
+    render(
+      <MemoryRouter>
+        <TraceDetail kind="pi_session" traceId="t1" entries={entries} loading={false} onBack={vi.fn()} />
+      </MemoryRouter>
+    )
+    expect(screen.getByText('思考')).toBeInTheDocument()
+    expect(screen.getByText('Tools - bash')).toBeInTheDocument()
+    fireEvent.change(screen.getByPlaceholderText('搜索详情…'), { target: { value: '登录' } })
+    expect(screen.getByText('匹配 1/2')).toBeInTheDocument()
+    expect(screen.getByText('思考')).toBeInTheDocument()
+    expect(screen.queryByText('Tools - bash')).not.toBeInTheDocument()
+    // 无匹配时显示空态
+    fireEvent.change(screen.getByPlaceholderText('搜索详情…'), { target: { value: '不存在的内容' } })
+    expect(screen.getByText('无匹配条目')).toBeInTheDocument()
+  })
+
+  it('TraceDetail 前端合并相邻 AI 消息碎片(修复:Qoder 消息按 delta 分块)', () => {
+    const entries: TraceEntry[] = Array.from({ length: 5 }, (_, i) => ({
+      id: `ev-${i}`,
+      traceId: 't1',
+      kind: 'task',
+      type: 'message',
+      title: 'Qoder Agent',
+      detail: `f-${i} `,
+      createdAt: '2025-01-01T00:00:00.000Z',
+      source: 'events'
+    }))
+    render(
+      <MemoryRouter>
+        <TraceDetail kind="task" traceId="t1" entries={entries} loading={false} onBack={vi.fn()} />
+      </MemoryRouter>
+    )
+    const pres = screen.getAllByRole('generic').filter((el) => el.tagName === 'PRE')
+    // 5 个碎片合并为一条完整文本
+    expect(pres).toHaveLength(1)
+    expect(pres[0]!.textContent).toBe('f-0 f-1 f-2 f-3 f-4 ')
+  })
+
+  it('TraceDetail 前端合并不跨子任务作用域(parentTaskId 不同不拼接)', () => {
+    const entries: TraceEntry[] = [
+      {
+        id: 'ev-0',
+        traceId: 't1',
+        kind: 'task',
+        type: 'message',
+        title: 'Qoder Agent',
+        detail: '主流程文本',
+        createdAt: '2025-01-01T00:00:00.000Z',
+        source: 'events'
+      },
+      {
+        id: 'ev-1',
+        traceId: 't1',
+        kind: 'task',
+        type: 'message',
+        title: 'Qoder Agent',
+        detail: '子任务文本',
+        parentTaskId: 'sub-1',
+        createdAt: '2025-01-01T00:00:00.001Z',
+        source: 'events'
+      }
+    ]
+    render(
+      <MemoryRouter>
+        <TraceDetail kind="task" traceId="t1" entries={entries} loading={false} onBack={vi.fn()} />
+      </MemoryRouter>
+    )
+    // 两条文本分属不同作用域:主流程文本保持独立(不被子任务文本拼接),子任务文本收进折叠卡
+    expect(screen.getByText('主流程文本')).toBeInTheDocument()
+    expect(screen.queryByText('主流程文本子任务文本')).not.toBeInTheDocument()
   })
 })
