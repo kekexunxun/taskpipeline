@@ -5,12 +5,15 @@ import {
   Code2Icon,
   KeyRoundIcon,
   Loader2Icon,
+  MoonIcon,
   RefreshCwIcon,
-  SettingsIcon
+  SettingsIcon,
+  SunIcon
 } from 'lucide-react'
 import type { CredentialState } from '../api'
 import { useCredentialStatusContext } from '../hooks/useCredentialStatusContext'
 import type { CredentialOverall } from '../hooks/useCredentialStatus'
+import { useTheme } from '@/hooks/useTheme'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -131,6 +134,7 @@ export function TopBar({
   /** 凭据失败项跳转设置对应 Tab。 */
   onOpenCredentialSettings(failures: CredentialState[]): void
 }) {
+  const { theme, toggleTheme } = useTheme()
   return (
     <header className="window-drag flex items-center justify-between border-b bg-card/80 px-3 pl-[80px]">
       <div className="flex items-center gap-2 text-xs">
@@ -141,6 +145,19 @@ export function TopBar({
       </div>
       <div className="window-no-drag flex items-center gap-1">
         <CredentialStatusPopover onOpenCredentialSettings={onOpenCredentialSettings} />
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={theme === 'dark' ? '切换到亮色主题' : '切换到暗色主题'}
+              onClick={toggleTheme}
+            >
+              {theme === 'dark' ? <SunIcon size={14} /> : <MoonIcon size={14} />}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{theme === 'dark' ? '切换到亮色' : '切换到暗色'}</TooltipContent>
+        </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
             <Button variant="ghost" size="icon" aria-label="设置" onClick={onOpenSettings}>

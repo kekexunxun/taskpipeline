@@ -1,5 +1,9 @@
 @import 'tailwindcss';
 
+/* dark: variant 改为由 html.dark 类驱动（默认无类=暗色变量，加 .light 切亮色），
+   与代码中 dark: 样式及 shiki 双主题联动保持一致。 */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* 排除 Electron 主进程和构建产物，避免 Tailwind 自动扫描误把主进程里的字符串字面量识别为任意值类。 */
 @source not "../electron";
 @source not "../dist-electron";
@@ -88,6 +92,51 @@
   --input: #303640;
   --ring: #a1a1aa;
   --radius: 6px;
+  /* 语义辅助色：Markdown 内联代码 / 代码块 / 链接、滚动条、深色内嵌块渐变。 */
+  --markdown-pre-bg: #090b0e;
+  --markdown-link: #d4d4d8;
+  --scrollbar-thumb: #3a414b;
+  --inset-bg-from: #0d1014;
+  --inset-bg-via: #0a0c0f;
+  --inset-bg-to: #090b0e;
+  --inset-border: #1f242c;
+  --inset-border-hover: #2a323d;
+  --inset-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), inset 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+/* ---------- 亮色主题（黑白）：html.light 覆盖暗色默认值 ---------- */
+:root.light {
+  color-scheme: light;
+
+  --background: #fbfbfd;
+  --foreground: #18191d;
+  --card: #ffffff;
+  --card-foreground: #18191d;
+  --popover: #ffffff;
+  --popover-foreground: #18191d;
+  --primary: #18191d;
+  --primary-foreground: #fbfbfd;
+  --secondary: #e9ebef;
+  --secondary-foreground: #1e2024;
+  --muted: #eff1f4;
+  --muted-foreground: #5d6269;
+  --accent: #e4e7eb;
+  --accent-foreground: #18191d;
+  --destructive: #d93a47;
+  --border: #d9dce1;
+  --input: #c8ccd3;
+  --ring: #565b63;
+  --radius: 6px;
+
+  --markdown-pre-bg: #f4f5f7;
+  --markdown-link: #0969da;
+  --scrollbar-thumb: #c3c8cf;
+  --inset-bg-from: #f6f7f9;
+  --inset-bg-via: #eff1f4;
+  --inset-bg-to: #e9ebef;
+  --inset-border: #d0d4db;
+  --inset-border-hover: #b9bfc9;
+  --inset-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), inset 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 * {
@@ -140,7 +189,7 @@ textarea:focus-visible {
   -webkit-app-region: no-drag;
 }
 .thin-scrollbar {
-  scrollbar-color: #3a414b transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
   scrollbar-width: thin;
 }
 
@@ -500,13 +549,13 @@ textarea:focus-visible {
     SFMono-Regular,
     Menlo,
     monospace;
-  background: #20242b;
+  background: var(--secondary);
   border-radius: 4px;
 }
 .markdown pre {
   padding: 0.75rem;
   overflow-x: auto;
-  background: #090b0e;
+  background: var(--markdown-pre-bg);
   border: 1px solid var(--border);
   border-radius: 6px;
 }
@@ -525,7 +574,7 @@ textarea:focus-visible {
   border: 1px solid var(--border);
 }
 .markdown a {
-  color: #d4d4d8;
+  color: var(--markdown-link);
   text-decoration: underline;
   text-underline-offset: 3px;
 }

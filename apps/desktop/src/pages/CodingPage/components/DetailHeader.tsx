@@ -155,10 +155,10 @@ export function DetailHeader({
           <div
             className={cn(
               "group/desc relative overflow-hidden rounded-md",
-              "border border-[#1f242c] border-l-2 border-l-foreground/30",
-              "bg-gradient-to-b from-[#0d1014] via-[#0a0c0f] to-[#090b0e]",
-              "shadow-[inset_0_1px_0_rgba(255,255,255,0.04),inset_0_1px_3px_rgba(0,0,0,0.45)]",
-              "transition-colors duration-150 hover:border-[#2a323d]"
+              "border border-[var(--inset-border)] border-l-2 border-l-foreground/30",
+              "bg-gradient-to-b from-[var(--inset-bg-from)] via-[var(--inset-bg-via)] to-[var(--inset-bg-to)]",
+              "shadow-[var(--inset-shadow)]",
+              "transition-colors duration-150 hover:border-[var(--inset-border-hover)]"
             )}
           >
             <span
@@ -198,10 +198,10 @@ export function DetailHeader({
           <div
             className={cn(
               "group/cri relative overflow-hidden rounded-md",
-              "border border-[#1f242c] border-l-2 border-l-foreground/30",
-              "bg-gradient-to-b from-[#0d1014] via-[#0a0c0f] to-[#090b0e]",
-              "shadow-[inset_0_1px_0_rgba(255,255,255,0.04),inset_0_1px_3px_rgba(0,0,0,0.45)]",
-              "transition-colors duration-150 hover:border-[#2a323d]"
+              "border border-[var(--inset-border)] border-l-2 border-l-foreground/30",
+              "bg-gradient-to-b from-[var(--inset-bg-from)] via-[var(--inset-bg-via)] to-[var(--inset-bg-to)]",
+              "shadow-[var(--inset-shadow)]",
+              "transition-colors duration-150 hover:border-[var(--inset-border-hover)]"
             )}
           >
             <span
