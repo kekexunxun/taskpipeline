@@ -65,6 +65,7 @@ import {
 import {
   accessToken,
   query,
+  QoderCliProcessError,
   type AccountInfo,
   type ModelInfo,
   type Query,
@@ -2875,12 +2876,22 @@ async function probeQoderStatus(): Promise<QoderStatus> {
     }
   } catch (error) {
     console.error('[qoder:status] probe failed:', error instanceof Error ? error.message : String(error))
+    // qodercli 进程非 0 退出（常见 exit 42）时，SDK 抛 QoderCliProcessError，
+    // 其 .stderr 字段是 qodercli 输出的尾部日志。只取 error.message 会丢掉
+    // 真正原因，导致 UI 上「错误信息不全、不好判断」——与 task-agent / plan-mode
+    // 的增强写法保持一致，把 stderr 尾部拼进 error 一并上报。
+    const message =
+      error instanceof QoderCliProcessError && error.stderr
+        ? `${error.message}\n\nqodercli stderr (tail):\n${error.stderr.trim().slice(-2000)}`
+        : error instanceof Error
+          ? error.message
+          : String(error)
     return {
       enabled: true,
       connected: false,
       running: Boolean(activeQoderQuery),
       models: [],
-      error: error instanceof Error ? error.message : String(error)
+      error: message
     }
   } finally {
     if (probeAbort) {

@@ -63,6 +63,9 @@ function CredentialStatusPopover({
 }) {
   const { items, overall, recheck } = useCredentialStatusContext()
   const failedCount = items.filter((item) => item.status === 'failed').length
+  /** 异常项（红框集中展示）与其余正常项（列表展示）分离。 */
+  const failedItems = items.filter((item) => item.status === 'failed')
+  const normalItems = items.filter((item) => item.status !== 'failed')
   return (
     <Popover>
       <Tooltip>
@@ -83,7 +86,44 @@ function CredentialStatusPopover({
           凭据状态
         </div>
         <div className="space-y-1 px-3 py-2">
-          {items.map((item) => (
+          {failedItems.length > 0 && (
+            <div
+              role="alert"
+              className="mb-2 space-y-2 rounded-md border border-destructive/40 bg-destructive/10 p-2.5"
+            >
+              {failedItems.map((item) => (
+                <div key={item.key} className="flex items-start gap-2">
+                  <AlertCircleIcon size={14} className="mt-0.5 shrink-0 text-destructive" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-semibold text-destructive">{item.label}</span>
+                      {item.checkedAt && (
+                        <span className="ml-auto shrink-0 text-[10px] text-destructive/60">
+                          {formatCheckedAt(item.checkedAt)}
+                        </span>
+                      )}
+                    </div>
+                    {item.message && (
+                      <p className="mt-0.5 text-[11px] leading-4 break-words whitespace-pre-wrap text-destructive/90">
+                        {item.message}
+                      </p>
+                    )}
+                    <div className="mt-1">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 border-destructive/40 px-2 text-[11px] text-destructive hover:text-destructive"
+                        onClick={() => onOpenCredentialSettings([item])}
+                      >
+                        前往设置
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {normalItems.map((item) => (
             <div key={item.key} className="rounded-md px-2 py-1.5 hover:bg-muted/60">
               <div className="flex items-center gap-2">
                 <CredentialItemIcon status={item.status} />
@@ -97,13 +137,6 @@ function CredentialStatusPopover({
               {item.message && (
                 <div className="mt-0.5 pl-6 text-[11px] leading-4 break-words text-muted-foreground">
                   {item.message}
-                </div>
-              )}
-              {item.status === 'failed' && (
-                <div className="mt-1 pl-6">
-                  <Button size="sm" variant="ghost" onClick={() => onOpenCredentialSettings([item])}>
-                    前往设置
-                  </Button>
                 </div>
               )}
             </div>

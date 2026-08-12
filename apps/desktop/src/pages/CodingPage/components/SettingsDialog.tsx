@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
-  AlertCircleIcon,
   BotIcon,
   ChevronRightIcon,
   DownloadIcon,
@@ -12,7 +11,6 @@ import {
   PlusIcon,
   RefreshCwIcon,
   SearchIcon,
-  ServerIcon,
   Trash2Icon,
   UploadIcon
 } from 'lucide-react'
@@ -602,7 +600,8 @@ export function SettingsDialog({
   const [settings, setSettings] = useState<Settings>(defaults)
   const [repositories, setRepositories] = useState<RepositoryProfile[]>([])
   const [loading, setLoading] = useState(false)
-  const [saving, setSaving] = useState(false)
+  /** 正在保存的 Token 键（按钮 loading 态）。 */
+  const [savingKey, setSavingKey] = useState<string | null>(null)
   const [repositoryDialog, setRepositoryDialog] = useState<{
     open: boolean
     initial?: RepoDraft
@@ -739,23 +738,53 @@ export function SettingsDialog({
   }, [open])
   const update = <K extends keyof Settings>(key: K, value: Settings[K]) =>
     setSettings((current) => ({ ...current, [key]: value }))
-  const save = async () => {
-    setSaving(true)
+  /** 实时保存单条普通设置（URL / 开关等）：失败提示，不阻塞交互。 */
+  const persistSetting = async (key: string, value: string) => {
     try {
-      for (const key of ordinaryKeys) await api.setSetting(key, settings[key])
-      for (const key of secretKeys)
-        if (settings[key] && settings[key] !== '__configured__') await api.setSetting(key, settings[key], true)
-      // Token 变更后触发 Qoder 状态刷新
-      if (settings.qoderToken && settings.qoderToken !== '__configured__') {
-        onQoderRefresh?.()
-      }
-      showSuccess('设置已保存')
+      await api.setSetting(key, value)
+    } catch (reason) {
+      showError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }
+  type TokenKey = 'qoderToken' | 'gitlabToken' | 'jiraToken' | 'confluenceToken'
+  /**
+   * 保存单个 Token（仅当有实际输入且非「已配置」占位时落盘）。
+   * 保存成功后触发全局凭据重检，让右上角状态立即刷新；Qoder 额外刷新状态探测。
+   */
+  const saveToken = async (key: TokenKey, opts?: { refreshQoder?: boolean }) => {
+    const value = settings[key]
+    if (!value || value === '__configured__') return
+    setSavingKey(key)
+    try {
+      await api.setSetting(key, value, true)
+      if (opts?.refreshQoder) onQoderRefresh?.()
       onSaved?.()
+      showSuccess('设置已保存')
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason))
     } finally {
-      setSaving(false)
+      setSavingKey(null)
     }
+  }
+  /** 任务自动化开关：本地 state 与落盘同步更新（实时生效）。 */
+  const toggleSettingLive = (
+    key:
+      | 'openCodeReviewEnabled'
+      | 'createTestCasesEnabled'
+      | 'autoCreateMergeRequests'
+      | 'deliveryConfirm'
+      | 'reviewAutoFix',
+    checked: boolean
+  ) => {
+    const value = checked ? 'true' : 'false'
+    update(key, value)
+    void persistSetting(key, value)
+  }
+  /** 自动修订轮数：夹取合法范围后同步落盘。 */
+  const updateRoundsLive = (raw: string) => {
+    const value = String(Math.max(1, Math.min(10, Number(raw) || 2)))
+    update('reviewAutoFixMaxRounds', value)
+    void persistSetting('reviewAutoFixMaxRounds', value)
   }
   const saveOpenAIProfile = async (input: {
     id?: string
@@ -962,7 +991,7 @@ export function SettingsDialog({
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent
-          hideClose
+          onPointerDownOutside={(event) => event.preventDefault()}
           className="grid h-[min(760px,calc(100vh-32px))] !w-[min(1120px,calc(100vw-32px))] !max-w-[1120px] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 p-0"
         >
           <DialogHeader className="space-y-1 border-b px-6 pt-3.5 pb-3">
@@ -1014,26 +1043,20 @@ export function SettingsDialog({
                           placeholder="Qoder Token"
                         />
                       </SettingField>
-                      {qoder && (
-                        <div className="flex flex-col gap-1 rounded-md border bg-card px-2.5 py-1.5 text-xs text-muted-foreground">
-                          <div className="flex items-center gap-1.5">
-                            <ServerIcon size={12} />
-                            <span className="text-xs text-foreground">连接状态</span>
-                            <Badge variant={qoder.connected ? 'success' : 'destructive'}>
-                              {qoder.connected ? '已连接' : '未连接'}
-                            </Badge>
-                            <span>{qoder.account?.subscriptionType ?? '未知档位'}</span>
-                          </div>
-                          {qoder.error && !qoder.connected && (
-                            <div className="flex items-start gap-1.5 pl-5 text-[11px] text-destructive">
-                              <AlertCircleIcon size={11} className="mt-0.5 shrink-0" />
-                              <span title={qoder.error} className="break-words">
-                                {qoder.error.length > 120 ? `${qoder.error.slice(0, 120)}...` : qoder.error}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      )}
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="w-fit"
+                        disabled={savingKey !== null}
+                        onClick={() => void saveToken('qoderToken', { refreshQoder: true })}
+                      >
+                        {savingKey === 'qoderToken' ? (
+                          <Loader2Icon className="animate-spin-slow" size={11} />
+                        ) : (
+                          <KeyRoundIcon size={11} />
+                        )}
+                        {savingKey === 'qoderToken' ? '保存中' : '保存'}
+                      </Button>
                     </FieldGroup>
                   </Section>
                   <Section title="任务自动化" description="控制实现完成后的 Review / 测试用例生成 / MR 提交流程。">
@@ -1047,7 +1070,7 @@ export function SettingsDialog({
                         </span>
                         <Switch
                           checked={settings.openCodeReviewEnabled === 'true'}
-                          onCheckedChange={(checked) => update('openCodeReviewEnabled', checked ? 'true' : 'false')}
+                          onCheckedChange={(checked) => toggleSettingLive('openCodeReviewEnabled', checked)}
                         />
                       </div>
                       <div className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
@@ -1059,7 +1082,7 @@ export function SettingsDialog({
                         </span>
                         <Switch
                           checked={settings.createTestCasesEnabled === 'true'}
-                          onCheckedChange={(checked) => update('createTestCasesEnabled', checked ? 'true' : 'false')}
+                          onCheckedChange={(checked) => toggleSettingLive('createTestCasesEnabled', checked)}
                         />
                       </div>
                       <div className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
@@ -1071,7 +1094,7 @@ export function SettingsDialog({
                         </span>
                         <Switch
                           checked={settings.autoCreateMergeRequests === 'true'}
-                          onCheckedChange={(checked) => update('autoCreateMergeRequests', checked ? 'true' : 'false')}
+                          onCheckedChange={(checked) => toggleSettingLive('autoCreateMergeRequests', checked)}
                         />
                       </div>
                       <div className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
@@ -1083,7 +1106,7 @@ export function SettingsDialog({
                         </span>
                         <Switch
                           checked={settings.deliveryConfirm === 'true'}
-                          onCheckedChange={(checked) => update('deliveryConfirm', checked ? 'true' : 'false')}
+                          onCheckedChange={(checked) => toggleSettingLive('deliveryConfirm', checked)}
                         />
                       </div>
                       <div className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
@@ -1095,7 +1118,7 @@ export function SettingsDialog({
                         </span>
                         <Switch
                           checked={settings.reviewAutoFix === 'true'}
-                          onCheckedChange={(checked) => update('reviewAutoFix', checked ? 'true' : 'false')}
+                          onCheckedChange={(checked) => toggleSettingLive('reviewAutoFix', checked)}
                         />
                       </div>
                       <div className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
@@ -1112,12 +1135,7 @@ export function SettingsDialog({
                           aria-label="自动修订轮数上限"
                           className="h-8 w-16 rounded-md border bg-background px-2 text-xs"
                           value={Number(settings.reviewAutoFixMaxRounds) || 2}
-                          onChange={(event) =>
-                            update(
-                              'reviewAutoFixMaxRounds',
-                              String(Math.max(1, Math.min(10, Number(event.target.value) || 2)))
-                            )
-                          }
+                          onChange={(event) => updateRoundsLive(event.target.value)}
                         />
                       </div>
                     </div>
@@ -1130,6 +1148,7 @@ export function SettingsDialog({
                         <Input
                           value={settings.gitlabUrl}
                           onChange={(event) => update('gitlabUrl', event.target.value)}
+                          onBlur={(event) => void persistSetting('gitlabUrl', event.target.value)}
                           placeholder="自建实例地址，如 https://gitlab.company.com"
                         />
                       </SettingField>
@@ -1141,6 +1160,20 @@ export function SettingsDialog({
                           placeholder="GitLab Token"
                         />
                       </SettingField>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="w-fit"
+                        disabled={savingKey !== null}
+                        onClick={() => void saveToken('gitlabToken')}
+                      >
+                        {savingKey === 'gitlabToken' ? (
+                          <Loader2Icon className="animate-spin-slow" size={11} />
+                        ) : (
+                          <KeyRoundIcon size={11} />
+                        )}
+                        {savingKey === 'gitlabToken' ? '保存中' : '保存'}
+                      </Button>
                     </FieldGroup>
                   </Section>
                   <Section
@@ -1159,6 +1192,7 @@ export function SettingsDialog({
                         <Input
                           value={settings.jiraUrl}
                           onChange={(event) => update('jiraUrl', event.target.value)}
+                          onBlur={(event) => void persistSetting('jiraUrl', event.target.value)}
                           placeholder="请输入Jira Host"
                         />
                       </SettingField>
@@ -1170,7 +1204,23 @@ export function SettingsDialog({
                           placeholder="请输入Jira Token"
                         />
                       </SettingField>
-                      <TestButton kind="jira" label="测试 Jira 连接" />
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="w-fit"
+                          disabled={savingKey !== null}
+                          onClick={() => void saveToken('jiraToken')}
+                        >
+                          {savingKey === 'jiraToken' ? (
+                            <Loader2Icon className="animate-spin-slow" size={11} />
+                          ) : (
+                            <KeyRoundIcon size={11} />
+                          )}
+                          {savingKey === 'jiraToken' ? '保存中' : '保存'}
+                        </Button>
+                        <TestButton kind="jira" label="测试 Jira 连接" />
+                      </div>
                     </FieldGroup>
                   </Section>
                   <Section title="Confluence">
@@ -1179,6 +1229,7 @@ export function SettingsDialog({
                         <Input
                           value={settings.confluenceUrl}
                           onChange={(event) => update('confluenceUrl', event.target.value)}
+                          onBlur={(event) => void persistSetting('confluenceUrl', event.target.value)}
                           placeholder="请输入Confluence Host"
                         />
                       </SettingField>
@@ -1190,7 +1241,23 @@ export function SettingsDialog({
                           placeholder="请输入Confluence Token"
                         />
                       </SettingField>
-                      <TestButton kind="confluence" label="测试 Confluence 连接" />
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="w-fit"
+                          disabled={savingKey !== null}
+                          onClick={() => void saveToken('confluenceToken')}
+                        >
+                          {savingKey === 'confluenceToken' ? (
+                            <Loader2Icon className="animate-spin-slow" size={11} />
+                          ) : (
+                            <KeyRoundIcon size={11} />
+                          )}
+                          {savingKey === 'confluenceToken' ? '保存中' : '保存'}
+                        </Button>
+                        <TestButton kind="confluence" label="测试 Confluence 连接" />
+                      </div>
                     </FieldGroup>
                   </Section>
                 </TabsContent>
@@ -1513,10 +1580,6 @@ export function SettingsDialog({
                 关闭
               </Button>
             </DialogClose>
-            <Button size="sm" disabled={saving || loading} onClick={() => void save()}>
-              {saving ? <Loader2Icon className="animate-spin-slow" size={11} /> : <KeyRoundIcon size={11} />}
-              {saving ? '保存中' : '保存设置'}
-            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
