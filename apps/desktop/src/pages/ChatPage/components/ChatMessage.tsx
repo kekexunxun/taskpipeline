@@ -79,12 +79,17 @@ function ChatMessageImpl({
                 <Loader2Icon className="animate-spin-slow" size={12} />
                 {driverLabel(message.driverId)} 正在思考…
               </div>
-            ) : isError ? (
-              <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-3.5 py-2.5 text-xs leading-5 break-words whitespace-pre-wrap text-destructive">
-                {errorMessage ?? '模型返回异常，请稍后重试'}
-              </div>
             ) : (
-              <DriverMessageBody message={message} isAnimating={isStreaming} />
+              <>
+                {/* 失败前已有产出(thinking / 正文 / 工具调用)时照常渲染,错误块追加在下方,
+                    不再用错误块整体替换正文(Qoder 中途失败时避免"界面没有任何展示")。 */}
+                {message.parts.length > 0 && <DriverMessageBody message={message} isAnimating={isStreaming} />}
+                {isError && (
+                  <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-3.5 py-2.5 text-xs leading-5 break-words whitespace-pre-wrap text-destructive">
+                    {errorMessage ?? '模型返回异常，请稍后重试'}
+                  </div>
+                )}
+              </>
             )}
             {taskCreation && taskKey && (
               <div className="flex w-full flex-wrap items-center gap-2 border-l-2 border-primary/50 pl-3 text-xs">

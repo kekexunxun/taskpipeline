@@ -91,4 +91,25 @@ describe('ChatMessageView error display', () => {
     expect(screen.getByText('connection refused')).toBeTruthy()
     expect(screen.getByText('失败')).toBeTruthy()
   })
+
+  it('renders produced parts and the error block together (错误不再替换已产出正文)', () => {
+    // Qoder 中途失败:流式已产出的正文照常渲染,错误块追加在下方,两者共存。
+    const message: ChatMessage = {
+      id: 'assistant-err-with-parts',
+      role: 'assistant',
+      driverId: 'qoder',
+      createdAt: new Date().toISOString(),
+      raw: { kind: 'assistant', parts: [] },
+      metadata: {
+        createdAt: new Date().toISOString(),
+        status: 'error',
+        errorMessage: '会话中断'
+      },
+      parts: [{ driverId: 'qoder', type: 'text', text: '失败前已经产出的正文' }]
+    }
+    render(<ChatMessageView message={message} />)
+    expect(screen.getByText('失败前已经产出的正文')).toBeTruthy()
+    expect(screen.getByText('会话中断')).toBeTruthy()
+    expect(screen.getByText('失败')).toBeTruthy()
+  })
 })

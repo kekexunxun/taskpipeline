@@ -18,11 +18,13 @@ const ChatPage = lazy(() => import('../pages/ChatPage/index'))
 const CodingPage = lazy(() => import('../pages/CodingPage/index'))
 const TracePage = lazy(() => import('../pages/TracePage/index'))
 
-/** 失效项 → 设置弹窗 Tab 的定位映射：Jira / Confluence 在 Atlassian Tab，其余在通用 Tab。 */
+/** 失效项 → 设置弹窗 Tab 的定位映射：Jira / Confluence 在 Atlassian Tab，GitLab 在 Gitlab Tab，其余在通用 Tab。 */
 function settingsTabForFailures(failures: CredentialState[]): string | undefined {
   const first = failures[0]
   if (!first) return undefined
-  return first.key === 'jira' || first.key === 'confluence' ? 'atlassian' : 'general'
+  if (first.key === 'jira' || first.key === 'confluence') return 'atlassian'
+  if (first.key === 'gitlab') return 'gitlab'
+  return 'general'
 }
 
 function ShellInner({

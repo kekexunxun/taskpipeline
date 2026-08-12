@@ -1,492 +1,624 @@
-import { fireEvent, render, screen } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
-import type { TraceEntry, TraceSummary } from '@task-pipeline/core'
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import type { AgentSpan, TraceSummary } from '@task-pipeline/core'
 import { TraceDetail } from './components/TraceDetail'
 import { TraceList } from './components/TraceList'
+import { Waterfall } from './components/Waterfall'
+import { PayloadInspector } from './components/PayloadInspector'
 
-describe('TracePage 组件', () => {
-  it('TraceDetail 把 TraceEntry 映射为 Timeline 项渲染', () => {
-    const entries: TraceEntry[] = [
-      {
-        id: 'e1',
-        traceId: 't1',
-        kind: 'task',
-        type: 'session_start',
-        title: '执行会话开始',
-        createdAt: '2025-01-01T00:00:00Z',
-        source: 'events'
-      },
-      {
-        id: 'e2',
-        traceId: 't1',
-        kind: 'task',
-        type: 'message',
-        title: 'AI',
-        detail: '你好',
-        createdAt: '2025-01-01T00:00:01Z',
-        source: 'events'
-      },
-      {
-        id: 'e3',
-        traceId: 't1',
-        kind: 'task',
-        type: 'tool_call',
-        title: '工具 read',
-        detail: '{"path":"a.ts"}',
-        createdAt: '2025-01-01T00:00:02Z',
-        source: 'events'
-      },
-      {
-        id: 'e4',
-        traceId: 't1',
-        kind: 'task',
-        type: 'error',
-        title: '执行错误',
-        createdAt: '2025-01-01T00:00:03Z',
-        source: 'events'
-      }
+function span(partial: Partial<AgentSpan>): AgentSpan {
+  return {
+    spanId: 'evt-t1-1',
+    traceId: 't1',
+    type: 'llm.generate',
+    name: 'gpt-4o',
+    status: 'completed',
+    startedAt: 1000,
+    endedAt: 3000,
+    durationMs: 2000,
+    sequence: 1,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    ...partial
+  }
+}
+
+const summary: TraceSummary = {
+  traceId: 't1',
+  kind: 'chat',
+  title: '测试提问',
+  status: 'ended',
+  startedAt: '2026-01-01T00:00:00.000Z',
+  spanCount: 2,
+  errorCount: 0,
+  updatedAt: '2026-01-01T00:00:03.000Z'
+}
+
+describe('TracePage 组件（v2）', () => {
+  it('TraceDetail 渲染头部统计与瀑布图', () => {
+    const spans = [
+      span({
+        spanId: 's1',
+        type: 'session.start',
+        name: '会话',
+        startedAt: 1000,
+        endedAt: 5000,
+        durationMs: 4000,
+        sequence: 1
+      }),
+      span({
+        spanId: 's2',
+        type: 'llm.generate',
+        name: 'gpt-4o',
+        startedAt: 1000,
+        endedAt: 3000,
+        durationMs: 2000,
+        sequence: 2
+      })
     ]
-    render(
-      <MemoryRouter>
-        <TraceDetail kind="task" traceId="t1" entries={entries} loading={false} onBack={() => undefined} />
-      </MemoryRouter>
-    )
-    expect(screen.getByText('AI')).toBeInTheDocument()
-    // tool_call 渲染成 ToolCallRow:标题剥掉「工具 」前缀,统一带「Tools - 」类别前缀
-    expect(screen.getByText('Tools - read')).toBeInTheDocument()
-    expect(screen.getByText('执行错误')).toBeInTheDocument()
-    // task 类型详情提供「打开任务」入口
-    expect(screen.getByRole('link', { name: /打开任务/ })).toBeInTheDocument()
+    render(<TraceDetail traceId="t1" spans={spans} loading={false} summary={summary} onBack={vi.fn()} />)
+    expect(screen.getByText('测试提问')).toBeTruthy()
+    expect(screen.getByText('gpt-4o')).toBeTruthy()
+    // 两态状态徽章：已结束（无"失败"态）
+    expect(screen.getByText('已结束')).toBeTruthy()
   })
 
-  it('TraceDetail 子任务卡锚定真实时间点,工具双源去重 + MetaBadges,发起调用被吸收', () => {
-    const entries: TraceEntry[] = [
-      // 主流程消息
-      {
-        id: 'e1',
-        traceId: 't1',
-        kind: 'task',
-        type: 'message',
-        title: 'AI',
-        detail: '主流程前文',
-        createdAt: '2025-01-01T00:00:00Z',
-        source: 'events'
-      },
-      // events 源:发起子任务的工具调用(use)
-      {
-        id: 'e2',
-        traceId: 't1',
-        kind: 'task',
-        type: 'tool_call',
-        title: 'Task',
-        createdAt: '2025-01-01T00:00:01Z',
-        source: 'events',
-        payload: { toolName: 'Task', toolUseId: 'toolu_spawn', phase: 'use', input: { description: '查文档' } }
-      },
-      // 子任务起点(qoder 源,toolUseId 指向发起调用)
-      {
-        id: 'e3',
-        traceId: 't1',
-        kind: 'task',
-        type: 'status',
-        title: '子任务启动',
-        detail: '查文档',
-        createdAt: '2025-01-01T00:00:02Z',
-        source: 'qoder',
-        taskId: 'sub-1',
-        parentTaskId: 'sub-1',
-        sdkSubtype: 'task_started',
-        payload: {
-          taskId: 'sub-1',
-          taskType: 'local_agent',
-          subagentType: 'Explore',
-          toolUseId: 'toolu_spawn',
-          description: '查文档'
-        }
-      },
-      // 子任务内工具(events 源 use + result)
-      {
-        id: 'e4',
-        traceId: 't1',
-        kind: 'task',
-        type: 'tool_call',
-        title: 'Read',
-        createdAt: '2025-01-01T00:00:03Z',
-        source: 'events',
-        parentTaskId: 'sub-1',
-        payload: { toolName: 'Read', toolUseId: 'toolu_r', phase: 'use', input: { file_path: '/tmp/a.ts' } }
-      },
-      {
-        id: 'e5',
-        traceId: 't1',
-        kind: 'task',
-        type: 'tool_call',
-        title: 'Read',
-        createdAt: '2025-01-01T00:00:04Z',
-        source: 'events',
-        parentTaskId: 'sub-1',
-        payload: { toolName: 'Read', toolUseId: 'toolu_r', phase: 'result', output: '内容' }
-      },
-      // qoder 源同一调用的已配对条目(双源重复,带 usage → MetaBadges)
-      {
-        id: 'e6',
-        traceId: 't1',
-        kind: 'task',
-        type: 'tool_call',
-        title: '工具 Read',
-        createdAt: '2025-01-01T00:00:04.500Z',
-        source: 'qoder',
-        parentTaskId: 'sub-1',
-        payload: {
-          toolCallId: 'toolu_r',
-          toolName: 'Read',
-          input: { file_path: '/tmp/a.ts' },
-          result: '内容',
-          isError: false,
-          usage: { input: 12, output: 3 }
-        }
-      },
-      // 发起调用 result(events 源)
-      {
-        id: 'e7',
-        traceId: 't1',
-        kind: 'task',
-        type: 'tool_call',
-        title: 'Task',
-        createdAt: '2025-01-01T00:00:05Z',
-        source: 'events',
-        payload: { toolName: 'Task', toolUseId: 'toolu_spawn', phase: 'result', output: '子任务完整输出' }
-      },
-      // 子任务收尾
-      {
-        id: 'e8',
-        traceId: 't1',
-        kind: 'task',
-        type: 'status',
-        title: '子任务收尾',
-        createdAt: '2025-01-01T00:00:06Z',
-        source: 'qoder',
-        taskId: 'sub-1',
-        parentTaskId: 'sub-1',
-        sdkSubtype: 'task_notification',
-        payload: { taskId: 'sub-1', status: 'completed', summary: '找到文档' }
-      },
-      // 主流程后文
-      {
-        id: 'e9',
-        traceId: 't1',
-        kind: 'task',
-        type: 'message',
-        title: 'AI',
-        detail: '主流程后文',
-        createdAt: '2025-01-01T00:00:07Z',
-        source: 'events'
-      }
-    ]
+  it('TraceDetail 头部：错误计数标记 + interrupted 异常中断提示', () => {
     render(
-      <MemoryRouter>
-        <TraceDetail kind="task" traceId="t1" entries={entries} loading={false} onBack={() => undefined} />
-      </MemoryRouter>
+      <TraceDetail
+        traceId="t1"
+        spans={[span({ spanId: 's1' })]}
+        loading={false}
+        summary={{ ...summary, errorCount: 3, interrupted: true }}
+        onBack={vi.fn()}
+      />
     )
-
-    // 发起调用(Task)被吸收:主流程不出现 Task 工具行
-    expect(screen.queryByRole('button', { name: /Task/ })).not.toBeInTheDocument()
-
-    // 子任务卡锚定在真实时间点:位于主流程前文与后文之间
-    const headerTrigger = document.querySelector<HTMLElement>('[data-subtask-id="sub-1"]')!
-    expect(headerTrigger).toBeInTheDocument()
-    // header:description + task_type / subagent_type 徽章 + 整体状态徽章
-    expect(screen.getByText('查文档')).toBeInTheDocument()
-    expect(screen.getByText('local_agent')).toBeInTheDocument()
-    expect(screen.getByText('Explore')).toBeInTheDocument()
-    expect(screen.getByText('已完成')).toBeInTheDocument()
-    const before = screen.getByText('主流程前文')
-    const after = screen.getByText('主流程后文')
-    expect(before.compareDocumentPosition(headerTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(headerTrigger.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-
-    // 展开卡片:子任务内工具双源合并为一行(Read 只出现一次)
-    fireEvent.click(headerTrigger)
-    expect(screen.getAllByText('Tools - Read')).toHaveLength(1)
-    // MetaBadges(qoder 源带 usage)
-    expect(screen.getByText('↑12 ↓3')).toBeInTheDocument()
-    // task_notification 内容不展示(只驱动状态徽章);被吸收调用的 result 进「输出」段
-    expect(screen.queryByText('找到文档')).toBeNull()
-    expect(screen.getByText('子任务完整输出')).toBeInTheDocument()
+    expect(screen.getByText('已结束')).toBeTruthy()
+    expect(screen.getByText('3 个错误步骤')).toBeTruthy()
+    expect(screen.getByText('异常中断')).toBeTruthy()
   })
 
-  /**
-   * 历史数据回归:老版 log.ts 写 events 表时 payload 整列留空,title=`Qoder task_*`、
-   * detail 是整包 SDK 消息 JSON。这些条目必须经 subtaskMetaOf 兑底入组 —— 否则会出现
-   * 「task_started / task_progress 平铺大 JSON + 子任务卡只有空壳」的重复展示。
-   */
-  it('历史数据:title=Qoder task_* 且 payload 空的 events 条目兑底入组,不再平铺 JSON', () => {
-    const entries: TraceEntry[] = [
-      {
-        id: 'h1',
-        traceId: 't1',
-        kind: 'task',
-        type: 'message',
-        title: 'AI',
-        detail: '主流程前文',
-        createdAt: '2025-01-01T00:00:00Z',
-        source: 'events'
-      },
-      // qoder 源发起调用(pairToolCalls 已把 result 合入 payload)
-      {
-        id: 'h2',
-        traceId: 't1',
-        kind: 'task',
-        type: 'tool_call',
-        title: '工具 Agent',
-        createdAt: '2025-01-01T00:00:01Z',
-        source: 'qoder',
-        payload: {
-          toolCallId: 'call_1',
-          toolName: 'Agent',
-          input: { description: '查找发票推送相关代码' },
-          result: '子任务报告'
-        }
-      },
-      // events 源历史 task_started:payload 空,detail 是整包 JSON
-      {
-        id: 'h3',
-        traceId: 't1',
-        kind: 'task',
-        type: 'status',
-        title: 'Qoder task_started',
-        detail: JSON.stringify({
-          type: 'system',
-          subtype: 'task_started',
-          task_id: 'sub-his',
-          tool_use_id: 'call_1',
-          task_type: 'local_agent',
-          subagent_type: 'Explore',
-          description: '查找发票推送相关代码'
-        }),
-        createdAt: '2025-01-01T00:00:02Z',
-        source: 'events'
-      },
-      {
-        id: 'h4',
-        traceId: 't1',
-        kind: 'task',
-        type: 'status',
-        title: 'Qoder task_progress',
-        detail: JSON.stringify({
-          type: 'system',
-          subtype: 'task_progress',
-          task_id: 'sub-his',
-          last_tool_name: 'Glob',
-          description: '扫文件'
-        }),
-        createdAt: '2025-01-01T00:00:03Z',
-        source: 'events'
-      },
-      {
-        id: 'h5',
-        traceId: 't1',
-        kind: 'task',
-        type: 'status',
-        title: 'Qoder task_notification',
-        detail: JSON.stringify({
-          type: 'system',
-          subtype: 'task_notification',
-          task_id: 'sub-his',
-          status: 'completed',
-          summary: '查完了'
-        }),
-        createdAt: '2025-01-01T00:00:04Z',
-        source: 'events'
-      },
-      {
-        id: 'h6',
-        traceId: 't1',
-        kind: 'task',
-        type: 'message',
-        title: 'AI',
-        detail: '主流程后文',
-        createdAt: '2025-01-01T00:00:05Z',
-        source: 'events'
-      }
-    ]
+  it('TraceDetail 头部：进行中显示 running 徽章，无错误计数标记', () => {
     render(
-      <MemoryRouter>
-        <TraceDetail kind="task" traceId="t1" entries={entries} loading={false} onBack={() => undefined} />
-      </MemoryRouter>
+      <TraceDetail
+        traceId="t1"
+        spans={[span({ spanId: 's1' })]}
+        loading={false}
+        summary={{ ...summary, status: 'running' }}
+        onBack={vi.fn()}
+      />
     )
-
-    // task_* 条目不再平铺:原始 JSON 与 title 都不出现在主流程
-    expect(screen.queryByText(/Qoder task_started/)).toBeNull()
-    expect(screen.queryByText(/"subtype":"task_started"/)).toBeNull()
-    // 发起调用(Agent)被吸收:主流程不出现该工具行
-    expect(screen.queryByRole('button', { name: /Agent/ })).toBeNull()
-
-    // 子任务卡:description + task_type / subagent_type 徽章 + 整体状态徽章(全部从 detail JSON 反解)
-    const headerTrigger = document.querySelector<HTMLElement>('[data-subtask-id="sub-his"]')!
-    expect(headerTrigger).toBeInTheDocument()
-    expect(screen.getByText('查找发票推送相关代码')).toBeInTheDocument()
-    expect(screen.getByText('local_agent')).toBeInTheDocument()
-    expect(screen.getByText('Explore')).toBeInTheDocument()
-    expect(screen.getByText('已完成')).toBeInTheDocument()
-
-    // 展开:progress 聚合成统计行;被吸收调用的 result 进「输出」段;notification summary 不展示
-    fireEvent.click(headerTrigger)
-    expect(screen.getByText('过程态 1 次')).toBeInTheDocument()
-    expect(screen.getByText('最后工具: Glob')).toBeInTheDocument()
-    expect(screen.getByText('子任务报告')).toBeInTheDocument()
-    expect(screen.queryByText('查完了')).toBeNull()
+    expect(screen.getByText('进行中')).toBeTruthy()
+    expect(screen.queryByText('已结束')).toBeNull()
+    expect(screen.queryByText(/个错误步骤/)).toBeNull()
   })
 
-  it('TraceList 按 kind 过滤并渲染 summary', () => {
-    const summaries: TraceSummary[] = [
-      {
-        traceId: 't1',
-        kind: 'task',
-        title: '示例任务',
-        createdAt: '2025-01-01T00:00:00Z',
-        updatedAt: '2025-01-01T00:00:01Z',
-        entryCount: 3
-      },
-      {
-        traceId: 'c1',
-        kind: 'chat',
-        title: '测试对话',
-        createdAt: '2025-01-01T00:00:00Z',
-        updatedAt: '2025-01-01T00:00:01Z',
-        entryCount: 2
-      }
+  it('Waterfall 渲染父子缩进与错误角标', () => {
+    const spans = [
+      span({
+        spanId: 's1',
+        type: 'agent.run',
+        name: 'implementing',
+        startedAt: 1000,
+        endedAt: 5000,
+        durationMs: 4000,
+        sequence: 1
+      }),
+      span({
+        spanId: 's2',
+        type: 'tool.execute',
+        name: 'bash',
+        parentSpanId: 's1',
+        startedAt: 2000,
+        endedAt: 2500,
+        durationMs: 500,
+        status: 'error',
+        sequence: 2
+      })
     ]
-    render(
-      <MemoryRouter>
-        <TraceList summaries={summaries} kind="task" query="" />
-      </MemoryRouter>
-    )
-    expect(screen.getByText('示例任务')).toBeInTheDocument()
-    expect(screen.queryByText('测试对话')).not.toBeInTheDocument()
+    const onSelect = vi.fn()
+    render(<Waterfall spans={spans} onSelect={onSelect} />)
+    // 错误子 span 名称可见
+    expect(screen.getByText('bash')).toBeTruthy()
+    // 错误计数角标（子树错误数 1）
+    expect(screen.getByText('1')).toBeTruthy()
   })
 
-  it('TraceList 支持关键词搜索', () => {
-    const summaries: TraceSummary[] = [
-      {
-        traceId: 't1',
-        kind: 'task',
-        title: '修复登录',
-        createdAt: '2025-01-01T00:00:00Z',
-        updatedAt: '2025-01-01T00:00:01Z',
-        entryCount: 1
-      },
-      {
-        traceId: 't2',
-        kind: 'task',
-        title: '升级依赖',
-        createdAt: '2025-01-01T00:00:00Z',
-        updatedAt: '2025-01-01T00:00:01Z',
-        entryCount: 1
-      }
-    ]
+  it('TraceList 「含错误」过滤按 errorCount > 0（两态模型：状态不表达失败），点击可选中', async () => {
+    const user = userEvent.setup()
+    const onSelect = vi.fn()
     render(
-      <MemoryRouter>
-        <TraceList summaries={summaries} kind="all" query="登录" />
-      </MemoryRouter>
+      <TraceList
+        summaries={[summary, { ...summary, traceId: 't2', title: '报错任务', errorCount: 2 }]}
+        timeRange="all"
+        status="error"
+        agent=""
+        query=""
+        onSelect={onSelect}
+        onDelete={vi.fn()}
+      />
     )
-    expect(screen.getByText('修复登录')).toBeInTheDocument()
-    expect(screen.queryByText('升级依赖')).not.toBeInTheDocument()
+    expect(screen.getByText('报错任务')).toBeTruthy()
+    expect(screen.queryByText('测试提问')).toBeNull()
+    // 错误计数红色小标记
+    expect(screen.getByText('2 个错误步骤')).toBeTruthy()
+    await user.click(screen.getByText('报错任务'))
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ traceId: 't2' }))
   })
 
-  it('TraceDetail 详情全文搜索：按关键词过滤条目，展示匹配计数', () => {
-    const entries: TraceEntry[] = [
-      {
-        id: 's1',
-        traceId: 't1',
-        kind: 'pi_session',
-        type: 'thinking',
-        title: '思考',
-        detail: '先定位登录模块',
-        createdAt: '2025-01-01T00:00:01Z',
-        source: 'pi_trace'
-      },
-      {
-        id: 's2',
-        traceId: 't1',
-        kind: 'pi_session',
-        type: 'tool_call',
-        title: '工具 bash',
-        detail: 'npm test',
-        createdAt: '2025-01-01T00:00:02Z',
-        source: 'pi_trace'
-      }
-    ]
+  it('TraceList 两态状态列：进行中 / 已结束（存量 success/error 摘要按已结束展示）', () => {
     render(
-      <MemoryRouter>
-        <TraceDetail kind="pi_session" traceId="t1" entries={entries} loading={false} onBack={vi.fn()} />
-      </MemoryRouter>
+      <TraceList
+        summaries={[
+          { ...summary, traceId: 't-run', title: '进行中任务', status: 'running' },
+          { ...summary, traceId: 't-end', title: '已结束任务' },
+          // 存量旧摘要（类型之外的运行时数据）：非 running 即已结束
+          { ...summary, traceId: 't-legacy', title: '存量任务', status: 'error' as TraceSummary['status'] }
+        ]}
+        timeRange="all"
+        status="all"
+        agent=""
+        query=""
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+      />
     )
-    expect(screen.getByText('思考')).toBeInTheDocument()
-    expect(screen.getByText('Tools - bash')).toBeInTheDocument()
-    fireEvent.change(screen.getByPlaceholderText('搜索详情…'), { target: { value: '登录' } })
-    expect(screen.getByText('匹配 1/2')).toBeInTheDocument()
-    expect(screen.getByText('思考')).toBeInTheDocument()
-    expect(screen.queryByText('Tools - bash')).not.toBeInTheDocument()
-    // 无匹配时显示空态
-    fireEvent.change(screen.getByPlaceholderText('搜索详情…'), { target: { value: '不存在的内容' } })
-    expect(screen.getByText('无匹配条目')).toBeInTheDocument()
+    expect(screen.getByText('进行中')).toBeTruthy()
+    // 已结束 + 存量 error 各显示一个「已结束」
+    expect(screen.getAllByText('已结束')).toHaveLength(2)
+    expect(screen.queryByText('失败')).toBeNull()
   })
 
-  it('TraceDetail 前端合并相邻 AI 消息碎片(修复:Qoder 消息按 delta 分块)', () => {
-    const entries: TraceEntry[] = Array.from({ length: 5 }, (_, i) => ({
-      id: `ev-${i}`,
-      traceId: 't1',
-      kind: 'task',
-      type: 'message',
-      title: 'Qoder Agent',
-      detail: `f-${i} `,
-      createdAt: '2025-01-01T00:00:00.000Z',
-      source: 'events'
-    }))
-    render(
-      <MemoryRouter>
-        <TraceDetail kind="task" traceId="t1" entries={entries} loading={false} onBack={vi.fn()} />
-      </MemoryRouter>
+  it('TraceList 按「进行中 / 已结束」状态过滤', () => {
+    const { rerender } = render(
+      <TraceList
+        summaries={[
+          { ...summary, traceId: 't-run', title: '进行中任务', status: 'running' },
+          { ...summary, traceId: 't-end', title: '已结束任务' }
+        ]}
+        timeRange="all"
+        status="running"
+        agent=""
+        query=""
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+      />
     )
-    const pres = screen.getAllByRole('generic').filter((el) => el.tagName === 'PRE')
-    // 5 个碎片合并为一条完整文本
-    expect(pres).toHaveLength(1)
-    expect(pres[0]!.textContent).toBe('f-0 f-1 f-2 f-3 f-4 ')
+    expect(screen.getByText('进行中任务')).toBeTruthy()
+    expect(screen.queryByText('已结束任务')).toBeNull()
+    rerender(
+      <TraceList
+        summaries={[
+          { ...summary, traceId: 't-run', title: '进行中任务', status: 'running' },
+          { ...summary, traceId: 't-end', title: '已结束任务' }
+        ]}
+        timeRange="all"
+        status="ended"
+        agent=""
+        query=""
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+      />
+    )
+    expect(screen.queryByText('进行中任务')).toBeNull()
+    expect(screen.getByText('已结束任务')).toBeTruthy()
   })
 
-  it('TraceDetail 前端合并不跨子任务作用域(parentTaskId 不同不拼接)', () => {
-    const entries: TraceEntry[] = [
-      {
-        id: 'ev-0',
-        traceId: 't1',
-        kind: 'task',
-        type: 'message',
-        title: 'Qoder Agent',
-        detail: '主流程文本',
-        createdAt: '2025-01-01T00:00:00.000Z',
-        source: 'events'
-      },
-      {
-        id: 'ev-1',
-        traceId: 't1',
-        kind: 'task',
-        type: 'message',
-        title: 'Qoder Agent',
-        detail: '子任务文本',
-        parentTaskId: 'sub-1',
-        createdAt: '2025-01-01T00:00:00.001Z',
-        source: 'events'
-      }
-    ]
+  it('TraceList 删除需确认，确认后回调 onDelete', async () => {
+    const user = userEvent.setup()
+    const onDelete = vi.fn()
     render(
-      <MemoryRouter>
-        <TraceDetail kind="task" traceId="t1" entries={entries} loading={false} onBack={vi.fn()} />
-      </MemoryRouter>
+      <TraceList
+        summaries={[summary]}
+        timeRange="all"
+        status="all"
+        agent=""
+        query=""
+        onSelect={vi.fn()}
+        onDelete={onDelete}
+      />
     )
-    // 两条文本分属不同作用域:主流程文本保持独立(不被子任务文本拼接),子任务文本收进折叠卡
-    expect(screen.getByText('主流程文本')).toBeInTheDocument()
-    expect(screen.queryByText('主流程文本子任务文本')).not.toBeInTheDocument()
+    // 打开确认对话框
+    await user.click(screen.getByLabelText('删除 Trace 测试提问'))
+    expect(screen.getByText('删除 Trace？')).toBeTruthy()
+    // 确认删除
+    await user.click(screen.getByRole('button', { name: '删除' }))
+    expect(onDelete).toHaveBeenCalledWith(expect.objectContaining({ traceId: 't1' }))
+  })
+
+  it('Waterfall 根拍平：session.start/task.run 根不渲染行，子项提升为顶层且可点击选中', async () => {
+    const user = userEvent.setup()
+    const onSelect = vi.fn()
+    render(
+      <Waterfall
+        spans={[
+          span({
+            spanId: 's1',
+            type: 'session.start',
+            name: '会话根',
+            startedAt: 1000,
+            endedAt: 5000,
+            durationMs: 4000,
+            sequence: 1
+          }),
+          span({
+            spanId: 's2',
+            type: 'llm.generate',
+            name: 'gpt-4o',
+            parentSpanId: 's1',
+            startedAt: 1000,
+            endedAt: 3000,
+            durationMs: 2000,
+            sequence: 2
+          })
+        ]}
+        onSelect={onSelect}
+      />
+    )
+    // 根行不渲染（数据保留、仅展示拍平）
+    expect(screen.queryByText('会话根')).toBeNull()
+    // 子项提升为顶层（depth 0 → paddingLeft 8）
+    const llmPad = screen.getByText('gpt-4o').parentElement!.style.paddingLeft
+    expect(parseInt(llmPad, 10)).toBe(8)
+    await user.click(screen.getByText('gpt-4o'))
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ spanId: 's2' }))
+  })
+
+  it('Waterfall 委派子 Agent 工具行按 Agent 展示（description + 徽章 + 子项缩进）', () => {
+    render(
+      <Waterfall
+        spans={[
+          span({
+            spanId: 'root',
+            type: 'task.run',
+            name: '任务',
+            startedAt: 1000,
+            endedAt: 5000,
+            durationMs: 4000,
+            sequence: 1
+          }),
+          span({
+            spanId: 'delegate',
+            type: 'tool.execute',
+            name: 'Agent',
+            parentSpanId: 'root',
+            input: { description: '探索代码结构', prompt: '...', subagent_type: 'Explore' },
+            startedAt: 1000,
+            endedAt: 4000,
+            durationMs: 3000,
+            sequence: 2
+          }),
+          span({
+            spanId: 'inner',
+            type: 'llm.generate',
+            name: 'qoder-lite',
+            parentSpanId: 'delegate',
+            startedAt: 1000,
+            endedAt: 2000,
+            durationMs: 1000,
+            sequence: 3
+          })
+        ]}
+        onSelect={vi.fn()}
+      />
+    )
+    // 类型标签为 Agent 而非工具；名称展示 description；附带 subagent_type 徽章
+    expect(screen.getByText('Agent')).toBeTruthy()
+    expect(screen.queryByText('工具')).toBeNull()
+    expect(screen.getByText('探索代码结构')).toBeTruthy()
+    expect(screen.getByText('Explore')).toBeTruthy()
+    // 子项缩进：内部 llm 行比委派 Agent 行多一级（18px/级）；task.run 根拍平后层级从 8 起
+    const delegatePad = screen.getByText('探索代码结构').parentElement!.style.paddingLeft
+    const innerPad = screen.getByText('qoder-lite').parentElement!.style.paddingLeft
+    expect(parseInt(delegatePad, 10)).toBe(8) // depth 0（根拍平后顶层）
+    expect(parseInt(innerPad, 10)).toBe(26) // depth 1
+  })
+
+  it('Waterfall 普通工具带 description 不误判为 Agent（Bash 等保持工具行）', () => {
+    render(
+      <Waterfall
+        spans={[
+          span({
+            spanId: 'root',
+            type: 'task.run',
+            name: '任务',
+            startedAt: 1000,
+            endedAt: 5000,
+            durationMs: 4000,
+            sequence: 1
+          }),
+          span({
+            spanId: 'bash',
+            type: 'tool.execute',
+            name: 'Bash',
+            parentSpanId: 'root',
+            input: { command: 'ls -la', description: '列出目录文件' },
+            startedAt: 1000,
+            endedAt: 2000,
+            durationMs: 1000,
+            sequence: 2
+          })
+        ]}
+        onSelect={vi.fn()}
+      />
+    )
+    // Bash 行保持工具语义：类型标签「工具」+ 工具名，不渲染 Agent 类型与 description
+    expect(screen.getByText('工具')).toBeTruthy()
+    expect(screen.queryByText('Agent')).toBeNull()
+    expect(screen.getByText('Bash')).toBeTruthy()
+    expect(screen.queryByText('列出目录文件')).toBeNull()
+  })
+
+  it('Waterfall 过滤空壳 llm（0ms 无输出）并把其子项上提到有效父级', () => {
+    render(
+      <Waterfall
+        spans={[
+          span({
+            spanId: 'root',
+            type: 'task.run',
+            name: '任务',
+            startedAt: 1000,
+            endedAt: 5000,
+            durationMs: 4000,
+            sequence: 1
+          }),
+          span({
+            spanId: 'vacant',
+            type: 'llm.generate',
+            name: 'qoder',
+            parentSpanId: 'root',
+            startedAt: 1000,
+            endedAt: 1000,
+            durationMs: 0,
+            sequence: 2
+          }),
+          span({
+            spanId: 'tool1',
+            type: 'tool.execute',
+            name: 'Grep',
+            parentSpanId: 'vacant',
+            startedAt: 1000,
+            endedAt: 2000,
+            durationMs: 1000,
+            sequence: 3
+          })
+        ]}
+        onSelect={vi.fn()}
+      />
+    )
+    // 空壳 llm 自身不渲染，其下工具子项上提到有效父级（root 也拍平 → 顶层）
+    expect(screen.queryByText('qoder')).toBeNull()
+    expect(screen.getByText('Grep')).toBeTruthy()
+    const toolPad = screen.getByText('Grep').parentElement!.style.paddingLeft
+    expect(parseInt(toolPad, 10)).toBe(8) // 上提后 depth 0
+  })
+
+  it('Waterfall 委派 Agent 行下 LLM → 工具嵌套缩进（逐级 18px）', () => {
+    render(
+      <Waterfall
+        spans={[
+          span({
+            spanId: 'root',
+            type: 'task.run',
+            name: '任务',
+            startedAt: 1000,
+            endedAt: 6000,
+            durationMs: 5000,
+            sequence: 1
+          }),
+          span({
+            spanId: 'delegate',
+            type: 'tool.execute',
+            name: 'Agent',
+            parentSpanId: 'root',
+            input: { description: '实现功能', subagent_type: 'Implement' },
+            startedAt: 1000,
+            endedAt: 5000,
+            durationMs: 4000,
+            sequence: 2
+          }),
+          span({
+            spanId: 'inner-llm',
+            type: 'llm.generate',
+            name: 'qoder-lite',
+            parentSpanId: 'delegate',
+            output: '计划完成',
+            startedAt: 1000,
+            endedAt: 2000,
+            durationMs: 1000,
+            sequence: 3
+          }),
+          span({
+            spanId: 'inner-tool',
+            type: 'tool.execute',
+            name: 'Grep',
+            parentSpanId: 'inner-llm',
+            startedAt: 2000,
+            endedAt: 3000,
+            durationMs: 1000,
+            sequence: 4
+          })
+        ]}
+        onSelect={vi.fn()}
+      />
+    )
+    // Agent → LLM → 工具 三级缩进：8 / 26 / 44 px（18px/级，根拍平后顶层从 8 起）
+    const agentPad = screen.getByText('实现功能').parentElement!.style.paddingLeft
+    const llmPad = screen.getByText('qoder-lite').parentElement!.style.paddingLeft
+    const toolPad = screen.getByText('Grep').parentElement!.style.paddingLeft
+    expect(parseInt(agentPad, 10)).toBe(8) // depth 0
+    expect(parseInt(llmPad, 10)).toBe(26) // depth 1
+    expect(parseInt(toolPad, 10)).toBe(44) // depth 2
+  })
+
+  it('Waterfall 阶段标签：agent.run 类型列按 meta.phase/trigger 显示阶段名', () => {
+    render(
+      <Waterfall
+        spans={[
+          span({
+            spanId: 'root',
+            type: 'task.run',
+            name: '任务',
+            startedAt: 1000,
+            endedAt: 9000,
+            durationMs: 8000,
+            sequence: 1
+          }),
+          span({
+            spanId: 'st1',
+            type: 'agent.run',
+            name: 'Agent planning',
+            parentSpanId: 'root',
+            meta: { phase: 'planning' },
+            startedAt: 1000,
+            endedAt: 3000,
+            durationMs: 2000,
+            sequence: 2
+          }),
+          span({
+            spanId: 'st2',
+            type: 'agent.run',
+            name: 'Agent implementing',
+            parentSpanId: 'root',
+            meta: { phase: 'implementation', trigger: 'resume' },
+            startedAt: 3000,
+            endedAt: 6000,
+            durationMs: 3000,
+            sequence: 3
+          }),
+          span({
+            spanId: 'st3',
+            type: 'agent.run',
+            name: 'Agent reviewing',
+            parentSpanId: 'root',
+            meta: { phase: 'review' },
+            startedAt: 6000,
+            endedAt: 8000,
+            durationMs: 2000,
+            sequence: 4
+          })
+        ]}
+        onSelect={vi.fn()}
+      />
+    )
+    // 类型列显示阶段名而非笼统的 Agent
+    expect(screen.getByText('Plan')).toBeTruthy()
+    expect(screen.getByText('执行（续接）')).toBeTruthy()
+    expect(screen.getByText('CodeReview')).toBeTruthy()
+    expect(screen.queryByText('Agent')).toBeNull()
+  })
+
+  it('Waterfall cancelled span 弱化展示（灰色虚框，不伪装成正常长条）', () => {
+    const { container } = render(
+      <Waterfall
+        spans={[
+          span({
+            spanId: 'ok',
+            type: 'tool.execute',
+            name: 'Grep',
+            startedAt: 1000,
+            endedAt: 2000,
+            durationMs: 1000,
+            sequence: 1
+          }),
+          span({
+            spanId: 'hung',
+            type: 'tool.execute',
+            name: 'Read',
+            status: 'cancelled',
+            startedAt: 2000,
+            endedAt: 2500,
+            durationMs: 500,
+            sequence: 2
+          })
+        ]}
+        onSelect={vi.fn()}
+      />
+    )
+    // cancelled 行的色块带虚框弱化 class，正常行不带
+    const bars = container.querySelectorAll('.border-dashed')
+    expect(bars.length).toBe(1)
+  })
+
+  it('Waterfall 归属重定向：meta.parentToolUseId 把子代理内部 span 挂到委派工具行下', () => {
+    render(
+      <Waterfall
+        spans={[
+          span({
+            spanId: 'root',
+            type: 'task.run',
+            name: '任务',
+            startedAt: 1000,
+            endedAt: 9000,
+            durationMs: 8000,
+            sequence: 1
+          }),
+          span({
+            spanId: 'delegate',
+            type: 'tool.execute',
+            name: 'Agent',
+            parentSpanId: 'root',
+            input: { description: '探索代码库' },
+            meta: { toolCallId: 'call-1' },
+            startedAt: 1000,
+            endedAt: 8000,
+            durationMs: 7000,
+            sequence: 2
+          }),
+          span({
+            spanId: 'sub',
+            type: 'subtask.run',
+            name: '探索代码库',
+            parentSpanId: 'root',
+            meta: { taskId: 'sub1', toolUseId: 'call-1' },
+            startedAt: 2000,
+            endedAt: 7000,
+            durationMs: 5000,
+            sequence: 3
+          }),
+          // 内部 llm：parentSpanId 锚在根上（task_started 滞后），真实归属在 meta.parentToolUseId
+          span({
+            spanId: 'inner',
+            type: 'llm.generate',
+            name: 'qoder-lite',
+            parentSpanId: 'root',
+            meta: { parentToolUseId: 'call-1' },
+            startedAt: 2000,
+            endedAt: 4000,
+            durationMs: 2000,
+            sequence: 4
+          })
+        ]}
+        onSelect={vi.fn()}
+      />
+    )
+    // 内部 llm 被重定向到委派工具行下（depth 1），不是顶层（depth 0）
+    const innerPad = screen.getByText('qoder-lite').parentElement!.style.paddingLeft
+    expect(parseInt(innerPad, 10)).toBe(26)
+  })
+
+  it('PayloadInspector 展示 LLM 输入输出与成本标签', () => {
+    render(
+      <PayloadInspector
+        span={span({
+          type: 'llm.generate',
+          input: { prompt: 'hello' },
+          output: 'world',
+          usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30, costUsd: 0.001 },
+          model: 'gpt-4o'
+        })}
+        onClose={vi.fn()}
+      />
+    )
+    expect(screen.getByText('Prompt（发送给模型）')).toBeTruthy()
+    expect(screen.getByText('hello', { exact: false })).toBeTruthy()
+    // Completions 默认展开：有 input 时结果也直接可见（此前默认收起导致工具结果看不到）
+    expect(screen.getByText('world', { exact: false })).toBeTruthy()
+    expect(screen.getByText(/\$0\.001/)).toBeTruthy()
+  })
+
+  it('空 span 显示空态', () => {
+    render(<Waterfall spans={[]} onSelect={vi.fn()} />)
+    expect(screen.getByText('该 Trace 尚未产生 span 数据')).toBeTruthy()
   })
 })

@@ -148,6 +148,21 @@ export type ChatStreamChunk =
   | { type: 'error'; message: string }
   | { type: 'done'; status: ChatMessageStatus; usage?: ChatUsage; model?: string }
 
+/**
+ * 模型可调参数能力声明（driver 自描述，schema 驱动）。
+ * 选择器按 capabilities 渲染运行时调节控件；不支持的能力不声明，避免无效 UI。
+ * - reasoningEffort: 推理力度档位（OpenAI reasoning / DeepSeek reasoningEffort）；
+ * - thinking: 思考模式开关（DeepSeek thinking.type enabled/disabled）；
+ * - maxOutputTokens: 最大输出 Token（上下文窗口控制）。
+ */
+export type ModelCapability =
+  | { key: 'reasoningEffort'; kind: 'enum'; options: string[] }
+  | { key: 'thinking'; kind: 'toggle' }
+  | { key: 'maxOutputTokens'; kind: 'number'; max?: number }
+
+/** 运行时模型参数（与 capabilities 的 key 对应；按对话持久化）。 */
+export type ModelParams = Record<string, unknown>
+
 /** 模型清单项 / 分组 — 与前端 `ChatModelInfo / ChatModelGroup` 对齐。 */
 export type ChatModelInfo = {
   value: string
@@ -156,12 +171,17 @@ export type ChatModelInfo = {
   isReasoning?: boolean
   isVl?: boolean
   priceFactor?: number
+  /** 该模型支持的运行时可调参数；缺省 = 无可调参数。 */
+  capabilities?: ModelCapability[]
 }
 export type ChatModelGroup = {
   driverId: ChatDriverId
   displayName: string
   models: ChatModelInfo[]
 }
+
+/** 可选的 MCP 服务 id（Chat 页 MCP 选择器与 driver 注入共用）。 */
+export type McpServiceId = 'gitlab' | 'jira' | 'confluence'
 
 /** 对话持久化形态。 */
 export type ChatConversationMeta = {
@@ -171,6 +191,12 @@ export type ChatConversationMeta = {
   updatedAt: string
   model?: string
   driverId?: ChatDriverId
+  /** 对话级运行时模型参数（推理力度/思考模式等），随对话持久化。 */
+  modelParams?: ModelParams
+  /** 最近一轮选中的 MCP 服务列表（随对话落盘，切换对话后恢复并注入 driver）。 */
+  mcpService?: McpServiceId[]
+  /** 最近一轮选中的 Agent id（随对话落盘，切换对话后恢复选择态）。 */
+  agentId?: string
   messageCount: number
   /**
    * 绑定的本地工作目录(项目对话)。
@@ -186,15 +212,34 @@ export type ChatConversationMeta = {
  */
 export type ChatConversation = ChatConversationMeta & { messages: StoredMessageRecord[] }
 
+/**
+ * 项目(工作目录)实体 — 与具体会话解耦,独立持久化。
+ * 只要在该目录下创建过项目对话,目录就会记为项目;即使目录下所有会话都被删除,
+ * 项目仍保留在列表中,显示「没有对话」,方便用户原地新建对话。
+ */
+export type ChatProject = {
+  directory: string
+  /** 最近一次活动时间(创建/绑定目录/最后删除会话时刷新),用于列表排序与空项目淘汰。 */
+  lastActiveAt: string
+}
+
 /** 流式启动 / 终止入参。 */
 export type StartChatStreamInput = {
   streamId: string
   chatId: string
   driverId: ChatDriverId
   model: string
+  /** 运行时模型参数（选择器调节产出；ChatService 随对话落盘并透传给 driver）。 */
+  modelParams?: ModelParams
   /** 用户当前输入(未持久化),ChatService 会按 driverId 调 `driver.serializeUserMessage` 包成 record。 */
   message: { id: string; text: string; createdAt: string }
   mode?: ChatAgentMode
+  /** 选中的 MCP 服务列表（落盘 + 注入 driver 工具：Qoder 走 mcpServers，OpenAI 走 MCP 桥接工具）。 */
+  mcpService?: McpServiceId[]
+  /** 选中 Agent 的 id（落盘与 Trace 展示用；systemPrompt 单独注入）。 */
+  agentId?: string
+  /** 选中 Agent 的 systemPrompt，注入为本轮 system 消息并随对话落盘。 */
+  systemPrompt?: string
 }
 export type AbortChatStreamInput = { streamId: string; chatId: string }
 

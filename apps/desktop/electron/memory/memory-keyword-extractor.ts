@@ -40,6 +40,12 @@ function keywordExtractionPrompt(): string {
  *
  * 与 memory-extractor 同源：driver.streamChat 是异步流，循环收集 text part 后退出；
  * 失败 / 解析为空时回退到 `fallbackKeywords` 兜底（不抛错，避免检索链路被关键词阶段卡死）。
+ *
+ * 会话隔离：每次调用使用一次性 conversationId，用完即关（finally closeSession）。
+ * 此前固定用 'memory-keyword-extract' 常驻会话 —— Qoder driver 按 conversationId 持有
+ * 活 qodercli 子进程且会话上下文跨调用累积，跨任务/跨对话的关键词内容会互相串扰，
+ * 既影响数据隔离也拉低提取质量。牺牲进程复用换隔离；OpenAI 路径无状态天然隔离
+ * （closeSession 未实现，?. 调用为空操作）。
  */
 export async function extractKeywords(input: {
   driver: ChatDriver
@@ -47,10 +53,14 @@ export async function extractKeywords(input: {
   model: string
   text: string
   signal?: AbortSignal
+  /** 所属对话回合/任务 traceId：join 同一执行树，避免辅助 LLM 调用产生独立 trace。 */
+  traceId?: string
 }): Promise<string[]> {
   const abort = new AbortController()
   const forwardAbort = () => abort.abort()
   input.signal?.addEventListener('abort', forwardAbort, { once: true })
+  // 一次性会话 id：每次提取独立上下文，结束后立刻释放（含报错/中止路径）。
+  const conversationId = `memory-keyword-extract-${randomUUID()}`
   const userText = [keywordExtractionPrompt(), '', '用户输入:', input.text.slice(0, MAX_QUERY_CHARS)].join('\n')
   const userRecord = input.driver.serializeUserMessage({
     id: randomUUID(),
@@ -61,11 +71,13 @@ export async function extractKeywords(input: {
   let result = ''
   try {
     for await (const chunk of input.driver.streamChat({
-      conversationId: 'memory-keyword-extract',
+      conversationId,
       model: input.model,
       history,
       userInput: { id: userRecord.id, text: userText, createdAt: userRecord.createdAt },
-      signal: abort.signal
+      signal: abort.signal,
+      traceLabel: '关键词提取',
+      ...(input.traceId ? { traceId: input.traceId } : {})
     })) {
       if (chunk.type === 'part' && chunk.part.type === 'text') {
         result += chunk.part.text
@@ -77,6 +89,13 @@ export async function extractKeywords(input: {
     console.warn('[memory] keyword extract llm failed:', error)
   } finally {
     input.signal?.removeEventListener('abort', forwardAbort)
+    // 用完即关：释放常驻会话与 qodercli 子进程。幂等 —— driver 内部错误路径
+    // 可能已 closeSession 过同一个 id，重复关闭为空操作。
+    try {
+      input.driver.closeSession?.(conversationId)
+    } catch {
+      /* 关闭失败不影响提取结果 */
+    }
   }
   const parsed = parseExtractedKeywords(result)
   if (parsed.length) return parsed

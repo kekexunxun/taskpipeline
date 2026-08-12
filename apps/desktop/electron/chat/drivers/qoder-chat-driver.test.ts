@@ -480,20 +480,32 @@ describe('QoderChatDriver multi-turn history', () => {
     const d = driver()
     const common = { model: 'qoder:claude-sonnet-4.5', history: [], signal: new AbortController().signal }
     const first = await collect(
-      d.streamChat({ conversationId: 'c', ...common, userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() } })
+      d.streamChat({
+        conversationId: 'c',
+        ...common,
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() }
+      })
     )
     // 第二次回合:先发起 streamChat(回合挂起等输出),再注入第二个脚本 —— 模拟真实时序:
     // 用户发消息 → SDK 会话产出该轮输出(不是回合开始前就产出)。
     const secondPromise = (async () =>
       collect(
-        d.streamChat({ conversationId: 'c', ...common, userInput: { id: 'u2', text: 'again', createdAt: new Date().toISOString() } })
+        d.streamChat({
+          conversationId: 'c',
+          ...common,
+          userInput: { id: 'u2', text: 'again', createdAt: new Date().toISOString() }
+        })
       ))()
     sdkMock.__pushScript({
       messages: [textDelta('second answer', 'sess-1'), resultMessage('second answer', 'sess-1')]
     })
     const second = await secondPromise
-    const firstText = first.filter((e) => e.type === 'part' && e.part.type === 'text').map((e) => (e.type === 'part' ? e.part.text : ''))
-    const secondText = second.filter((e) => e.type === 'part' && e.part.type === 'text').map((e) => (e.type === 'part' ? e.part.text : ''))
+    const firstText = first
+      .filter((e) => e.type === 'part' && e.part.type === 'text')
+      .map((e) => (e.type === 'part' ? e.part.text : ''))
+    const secondText = second
+      .filter((e) => e.type === 'part' && e.part.type === 'text')
+      .map((e) => (e.type === 'part' ? e.part.text : ''))
     expect(firstText.join('')).toContain('first answer')
     expect(secondText.join('')).toContain('second answer')
     // 两次 streamChat 复用同一会话:query 只创建一次(多轮由消息流驱动,不新建会话)。
@@ -507,9 +519,7 @@ describe('QoderChatDriver multi-turn history', () => {
     const abort = new AbortController()
     const common = { conversationId: 'c', model: 'qoder:claude-sonnet-4.5', history: [], signal: abort.signal }
     const turnPromise = (async () =>
-      collect(
-        d.streamChat({ ...common, userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() } })
-      ))()
+      collect(d.streamChat({ ...common, userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() } })))()
     await new Promise((resolve) => setTimeout(resolve, 20))
     // abort 必须唤醒挂起的回合(此前只靠 SDK 继续产出消息才能退出)。
     abort.abort()
@@ -527,7 +537,9 @@ describe('QoderChatDriver multi-turn history', () => {
         userInput: { id: 'u2', text: 'again', createdAt: new Date().toISOString() }
       })
     )
-    const secondText = second.filter((e) => e.type === 'part' && e.part.type === 'text').map((e) => (e.type === 'part' ? e.part.text : ''))
+    const secondText = second
+      .filter((e) => e.type === 'part' && e.part.type === 'text')
+      .map((e) => (e.type === 'part' ? e.part.text : ''))
     expect(secondText.join('')).toContain('after abort')
     // 复用同一会话:query 仍只创建一次。
     expect(sdkMock.__getQueryCallCount()).toBe(1)
@@ -730,5 +742,72 @@ describe('QoderChatDriver sub-task lifecycle', () => {
     })
     // 第二次流不应再 emit 子任务 part
     expect(parts.some((p) => p.type === 'qoder.subtask-start')).toBe(false)
+  })
+})
+
+describe('QoderChatDriver MCP 服务注入', () => {
+  function driverWithMcp(
+    resolver?: (
+      serviceId: string
+    ) => { transport: string; command?: string; args?: string[]; env?: Record<string, string> } | undefined
+  ) {
+    return new QoderChatDriver(
+      () => 'test-token',
+      async () => ({
+        enabled: true,
+        connected: true,
+        running: false,
+        models: [{ value: 'claude-sonnet-4.5', displayName: 'Claude', isDefault: true }]
+      }),
+      undefined,
+      resolver as never
+    )
+  }
+
+  const gitlabProfile = {
+    transport: 'stdio' as const,
+    command: 'npx',
+    args: ['-y', '@zereight/mcp-gitlab'],
+    env: { GITLAB_PERSONAL_ACCESS_TOKEN: 'glpat-xxx' }
+  }
+
+  it('勾选的 MCP 服务并入 mcpServers 与 allowedMcpServerNames', async () => {
+    sdkMock.__pushScript({ messages: [textDelta('ok', 'sess-mcp'), resultMessage('ok', 'sess-mcp')] })
+    await collect(
+      driverWithMcp((id) => (id === 'gitlab' ? gitlabProfile : undefined)).streamChat({
+        conversationId: 'c-mcp',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        mcpServices: ['gitlab'],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const options = sdkMock.__getLastQueryOptions()!
+    const servers = options.mcpServers as Record<string, Record<string, unknown>>
+    expect(servers.gitlab).toEqual({
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', '@zereight/mcp-gitlab'],
+      env: { GITLAB_PERSONAL_ACCESS_TOKEN: 'glpat-xxx' }
+    })
+    expect(options.allowedMcpServerNames).toEqual(['gitlab'])
+  })
+
+  it('凭据缺失（resolver 返回 undefined）的服务不注入', async () => {
+    sdkMock.__pushScript({ messages: [textDelta('ok', 'sess-mcp2'), resultMessage('ok', 'sess-mcp2')] })
+    await collect(
+      driverWithMcp(() => undefined).streamChat({
+        conversationId: 'c-mcp2',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        mcpServices: ['gitlab', 'jira'],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const options = sdkMock.__getLastQueryOptions()!
+    expect(options.mcpServers).toBeUndefined()
+    expect(options.allowedMcpServerNames).toBeUndefined()
   })
 })

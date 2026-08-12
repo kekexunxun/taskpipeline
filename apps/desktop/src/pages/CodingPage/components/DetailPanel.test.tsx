@@ -86,6 +86,7 @@ const callbacks = {
   onResetDelivery: vi.fn(),
   onRetryValidation: vi.fn(),
   onApprovePlan: vi.fn(),
+  onCancelTask: vi.fn(),
   onRevisePlan: vi.fn(),
   onPlanEdited: vi.fn(),
   onSubmitMR: vi.fn(),
@@ -94,6 +95,7 @@ const callbacks = {
   onResume: vi.fn(),
   onPrompt: vi.fn(),
   onSend: vi.fn(),
+  onMcpServiceChange: vi.fn(),
   onOpenUrl: vi.fn()
 }
 
@@ -111,6 +113,7 @@ describe('DetailPanel tabs', () => {
         starting={false}
         merging={false}
         focused={false}
+        mcpService={[]}
         {...callbacks}
       />
     )
@@ -147,6 +150,7 @@ describe('DetailPanel tabs', () => {
         starting={false}
         merging={false}
         focused={false}
+        mcpService={[]}
         {...callbacks}
       />
     )
@@ -171,6 +175,7 @@ describe('DetailPanel tabs', () => {
         starting={false}
         merging={false}
         focused={false}
+        mcpService={[]}
         {...callbacks}
         onApprovePlan={onApprovePlan}
         onRevisePlan={onRevisePlan}

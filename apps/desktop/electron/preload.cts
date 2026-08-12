@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('agentApi', {
   retryTaskValidation: (taskId: string) => ipcRenderer.invoke('tasks:retry-validation', taskId),
   sendTaskMessage: (taskId: string, message: string) => ipcRenderer.invoke('tasks:message', taskId, message),
   abortTask: () => ipcRenderer.invoke('tasks:abort'),
+  cancelTask: (taskId: string) => ipcRenderer.invoke('tasks:cancel', taskId),
   runReview: (taskId: string) => ipcRenderer.invoke('tasks:review', taskId),
   resetReview: (taskId: string) => ipcRenderer.invoke('tasks:reset-review', taskId),
   resetDelivery: (taskId: string) => ipcRenderer.invoke('tasks:reset-delivery', taskId),
@@ -39,6 +40,7 @@ contextBridge.exposeInMainWorld('agentApi', {
   syncJiraTasks: () => ipcRenderer.invoke('jira:sync'),
   importJiraTasks: (candidates: unknown[]) => ipcRenderer.invoke('jira:import-many', candidates),
   testAtlassian: (kind: 'jira' | 'confluence') => ipcRenderer.invoke('atlassian:test', kind),
+  testGitlabMcp: () => ipcRenderer.invoke('gitlab:test-mcp'),
   checkCredentials: () => ipcRenderer.invoke('settings:check-credentials'),
   getCredentialState: () => ipcRenderer.invoke('credentials:state'),
   onCredentialStateChange: (callback: (states: unknown) => void) => {
@@ -78,12 +80,14 @@ contextBridge.exposeInMainWorld('agentApi', {
   generateAgentContent: (input: unknown) => ipcRenderer.invoke('agents:generate-content', input),
   // === Chat 对话(Codex 样式) ==================================================
   listChats: () => ipcRenderer.invoke('chats:list'),
+  listChatProjects: () => ipcRenderer.invoke('chats:list-projects'),
   getChat: (id: string) => ipcRenderer.invoke('chats:get', id),
   createChat: (model?: string) => ipcRenderer.invoke('chats:create', model),
   deleteChat: (id: string) => ipcRenderer.invoke('chats:delete', id),
   setChatDirectory: (id: string, workingDirectory?: string) =>
     ipcRenderer.invoke('chats:set-directory', id, workingDirectory),
   listChatModels: () => ipcRenderer.invoke('chats:list-models'),
+  getDefaultModel: () => ipcRenderer.invoke('chats:default-model'),
   startChatStream: (input: unknown) => ipcRenderer.invoke('chats:start-stream', input),
   abortChat: (input: unknown) => ipcRenderer.invoke('chats:abort', input),
   chooseDirectory: () => ipcRenderer.invoke('dialog:choose-directory'),
@@ -92,7 +96,9 @@ contextBridge.exposeInMainWorld('agentApi', {
     ipcRenderer.on('chat:stream-event', listener)
     return () => ipcRenderer.removeListener('chat:stream-event', listener)
   },
-  // === Trace 页面(任务 / 对话 / Pi 会话统一执行轨迹) ============================
+  // === Trace 页面(v2：AgentSpan 管道) ===========================================
   listTrace: () => ipcRenderer.invoke('trace:list'),
-  getTrace: (kind: string, traceId: string) => ipcRenderer.invoke('trace:get', kind, traceId)
+  getTrace: (kind: string, traceId: string) => ipcRenderer.invoke('trace:get', kind, traceId),
+  dashboardTrace: () => ipcRenderer.invoke('trace:dashboard'),
+  deleteTrace: (kind: string, traceId: string) => ipcRenderer.invoke('trace:delete', kind, traceId)
 })

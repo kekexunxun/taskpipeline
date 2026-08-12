@@ -24,7 +24,7 @@ import {
   CheckCircle2Icon,
   XCircleIcon,
   StopCircleIcon,
-  GitBranchIcon,
+  //   GitBranchIcon,
   Code2Icon
 } from 'lucide-react'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -37,7 +37,7 @@ export type ParentedItem = {
   parentTaskId?: string
   /**
    * 子任务 ID 字段名(同义不同名):
-   * - TraceEntry.taskId —— TraceEntry 没有 taskId 冲突,直接用 taskId。
+   * - span meta 的 taskId —— subtask.run 的 subtaskId。
    * - AgentEvent.subtaskId —— AgentEvent.taskId 已被"归属任务"占用,改名 subtaskId。
    * - DriverPart 通过 taskId 直接传入(part-level 命名空间不冲突)。
    * 工具的 `header` 查找会同时识别 taskId / subtaskId,避免数据层命名漂移导致分组丢头。
@@ -45,6 +45,12 @@ export type ParentedItem = {
   taskId?: string
   subtaskId?: string
   sdkSubtype?: string
+  /**
+   * 所属 agent.run 阶段 id（planning/implementing 等阶段容器）：
+   * 带此值的子任务组会被嵌套进对应阶段组，而不是与阶段卡平级 ——
+   * 执行面板的「Agent planning 卡 → Explore 子 Agent 卡 → 工具」层级由此实现。
+   */
+  stageId?: string
 }
 
 /**
@@ -106,7 +112,14 @@ export function groupByParentTask<T extends ParentedItem>(
  */
 export type TimelineBlock<T> =
   | { kind: 'main'; item: T }
-  | { kind: 'group'; taskId: string; header: T | undefined; children: T[] }
+  | {
+      kind: 'group'
+      taskId: string
+      header: T | undefined
+      children: T[]
+      /** 嵌套在本组内的子组（子任务组挂进所属 agent.run 阶段组），递归结构。 */
+      nested: TimelineBlock<T>[]
+    }
 
 /**
  * 不在时间线展示的内部事件标题(数据仍落 events 表,仅渲染层隐藏)。
@@ -152,11 +165,33 @@ export function interleaveTimeline<T extends ParentedItem>(items: T[]): Timeline
     const idx = (g.header ? indexByItem.get(g.header) : undefined) ?? g.firstIndex
     tagged.push({
       index: idx,
-      block: { kind: 'group', taskId: g.taskId, header: g.header, children: g.children }
+      block: { kind: 'group', taskId: g.taskId, header: g.header, children: g.children, nested: [] }
     })
   }
   tagged.sort((a, b) => a.index - b.index)
-  return tagged.map((t) => t.block)
+
+  // Step 3: 嵌套 —— 子任务组（header 带 stageId 且该 stageId 是某个阶段的 group id）从顶层
+  // 移除，挂进对应阶段组的 nested（按出现顺序）。阶段组与子任务组不再平级，
+  // 执行面板呈现「Agent planning → Explore 子 Agent → 工具」的树形层级。
+  const stageOfGroup = new Map<string, Tagged>()
+  for (const t of tagged) if (t.block.kind === 'group') stageOfGroup.set(t.block.taskId, t)
+  const nestedByStage = new Map<string, Tagged[]>()
+  const topLevel: Tagged[] = []
+  for (const t of tagged) {
+    const stageId = t.block.kind === 'group' ? t.block.header?.stageId : undefined
+    if (stageId && stageOfGroup.has(stageId)) {
+      const list = nestedByStage.get(stageId)
+      if (list) list.push(t)
+      else nestedByStage.set(stageId, [t])
+    } else {
+      topLevel.push(t)
+    }
+  }
+  return topLevel.map((t) => {
+    if (t.block.kind !== 'group') return t.block
+    const nested = (nestedByStage.get(t.block.taskId) ?? []).sort((a, b) => a.index - b.index).map((n) => n.block)
+    return nested.length ? { ...t.block, nested } : t.block
+  })
 }
 
 function isSubtaskHeader<T extends ParentedItem>(item: T, parent: string): boolean {
@@ -175,6 +210,8 @@ export type SubtaskMeta = {
   usage?: unknown
   lastToolName?: string
   toolUseId?: string
+  /** 所属 agent.run 阶段 id（阶段容器内发起的子任务，嵌套进阶段卡）。 */
+  stageId?: string
 }
 
 /**
@@ -196,6 +233,7 @@ export function subtaskMetaOf(record: { title?: string; detail?: string; payload
       meta.parentTaskId = payload.subtaskId
     }
     if (typeof payload.parentTaskId === 'string' && payload.parentTaskId) meta.parentTaskId = payload.parentTaskId
+    if (typeof payload.stageId === 'string' && payload.stageId) meta.stageId = payload.stageId
     if (typeof payload.sdkSubtype === 'string' && payload.sdkSubtype) meta.sdkSubtype = payload.sdkSubtype
     if (typeof payload.taskType === 'string' && payload.taskType) meta.taskType = payload.taskType
     if (typeof payload.subagentType === 'string' && payload.subagentType) meta.subagentType = payload.subagentType
@@ -320,10 +358,14 @@ export function SubTaskGroup({
 }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <article className={cn('mb-4 grid grid-cols-[26px_minmax(0,1fr)] gap-2', className)}>
-      <div className="grid size-6 place-items-center rounded-full border bg-muted text-muted-foreground">
+    // <article className={cn('mb-4 grid grid-cols-[26px_minmax(0,1fr)] gap-2', className)}>
+    //   <div className="grid size-6 place-items-center rounded-full border bg-muted text-muted-foreground">
+    //     <GitBranchIcon size={12} />
+    //   </div>
+    <article className={cn('mb-4 grid gap-2', className)}>
+      {/* <div className="grid size-6 place-items-center rounded-full border bg-muted text-muted-foreground">
         <GitBranchIcon size={12} />
-      </div>
+      </div> */}
       <div className="min-w-0 pt-0.5">
         <Collapsible open={open} onOpenChange={setOpen}>
           <CollapsibleTrigger
@@ -336,7 +378,8 @@ export function SubTaskGroup({
               ) : (
                 <ChevronRightIcon size={12} className="shrink-0 text-muted-foreground" />
               )}
-              <span className="min-w-0 flex-1 truncate">{header}</span>
+              {/* 截断由 header 内容自行控制(description/summary 加 truncate),避免徽章被整体截断 */}
+              <span className="min-w-0 flex-1">{header}</span>
             </span>
             {createdAt && <time className="shrink-0 text-xs text-muted-foreground">{formatTime(createdAt)}</time>}
           </CollapsibleTrigger>
@@ -363,12 +406,50 @@ export function SubTaskHeader({
 }) {
   return (
     <span className="inline-flex min-w-0 items-center gap-1.5">
-      <span className="shrink-0 text-xs font-medium text-foreground/80">{description || '子任务'}</span>
+      <span className="min-w-0 truncate text-xs font-medium text-foreground/80">{description || '子任务'}</span>
       {taskType && (
         <Badge variant="outline" className="shrink-0 px-1 py-0 font-mono text-[10px]">
           {taskType}
         </Badge>
       )}
+      {subagentType && (
+        <Badge variant="outline" className="shrink-0 px-1 py-0 font-mono text-[10px]">
+          {subagentType}
+        </Badge>
+      )}
+      <StatusBadge status={status} />
+    </span>
+  )
+}
+
+/**
+ * 子任务卡 header 的「Agent 调用」样式 —— Qoder 委派 Agent 时,子任务卡就是那条
+ * 发起调用(task 工具)的呈现:工具名(无 "Tools -" 前缀)+ 调用摘要 + 类型/状态徽章。
+ * 新数据(task_started.tool_use_id 可关联到主流程发起调用)时 Timeline 用它替代
+ * SubTaskHeader;老数据无 toolUseId、关联不上发起调用时回退 SubTaskHeader。
+ */
+export function SubTaskAgentHeader({
+  name,
+  summary,
+  //   taskType,
+  subagentType,
+  status
+}: {
+  name: string
+  summary?: string
+  taskType?: string
+  subagentType?: string
+  status: SubTaskStatus
+}) {
+  return (
+    <span className="flex min-w-0 items-center gap-1.5">
+      <strong className="shrink-0 text-xs font-medium">{name}</strong>
+      {summary && <span className="min-w-0 truncate text-xs text-muted-foreground">{summary}</span>}
+      {/* {taskType && (
+        <Badge variant="outline" className="shrink-0 px-1 py-0 font-mono text-[10px]">
+          {taskType}
+        </Badge>
+      )} */}
       {subagentType && (
         <Badge variant="outline" className="shrink-0 px-1 py-0 font-mono text-[10px]">
           {subagentType}

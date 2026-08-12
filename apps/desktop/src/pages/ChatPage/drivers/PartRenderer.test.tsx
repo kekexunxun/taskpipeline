@@ -57,7 +57,8 @@ describe('PartRenderer', () => {
     expect(screen.getByText('最终答案')).toBeInTheDocument()
     // 展开后能看到完整的拼接推理文本。
     fireEvent.click(screen.getByText('思考过程'))
-    expect(screen.getByText(/第一步思考\s*第二步思考\s*第三步思考/)).toBeInTheDocument()
+    // thinking_delta 按 token 粒度推送:合并必须直接拼接,不能插入换行(否则每个词一行)
+    expect(screen.getByText('第一步思考第二步思考第三步思考')).toBeInTheDocument()
   })
 
   it('wraps a full subtask (start + in-task parts + end) in a SubTaskGroup, default collapsed', () => {

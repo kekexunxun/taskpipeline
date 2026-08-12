@@ -23,10 +23,16 @@ type FakeDriverOptions = {
   throwOnStream?: string
 }
 
-function createFakeDriver(
-  opts: FakeDriverOptions
-): ChatDriver & { received: { history: StoredMessage[]; model: string; toolSource?: unknown; cwd?: string }[] } {
-  const received: { history: StoredMessage[]; model: string; toolSource?: unknown; cwd?: string }[] = []
+function createFakeDriver(opts: FakeDriverOptions): ChatDriver & {
+  received: { history: StoredMessage[]; model: string; toolSource?: unknown; cwd?: string; mcpServices?: string[] }[]
+} {
+  const received: {
+    history: StoredMessage[]
+    model: string
+    toolSource?: unknown
+    cwd?: string
+    mcpServices?: string[]
+  }[] = []
   let scriptIndex = 0
   return {
     received,
@@ -57,7 +63,13 @@ function createFakeDriver(
       }
     },
     async *streamChat(input) {
-      received.push({ history: input.history, model: input.model, toolSource: input.toolSource, cwd: input.cwd })
+      received.push({
+        history: input.history,
+        model: input.model,
+        toolSource: input.toolSource,
+        cwd: input.cwd,
+        mcpServices: input.mcpServices
+      })
       if (opts.throwOnStream) throw new Error(opts.throwOnStream)
       const script = opts.scripts[scriptIndex++] ?? { emit: [] }
       for (const chunk of script.emit) yield chunk
@@ -65,7 +77,9 @@ function createFakeDriver(
     dispose() {
       /* noop */
     }
-  } as ChatDriver & { received: { history: StoredMessage[]; model: string; toolSource?: unknown; cwd?: string }[] }
+  } as ChatDriver & {
+    received: { history: StoredMessage[]; model: string; toolSource?: unknown; cwd?: string; mcpServices?: string[] }[]
+  }
 }
 
 function fakeStore(): TaskStore {
@@ -93,7 +107,8 @@ describe('ChatService (driver-based)', () => {
             { type: 'done', status: 'done' }
           ]
         }
-      ]
+      ],
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
     })
     const registry = new ChatDriverRegistry()
     registry.register(driver)
@@ -128,7 +143,8 @@ describe('ChatService (driver-based)', () => {
       id: 'openai',
       displayName: 'OpenAI',
       scripts: [],
-      throwOnStream: '401 Invalid API key'
+      throwOnStream: '401 Invalid API key',
+      models: [{ value: 'gpt-4o', displayName: 'GPT-4o' }]
     })
     const registry = new ChatDriverRegistry()
     registry.register(driver)
@@ -168,7 +184,8 @@ describe('ChatService (driver-based)', () => {
             { type: 'done', status: 'done' }
           ]
         }
-      ]
+      ],
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
     })
     const openai = createFakeDriver({
       id: 'openai',
@@ -180,7 +197,8 @@ describe('ChatService (driver-based)', () => {
             { type: 'done', status: 'done' }
           ]
         }
-      ]
+      ],
+      models: [{ value: 'openai:default', displayName: '默认 profile' }]
     })
     const registry = new ChatDriverRegistry()
     registry.register(qoder)
@@ -244,7 +262,8 @@ describe('ChatService (driver-based)', () => {
             { type: 'done', status: 'done' }
           ]
         }
-      ]
+      ],
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
     })
     const registry = new ChatDriverRegistry()
     registry.register(driver)
@@ -265,7 +284,7 @@ describe('ChatService (driver-based)', () => {
     expect(reloaded?.messages[1]?.parts[0]?.type).toBe('text')
   })
 
-  it('rejects an unknown driverId', async () => {
+  it('rejects when no driver is registered (no usable model)', async () => {
     const registry = new ChatDriverRegistry()
     const service = new ChatService(fakeStore(), dataDir, registry, () => undefined)
     const conv = service.createChat()
@@ -277,7 +296,59 @@ describe('ChatService (driver-based)', () => {
         model: 'qoder:test',
         message: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() }
       })
-    ).rejects.toThrow(/未注册的 chat driver/)
+    ).rejects.toThrow(/未配置可用模型/)
+  })
+
+  it('falls back to the driver default when the requested model is no longer available', async () => {
+    const driver = createFakeDriver({
+      id: 'qoder',
+      displayName: 'Qoder',
+      scripts: [{ emit: [{ type: 'done', status: 'done' }] }],
+      models: [{ value: 'qoder:current', displayName: '当前模型', isDefault: true }]
+    })
+    const registry = new ChatDriverRegistry()
+    registry.register(driver)
+    const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow
+    const service = new ChatService(fakeStore(), dataDir, registry, () => win)
+    // 对话存的是已下线的旧模型
+    const conv = service.createChat('qoder', 'qoder:retired')
+    await service.startChatStream({
+      streamId: 'stream-fb',
+      chatId: conv.id,
+      driverId: 'qoder',
+      model: 'qoder:retired',
+      message: { id: 'u1', text: 'hello', createdAt: new Date().toISOString() }
+    })
+    // driver 实际收到的是组内默认模型；本轮落盘记录的也是实际使用的模型
+    expect(driver.received[0]?.model).toBe('qoder:current')
+    expect(service.getChat(conv.id)?.conversation.model).toBe('qoder:current')
+  })
+
+  it('falls back across drivers to the system default when the requested driver has no models', async () => {
+    // qoder driver 无任何模型（未连接），openai driver 有模型 → 系统默认落在 openai 组
+    const qoder = createFakeDriver({ id: 'qoder', displayName: 'Qoder', scripts: [] })
+    const openai = createFakeDriver({
+      id: 'openai',
+      displayName: 'OpenAI',
+      scripts: [{ emit: [{ type: 'done', status: 'done' }] }],
+      models: [{ value: 'openai:gpt-4o', displayName: 'GPT-4o', isDefault: true }]
+    })
+    const registry = new ChatDriverRegistry()
+    registry.register(qoder)
+    registry.register(openai)
+    const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow
+    const service = new ChatService(fakeStore(), dataDir, registry, () => win)
+    const conv = service.createChat('qoder', 'qoder:test')
+    await service.startChatStream({
+      streamId: 'stream-x',
+      chatId: conv.id,
+      driverId: 'qoder',
+      model: 'qoder:test',
+      message: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() }
+    })
+    expect(openai.received).toHaveLength(1)
+    expect(openai.received[0]?.model).toBe('openai:gpt-4o')
+    expect(qoder.received).toHaveLength(0)
   })
 
   it('rejects stream on missing conversation', async () => {
@@ -314,7 +385,8 @@ describe('ChatService (driver-based)', () => {
     const driver = createFakeDriver({
       id: 'qoder',
       displayName: 'Qoder',
-      scripts: [{ emit: [{ type: 'done', status: 'done' }] }]
+      scripts: [{ emit: [{ type: 'done', status: 'done' }] }],
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
     })
     const registry = new ChatDriverRegistry()
     registry.register(driver)
@@ -335,7 +407,8 @@ describe('ChatService (driver-based)', () => {
     const driver = createFakeDriver({
       id: 'qoder',
       displayName: 'Qoder',
-      scripts: [{ emit: [{ type: 'done', status: 'done' }] }]
+      scripts: [{ emit: [{ type: 'done', status: 'done' }] }],
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
     })
     const registry = new ChatDriverRegistry()
     registry.register(driver)
@@ -389,12 +462,46 @@ describe('ChatService (driver-based)', () => {
     expect(service.listChats()).toHaveLength(2)
   })
 
+  it('persists mcpService/agentId into conversation meta and passes mcpServices to the driver', async () => {
+    const driver = createFakeDriver({
+      id: 'qoder',
+      displayName: 'Qoder',
+      scripts: [{ emit: [{ type: 'done', status: 'done' }] }],
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
+    })
+    const registry = new ChatDriverRegistry()
+    registry.register(driver)
+    const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow
+    const service = new ChatService(fakeStore(), dataDir, registry, () => win)
+    const conv = service.createChat('qoder', 'qoder:test')
+    await service.startChatStream({
+      streamId: 'stream-mcp',
+      chatId: conv.id,
+      driverId: 'qoder',
+      model: 'qoder:test',
+      mcpService: ['gitlab', 'jira'],
+      agentId: 'agent-42',
+      message: { id: 'u1', text: 'hello', createdAt: new Date().toISOString() }
+    })
+    // MCP 选择透传给 driver（真正注入工具）
+    expect(driver.received[0]?.mcpServices).toEqual(['gitlab', 'jira'])
+    // MCP / Agent 选择态随对话落盘，切换对话后可恢复
+    const reloaded = service.getChat(conv.id)
+    expect(reloaded?.conversation.mcpService).toEqual(['gitlab', 'jira'])
+    expect(reloaded?.conversation.agentId).toBe('agent-42')
+  })
+
   it('refuses to rebind the directory while streaming', async () => {
     let release: () => void = () => undefined
     const gate = new Promise<void>((resolve) => {
       release = resolve
     })
-    const base = createFakeDriver({ id: 'qoder', displayName: 'Qoder', scripts: [] })
+    const base = createFakeDriver({
+      id: 'qoder',
+      displayName: 'Qoder',
+      scripts: [],
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
+    })
     const gated: ChatDriver = {
       ...base,
       async *streamChat(_input) {

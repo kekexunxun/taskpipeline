@@ -1,7 +1,9 @@
-import { Fragment, useEffect, useMemo, useRef, type ReactNode } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   ActivityIcon,
   BotIcon,
+  BrainIcon,
+  ChevronDownIcon,
   Code2Icon,
   FileDiffIcon,
   MessageSquareTextIcon,
@@ -14,7 +16,9 @@ import { cn } from '@/lib/utils'
 import { formatTime } from '@/utils/format'
 import { localizedEventTitle } from '@/utils/status'
 import { Badge } from '@/components/ui/badge'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
+  SubTaskAgentHeader,
   SubTaskGroup,
   SubTaskHeader,
   SubTaskProgressSummary,
@@ -26,7 +30,9 @@ import {
   subtaskMetaOf,
   subtaskStatusOf,
   toolInputSummary,
+  type ParentedItem,
   type SubTaskProgressSample,
+  type TimelineBlock,
   type ToolCallStatus
 } from '@/components/SubTaskGroup'
 
@@ -65,7 +71,10 @@ function visibleDetail(detail: string | undefined): string | undefined {
 
 function duplicateKey(item: TimelineItem): string {
   const title = isAgentMessage(item) ? 'agent' : item.title.trim().toLowerCase()
-  return `${item.kind} ${title} ${visibleDetail(item.detail) ?? ''}`
+  // 工具事件的 use / result 两条记录 kind/title/detail 完全一致（仅 payload.phase 不同），
+  // 必须把 phase 纳入 key，否则 5 秒去重会把 result 当重复删除 —— 工具行只剩输入没有输出。
+  const phase = item.kind === 'tool' ? ` ${String((item.payload as { phase?: string } | undefined)?.phase ?? '')}` : ''
+  return `${item.kind} ${title}${phase} ${visibleDetail(item.detail) ?? ''}`
 }
 
 /**
@@ -90,7 +99,9 @@ function mergeAdjacentAgentMessages(items: TimelineItem[]): TimelineItem[] {
 /**
  * 归一化时间线条目:
  * 1. 去掉 outcome marker 注释(避免污染 UI);
- * 2. 同 kind + title + detail + 5 秒内重复 → 合并,防流式重放刷屏;
+ * 2. 同 kind + title + detail + 5 秒内重复 → 合并,防流式重放刷屏 —— 仅对无 span payload 的
+ *    遗留事件生效;span 来源事件(payload.spanId)按 spanId 豁免:相邻的纯 thinking 等记录
+ *    内容相同但是不同执行步骤(spanId 唯一),内容去重会误吞;
  * 3. 相邻 agent 消息合并(修复旧数据 delta 碎片);
  * 4. 保持 createdAt 升序。
  */
@@ -103,25 +114,67 @@ export function normalizeTimelineItems(items: TimelineItem[]): TimelineItem[] {
     })
   const seen = new Map<string, number>()
   const deduped = sorted.flatMap(({ item }) => {
-    const key = duplicateKey(item)
-    const time = Date.parse(item.createdAt)
-    const previousTime = seen.get(key)
-    if (previousTime !== undefined && Math.abs(time - previousTime) < 5_000) return []
-    seen.set(key, time)
+    const spanMarked = Boolean((item.payload as { spanId?: unknown } | undefined)?.spanId)
+    if (!spanMarked) {
+      const key = duplicateKey(item)
+      const time = Date.parse(item.createdAt)
+      const previousTime = seen.get(key)
+      if (previousTime !== undefined && Math.abs(time - previousTime) < 5_000) return []
+      seen.set(key, time)
+    }
     return [item]
   })
   return mergeAdjacentAgentMessages(deduped)
 }
 
 /** TimelineItem 转 ParentedItem(interleaveTimeline 需要的形态)。子任务元信息走共享 subtaskMetaOf。 */
-function toParentedItem(item: TimelineItem) {
+type ParentedMeta = ParentedItem & { id: string }
+function toParentedItem(item: TimelineItem): ParentedMeta {
   const meta = subtaskMetaOf(item)
   return {
     id: item.id,
     parentTaskId: meta.parentTaskId,
     subtaskId: meta.subtaskId,
-    sdkSubtype: meta.sdkSubtype
+    sdkSubtype: meta.sdkSubtype,
+    stageId: meta.stageId
   }
+}
+
+/** 将 LLM input 格式化为可读的字符串。 */
+function formatJsonInput(value: unknown): string {
+  if (value === undefined || value === null) return ''
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+/**
+ * 模型 thinking 折叠块：thinking 是模型内部推理，不算主流程数据，
+ * 默认收起只保留「思考过程」摘要，用户可手动展开查看完整推理。
+ */
+function ThinkingBlock({ text }: { text: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <Collapsible
+      open={open}
+      onOpenChange={setOpen}
+      className="not-prose mt-1.5 w-full rounded-md border border-border/60 bg-muted/30 text-foreground"
+    >
+      <CollapsibleTrigger className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-xs text-muted-foreground">
+        <span className="inline-flex items-center gap-1.5 text-xs">
+          <BrainIcon size={12} className="text-muted-foreground" />
+          <span className="font-medium">思考过程</span>
+        </span>
+        <ChevronDownIcon size={12} className={cn('transition-transform', open ? 'rotate-180' : 'rotate-0')} />
+      </CollapsibleTrigger>
+      <CollapsibleContent className="border-t border-border/40 px-4 py-3 text-foreground/80">
+        <pre className="m-0 font-sans text-xs leading-6 break-words whitespace-pre-wrap">{text}</pre>
+      </CollapsibleContent>
+    </Collapsible>
+  )
 }
 
 function TimelineEntryBody({ item }: { item: TimelineItem }) {
@@ -133,6 +186,10 @@ function TimelineEntryBody({ item }: { item: TimelineItem }) {
         | undefined)
     : undefined
   const reviewComments = payload?.comments?.filter((comment) => comment.message || comment.path) ?? []
+  // 模型 thinking：不算主流程数据，折叠标注展示（trace-service 已拆到 payload.thinking）。
+  const thinking = (item.payload as { thinking?: string } | undefined)?.thinking
+  // LLM prompt：发往模型的完整请求（trace-service 已透传到 payload.input）。
+  const llmInput = (item.payload as { input?: unknown } | undefined)?.input
   const severityBadge = (severity?: string) => {
     const level = String(severity ?? '').toLowerCase()
     return (
@@ -166,11 +223,26 @@ function TimelineEntryBody({ item }: { item: TimelineItem }) {
           <strong className="text-xs font-medium">{localizedEventTitle(item.title)}</strong>
           <time className="shrink-0 text-xs text-muted-foreground">{formatTime(item.createdAt)}</time>
         </div>
+        {llmInput !== undefined && (
+          <Collapsible className="mt-1.5 mb-2" defaultOpen={false}>
+            <CollapsibleTrigger className="flex w-full items-center gap-1.5 rounded-md bg-muted/30 px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted/50">
+              <Code2Icon size={12} />
+              模型输入
+              <ChevronDownIcon size={11} className="ui-open:rotate-180 ml-auto transition-transform" />
+            </CollapsibleTrigger>
+            <CollapsibleContent className="mt-1">
+              <pre className="thin-scrollbar max-h-48 overflow-auto rounded-md border bg-background p-2 font-mono text-[10px] leading-relaxed break-all whitespace-pre-wrap">
+                {formatJsonInput(llmInput)}
+              </pre>
+            </CollapsibleContent>
+          </Collapsible>
+        )}
         {item.detail && (
           <pre className="thin-scrollbar mt-1.5 overflow-x-auto rounded-md border bg-background p-2 font-mono text-xs leading-4 whitespace-pre-wrap text-muted-foreground">
             {item.detail}
           </pre>
         )}
+        {thinking && <ThinkingBlock text={thinking} />}
         {reviewComments.length > 0 && (
           <div className="mt-1.5 space-y-1">
             {reviewComments.map((comment, index) => (
@@ -256,8 +328,8 @@ export function Timeline({ items, live }: { items: TimelineItem[]; live?: boolea
     const visible = normalized.filter((item) => !isHiddenTimelineEvent((item as { title?: string }).title))
     const indexed = visible.map((item) => ({ item, meta: toParentedItem(item) }))
     const interleaved = interleaveTimeline(indexed.map((x) => x.meta))
-    // 把 ParentedItem 反查回原始 TimelineItem
-    return interleaved.map((block) => {
+    // 把 ParentedItem 反查回原始 TimelineItem（nested 递归处理）
+    const resolveBlock = (block: TimelineBlock<ParentedMeta>): TimelineBlock<TimelineItem> => {
       if (block.kind === 'main') {
         const found = indexed.find((x) => x.meta.id === block.item.id)
         return { kind: 'main' as const, item: found!.item }
@@ -266,40 +338,50 @@ export function Timeline({ items, live }: { items: TimelineItem[]; live?: boolea
         kind: 'group' as const,
         taskId: block.taskId,
         header: block.header ? indexed.find((x) => x.meta.id === block.header!.id)!.item : undefined,
-        children: block.children.map((c) => indexed.find((x) => x.meta.id === c.id)!.item)
+        children: block.children.map((c) => indexed.find((x) => x.meta.id === c.id)!.item),
+        nested: block.nested.map(resolveBlock)
       }
-    })
+    }
+    return interleaved.map(resolveBlock)
   }, [normalized])
 
   // 主流程里发起子任务的工具调用(task_started.tool_use_id → taskId)。
+  // 递归遍历所有 group(含 nested 阶段卡内的子 Agent 卡),确保嵌套组的委派调用也被吸收。
   // 这些调用不再单独渲染成行 —— 子任务折叠卡就是它们的呈现(跟 Qoder 一致)。
   const spawnerTaskByCallId = useMemo(() => {
     const map = new Map<string, string>()
-    for (const block of blocks) {
-      if (block.kind !== 'group') continue
-      const toolUseId = block.header ? subtaskMetaOf(block.header).toolUseId : undefined
-      if (toolUseId) map.set(toolUseId, block.taskId)
+    const walk = (blocks: TimelineBlock<TimelineItem>[]): void => {
+      for (const block of blocks) {
+        if (block.kind !== 'group') continue
+        const toolUseId = block.header ? subtaskMetaOf(block.header).toolUseId : undefined
+        if (toolUseId) map.set(toolUseId, block.taskId)
+        walk(block.nested)
+      }
     }
+    walk(blocks)
     return map
   }, [blocks])
 
-  // 主流程工具事件配对(仅 main 块;子任务内的在 renderSubTaskChildren 里单独配)。
-  const mainToolPairs = useMemo(() => {
-    const mains = blocks.flatMap((block) => (block.kind === 'main' ? [block.item] : []))
-    return pairToolItems(mains)
+  // 全部工具事件配对(main + 所有 group children,含 nested 递归)。
+  // 被吸收调用的委派工具在「父块」里(主流程或阶段卡 children),result 要能反查到,
+  // 因此不能只配 main —— 阶段卡内的委派调用(result 在阶段卡 children)同样需要吸收。
+  const allToolPairs = useMemo(() => {
+    const collect = (blocks: TimelineBlock<TimelineItem>[]): TimelineItem[] =>
+      blocks.flatMap((block) => (block.kind === 'main' ? [block.item] : [...block.children, ...collect(block.nested)]))
+    return pairToolItems(collect(blocks))
   }, [blocks])
 
   // 被吸收调用的结果输出(taskId → output),作为卡片底部「输出」段。
   const absorbedOutputByTaskId = useMemo(() => {
     const map = new Map<string, { output?: unknown; isError?: boolean }>()
     for (const [callId, taskId] of spawnerTaskByCallId) {
-      const pair = mainToolPairs.get(callId)
+      const pair = allToolPairs.get(callId)
       if (!pair?.result) continue
       const payload = pair.result.payload as { output?: unknown; isError?: boolean } | undefined
       map.set(taskId, { output: payload?.output ?? pair.result.detail, isError: payload?.isError === true })
     }
     return map
-  }, [spawnerTaskByCallId, mainToolPairs])
+  }, [spawnerTaskByCallId, allToolPairs])
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
@@ -312,7 +394,7 @@ export function Timeline({ items, live }: { items: TimelineItem[]; live?: boolea
       const callId = typeof payload?.toolUseId === 'string' ? payload.toolUseId : undefined
       if (callId) {
         if (spawnerTaskByCallId.has(callId)) return null // 吸收进子任务卡
-        const pair = mainToolPairs.get(callId)
+        const pair = allToolPairs.get(callId)
         const anchor = pair ? (pair.use ?? pair.result) : undefined
         if (anchor && anchor.id !== item.id) return null // 只在锚点位置渲染一次
         if (pair) return toolRowFromPair(pair, live)
@@ -330,6 +412,101 @@ export function Timeline({ items, live }: { items: TimelineItem[]; live?: boolea
     return <TimelineEntryBody item={item} />
   }
 
+  /**
+   * 子任务/阶段卡渲染(递归)。nested 组挂进卡内容区,形成
+   * 「Agent planning 阶段卡 → Explore 子 Agent 卡 → 工具行」的树形层级,
+   * 不再与阶段卡平级(此前 nested 只在数据层生成、渲染层被丢弃)。
+   *
+   * - 顶层卡(阶段卡/顶层子任务卡)不缩进:此前统一 ml-7 border-l-2 让顶层阶段卡视觉上
+   *   像嵌套在上一条 LLM 调用之下;仅 nested 嵌套子 Agent 卡保留缩进表达层级。
+   * - children 与 nested 子卡按 createdAt 合并排序(此前固定先 children 后 nested,
+   *   早发生的子 Agent 卡被排到晚发生的 LLM 调用之后,时序错乱);nested 子卡的时间锚点
+   *   取「被吸收委派工具」在本卡 children 里的位置(工具行被吸收不渲染,子卡顶位),
+   *   关联不上时回退子卡 header 时间。
+   */
+  const renderGroup = (block: TimelineBlock<TimelineItem>, index: number, nestedCard = false): ReactNode => {
+    if (block.kind !== 'group') return null // TimelineBlock 是 main|group union，先收窄才能访问组属性
+    const headerMeta = block.header ? subtaskMetaOf(block.header) : undefined
+    const endItem = block.children.find((c) => subtaskMetaOf(c).sdkSubtype === 'task_notification')
+    const endMeta = endItem ? subtaskMetaOf(endItem) : undefined
+    const status = subtaskStatusOf(endItem ? { payload: endMeta } : block.header ? { payload: headerMeta } : undefined)
+    const aggregate = aggregateSubTaskProgress(progressSamplesOf(block.children))
+    const absorbed = absorbedOutputByTaskId.get(block.taskId)
+    // 发起调用吸收成功(task_started.tool_use_id 关联到父块工具事件)时,
+    // header 呈现为 Agent 调用样式(工具名 + 调用摘要,无 "Tools -" 前缀);
+    // 老数据关联不上发起调用时回退 SubTaskHeader(纯说明)。
+    const spawnerPair = headerMeta?.toolUseId ? allToolPairs.get(headerMeta.toolUseId) : undefined
+    const spawnerAnchor = spawnerPair ? (spawnerPair.use ?? spawnerPair.result) : undefined
+    const spawnerName = spawnerPair
+      ? ((spawnerPair.use?.payload as { toolName?: string } | undefined)?.toolName ??
+        (spawnerPair.result?.payload as { toolName?: string } | undefined)?.toolName ??
+        spawnerAnchor?.title ??
+        'Agent')
+      : undefined
+    const spawnerInput = spawnerPair?.use
+      ? ((spawnerPair.use.payload as { input?: unknown } | undefined)?.input ?? spawnerPair.use.detail)
+      : undefined
+    // 卡内容区:可见 children(工具行/消息) + nested 子卡,按时间合并排序。
+    const visibleChildren = block.children.filter((c) => {
+      const subtype = subtaskMetaOf(c).sdkSubtype
+      return subtype !== 'task_started' && subtype !== 'task_progress' && subtype !== 'task_notification'
+    })
+    const childPairs = pairToolItems(visibleChildren)
+    const merged: Array<{ time: number; node: ReactNode }> = visibleChildren.map((child) => ({
+      time: Date.parse(child.createdAt) || 0,
+      node: <Fragment key={child.id}>{renderSubTaskChild(child, live, spawnerTaskByCallId, childPairs)}</Fragment>
+    }))
+    block.nested.forEach((nested, nestedIndex) => {
+      if (nested.kind !== 'group') return // main 块无 header/taskId，先收窄（理论上 nested 只产 group）
+      const nestedHeaderMeta = nested.header ? subtaskMetaOf(nested.header) : undefined
+      const nestedSpawner = nestedHeaderMeta?.toolUseId
+        ? (childPairs.get(nestedHeaderMeta.toolUseId) ?? allToolPairs.get(nestedHeaderMeta.toolUseId))
+        : undefined
+      const anchorItem = nestedSpawner?.use ?? nestedSpawner?.result ?? nested.header
+      merged.push({
+        time: (anchorItem ? Date.parse(anchorItem.createdAt) : 0) || 0,
+        node: (
+          <Fragment key={`nested-${nested.taskId}-${nestedIndex}`}>{renderGroup(nested, nestedIndex, true)}</Fragment>
+        )
+      })
+    })
+    merged.sort((a, b) => a.time - b.time)
+    return (
+      <div
+        key={`g-${block.taskId}-${index}`}
+        className={cn('mb-4', nestedCard && 'ml-7 border-l-2 border-border/40 pl-3')}
+      >
+        <SubTaskGroup
+          taskId={block.taskId}
+          createdAt={block.header?.createdAt}
+          className="mb-0"
+          header={
+            spawnerName ? (
+              <SubTaskAgentHeader
+                name={spawnerName}
+                summary={toolInputSummary(spawnerInput)}
+                taskType={headerMeta?.taskType}
+                subagentType={headerMeta?.subagentType}
+                status={status}
+              />
+            ) : (
+              <SubTaskHeader
+                description={headerMeta?.description ?? block.header?.detail}
+                taskType={headerMeta?.taskType}
+                subagentType={headerMeta?.subagentType}
+                status={status}
+              />
+            )
+          }
+        >
+          <SubTaskProgressSummary aggregate={aggregate} running={status === 'running'} />
+          {merged.map((entry) => entry.node)}
+          <SubTaskResultBlock output={absorbed?.output} isError={absorbed?.isError} />
+        </SubTaskGroup>
+      </div>
+    )
+  }
+
   return (
     <div className="px-5 py-4 pb-16">
       {normalized.length === 0 && (
@@ -342,36 +519,7 @@ export function Timeline({ items, live }: { items: TimelineItem[]; live?: boolea
         if (block.kind === 'main') {
           return <Fragment key={`m-${block.item.id}-${index}`}>{renderMainItem(block.item)}</Fragment>
         }
-        // group:header 用 task_started 的元信息(description + task_type + subagent_type 徽章);
-        // task_progress 聚合成统计行,task_notification 只驱动 header 状态徽章(内容不重复展示),
-        // 子条目只剩工具行 + 文本块 —— 跟 Qoder 子任务展示一致。
-        const headerMeta = block.header ? subtaskMetaOf(block.header) : undefined
-        const endItem = block.children.find((c) => subtaskMetaOf(c).sdkSubtype === 'task_notification')
-        const endMeta = endItem ? subtaskMetaOf(endItem) : undefined
-        const status = subtaskStatusOf(
-          endItem ? { payload: endMeta } : block.header ? { payload: headerMeta } : undefined
-        )
-        const aggregate = aggregateSubTaskProgress(progressSamplesOf(block.children))
-        const absorbed = absorbedOutputByTaskId.get(block.taskId)
-        return (
-          <SubTaskGroup
-            key={`g-${block.taskId}-${index}`}
-            taskId={block.taskId}
-            createdAt={block.header?.createdAt}
-            header={
-              <SubTaskHeader
-                description={headerMeta?.description ?? block.header?.detail}
-                taskType={headerMeta?.taskType}
-                subagentType={headerMeta?.subagentType}
-                status={status}
-              />
-            }
-          >
-            <SubTaskProgressSummary aggregate={aggregate} running={status === 'running'} />
-            {renderSubTaskChildren(block.children, live)}
-            <SubTaskResultBlock output={absorbed?.output} isError={absorbed?.isError} />
-          </SubTaskGroup>
-        )
+        return renderGroup(block, index)
       })}
       <div ref={endRef} />
     </div>
@@ -394,39 +542,37 @@ function progressSamplesOf(children: TimelineItem[]): SubTaskProgressSample[] {
 }
 
 /**
- * 把子任务 group 的 children 按类别路由:
- * - task_started / task_progress / task_notification 不直接渲染(分别已折进 header / 统计行 / 收尾块);
- * - tool 事件按 toolUseId 配对成 ToolCallRow;
+ * 单个子条目渲染(renderGroup 的合并排序单元):
+ * - task_started / task_progress / task_notification 由调用方过滤(分别已折进 header / 统计行 / 收尾块);
+ * - tool 事件按 toolUseId 配对成 ToolCallRow;发起子任务的委派调用(spawnerByCallId 命中)
+ *   不再渲染 —— 嵌套的子 Agent 卡就是它的呈现,避免「委派调用行 + 子卡」重复;
+ * - 配对后的工具行锚定在 use(否则 result)出现的位置;
  * - 其它(message / status 等)走 TimelineEntryBody。
- *
- * 顺序:保持 children 原序(接收时间序),配对后的工具行锚定在 use(否则 result)出现的位置。
  */
-function renderSubTaskChildren(children: TimelineItem[], live?: boolean): ReactNode {
-  const visible = children.filter((c) => {
-    const subtype = subtaskMetaOf(c).sdkSubtype
-    return subtype !== 'task_started' && subtype !== 'task_progress' && subtype !== 'task_notification'
-  })
-  const pairByCallId = pairToolItems(visible)
-  return visible.map((child) => {
-    if (child.kind === 'tool') {
-      const payload = child.payload as { toolUseId?: string } | undefined
-      const callId = typeof payload?.toolUseId === 'string' ? payload.toolUseId : undefined
-      const pair = callId ? pairByCallId.get(callId) : undefined
-      if (pair) {
-        const anchor = pair.use ?? pair.result
-        if (anchor && anchor.id !== child.id) return null
-        return <Fragment key={child.id}>{toolRowFromPair(pair, live)}</Fragment>
-      }
-      return (
-        <ToolCallRow
-          key={child.id}
-          name={child.title}
-          summary={toolInputSummary(child.detail)}
-          input={child.detail}
-          createdAt={child.createdAt}
-        />
-      )
+function renderSubTaskChild(
+  child: TimelineItem,
+  live: boolean | undefined,
+  spawnerByCallId: Map<string, string>,
+  pairByCallId: Map<string, ToolPair>
+): ReactNode {
+  if (child.kind === 'tool') {
+    const payload = child.payload as { toolUseId?: string } | undefined
+    const callId = typeof payload?.toolUseId === 'string' ? payload.toolUseId : undefined
+    if (callId && spawnerByCallId.has(callId)) return null // 吸收进嵌套子 Agent 卡
+    const pair = callId ? pairByCallId.get(callId) : undefined
+    if (pair) {
+      const anchor = pair.use ?? pair.result
+      if (anchor && anchor.id !== child.id) return null
+      return toolRowFromPair(pair, live)
     }
-    return <TimelineEntryBody key={child.id} item={child} />
-  })
+    return (
+      <ToolCallRow
+        name={child.title}
+        summary={toolInputSummary(child.detail)}
+        input={child.detail}
+        createdAt={child.createdAt}
+      />
+    )
+  }
+  return <TimelineEntryBody item={child} />
 }

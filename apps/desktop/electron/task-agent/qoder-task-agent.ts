@@ -18,10 +18,12 @@
 
 import { QoderCliProcessError, type Query, type SDKMessage } from '@qoder-ai/qoder-agent-sdk'
 import type { HookCallback, HookCallbackMatcher, HookEvent, HookJSONOutput } from '@qoder-ai/qoder-agent-sdk'
-import type { Task, TaskRepository, TaskStore } from '@task-pipeline/core'
+import type { Task, TaskRepository, TaskStore, AgentSpan } from '@task-pipeline/core'
 import { implementationOutcomeInstruction } from '../task-readiness.js'
 import { QoderSession, QoderSessionRegistry } from '../qoder/qoder-session.js'
 import type { DriverPart } from '../chat/chat-types.js'
+import type { TracePipeline } from '../trace/bus/trace-pipeline.js'
+import { QoderTraceBuilder } from '../trace/instrument/qoder-trace-builder.js'
 import type {
   TaskAgentDriver,
   TaskAgentDeps,
@@ -77,6 +79,8 @@ export type QoderTaskAgentDeps = TaskAgentDeps & {
    * 存在时优先使用，回退现有 resolveAgentContext。
    */
   resolveTestContext?: (task: Task, repos: TaskRepository[]) => Promise<{ sections: string[] }>
+  /** 埋点管线：任务路径 span 采集（可选）。一次任务执行 = 一个 Trace（traceId = task.id）。 */
+  tracePipeline?: TracePipeline
 }
 
 const TEST_CASE_GENERATION_PROMPT = [
@@ -159,14 +163,75 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
   private readonly buffers = new Map<string, PhaseBuffers>()
   /** 回合上下文按 taskId 隔离(onMessage 钩子读 recordText 用;不同任务可并发,不能用单字段)。 */
   private readonly turnCtxByTaskId = new Map<string, { recordText: boolean }>()
+  /** 已开启任务 trace 的 taskId（一次任务执行 = 一个 Trace，只 begin 一次）。 */
+  private readonly traceStarted = new Set<string>()
+  /** taskId → Qoder span 转换器。 */
+  private readonly traceBuilders = new Map<string, QoderTraceBuilder>()
+  /** taskId → 当前阶段 agent.run span。 */
+  private readonly traceAgentSpans = new Map<string, AgentSpan>()
+  /** (taskId, phase) → 已执行次数：阶段 span meta.attempt（同 phase 第几次执行，恢复/续接展示用）。 */
+  private readonly phaseAttempts = new Map<string, number>()
 
   constructor(private readonly deps: QoderTaskAgentDeps) {
     if (!deps) throw new Error('QoderTaskAgentDriver requires deps')
     if (!deps.qoderTokenProvider) throw new Error('QoderTaskAgentDriver requires qoderTokenProvider')
   }
 
+  /** 任务 trace 惰性开启：begin + task.run 根 span（仅首次）；恢复/续接时复用历史根。 */
+  private ensureTaskTrace(task: Task): void {
+    const pipeline = this.deps.tracePipeline
+    if (!pipeline) return
+    if (!this.traceStarted.has(task.id)) {
+      this.traceStarted.add(task.id)
+      pipeline.beginTrace({
+        traceId: task.id,
+        kind: 'task',
+        title: task.title,
+        source: 'qoder',
+        ...(task.qoderModel ? { model: stripQoderModelPrefix(task.qoderModel) } : {})
+      })
+    }
+    // 根 span 恢复安全：任务终态后 driver 内存标记被清（finishTrace），恢复/续接
+    // （含应用重启后）再进 ensureTaskTrace 时，存储中已有历史 task.run 根——
+    // ensureRootSpan 复用历史根并挂回栈底，不再向同一 JSONL 追加第二个根（Bug A）。
+    pipeline.ensureRootSpan(task.id, {
+      type: 'task.run',
+      name: '任务执行',
+      meta: { source: 'qoder' }
+    })
+    if (!this.traceBuilders.has(task.id)) {
+      this.traceBuilders.set(
+        task.id,
+        new QoderTraceBuilder(pipeline, task.id, 'task', 'qoder', stripQoderModelPrefix(task.qoderModel))
+      )
+    }
+  }
+
+  /**
+   * keyword 阶段容器：包裹记忆/Agent 上下文解析段（含关键词提取 llm 调用）。
+   * 容器 = agent.run span + meta.phase='keyword'；解析期间 llm span 挂栈顶自然落入容器，
+   * 执行 Tab / Trace 页据此把「关键词提取并注入」渲染为独立顶层阶段卡，而非与 Plan 混排。
+   */
+  private async withKeywordStage<T>(taskId: string, fn: () => Promise<T>): Promise<T> {
+    const pipeline = this.deps.tracePipeline
+    if (!pipeline || !this.traceStarted.has(taskId)) return fn()
+    const span = pipeline.startSpan(taskId, {
+      type: 'agent.run',
+      name: '关键词提取并注入',
+      meta: { source: 'qoder', phase: 'keyword' }
+    })
+    try {
+      return await fn()
+    } finally {
+      pipeline.endSpan(taskId, span)
+    }
+  }
+
   async runPlan(input: RunPlanInput): Promise<void> {
-    const { task, repos, signal, feedback } = input
+    const { task, repos, signal, feedback, trigger } = input
+    // 任务 trace 提前 begin：在记忆/Agent 上下文检索之前就绪（幂等），
+    // 让 Trace 页在首个 SDK 消息到达前就能看到任务执行记录。
+    this.ensureTaskTrace(task)
     // 会话策略(无论是否 feedback 都统一):
     //  - 该任务已有有效会话 → 追加消息(保留此前全部对话上下文,绝不 init 重来);
     //  - 无会话但 task.qoderSessionId 存在(应用重启 / 会话被释放后) → resume 恢复后追加;
@@ -175,8 +240,12 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     const hasSession = Boolean(this.sessions.get(task.id))
 
     // 串行:先取记忆上下文再取 Agent 指引,保证 trace 中“检索记忆上下文”先于“注入 Agent 上下文”出现。
-    const memoryContext = await this.deps.resolveMemoryContext?.(task, repos)
-    const agentContext = await this.deps.resolveAgentContext?.(task, repos)
+    // keyword 阶段容器：这段解析（含关键词提取 llm 调用）归入独立阶段卡，与 Plan/Exec 顶层平铺。
+    const { memoryContext, agentContext } = await this.withKeywordStage(task.id, async () => {
+      const memory = await this.deps.resolveMemoryContext?.(task, repos)
+      const agent = await this.deps.resolveAgentContext?.(task, repos)
+      return { memoryContext: memory, agentContext: agent }
+    })
     const prompt = hasSession
       ? [
           feedback
@@ -207,13 +276,16 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
       signal,
       recordText: false,
       hardTimeoutMs: PLAN_TIMEOUT_MS,
+      ...(trigger ? { trigger } : {}),
       // 无活跃会话时尝试 resume(恢复历史会话后同样追加消息,不丢失上下文)。
       resume: hasSession ? undefined : task.qoderSessionId
     })
   }
 
   async runImplementation(input: RunImplementationInput): Promise<void> {
-    const { task, repos, signal, resumeSessionId, extraPrompt } = input
+    const { task, repos, signal, resumeSessionId, extraPrompt, trigger, round } = input
+    // 任务 trace 提前 begin（幂等）：实现阶段与计划阶段共享同一 Trace。
+    this.ensureTaskTrace(task)
 
     const hasSession = Boolean(this.sessions.get(task.id))
     let prompt: string
@@ -231,11 +303,11 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
       ].join('\n')
     } else {
       // 无会话(直接进入实现阶段,未经过 plan):全量上下文兜底。
-      const [agentContext, memoryContext] = await (async () => {
+      const [agentContext, memoryContext] = await this.withKeywordStage(task.id, async () => {
         const memory = await this.deps.resolveMemoryContext?.(task, repos)
         const agent = await this.deps.resolveAgentContext?.(task, repos)
-        return [agent, memory]
-      })()
+        return [agent, memory] as const
+      })
       prompt = [
         ...(agentContext?.sections ?? []),
         memoryContext ?? '',
@@ -257,18 +329,24 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
       prompt,
       signal,
       resume: resumeSessionId,
-      recordText: true
+      recordText: true,
+      ...(trigger ? { trigger } : {}),
+      ...(round !== undefined ? { round } : {})
     })
   }
 
   async runTestGeneration(input: RunTestGenerationInput): Promise<void> {
     const { task, repos, signal } = input
+    // 任务 trace 提前 begin（幂等）：测试阶段与实现阶段共享同一 Trace。
+    this.ensureTaskTrace(task)
 
     const hasSession = Boolean(this.sessions.get(task.id))
     let prompt: string
     if (hasSession) {
       // 三阶段共享会话:实现上下文已在会话里,只发测试阶段指令。
-      prompt = ['现在进入 Test 阶段。为 Implementation 阶段修改的代码生成测试。', TEST_CASE_GENERATION_PROMPT].join('\n\n')
+      prompt = ['现在进入 Test 阶段。为 Implementation 阶段修改的代码生成测试。', TEST_CASE_GENERATION_PROMPT].join(
+        '\n\n'
+      )
     } else {
       // 无会话兜底:全量上下文。
       const agentContext = this.deps.resolveTestContext
@@ -304,6 +382,24 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     // 释放该任务累积的阶段产物,避免 Map 无限增长。
     for (const key of this.buffers.keys()) {
       if (key.startsWith(`${taskId}:`)) this.buffers.delete(key)
+    }
+  }
+
+  /** 任务终态收尾 trace 采集：关闭 builder 未收尾的 llm/工具/子任务 span，并清理 taskId 相关状态。 */
+  finishTrace(taskId: string): void {
+    const builder = this.traceBuilders.get(taskId)
+    if (builder) {
+      try {
+        builder.finish()
+      } catch {
+        /* trace 收尾失败不影响任务 */
+      }
+      this.traceBuilders.delete(taskId)
+    }
+    this.traceStarted.delete(taskId)
+    this.traceAgentSpans.delete(taskId)
+    for (const key of this.phaseAttempts.keys()) {
+      if (key.startsWith(`${taskId}:`)) this.phaseAttempts.delete(key)
     }
   }
 
@@ -364,6 +460,12 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
             emitPi: this.deps.emitPi
           })
         }
+        // 任务 trace：SDKMessage 逐条喂给 span 转换器。
+        try {
+          this.traceBuilders.get(task.id)?.onMessage(message as never)
+        } catch {
+          /* 忽略:trace 采集失败不能影响任务 */
+        }
       },
       onQueryStarted: (query, abort) => this.deps.onQueryStarted?.(query, abort),
       onQueryFinished: (query) => this.deps.onQueryFinished?.(query)
@@ -381,8 +483,12 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     resume?: string
     recordText: boolean
     hardTimeoutMs?: number
+    /** 恢复/续接标记：'resume'（失败后继续/暂停恢复）| 'followup'（续接对话追加指令）。 */
+    trigger?: 'resume' | 'followup'
+    /** auto-fix 重跑轮次（reviewFixCount）：渲染层区分 Exec / ReExec #n。 */
+    round?: number
   }): Promise<void> {
-    const { task, repos, phase, prompt, signal, resume, recordText, hardTimeoutMs } = options
+    const { task, repos, phase, prompt, signal, resume, recordText, hardTimeoutMs, trigger, round } = options
     const buffers = this.ensureBuffers(task.id, phase)
     const session = this.ensureSession(task, repos, resume)
 
@@ -392,6 +498,27 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
 
     this.turnCtxByTaskId.set(task.id, { recordText })
     this.emit({ type: 'agent_start', phase })
+    // 任务 trace：惰性开启（一次任务 = 一个 Trace）+ 阶段 agent.run span。
+    // 阶段实例按时间追加：首跑与恢复/续接/auto-fix 重跑各自产生一个阶段 span（同 phase 多实例），
+    // meta.attempt 标记同 phase 第几次执行，trigger/round 供展示层显示「执行（续接）」「ReExec #n」。
+    if (this.deps.tracePipeline) {
+      this.ensureTaskTrace(task)
+      const attemptKey = `${task.id}:${phase}`
+      const attempt = (this.phaseAttempts.get(attemptKey) ?? 0) + 1
+      this.phaseAttempts.set(attemptKey, attempt)
+      const agentSpan = this.deps.tracePipeline.startSpan(task.id, {
+        type: 'agent.run',
+        name: `Agent ${phase}`,
+        meta: {
+          source: 'qoder',
+          phase,
+          attempt,
+          ...(trigger ? { trigger } : {}),
+          ...(round !== undefined ? { round } : {})
+        }
+      })
+      this.traceAgentSpans.set(task.id, agentSpan)
+    }
 
     // 回合级中止信号:父级(任务取消/暂停)abort + 硬超时(plan 超时强制中止)。
     const internalAbort = new AbortController()
@@ -420,6 +547,9 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
           this.emit({ type: 'agent_text', phase, text: textBuffer.join('') })
           textBuffer = []
         }
+        // 本阶段发送给模型的完整 prompt：作该阶段首个 llm span 的 input
+        // （SDK 不回显 user 文本消息，任务各阶段的 Prompt 此前在 span 详情里看不到）。
+        this.traceBuilders.get(task.id)?.setTurnInput(prompt)
         for await (const chunk of session.turn({ text: prompt, signal: internalAbort.signal })) {
           if (chunk.type === 'part') {
             const text = partTextOf(chunk.part)
@@ -459,6 +589,14 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     } finally {
       signal?.removeEventListener('abort', onParentAbort)
       if (hardTimer) clearTimeout(hardTimer)
+      // 阶段 agent.run span 收尾。
+      if (this.deps.tracePipeline) {
+        const agentSpan = this.traceAgentSpans.get(task.id)
+        if (agentSpan) {
+          this.traceAgentSpans.delete(task.id)
+          this.deps.tracePipeline.endSpan(task.id, agentSpan)
+        }
+      }
       this.turnCtxByTaskId.delete(task.id)
       // 阶段结束统一收尾(成功与失败路径一致,保持旧行为):先落 sessionId 再收 agent_session / agent_end。
       buffers.sessionId = session.getSessionId()

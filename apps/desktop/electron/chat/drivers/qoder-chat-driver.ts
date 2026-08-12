@@ -21,16 +21,14 @@ import type { z } from 'zod'
 import {
   createSdkMcpServer,
   tool as qoderTool,
+  type McpServerConfig,
   type SdkMcpToolDefinition
 } from '@qoder-ai/qoder-agent-sdk'
-import type {
-  ChatModelInfo,
-  ChatStreamChunk,
-  DriverPart,
-  StoredMessage,
-  StoredMessageRecord
-} from '../chat-types.js'
+import type { ChatModelInfo, ChatStreamChunk, DriverPart, StoredMessage, StoredMessageRecord } from '../chat-types.js'
 import { QoderSession, QoderSessionRegistry } from '../../qoder/qoder-session.js'
+import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
+import { QoderTraceBuilder } from '../../trace/instrument/qoder-trace-builder.js'
+import type { McpServiceProfileResolver } from '../mcp-services.js'
 import type { ChatDriver, StreamChatInput } from './chat-driver.js'
 import type { ToolSource } from './tool-source.js'
 
@@ -134,11 +132,19 @@ export class QoderChatDriver implements ChatDriver {
 
   private readonly sessions = new QoderSessionRegistry()
 
+  /** conversationId → 对话 trace builder（一次用户提问 = 一个 trace）。 */
+  private readonly traceBuilders = new Map<string, QoderTraceBuilder>()
+
+  /** conversationId → 常驻会话创建时的 MCP 选择指纹（选择变化时重建会话使注入生效）。 */
+  private readonly sessionMcpKeys = new Map<string, string>()
+
   constructor(
     private readonly tokenProvider: QoderTokenProvider,
     private readonly statusProvider: QoderStatusProvider,
-    /** B2：逐条 SDKMessage 回调（chat trace 落盘用），透传给常驻会话。 */
-    private readonly onSdkMessage?: (conversationId: string, message: unknown) => void
+    /** 埋点管线：对话路径 span 采集（可选，缺省不采集）。 */
+    private readonly tracePipeline?: TracePipeline,
+    /** 用户勾选的 MCP 服务 → stdio 配置（缺省 = 不注入外部 MCP）。 */
+    private readonly mcpProfileResolver?: McpServiceProfileResolver
   ) {
     if (!tokenProvider) throw new Error('QoderChatDriver requires a token provider')
     if (!statusProvider) throw new Error('QoderChatDriver requires a status provider')
@@ -198,15 +204,58 @@ export class QoderChatDriver implements ChatDriver {
     const token = this.tokenProvider()
     if (!token) throw new Error('请先在设置中配置 Qoder Token')
 
+    // 对话 trace：一次用户提问 = 一个 Trace。主对话由 ChatService 传 traceId（join），
+    // 辅助 LLM 调用也 join 同一回合；无 traceId 时自建独立 trace。
+    const traceId = input.traceId ?? `chat-${input.conversationId}-${input.userInput.id}`
+    const join = Boolean(input.traceId)
+
     // 常驻会话:已存在则复用(多轮上下文由会话提供);不存在则创建 ——
     // 历史末尾有 qoder.session 时自动 resume(底层能力,应用重启后上下文不丢)。
-    const existing = this.sessions.get(input.conversationId)
-    const session =
-      existing ??
-      this.sessions.register(
+    // mcpServers 在会话创建时固化:本轮 MCP 选择与会话创建时不一致则关闭重建
+    // (上下文经 resume 恢复),保证勾选变化真正生效。
+    const mcpKey = [...(input.mcpServices ?? [])].sort().join(',')
+    let session = this.sessions.get(input.conversationId)
+    if (session && this.sessionMcpKeys.get(input.conversationId) !== mcpKey) {
+      this.closeSession(input.conversationId)
+      session = undefined
+    }
+    if (!session) {
+      session = this.sessions.register(
         input.conversationId,
-        new QoderSession(input.conversationId, this.buildSessionOptions(input, token))
+        new QoderSession(input.conversationId, this.buildSessionOptions(input, token, traceId))
       )
+      this.sessionMcpKeys.set(input.conversationId, mcpKey)
+    }
+
+    const model = input.model.startsWith('qoder:') ? input.model.slice(6) : input.model
+    if (this.tracePipeline) {
+      if (join) {
+        this.tracePipeline.ensureActive({
+          traceId,
+          kind: 'chat',
+          title: input.userInput.text.slice(0, 80),
+          source: 'qoder',
+          agentName: 'Qoder',
+          model
+        })
+      } else {
+        this.tracePipeline.beginTrace({
+          traceId,
+          kind: 'chat',
+          title: input.userInput.text.slice(0, 80),
+          source: 'qoder',
+          agentName: 'Qoder',
+          model
+        })
+        this.tracePipeline.startSpan(traceId, { type: 'session.start', name: '对话', meta: { source: 'qoder' } })
+      }
+      // 辅助调用（关键词提取/记忆整理）传入 traceLabel 作 llm span 语义名。
+      const builder = new QoderTraceBuilder(this.tracePipeline, traceId, 'chat', 'qoder', model, input.traceLabel)
+      // 本回合发送给模型的用户输入：作首个 llm span 的 input（SDK 不一定回显 user 文本消息，
+      // 尤其一次性辅助会话——关键词提取/记忆整理的 span 此前因此看不到 Prompt）。
+      builder.setTurnInput(input.userInput.text)
+      this.traceBuilders.set(traceId, builder)
+    }
 
     // 一个回合:消息入队 → 实时转发输出 → result / error / abort 收尾。
     try {
@@ -220,7 +269,17 @@ export class QoderChatDriver implements ChatDriver {
     } catch (error) {
       // 回合失败说明会话状态可能已损坏(消费循环已结束),关闭它,下次自动重建全新会话。
       this.closeSession(input.conversationId)
+      this.traceBuilders
+        .get(traceId)
+        ?.finish({ status: 'error', error: { message: error instanceof Error ? error.message : String(error) } })
       throw error
+    } finally {
+      if (this.tracePipeline) {
+        this.traceBuilders.get(traceId)?.finish()
+        this.traceBuilders.delete(traceId)
+        // join 模式：trace 生命周期由回合层（ChatService）统一 endTrace。
+        if (!join) this.tracePipeline.endTrace(traceId)
+      }
     }
     if (!input.signal.aborted) {
       yield { type: 'done', status: 'done' }
@@ -228,6 +287,7 @@ export class QoderChatDriver implements ChatDriver {
   }
 
   closeSession(conversationId: string): void {
+    this.sessionMcpKeys.delete(conversationId)
     void this.sessions.close(conversationId)
   }
 
@@ -235,10 +295,25 @@ export class QoderChatDriver implements ChatDriver {
     void this.sessions.dispose()
   }
 
-  private buildSessionOptions(input: StreamChatInput, token: string) {
+  private buildSessionOptions(input: StreamChatInput, token: string, traceId?: string) {
     const resumeSessionId = extractLastSessionId(input.history)
     const taskSource = input.toolSource
     const mcpSetup = taskSource ? buildTaskCreationMcp(taskSource) : undefined
+    // 用户勾选的外部 MCP 服务（gitlab/jira/confluence）→ SDK stdio mcpServers，
+    // 凭据缺失的服务由 resolver 返回 undefined 直接跳过（不误注入空配置）。
+    const mcpServers: Record<string, McpServerConfig> = {}
+    if (taskSource && mcpSetup) mcpServers.task_creation = mcpSetup.server
+    for (const serviceId of input.mcpServices ?? []) {
+      const profile = this.mcpProfileResolver?.(serviceId)
+      if (!profile || profile.transport !== 'stdio' || !profile.command) continue
+      mcpServers[serviceId] = {
+        type: 'stdio',
+        command: profile.command,
+        ...(profile.args?.length ? { args: profile.args } : {}),
+        ...(profile.env && Object.keys(profile.env).length ? { env: profile.env } : {})
+      }
+    }
+    const serverNames = Object.keys(mcpServers)
     return {
       token,
       cwd: input.cwd ?? process.cwd(),
@@ -246,25 +321,25 @@ export class QoderChatDriver implements ChatDriver {
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
       permissionMode: 'default' as const,
       controlRequestTimeoutMs: 15_000,
-      // B2：逐条 SDKMessage 透传（chat trace 落盘 / 未来复用），失败不影响主流程。
-      ...(this.onSdkMessage
-        ? {
-            onMessage: (message: unknown) => {
-              try {
-                this.onSdkMessage?.(input.conversationId, message)
-              } catch {
-                /* 忽略:trace 采集失败不能影响对话 */
-              }
-            }
-          }
-        : {}),
+      // 对话 trace：SDKMessage 逐条喂给 span 转换器（采集失败不影响主流程）。
+      onMessage: (message: unknown) => {
+        try {
+          if (traceId) this.traceBuilders.get(traceId)?.onMessage(message as never)
+        } catch {
+          /* 忽略:trace 采集失败不能影响对话 */
+        }
+      },
       ...(taskSource && mcpSetup
         ? {
             systemPrompt: taskSource.systemPrompt(),
-            mcpServers: { task_creation: mcpSetup.server },
-            allowedMcpServerNames: ['task_creation'],
             allowedTools: mcpSetup.toolNames,
             maxTurns: 10
+          }
+        : {}),
+      ...(serverNames.length
+        ? {
+            mcpServers,
+            allowedMcpServerNames: serverNames
           }
         : {})
     }

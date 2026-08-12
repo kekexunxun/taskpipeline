@@ -1,6 +1,7 @@
 import type {
   AgentEvent,
   AgentProfile,
+  AgentSpan,
   Approval,
   Memory,
   MemoryScope,
@@ -12,14 +13,17 @@ import type {
   TaskCard,
   TaskRepository,
   TaskStartMode,
-  TraceEntry,
-  TraceKind,
+  TraceDashboardStats,
   TraceSummary
 } from '@task-pipeline/core'
+
+import { pickSystemDefaultModel } from './utils/chat-models'
 
 export type ChangedFile = { repositoryId: string; repositoryName: string; path: string; status: string }
 export type TaskDetail = {
   task?: Task
+  /** 主进程 activeTaskOperations 判定的运行中标记（应用重启后前端据此恢复 running，避免误显示"继续生成计划"）。 */
+  running?: boolean
   repositories: TaskRepository[]
   events: AgentEvent[]
   /** Pi/OpenAI 独立表（openai_events）的事件，与 events 表分开存储、分开渲染。 */
@@ -253,12 +257,27 @@ export type ChatConversationMeta = {
   updatedAt: string
   model?: string
   driverId?: ChatDriverId
+  /** 对话级运行时模型参数（推理力度/思考模式等），随对话持久化。 */
+  modelParams?: ModelParams
+  /** 最近一轮选中的 MCP 服务列表（随对话落盘，切换对话后恢复并注入 driver）。 */
+  mcpService?: ('gitlab' | 'jira' | 'confluence')[]
+  /** 最近一轮选中的 Agent id（随对话落盘，切换对话后恢复选择态）。 */
+  agentId?: string
   messageCount: number
   /** 绑定的本地工作目录(项目对话);无值 = 普通对话。 */
   workingDirectory?: string
 }
 
 export type ChatConversation = ChatConversationMeta & { messages: StoredMessageRecord[] }
+
+/**
+ * 项目(工作目录)实体 — 与具体会话解耦。目录下所有会话被删除后项目仍保留,
+ * 列表显示「没有对话」,方便原地新建对话。
+ */
+export type ChatProject = {
+  directory: string
+  lastActiveAt: string
+}
 
 export type ChatModelInfo = {
   value: string
@@ -267,7 +286,27 @@ export type ChatModelInfo = {
   isReasoning?: boolean
   isVl?: boolean
   priceFactor?: number
+  /** 该模型支持的运行时可调参数；缺省 = 无可调参数。 */
+  capabilities?: ModelCapability[]
 }
+
+/**
+ * 模型可调参数能力声明（driver 自描述，schema 驱动）。
+ * 选择器按 capabilities 渲染运行时调节控件；不支持的能力不声明，避免无效 UI。
+ * - reasoningEffort: 推理力度档位（OpenAI reasoning / DeepSeek reasoningEffort）；
+ * - thinking: 思考模式开关（DeepSeek thinking.type enabled/disabled）；
+ * - maxOutputTokens: 最大输出 Token（上下文窗口控制）。
+ */
+export type ModelCapability =
+  | { key: 'reasoningEffort'; kind: 'enum'; options: string[] }
+  | { key: 'thinking'; kind: 'toggle' }
+  | { key: 'maxOutputTokens'; kind: 'number'; max?: number }
+
+/** 能力 key（OpenAI profile 能力多选项）。 */
+export type CapabilityKey = ModelCapability['key']
+
+/** 运行时模型参数（与 capabilities 的 key 对应；按对话持久化）。 */
+export type ModelParams = Record<string, unknown>
 
 export type ChatModelGroup = {
   driverId: ChatDriverId
@@ -275,14 +314,25 @@ export type ChatModelGroup = {
   models: ChatModelInfo[]
 }
 
+/** 系统默认模型解析结果（主进程 `chats:default-model` 返回形态）。 */
+export type SystemDefaultModel = { driverId: ChatDriverId; model: string }
+
 export type StartChatStreamInput = {
   streamId: string
   chatId: string
   driverId: ChatDriverId
   model: string
+  /** 运行时模型参数（选择器调节产出；ChatService 随对话落盘并透传给 driver）。 */
+  modelParams?: ModelParams
   /** 用户当前输入(未持久化),ChatService 会按 driverId 调 `driver.serializeUserMessage` 包成 record。 */
   message: { id: string; text: string; createdAt: string }
   mode?: ChatAgentMode
+  /** 选中的 MCP 服务列表（落盘 + 注入 driver 工具：Qoder 走 mcpServers，OpenAI 走 MCP 桥接工具）。 */
+  mcpService?: ('gitlab' | 'jira' | 'confluence')[]
+  /** 选中 Agent 的 id（落盘与 Trace 展示用；systemPrompt 单独注入）。 */
+  agentId?: string
+  /** 选中 Agent 的 systemPrompt，由 ChatService 注入为本轮 system 消息。 */
+  systemPrompt?: string
 }
 export type AbortChatStreamInput = { streamId: string; chatId: string }
 
@@ -399,6 +449,7 @@ export type AgentApi = {
   retryTaskValidation(taskId: string): Promise<void>
   sendTaskMessage(taskId: string, message: string): Promise<void>
   abortTask(): Promise<void>
+  cancelTask(taskId: string): Promise<void>
   runReview(taskId: string): Promise<void>
   resetReview(taskId: string): Promise<void>
   resetDelivery(taskId: string): Promise<void>
@@ -409,6 +460,8 @@ export type AgentApi = {
   syncJiraTasks(): Promise<JiraTaskCandidate[]>
   importJiraTasks(candidates: JiraTaskCandidate[]): Promise<Task[]>
   testAtlassian(kind: 'jira' | 'confluence'): Promise<{ ok: boolean; message: string }>
+  /** 测试 GitLab MCP 连接（复用 gitlabUrl/gitlabToken，端点 {url}/api/v4/mcp 握手）。 */
+  testGitlabMcp(): Promise<{ ok: boolean; message: string }>
   /** 触发一轮凭据探测，完成后返回最新全局状态快照。 */
   checkCredentials(): Promise<CredentialState[]>
   /** 拉取当前凭据全局状态快照。 */
@@ -443,18 +496,26 @@ export type AgentApi = {
   generateAgentContent(input: AgentGenerationInput): Promise<AgentGenerationResult>
   // chat
   listChats(): Promise<ChatConversationMeta[]>
+  /** 列出所有项目(工作目录),与具体会话解耦 —— 目录下会话删光后项目仍保留。 */
+  listChatProjects(): Promise<ChatProject[]>
   getChat(id: string): Promise<{ conversation: ChatConversation; messages: ChatMessage[] } | undefined>
   createChat(input?: { driverId?: ChatDriverId; model?: string; workingDirectory?: string }): Promise<ChatConversation>
   deleteChat(id: string): Promise<void>
   /** 绑定/解绑对话的工作目录(undefined = 解绑,回到普通对话)。 */
   setChatDirectory(id: string, workingDirectory?: string): Promise<ChatConversation | undefined>
   listChatModels(): Promise<ChatModelGroup[]>
+  /** 系统默认模型（Qoder 优先，否则 OpenAI）；无任何可用模型时 undefined。 */
+  getDefaultModel(): Promise<SystemDefaultModel | undefined>
   startChatStream(input: StartChatStreamInput): Promise<void>
   abortChat(input: AbortChatStreamInput): Promise<void>
   onChatStreamEvent(callback: (event: ChatStreamEvent) => void): () => void
-  // trace
+  // trace（v2：AgentSpan 管道）
   listTrace(): Promise<TraceSummary[]>
-  getTrace(kind: TraceKind, traceId: string): Promise<TraceEntry[]>
+  getTrace(kind: string, traceId: string): Promise<AgentSpan[]>
+  /** 仪表盘统计：今日请求数 / 平均耗时 / 总成本。 */
+  dashboardTrace(): Promise<TraceDashboardStats>
+  /** 删除一条 trace（本地文件移除，不可恢复）。 */
+  deleteTrace(kind: string, traceId: string): Promise<void>
 }
 
 declare global {
@@ -666,6 +727,8 @@ const demoTaskRepositories = new Map<string, TaskRepository[]>(
 // 浏览器回退（vite 不带 Electron 启动时使用）的 mock 实现：任务走 demo 数据，
 // Chat 走纯内存 store —— 仅供 UI 演示，不会写本地文件。
 const memoryChats = new Map<string, ChatConversation>()
+/** 项目实体(目录 → lastActiveAt):与会话解耦,删除会话后项目仍保留。 */
+const memoryProjects = new Map<string, string>()
 const memoryListeners = new Set<(event: ChatStreamEvent) => void>()
 const memoryStreamTimers = new Map<string, number>()
 const defaultModelGroups: ChatModelGroup[] = [
@@ -859,6 +922,7 @@ export const api: AgentApi = window.agentApi ?? {
   async retryTaskValidation() {},
   async sendTaskMessage() {},
   async abortTask() {},
+  async cancelTask() {},
   async runReview() {},
   async resetReview() {},
   async resetDelivery() {},
@@ -877,6 +941,9 @@ export const api: AgentApi = window.agentApi ?? {
     return []
   },
   async testAtlassian() {
+    return { ok: false, message: 'Electron is required' }
+  },
+  async testGitlabMcp() {
     return { ok: false, message: 'Electron is required' }
   },
   async checkCredentials() {
@@ -970,6 +1037,11 @@ export const api: AgentApi = window.agentApi ?? {
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     )
   },
+  async listChatProjects() {
+    return [...memoryProjects.entries()]
+      .map(([directory, lastActiveAt]) => ({ directory, lastActiveAt }))
+      .sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
+  },
   async getChat(id) {
     const conversation = memoryChats.get(id)
     if (!conversation) return undefined
@@ -982,14 +1054,15 @@ export const api: AgentApi = window.agentApi ?? {
   async createChat(input) {
     const existing = [...memoryChats.values()]
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-      .find((item) => item.messages.length === 0)
+      .find((item) => item.messages.length === 0 && item.workingDirectory === input?.workingDirectory)
     if (existing) return existing
     const id = makeId()
+    const createdAt = nowIso()
     const conv: ChatConversation = {
       id,
       title: '新对话',
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
+      createdAt,
+      updatedAt: createdAt,
       messageCount: 0,
       model: input?.model,
       driverId: input?.driverId,
@@ -997,9 +1070,11 @@ export const api: AgentApi = window.agentApi ?? {
       messages: []
     }
     memoryChats.set(id, conv)
+    if (conv.workingDirectory) memoryProjects.set(conv.workingDirectory, createdAt)
     return conv
   },
   async deleteChat(id) {
+    // 只删会话,项目(工作目录)保留 —— 与主进程 ChatStorage 行为一致。
     memoryChats.delete(id)
   },
   async setChatDirectory(id, workingDirectory) {
@@ -1007,10 +1082,14 @@ export const api: AgentApi = window.agentApi ?? {
     if (!conv) return undefined
     conv.workingDirectory = workingDirectory
     conv.updatedAt = nowIso()
+    if (workingDirectory) memoryProjects.set(workingDirectory, conv.updatedAt)
     return conv
   },
   async listChatModels() {
     return defaultModelGroups
+  },
+  async getDefaultModel() {
+    return pickSystemDefaultModel(defaultModelGroups)
   },
   async startChatStream({ streamId, chatId, driverId, model, message, mode }) {
     const conv = memoryChats.get(chatId)
@@ -1106,5 +1185,9 @@ export const api: AgentApi = window.agentApi ?? {
   },
   async getTrace() {
     return []
-  }
+  },
+  async dashboardTrace() {
+    return { todayCount: 0, weekCount: 0, errorCount: 0 }
+  },
+  async deleteTrace() {}
 }

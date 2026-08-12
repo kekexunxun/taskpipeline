@@ -7,11 +7,14 @@ import {
   PencilIcon,
   PlayIcon,
   RotateCcwIcon,
+  SquareIcon,
   SquareTerminalIcon
 } from 'lucide-react'
 import type { TaskCard, TaskRepository } from '@task-pipeline/core'
 import type { TaskDetail, ChangedFile } from '../../../api'
+import { ChatMcpSelector, type McpServiceId } from '../../ChatPage/components/ChatMcpSelector'
 import { useChatModels } from '../../../hooks/useChatModels'
+import { isModelAvailable, pickSystemDefaultModel } from '../../../utils/chat-models'
 import { inReviewStates } from '../../../utils/status'
 import { DetailHeader } from './DetailHeader'
 import { UsageSection } from './UsageSection'
@@ -27,6 +30,17 @@ import { EditPlanDialog } from './EditPlanDialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger
+} from '@/components/ui/alert-dialog'
 
 const detailTabClass =
   'relative h-full gap-1.5 rounded-none border-0 px-3 text-xs! after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0 data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:after:bg-foreground'
@@ -41,6 +55,9 @@ type Props = {
   starting: boolean
   merging: boolean
   focused: boolean
+  /** 任务详情 Composer 选中的 MCP 服务列表（会话内有效，不持久化）。 */
+  mcpService: McpServiceId[]
+  onMcpServiceChange(services: McpServiceId[]): void
   onFocusedChange(value: boolean): void
   onClose(): void
   onOpenVSCode(): void
@@ -57,6 +74,7 @@ type Props = {
   onResetDelivery(): void
   onRetryValidation(): void
   onApprovePlan(): void
+  onCancelTask(): void
   onRevisePlan(feedback: string): void
   onPlanEdited(): void
   onSubmitMR(): void
@@ -78,6 +96,8 @@ export function DetailPanel({
   starting,
   merging,
   focused,
+  mcpService,
+  onMcpServiceChange,
   onFocusedChange,
   onClose,
   onOpenVSCode,
@@ -94,6 +114,7 @@ export function DetailPanel({
   onResetDelivery,
   onRetryValidation,
   onApprovePlan,
+  onCancelTask,
   onRevisePlan,
   onPlanEdited,
   onSubmitMR,
@@ -110,6 +131,12 @@ export function DetailPanel({
   const [planFeedback, setPlanFeedback] = useState('')
   const [planEditOpen, setPlanEditOpen] = useState(false)
   const { modelGroups: allModelGroups } = useChatModels()
+  // 任务存储模型失效(profile 删除 / 模型下线)时展示系统默认,不动存储值(运行时由后端同样回落)。
+  const effectiveTaskModel = useMemo(() => {
+    const stored = task?.qoderModel
+    if (stored && isModelAvailable(allModelGroups, stored)) return stored
+    return pickSystemDefaultModel(allModelGroups)?.model ?? stored
+  }, [task?.qoderModel, allModelGroups])
   const groups = useMemo(() => {
     const byRepo = new Map<string, { repositoryId: string; repositoryName: string; files: ChangedFile[] }>()
     for (const file of detail?.changedFiles ?? []) {
@@ -190,7 +217,7 @@ export function DetailPanel({
       <UsageSection
         task={task}
         card={card}
-        model={task.qoderModel}
+        model={effectiveTaskModel}
         onChangeModel={onChangeModel}
         modelGroups={allModelGroups}
         running={running || starting}
@@ -306,6 +333,31 @@ export function DetailPanel({
                     <PlayIcon size={11} />
                     批准并开始
                   </Button>
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button type="button" size="sm" variant="destructive" className="gap-1 px-2" disabled={running}>
+                        <SquareIcon size={11} />
+                        结束任务
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>确认结束任务？</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          任务将被取消并关闭，已生成的计划与改动会保留在任务记录中。
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>取消</AlertDialogCancel>
+                        <AlertDialogAction
+                          className="text-destructive-foreground bg-destructive hover:bg-destructive/90"
+                          onClick={onCancelTask}
+                        >
+                          确认结束
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
                 </div>
               }
             />
@@ -339,6 +391,9 @@ export function DetailPanel({
                 task.state !== 'awaiting_input' &&
                 task.state !== 'draft' &&
                 !inReviewStates.has(task.state))
+            }
+            leftSlot={
+              <ChatMcpSelector selected={mcpService} onChange={onMcpServiceChange} disabled={running || sending} />
             }
           />
         </div>

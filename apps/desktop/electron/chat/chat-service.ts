@@ -5,6 +5,8 @@ import { ChatStorage } from './chat-storage.js'
 import type { ChatDriverRegistry } from './drivers/driver-registry.js'
 import { createProjectQueryToolSource } from './drivers/project-query-tools.js'
 import type { ToolSource } from './drivers/tool-source.js'
+import { isModelAvailable, pickSystemDefaultModel } from './system-default-model.js'
+import type { ChatDriver } from './drivers/chat-driver.js'
 import type {
   AbortChatStreamInput,
   ChatConversation,
@@ -15,6 +17,7 @@ import type {
   ChatDriverId,
   ChatUsage,
   DriverPart,
+  McpServiceId,
   StartChatStreamInput,
   StoredMessage,
   StoredMessageRecord
@@ -29,7 +32,37 @@ type ConversationConsolidator = (input: {
   signal: AbortSignal
   driverId: ChatDriverId
   model: string
+  /** 所属对话回合 traceId（记忆整理 LLM 调用 join 用）。 */
+  traceId?: string
 }) => Promise<void>
+
+/**
+ * 对话回合 trace 管理器（一次用户提问 = 一个 Trace）。
+ * 由主进程注入：回合 begin/end 控制 trace 生命周期，辅助 LLM 调用（关键词提取/记忆整理）
+ * 通过 traceIdForChat 拿到 traceId 后 join 同一回合。
+ */
+export type ChatTraceManager = {
+  beginTurn(
+    chatId: string,
+    messageId: string,
+    text: string,
+    driverId: ChatDriverId,
+    model: string,
+    /** 本回合选择态（MCP 服务 / Agent）：写入根 span meta，Trace 里可见。 */
+    extras?: { mcpServices?: McpServiceId[]; agentId?: string }
+  ): string | undefined
+  endTurn(chatId: string): void
+  traceIdForChat(chatId: string): string | undefined
+  /**
+   * 阶段容器（可选）：begin/end 成对调用，包裹期间产生的 span 自动挂入
+   * agent.run 阶段容器（keyword/chat/memory），Trace 页据此按阶段分组而非平铺。
+   */
+  beginStage?(chatId: string, phase: ChatStagePhase): void
+  endStage?(chatId: string, status?: 'completed' | 'error'): void
+}
+
+/** 对话回合的阶段划分：关键词提取并注入 / 对话生成 / 记忆整理。 */
+export type ChatStagePhase = 'keyword' | 'chat' | 'memory'
 
 /**
  * ChatService — 编排层。
@@ -53,13 +86,19 @@ export class ChatService {
     private readonly getMainWindow: () => BrowserWindow | undefined,
     private readonly resolveTaskBackend?: TaskBackendFactory,
     private readonly memoryContext?: MemoryContextProvider,
-    private readonly consolidateConversation?: ConversationConsolidator
+    private readonly consolidateConversation?: ConversationConsolidator,
+    private readonly traceManager?: ChatTraceManager
   ) {
     this.storage = new ChatStorage(dataDir)
   }
 
   listChats() {
     return this.storage.listMetas()
+  }
+
+  /** 列出所有项目(工作目录),与具体会话解耦 —— 目录下会话删光后项目仍保留。 */
+  listProjects() {
+    return this.storage.listProjects()
   }
 
   /**
@@ -87,6 +126,39 @@ export class ChatService {
       }
     }
     return groups
+  }
+
+  /**
+   * 系统默认模型:Qoder 可用优先,否则第一个有模型的分组;组内 isDefault 优先。
+   * 无任何可用模型时返回 undefined(前端禁用发送)。
+   */
+  async getDefaultModel(): Promise<{ driverId: ChatDriverId; model: string } | undefined> {
+    return pickSystemDefaultModel(await this.listModels())
+  }
+
+  /**
+   * 解析本轮实际使用的 driver + model(失效模型 fallback):
+   *  1. 请求的 driver 下 model 仍存在 → 原样使用;
+   *  2. model 失效但该 driver 还有模型 → 用该 driver 的默认模型;
+   *  3. driver 无模型 / 未注册 → 回落到系统默认模型(可能换 driver);
+   *  4. 全无可用模型 → 抛错提示配置。
+   */
+  private async resolveStreamTarget(input: StartChatStreamInput): Promise<{ driver: ChatDriver; model: string }> {
+    const groups = await this.listModels()
+    const group = groups.find((item) => item.driverId === input.driverId)
+    if (group && isModelAvailable(groups, input.model)) {
+      const driver = this.driverRegistry.tryGet(input.driverId)
+      if (driver) return { driver, model: input.model }
+    }
+    if (group?.models.length) {
+      const driver = this.driverRegistry.tryGet(input.driverId)
+      const fallback = group.models.find((model) => model.isDefault) ?? group.models[0]
+      if (driver && fallback) return { driver, model: fallback.value }
+    }
+    const systemDefault = pickSystemDefaultModel(groups)
+    const driver = systemDefault ? this.driverRegistry.tryGet(systemDefault.driverId) : undefined
+    if (!driver || !systemDefault) throw new Error('未配置可用模型，请在设置中添加 Qoder Token 或 OpenAI 配置')
+    return { driver, model: systemDefault.model }
   }
 
   createChat(driverId?: ChatDriverId, model?: string, workingDirectory?: string): ChatConversation {
@@ -139,11 +211,37 @@ export class ChatService {
     if (active?.streamId === input.streamId) active.abort.abort()
   }
 
+  /**
+   * 阶段容器包裹（与任务路径 agent.run 阶段同构）：fn 执行期间产生的 span 自动挂入
+   * keyword/chat/memory 阶段容器，Trace 页据此按阶段分组。trace 不活跃或管理器缺
+   * 阶段能力时直通执行；阶段内异常标记容器 error 后原样上抛（不吞错）。
+   */
+  private async withStage<T>(
+    traceActive: boolean,
+    chatId: string,
+    phase: ChatStagePhase,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    if (!traceActive || !this.traceManager?.beginStage || !this.traceManager.endStage) return fn()
+    this.traceManager.beginStage(chatId, phase)
+    try {
+      const result = await fn()
+      this.traceManager.endStage(chatId)
+      return result
+    } catch (error) {
+      this.traceManager.endStage(chatId, 'error')
+      throw error
+    }
+  }
+
   async startChatStream(input: StartChatStreamInput): Promise<void> {
     const conversation = this.storage.getConversation(input.chatId)
     if (!conversation) throw new Error('对话不存在')
-    const driver = this.driverRegistry.tryGet(input.driverId)
-    if (!driver) throw new Error(`未注册的 chat driver: ${input.driverId}`)
+    // 失效模型 fallback:存储/请求里的 model 可能已不存在(profile 删除 / Qoder 模型下线),
+    // 解析出本轮真正可用的 driver + model(可能换 driver);不做前置改写,仅本轮按实际使用值落盘。
+    const target = await this.resolveStreamTarget(input)
+    const driver = target.driver
+    const effective: StartChatStreamInput = { ...input, driverId: driver.id, model: target.model }
 
     const prior = this.activeStreams.get(input.chatId)
     if (prior) prior.abort.abort()
@@ -151,9 +249,35 @@ export class ChatService {
     this.activeStreams.set(input.chatId, { streamId: input.streamId, abort })
 
     const now = input.message.createdAt
+    // 对话回合 trace：一次用户提问 = 一个 Trace（主对话 + 关键词提取 + 记忆整理共用）。
+    // extras 带上 MCP / Agent 选择态，写入根 span meta（Trace 里可见本回合注入了什么）。
+    const turnTraceId = this.traceManager?.beginTurn(
+      effective.chatId,
+      effective.message.id,
+      effective.message.text,
+      effective.driverId,
+      effective.model,
+      {
+        ...(effective.mcpService?.length ? { mcpServices: effective.mcpService } : {}),
+        ...(effective.agentId ? { agentId: effective.agentId } : {})
+      }
+    )
     const userRecord = driver.serializeUserMessage({ id: input.message.id, text: input.message.text, createdAt: now })
     const existing = conversation.messages.filter((message) => message.id !== userRecord.id)
-    const messages: StoredMessageRecord[] = [...existing, userRecord]
+    // 选中 Agent 的 systemPrompt：以 system 消息插入本轮上下文（复用 memoryContext 的插入模式），
+    // 随 messages 一起落盘，保证注入内容进入模型上下文且历史加载后仍可见。
+    const agentSystemRecord = input.systemPrompt
+      ? ({
+          id: randomUUID(),
+          role: 'system',
+          createdAt: now,
+          driverId: effective.driverId,
+          raw: { kind: 'system', text: input.systemPrompt }
+        } as StoredMessageRecord)
+      : undefined
+    const messages: StoredMessageRecord[] = agentSystemRecord
+      ? [...existing, agentSystemRecord, userRecord]
+      : [...existing, userRecord]
     const assistantId = randomUUID()
     const parts: DriverPart[] = []
     let status: ChatMessageMetadata['status'] = 'done'
@@ -173,13 +297,21 @@ export class ChatService {
       const title = isFirstUserMessage ? titleOf(input.message.text) : conversation.title
       this.storage.replaceMessages(input.chatId, messages, {
         title,
-        model: input.model,
-        driverId: input.driverId,
+        model: effective.model,
+        driverId: effective.driverId,
+        // 运行时模型参数随对话落盘：切回对话时恢复，换模型时由前端清空后不再携带。
+        ...(effective.modelParams ? { modelParams: effective.modelParams } : {}),
+        // 选中的 MCP 服务 / Agent 随对话落盘：切换对话后前端恢复选择态，发送时注入 driver。
+        ...(effective.mcpService?.length ? { mcpService: effective.mcpService } : {}),
+        ...(effective.agentId ? { agentId: effective.agentId } : {}),
         updatedAt: now
       })
       userPersisted = true
 
-      const memoryContext = await this.memoryContext?.({ conversationId: input.chatId, query: input.message.text })
+      // keyword 阶段容器：关键词提取 + 记忆/Repowiki 检索（期间的 llm/tool span 挂入阶段）。
+      const memoryContext = await this.withStage(Boolean(turnTraceId), input.chatId, 'keyword', async () =>
+        this.memoryContext?.({ conversationId: input.chatId, query: input.message.text })
+      )
       const historyRecords = memoryContext
         ? [
             ...messages.slice(0, -1),
@@ -187,7 +319,7 @@ export class ChatService {
               id: randomUUID(),
               role: 'system',
               createdAt: now,
-              driverId: input.driverId,
+              driverId: effective.driverId,
               raw: { kind: 'system', text: memoryContext }
             } as StoredMessageRecord,
             userRecord
@@ -195,34 +327,40 @@ export class ChatService {
         : messages
       const history = historyRecords.map((record) => this.deserializeRecord(record))
 
-      this.dispatch(input, {
+      this.dispatch(effective, {
         type: 'start',
         messageId: assistantId,
-        messageMetadata: { createdAt: now, model: input.model, agentMode: input.mode ?? 'chat' }
+        messageMetadata: { createdAt: now, model: effective.model, agentMode: input.mode ?? 'chat' }
       })
 
-      for await (const chunk of driver.streamChat({
-        conversationId: input.chatId,
-        model: input.model,
-        history,
-        userInput: { id: input.message.id, text: input.message.text, createdAt: now },
-        signal: abort.signal,
-        cwd: conversation.workingDirectory,
-        ...(toolSource ? { toolSource } : {})
-      })) {
-        if (abort.signal.aborted) break
-        // 累积 parts
-        if (chunk.type === 'part') {
-          parts.push(chunk.part)
-          if (chunk.part.type === 'qoder.session') capturedSessionId = chunk.part.sessionId
-        } else if (chunk.type === 'task-created') {
-          // task-created 已随 dispatch 透传给前端，无需本地累积。
-        } else if (chunk.type === 'done') {
-          // driver 在流结束时带回用量（openai 路径），供 Trace 元信息展示与落盘。
-          if (chunk.usage) streamUsage = chunk.usage
+      // chat 阶段容器：主对话生成（driver 流式期间的 llm/tool/subtask span 挂入阶段）。
+      await this.withStage(Boolean(turnTraceId), input.chatId, 'chat', async () => {
+        for await (const chunk of driver.streamChat({
+          conversationId: input.chatId,
+          model: effective.model,
+          ...(effective.modelParams ? { modelParams: effective.modelParams } : {}),
+          history,
+          userInput: { id: input.message.id, text: input.message.text, createdAt: now },
+          signal: abort.signal,
+          cwd: conversation.workingDirectory,
+          ...(turnTraceId ? { traceId: turnTraceId } : {}),
+          ...(toolSource ? { toolSource } : {}),
+          ...(effective.mcpService?.length ? { mcpServices: effective.mcpService } : {})
+        })) {
+          if (abort.signal.aborted) break
+          // 累积 parts
+          if (chunk.type === 'part') {
+            parts.push(chunk.part)
+            if (chunk.part.type === 'qoder.session') capturedSessionId = chunk.part.sessionId
+          } else if (chunk.type === 'task-created') {
+            // task-created 已随 dispatch 透传给前端，无需本地累积。
+          } else if (chunk.type === 'done') {
+            // driver 在流结束时带回用量（openai 路径），供 Trace 元信息展示与落盘。
+            if (chunk.usage) streamUsage = chunk.usage
+          }
+          this.dispatch(effective, chunk)
         }
-        this.dispatch(input, chunk)
-      }
+      })
       if (abort.signal.aborted) status = 'aborted'
       if (status === 'done' && parts.length === 0) throw new Error('模型返回了空响应')
     } catch (reason) {
@@ -231,7 +369,7 @@ export class ChatService {
         status = 'error'
         const message = reason instanceof Error ? reason.message : String(reason)
         errorMessage = message
-        this.dispatch(input, { type: 'error', message })
+        this.dispatch(effective, { type: 'error', message })
       }
     } finally {
       // 用量/模型已在 done chunk 里随 dispatch 透传给前端，此处只负责落盘（见下方 serializeAssistantMessage）。
@@ -247,28 +385,50 @@ export class ChatService {
           // 错误详情不依赖 driver 的序列化实现(各 driver 挑字段返回,可能丢弃多余 input),
           // 统一在编排层合并进 record,保证历史消息重新加载后仍能展示接口异常。
           const assistantRecord = errorMessage ? { ...serialized, errorMessage } : serialized
-          this.storage.appendMessage(input.chatId, assistantRecord, { model: input.model, driverId: input.driverId })
+          this.storage.appendMessage(input.chatId, assistantRecord, {
+            model: effective.model,
+            driverId: effective.driverId
+          })
         }
       } catch (reason) {
         const message = reason instanceof Error ? reason.message : String(reason)
-        this.dispatch(input, { type: 'error', message: `保存聊天失败:${message}` })
+        this.dispatch(effective, { type: 'error', message: `保存聊天失败:${message}` })
       } finally {
         toolSource?.close()
         taskBackend?.close()
-        if (status === 'aborted') this.dispatch(input, { type: 'done', status: 'aborted' })
-        else this.dispatch(input, { type: 'done', status })
-        this.finish(input)
+        if (status === 'aborted') this.dispatch(effective, { type: 'done', status: 'aborted' })
+        else this.dispatch(effective, { type: 'done', status })
+        this.finish(effective)
         if (this.activeStreams.get(input.chatId)?.streamId === input.streamId) this.activeStreams.delete(input.chatId)
         if (status === 'done' && parts.length) {
           const conversation = this.storage.getConversation(input.chatId)
           if (conversation) {
-            void this.consolidateConversation?.({
-              conversation,
-              signal: abort.signal,
-              driverId: input.driverId,
-              model: input.model
-            }).catch((reason) => console.warn('[memory] chat consolidate failed:', reason))
+            // 记忆整理是回合的一部分：await 它完成后再 endTurn，确保整理 LLM 调用
+            // 挂在同一 trace 下；consolidate 异常也 endTurn（兜底关闭）。
+            // memory 阶段容器包裹整理过程（整理 LLM span 挂入阶段）。
+            void (async () => {
+              try {
+                await this.withStage(Boolean(turnTraceId), input.chatId, 'memory', async () => {
+                  await this.consolidateConversation?.({
+                    conversation,
+                    signal: abort.signal,
+                    driverId: effective.driverId,
+                    model: effective.model,
+                    traceId: turnTraceId
+                  })
+                })
+              } catch (reason) {
+                console.warn('[memory] chat consolidate failed:', reason)
+              } finally {
+                this.traceManager?.endTurn(input.chatId)
+              }
+            })()
+          } else {
+            this.traceManager?.endTurn(input.chatId)
           }
+        } else {
+          // 错误 / 中止：无记忆整理，直接收尾回合。
+          this.traceManager?.endTurn(input.chatId)
         }
       }
     }

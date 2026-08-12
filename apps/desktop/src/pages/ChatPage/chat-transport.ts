@@ -1,4 +1,4 @@
-import { api, type ChatStreamEvent } from '@/api'
+import { api, type ChatStreamEvent, type ModelParams } from '@/api'
 
 /**
  * 单次 chat 流的回调订阅。
@@ -23,8 +23,16 @@ export class ElectronChatTransport {
     chatId: string
     driverId: 'qoder' | 'openai'
     model: string
+    /** 运行时模型参数（选择器调节产出，透传给主进程 ChatService）。 */
+    modelParams?: ModelParams
     message: { id: string; text: string; createdAt: string }
     mode?: 'chat' | 'task-create'
+    /** 选中的 MCP 服务列表（透传给主进程 ChatService）。 */
+    mcpService?: ('gitlab' | 'jira' | 'confluence')[]
+    /** 选中 Agent 的 id（落盘与 Trace 展示用；systemPrompt 单独透传）。 */
+    agentId?: string
+    /** 选中 Agent 的 systemPrompt（透传给主进程 ChatService 注入本轮对话）。 */
+    systemPrompt?: string
     onEvent(event: ChatStreamEvent): void
     onError?(error: Error): void
   }): { abort(): void; closed: Promise<void> } {
@@ -66,8 +74,12 @@ export class ElectronChatTransport {
         chatId: input.chatId,
         driverId: input.driverId,
         model: input.model,
+        modelParams: input.modelParams,
         message: input.message,
-        mode: input.mode
+        mode: input.mode,
+        mcpService: input.mcpService,
+        agentId: input.agentId,
+        systemPrompt: input.systemPrompt
       })
       .catch((reason) => {
         if (closed) return

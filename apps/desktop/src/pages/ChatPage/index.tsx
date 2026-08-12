@@ -1,85 +1,88 @@
-import { useEffect } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { ChatHistoryList } from "./components/ChatHistoryList";
-import { ChatConversation } from "./components/ChatConversation";
-import { ChatComposer } from "./components/ChatComposer";
-import { ChatModelSelector } from "./components/ChatModelSelector";
-import { ChatDirectoryBadge } from "./components/ChatDirectoryBadge";
-import { TaskCreationTool } from "./components/TaskCreationTool";
-import { useChat } from "./hooks/useChat";
-import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { api } from "@/api";
-import { useFeedback } from "@/hooks/useGlobalFeedback";
+import { useEffect } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
+import { ChatHistoryList } from './components/ChatHistoryList'
+import { ChatConversation } from './components/ChatConversation'
+import { ChatComposer } from './components/ChatComposer'
+import { ChatModelSelector } from './components/ChatModelSelector'
+import { ChatMcpSelector } from './components/ChatMcpSelector'
+import { ChatAgentSelector } from './components/ChatAgentSelector'
+import { ChatDirectoryBadge } from './components/ChatDirectoryBadge'
+import { TaskCreationTool } from './components/TaskCreationTool'
+import { useChat } from './hooks/useChat'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { api } from '@/api'
+import { useFeedback } from '@/hooks/useGlobalFeedback'
 
 export default function ChatPage() {
   return (
     <ErrorBoundary scope="对话面板加载失败">
       <ChatPageInner />
     </ErrorBoundary>
-  );
+  )
 }
 
 function ChatPageInner() {
-  const { conversationId } = useParams();
-  const navigate = useNavigate();
-  const { showError } = useFeedback();
-  const chat = useChat();
+  const { conversationId } = useParams()
+  const navigate = useNavigate()
+  const { showError } = useFeedback()
+  const chat = useChat()
 
   // URL ↔ state 同步
   useEffect(() => {
     if (conversationId && conversationId !== chat.activeId) {
-      void chat.select(conversationId);
+      void chat.select(conversationId)
     } else if (!conversationId && chat.activeId) {
       // 离开 /chat/:id 时清理当前对话
-      void chat.select(undefined);
+      void chat.select(undefined)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversationId]);
+  }, [conversationId])
 
   const create = async () => {
     if (chat.activeId && chat.conversation?.messages.length === 0) {
-      document.querySelector<HTMLTextAreaElement>("[data-testid=chat-composer]")?.focus();
-      return;
+      document.querySelector<HTMLTextAreaElement>('[data-testid=chat-composer]')?.focus()
+      return
     }
-    const id = await chat.create();
-    if (id) navigate(`/chat/${id}`);
-  };
+    const id = await chat.create()
+    if (id) navigate(`/chat/${id}`)
+  }
 
   /**
    * 项目对话入口:选目录(或直接传入已有目录)→ 在该目录下新建会话。
    * Codex 式:一个目录可挂多个会话。
    */
   const createProject = async (directory?: string) => {
-    let dir = directory;
+    let dir = directory
     if (!dir) {
       try {
-        dir = await api.chooseDirectory();
+        dir = await api.chooseDirectory()
       } catch (reason) {
-        showError(reason instanceof Error ? reason.message : String(reason));
-        return;
+        showError(reason instanceof Error ? reason.message : String(reason))
+        return
       }
     }
-    if (!dir) return;
-    const id = await chat.create(dir);
-    if (id) navigate(`/chat/${id}`);
-  };
+    if (!dir) return
+    const id = await chat.create(dir)
+    if (id) navigate(`/chat/${id}`)
+  }
 
   const handleSend = async (value: string) => {
-    const wasEmpty = !chat.activeId;
-    const newId = await chat.send(value);
-    if (newId && wasEmpty) navigate(`/chat/${newId}`);
-  };
+    const wasEmpty = !chat.activeId
+    const newId = await chat.send(value)
+    if (newId && wasEmpty) navigate(`/chat/${newId}`)
+  }
 
-  const hasModel = chat.modelGroups.some((group) => group.models.length);
-  const isEmpty = !chat.activeId;
+  const hasModel = chat.modelGroups.some((group) => group.models.length)
+  const isEmpty = !chat.activeId
   const headerSubtitle = isEmpty
-    ? "输入消息即可自动创建新对话"
-    : `${chat.messages.length} 条消息 · ${hasModel ? `${chat.modelGroups.length} 个 Provider` : "未配置模型"}`;
+    ? '输入消息即可自动创建新对话'
+    : `${chat.messages.length} 条消息 · ${hasModel ? `${chat.modelGroups.length} 个 Provider` : '未配置模型'}`
 
   return (
     <div className="grid h-full min-h-0 min-w-0 grid-cols-[288px_minmax(0,1fr)] bg-background">
       <ChatHistoryList
         metas={chat.metas}
+        projects={chat.projects}
         activeId={chat.activeId}
         onSelect={(id) => navigate(`/chat/${id}`)}
         onCreate={() => void create()}
@@ -89,12 +92,8 @@ function ChatPageInner() {
       <section className="grid min-w-0 grid-rows-[52px_minmax(0,1fr)_auto] overflow-hidden">
         <header className="flex items-center justify-between gap-3 border-b px-5">
           <div className="min-w-0">
-            <h1 className="truncate text-sm font-semibold tracking-tight">
-              {chat.conversation?.title ?? "新建对话"}
-            </h1>
-            <p className="truncate text-xs text-muted-foreground mt-1">
-              {headerSubtitle}
-            </p>
+            <h1 className="truncate text-sm font-semibold tracking-tight">{chat.conversation?.title ?? '新建对话'}</h1>
+            <p className="mt-1 truncate text-xs text-muted-foreground">{headerSubtitle}</p>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
             {chat.conversation?.workingDirectory && (
@@ -102,7 +101,7 @@ function ChatPageInner() {
             )}
             {chat.streaming && (
               <span className="inline-flex items-center gap-1.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-300">
-                <span className="inline-block size-1.5 animate-caret-blink rounded-full bg-current" />
+                <span className="animate-caret-blink inline-block size-1.5 rounded-full bg-current" />
                 生成中
               </span>
             )}
@@ -114,16 +113,16 @@ function ChatPageInner() {
           streaming={chat.streaming}
           onExecuteJira={async (taskKey) => {
             try {
-              const task = await api.importJiraTask(taskKey);
-              navigate(`/coding/${task.id}`);
+              const task = await api.importJiraTask(taskKey)
+              navigate(`/coding/${task.id}`)
             } catch (reason) {
-              showError(reason instanceof Error ? reason.message : String(reason));
-              throw reason;
+              showError(reason instanceof Error ? reason.message : String(reason))
+              throw reason
             }
           }}
         />
 
-        <div className="shrink-0 border-t bg-background/95 px-4 pb-2.5 pt-2">
+        <div className="shrink-0 border-t bg-background/95 px-4 pt-2 pb-2.5">
           <ChatComposer
             value={chat.draft}
             onChange={chat.setDraft}
@@ -132,12 +131,12 @@ function ChatPageInner() {
             disabled={!hasModel}
             placeholder={
               !hasModel
-                ? "请先在设置中配置可用模型"
+                ? '请先在设置中配置可用模型'
                 : chat.taskCreationEnabled
-                ? "描述准备创建的 Jira 任务，Agent 会补齐必要信息"
-                : isEmpty
-                ? "输入消息，Enter 发送，将自动创建新对话"
-                : undefined
+                  ? '描述准备创建的 Jira 任务，Agent 会补齐必要信息'
+                  : isEmpty
+                    ? '输入消息，Enter 发送，将自动创建新对话'
+                    : undefined
             }
             streaming={chat.streaming}
             leftSlot={
@@ -146,8 +145,12 @@ function ChatPageInner() {
                   groups={chat.modelGroups}
                   value={chat.model}
                   onChange={chat.setModelAndDriver}
+                  modelParams={chat.modelParams}
+                  onChangeParams={chat.setModelParams}
                   disabled={chat.streaming}
                 />
+                <ChatMcpSelector selected={chat.mcpService} onChange={chat.setMcpService} disabled={chat.streaming} />
+                <ChatAgentSelector selected={chat.agentId} onChange={chat.setAgentId} disabled={chat.streaming} />
                 <TaskCreationTool
                   selected={chat.taskCreationEnabled}
                   disabled={chat.streaming}
@@ -160,5 +163,5 @@ function ChatPageInner() {
         </div>
       </section>
     </div>
-  );
+  )
 }

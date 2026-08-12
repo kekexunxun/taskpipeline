@@ -251,7 +251,9 @@ export class QoderSession {
         if (turn.status === 'done' || turn.status === 'closed') break
         if (turn.status === 'error') {
           // 原样抛原始错误(如 QoderCliProcessError),让上层能做 stderr 增强。
-          throw turn.error instanceof Error ? turn.error : new Error(turn.error !== undefined ? String(turn.error) : 'Qoder SDK 错误')
+          throw turn.error instanceof Error
+            ? turn.error
+            : new Error(turn.error !== undefined ? String(turn.error) : 'Qoder SDK 错误')
         }
         // 队列空且回合仍 active:挂起,等消费循环推 chunk / 改状态后唤醒;
         // 同时监听 abort —— 否则 abort/interrupt 后若 SDK 不再产出消息,回合会永久挂起。
@@ -286,7 +288,10 @@ export class QoderSession {
     }
     let closeTimer: ReturnType<typeof setTimeout> | undefined
     const closed = await Promise.race([
-      this.query.close().then(() => true).catch(() => true),
+      this.query
+        .close()
+        .then(() => true)
+        .catch(() => true),
       new Promise<false>((resolve) => {
         closeTimer = setTimeout(() => resolve(false), 5_000)
       })
@@ -376,7 +381,7 @@ export class QoderSession {
   /**
    * 把一条 SDKMessage 解析成 chunk 推入当前回合(解析逻辑自 qoder-chat-driver 搬迁)。
    * - `yield` 语义 → `pushChunk`;
-   * - `throw` 语义 → `failTurn`(仅在无文本产出时,避免把半截回复当成错误)。
+   * - `throw` 语义 → failTurn(错误一律上抛,已产出的 parts 由上层保留展示)。
    */
   private handleMessage(message: RawSdkMessage, turn: ActiveTurn): void {
     const parentTaskId = this.resolveParentTaskId(message)
@@ -472,9 +477,10 @@ export class QoderSession {
             input: block.input ?? {}
           })
         }
-      } else if (event?.type === 'error' && !turn.buffer) {
-        const errorText =
-          typeof event.error === 'string' ? event.error : (event.error?.message ?? 'Qoder SDK 流式错误')
+      } else if (event?.type === 'error') {
+        // 错误一律上抛:已有部分文本产出时也 failTurn,已产出的 parts 早已随流事件
+        // 推给上层(ChatService 累积并落盘),不会丢;吞掉错误会导致失败界面无任何展示。
+        const errorText = typeof event.error === 'string' ? event.error : (event.error?.message ?? 'Qoder SDK 流式错误')
         turn.status = 'error'
         turn.error = errorText
         this.wakeTurn(turn)
@@ -498,7 +504,9 @@ export class QoderSession {
             name: block.name,
             input: block.input ?? {}
           }
-          if (!turn.parts.some((existing) => existing.type === 'qoder.tool-use' && existing.toolCallId === toolCallId)) {
+          if (
+            !turn.parts.some((existing) => existing.type === 'qoder.tool-use' && existing.toolCallId === toolCallId)
+          ) {
             turn.parts.push(toolUsePart)
             this.pushChunk(turn, { type: 'part', part: toolUsePart })
           }
@@ -551,7 +559,8 @@ export class QoderSession {
       return
     }
 
-    if (message.type === 'error' && !turn.buffer) {
+    if (message.type === 'error') {
+      // 与 stream_event error 同语义:不再按「是否已有文本产出」门控,失败必须可见。
       turn.status = 'error'
       turn.error = message.error ?? 'Qoder SDK 错误'
       this.wakeTurn(turn)

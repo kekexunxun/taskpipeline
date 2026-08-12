@@ -110,9 +110,9 @@
 
   --background: #fbfbfd;
   --foreground: #18191d;
-  --card: #ffffff;
+  --card: #fff;
   --card-foreground: #18191d;
-  --popover: #ffffff;
+  --popover: #fff;
   --popover-foreground: #18191d;
   --primary: #18191d;
   --primary-foreground: #fbfbfd;
@@ -128,6 +128,7 @@
   --ring: #565b63;
   --radius: 6px;
 
+  /* markdown */
   --markdown-pre-bg: #f4f5f7;
   --markdown-link: #0969da;
   --scrollbar-thumb: #c3c8cf;
@@ -614,4 +615,15 @@ textarea:focus-visible {
   vertical-align: text-bottom;
   background: currentColor;
   animation: caret-blink 1s steps(1) infinite;
+}
+
+/* ---------- Trace 瀑布图 ---------- */
+@keyframes trace-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
 }

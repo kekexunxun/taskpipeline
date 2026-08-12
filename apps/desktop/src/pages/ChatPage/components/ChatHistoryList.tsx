@@ -1,6 +1,6 @@
 import { FolderIcon, FolderPlusIcon, MessagesSquareIcon, PlusIcon } from 'lucide-react'
 import { ChatHistoryItem } from './ChatHistoryItem'
-import type { ChatConversationMeta } from '@/api'
+import type { ChatConversationMeta, ChatProject } from '@/api'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
@@ -13,14 +13,18 @@ function baseName(dir: string): string {
 type Group = {
   /** 有值 = 项目组(该工作目录下的会话);无值 = 普通对话组。 */
   directory?: string
+  /** 项目组排序/展示用的最近活动时间(会话或项目自身的 lastActiveAt)。 */
+  lastActiveAt: string
   items: ChatConversationMeta[]
 }
 
 /**
  * 按工作目录把会话分组:一个目录(项目)下可挂多个会话,普通对话归入末尾一组。
- * 组间按组内最近活动排序,组内按更新时间倒序。
+ * 项目实体与具体会话解耦 —— 目录下所有会话被删除后,项目组仍保留(items 为空),
+ * 显示「没有对话」,方便原地新建对话。
+ * 组间按最近活动排序(项目组取会话最新活动或项目 lastActiveAt),组内按更新时间倒序。
  */
-function groupMetas(metas: ChatConversationMeta[]): Group[] {
+function groupMetas(metas: ChatConversationMeta[], projects: ChatProject[]): Group[] {
   const byDir = new Map<string, ChatConversationMeta[]>()
   const plain: ChatConversationMeta[] = []
   for (const meta of metas) {
@@ -33,15 +37,24 @@ function groupMetas(metas: ChatConversationMeta[]): Group[] {
     }
   }
   const byRecent = (a: ChatConversationMeta, b: ChatConversationMeta) => b.updatedAt.localeCompare(a.updatedAt)
-  const groups: Group[] = [...byDir.entries()]
-    .map(([directory, items]) => ({ directory, items: [...items].sort(byRecent) }))
-    .sort((a, b) => b.items[0]!.updatedAt.localeCompare(a.items[0]!.updatedAt))
-  if (plain.length) groups.push({ items: [...plain].sort(byRecent) })
+  const groups: Group[] = projects
+    .map((project) => {
+      const items = (byDir.get(project.directory) ?? []).sort(byRecent)
+      // 有会话的项目组用会话最新活动排序;空项目组用项目自身的 lastActiveAt。
+      const lastActiveAt = items[0]?.updatedAt ?? project.lastActiveAt
+      return { directory: project.directory, lastActiveAt, items }
+    })
+    .sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
+  if (plain.length) {
+    const sorted = [...plain].sort(byRecent)
+    groups.push({ lastActiveAt: sorted[0]!.updatedAt, items: sorted })
+  }
   return groups
 }
 
 export function ChatHistoryList({
   metas,
+  projects,
   activeId,
   onSelect,
   onCreate,
@@ -49,6 +62,8 @@ export function ChatHistoryList({
   onDelete
 }: {
   metas: ChatConversationMeta[]
+  /** 项目(工作目录)实体列表,与具体会话解耦。 */
+  projects: ChatProject[]
   activeId?: string
   onSelect(id: string): void
   /** 新建普通对话。 */
@@ -57,7 +72,7 @@ export function ChatHistoryList({
   onCreateInDirectory(directory?: string): void
   onDelete(id: string): void
 }) {
-  const groups = groupMetas(metas)
+  const groups = groupMetas(metas, projects)
 
   return (
     <aside className="grid min-h-0 w-72 grid-rows-[auto_auto_minmax(0,1fr)] border-r bg-card/50">
@@ -130,16 +145,24 @@ export function ChatHistoryList({
                   className={cn('space-y-1', !group.directory && 'border-t pt-2')}
                 >
                   {header}
-                  {group.items.map((meta) => (
-                    <ChatHistoryItem
-                      key={meta.id}
-                      meta={meta}
-                      active={meta.id === activeId}
-                      showDirectory={false}
-                      onClick={() => onSelect(meta.id)}
-                      onDelete={() => onDelete(meta.id)}
-                    />
-                  ))}
+                  {group.items.length === 0 ? (
+                    <div className="px-2 py-1.5 text-[10px] leading-4 text-muted-foreground/70">
+                      没有对话
+                      <br />
+                      点右侧 + 在此目录新建
+                    </div>
+                  ) : (
+                    group.items.map((meta) => (
+                      <ChatHistoryItem
+                        key={meta.id}
+                        meta={meta}
+                        active={meta.id === activeId}
+                        showDirectory={false}
+                        onClick={() => onSelect(meta.id)}
+                        onDelete={() => onDelete(meta.id)}
+                      />
+                    ))
+                  )}
                 </div>
               )
             })

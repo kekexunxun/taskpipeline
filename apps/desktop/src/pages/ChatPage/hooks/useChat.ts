@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { AgentProfile } from '@task-pipeline/core'
 import { ElectronChatTransport } from '../chat-transport'
+import type { McpServiceId } from '../components/ChatMcpSelector'
 import {
   api,
   type ChatAgentMode,
@@ -9,12 +11,15 @@ import {
   type ChatMessage,
   type ChatMessageMetadata,
   type ChatModelGroup,
+  type ChatProject,
   type ChatStreamChunk,
   type DriverPart,
+  type ModelParams,
   type StoredMessageRecord
 } from '@/api'
 import { useChatModels } from '@/hooks/useChatModels'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
+import { isModelAvailable, pickSystemDefaultModel } from '@/utils/chat-models'
 
 const transport = new ElectronChatTransport()
 
@@ -66,6 +71,7 @@ function driverOfModelValue(value: string | undefined, groups: ChatModelGroup[])
 export function useChat() {
   const { showError, showSuccess } = useFeedback()
   const [metas, setMetas] = useState<ChatConversationMeta[]>([])
+  const [projects, setProjects] = useState<ChatProject[]>([])
   const [activeId, setActiveId] = useState<string>()
   const [conversation, setConversation] = useState<ChatConversation>()
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -73,24 +79,48 @@ export function useChat() {
   const { modelGroups } = useChatModels()
   const [model, setModel] = useState<string>()
   const [driverId, setDriverId] = useState<ChatDriverId | undefined>()
-  /** 包装 setModel:同时根据 model value 推断 driverId 并设上。 */
+  /** 对话级运行时模型参数（推理力度/思考模式等），切换模型时清空。 */
+  const [modelParams, setModelParams] = useState<ModelParams | undefined>()
+  /** 包装 setModel:同时根据 model value 推断 driverId 并设上;切换模型时清空参数。 */
   const setModelAndDriver = useCallback(
     (value: string | undefined) => {
+      if (value !== model) setModelParams(undefined)
       setModel(value)
       const resolved = driverOfModelValue(value, modelGroups)
       if (resolved) setDriverId(resolved)
     },
-    [modelGroups]
+    [model, modelGroups]
   )
   const [status, setStatus] = useState<ChatStatus>('idle')
   const [taskCreationEnabled, setTaskCreationEnabled] = useState(false)
   const [taskBackend, setTaskBackend] = useState<{ id: string; displayName: string; configured: boolean }>()
+  /** 选中的 MCP 服务列表（随对话落盘，切换对话时按落盘值恢复）。 */
+  const [mcpService, setMcpService] = useState<McpServiceId[]>([])
+  /** 选中的 Agent id（随对话落盘，切换对话时按落盘值恢复）。 */
+  const [agentId, setAgentIdState] = useState<string>()
+  const [agents, setAgents] = useState<AgentProfile[]>([])
+  /** 选中 Agent 的 profile 引用，send() 发送时取 systemPrompt 注入（避免 send 依赖重建）。 */
+  const selectedAgentRef = useRef<AgentProfile | undefined>(undefined)
+  const setAgentId = useCallback(
+    (next: string | undefined) => {
+      setAgentIdState(next)
+      selectedAgentRef.current = next ? agents.find((agent) => agent.id === next) : undefined
+    },
+    [agents]
+  )
+  // agents 列表异步加载：落盘恢复的 agentId 先入 state，agents 到达后按 id 回填
+  // selectedAgentRef（send 时取 systemPrompt 依赖它），避免恢复早于列表时引用丢失。
+  useEffect(() => {
+    selectedAgentRef.current = agentId ? agents.find((agent) => agent.id === agentId) : undefined
+  }, [agentId, agents])
 
   const activeStream = useRef<ActiveStream | undefined>(undefined)
 
   const refreshMetas = useCallback(async () => {
     try {
-      setMetas(await api.listChats())
+      const [nextMetas, nextProjects] = await Promise.all([api.listChats(), api.listChatProjects()])
+      setMetas(nextMetas)
+      setProjects(nextProjects)
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason))
     }
@@ -98,6 +128,11 @@ export function useChat() {
 
   useEffect(() => {
     void refreshMetas()
+    // Agent 列表（Agent 选择器用；挂载时拉取一次）
+    void api
+      .listAgents()
+      .then((list) => setAgents(list))
+      .catch(() => undefined)
     // 任务后端列表
     void api
       .listTaskBackends()
@@ -108,14 +143,14 @@ export function useChat() {
       .catch(() => undefined)
   }, [refreshMetas, showError])
 
-  // 模型列表首次加载时,设置默认 driver 和 model
+  // 模型列表首次加载时,设置默认 driver 和 model。
+  // 系统默认规则:Qoder 分组优先(已连接且有模型),否则第一个分组;组内取 isDefault,无则第一个。
   useEffect(() => {
     if (modelGroups.length === 0) return
-    const preferredDriver = modelGroups[0]?.driverId
-    const preferredModel =
-      modelGroups.flatMap((group) => group.models).find((item) => item.isDefault) ?? modelGroups[0]?.models[0]
-    setDriverId((current) => current ?? preferredDriver)
-    setModel((current) => current ?? preferredModel?.value)
+    const preferred = pickSystemDefaultModel(modelGroups)
+    if (!preferred) return
+    setDriverId((current) => current ?? preferred.driverId)
+    setModel((current) => current ?? preferred.model)
   }, [modelGroups])
 
   const loadConversation = useCallback(
@@ -128,13 +163,27 @@ export function useChat() {
         }
         setConversation(next.conversation)
         setMessages(next.messages)
-        if (next.conversation.model) setModelAndDriver(next.conversation.model)
-        if (next.conversation.driverId) setDriverId(next.conversation.driverId)
+        // 存储模型失效(profile 删除 / 模型下线)时回落系统默认,不动存储值。
+        const stored = next.conversation.model
+        const storedValid = Boolean(stored) && isModelAvailable(modelGroups, stored)
+        if (stored && storedValid) {
+          setModelAndDriver(stored)
+          if (next.conversation.driverId) setDriverId(next.conversation.driverId)
+          setModelParams(next.conversation.modelParams)
+        } else {
+          const fallback = pickSystemDefaultModel(modelGroups)
+          if (fallback) setModelAndDriver(fallback.model)
+          setModelParams(undefined)
+        }
+        // MCP / Agent 选择态按落盘值恢复（切换对话不丢失）；agents 列表异步到达，
+        // selectedAgentRef 由上面的 effect 在列表加载后按 id 回填。
+        setMcpService(next.conversation.mcpService ?? [])
+        setAgentIdState(next.conversation.agentId)
       } catch (reason) {
         showError(reason instanceof Error ? reason.message : String(reason))
       }
     },
-    [showError]
+    [modelGroups, setModelAndDriver, showError]
   )
 
   const select = useCallback(
@@ -247,8 +296,12 @@ export function useChat() {
         chatId: targetId!,
         driverId,
         model,
+        modelParams,
         message: { id: userId, text, createdAt },
         mode: (taskCreationEnabled ? 'task-create' : 'chat') satisfies ChatAgentMode,
+        mcpService,
+        agentId,
+        systemPrompt: selectedAgentRef.current?.systemPrompt,
         onEvent: (event) => {
           const chunk = event.chunk
           if (!chunk) return
@@ -301,7 +354,7 @@ export function useChat() {
 
       return targetId
     },
-    [activeId, draft, driverId, model, refreshMetas, showError, taskCreationEnabled]
+    [activeId, agentId, draft, driverId, mcpService, model, modelParams, refreshMetas, showError, taskCreationEnabled]
   )
 
   /**
@@ -349,6 +402,7 @@ export function useChat() {
   return useMemo(
     () => ({
       metas,
+      projects,
       activeId,
       conversation,
       messages,
@@ -358,12 +412,18 @@ export function useChat() {
       modelGroups,
       model,
       driverId,
+      modelParams,
       taskCreationEnabled,
       taskBackend,
+      mcpService,
+      agentId,
       setDraft,
       setModelAndDriver,
+      setModelParams,
       setDriverId,
       setTaskCreationEnabled,
+      setMcpService,
+      setAgentId,
       select,
       create,
       remove,
@@ -372,6 +432,7 @@ export function useChat() {
     }),
     [
       metas,
+      projects,
       activeId,
       conversation,
       messages,
@@ -381,8 +442,11 @@ export function useChat() {
       modelGroups,
       model,
       driverId,
+      modelParams,
       taskCreationEnabled,
       taskBackend,
+      mcpService,
+      agentId,
       select,
       create,
       remove,

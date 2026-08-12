@@ -1,717 +1,267 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
-import { TaskStore, type TraceEntry } from '@task-pipeline/core'
-import type { ChatService } from '../chat/chat-service.js'
-import type { StoredMessage } from '../chat/chat-types.js'
-import { parsePiSessionFile, sessionIdFromFile } from './pi-session-trace.js'
-import { listPiTraceSessions, parsePiTraceEvents, summarizePiTrace } from './pi-trace-events.js'
-import { QoderTraceSink } from './qoder-trace.js'
-import { TraceService, eventToTraceEntry } from './trace-service.js'
+import { describe, expect, it } from 'vitest'
+import type { AgentEvent, AgentSpan } from '@task-pipeline/core'
+import { spansToAgentEvents } from './trace-service.js'
 
-const roots: string[] = []
-function temporaryRoot(name: string) {
-  const root = join(tmpdir(), `task-pipeline-trace-${name}-${crypto.randomUUID()}`)
-  roots.push(root)
-  mkdirSync(root, { recursive: true })
-  return root
-}
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
-})
-
-// === fixture：pi-trace-extension events.jsonl =================================
-
-const PI_TRACE_EVENTS = [
-  { ts: 1750000000000, sessionId: 'sess-pi', type: 'session_start' },
-  {
-    ts: 1750000001000,
-    sessionId: 'sess-pi',
-    type: 'interaction_start',
-    interactionId: 1,
-    prompt: '修复登录 bug',
-    slashCommand: null
-  },
-  { ts: 1750000002000, sessionId: 'sess-pi', turnIndex: 0, type: 'turn_start', interactionId: 1 },
-  { ts: 1750000003000, sessionId: 'sess-pi', turnIndex: 0, stepIndex: 1, type: 'step_start' },
-  {
-    ts: 1750000003500,
-    sessionId: 'sess-pi',
-    turnIndex: 0,
-    stepIndex: 1,
-    type: 'llm_request',
-    input: {
-      model: 'gpt-5',
-      tools: [{ name: 'read' }, { name: 'edit' }],
-      messages: [
-        { role: 'developer', content: 'You are an expert coding assistant.' },
-        { role: 'user', content: [{ type: 'text', text: '修复登录 bug 的完整复现步骤' }] }
-      ]
-    }
-  },
-  {
-    ts: 1750000008000,
-    sessionId: 'sess-pi',
-    turnIndex: 0,
-    stepIndex: 1,
-    type: 'step_end',
-    text: '我来分析这个问题',
-    thinking: '需要先定位代码',
-    toolCalls: [{ id: 'tc1', name: 'grep', args: { query: 'login' } }],
-    usage: { input: 100, output: 50, cost: 0.001 }
-  },
-  {
-    ts: 1750000009000,
-    sessionId: 'sess-pi',
-    turnIndex: 0,
-    stepIndex: 1,
-    type: 'tool_start',
-    toolCallId: 'tc1',
-    toolName: 'grep',
-    args: { query: 'login' }
-  },
-  {
-    ts: 1750000010000,
-    sessionId: 'sess-pi',
-    turnIndex: 0,
-    stepIndex: 1,
-    type: 'tool_end',
-    toolCallId: 'tc1',
-    toolName: 'grep',
-    durationMs: 1000,
-    isError: false,
-    resultPreview: 'file.ts:10: function login'
-  },
-  {
-    ts: 1750000011000,
-    sessionId: 'sess-pi',
-    turnIndex: 0,
-    stepIndex: 1,
-    type: 'file_change',
-    path: 'src/login.ts',
-    op: 'edit',
-    toolName: 'edit'
-  },
-  {
-    ts: 1750000012000,
-    sessionId: 'sess-pi',
-    turnIndex: 0,
-    type: 'turn_summary',
-    stepCount: 1,
-    durationMs: 10000,
-    model: 'gpt-5',
-    filesChanged: [{ path: 'src/login.ts', op: 'edit', count: 1 }],
-    toolsUsed: [{ name: 'grep', count: 1, errors: 0, totalMs: 1000 }],
-    usage: { input: 100, output: 50, cacheRead: 30, cacheWrite: 5, cost: 0.001 },
-    steps: [
-      {
-        stepIndex: 1,
-        durationMs: 8000,
-        thinking: 'Let me trace the login flow first.',
-        thinkingSource: 'message',
-        thinkingDeltaCount: 42
-      },
-      // 仅存在于 turn_summary 的 step（step_end 缺失时兜底）：应展开为独立 thinking 条目。
-      {
-        stepIndex: 2,
-        durationMs: 2000,
-        thinking: 'Step 2 thinking only in summary.'
-      }
-    ],
-    finalText: '修复完成'
-  },
-  { ts: 1750000013000, sessionId: 'sess-pi', turnIndex: 0, type: 'turn_end', durationMs: 11000 },
-  { type: 'future_event', sessionId: 'sess-pi', ts: 1750000013500 }, // 未知类型：应跳过
-  { ts: 1750000014000, sessionId: 'sess-pi', type: 'session_shutdown', reason: 'quit' }
-]
-
-function writePiTraceSession(agentDir: string, sessionId: string, events: unknown[]) {
-  const dir = join(agentDir, 'traces', sessionId)
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n'), 'utf8')
-  return dir
+/** payload 为 unknown 类型，断言前收窄为 Record 便于访问属性。 */
+function payloadOf(event: AgentEvent): Record<string, unknown> | undefined {
+  return event.payload as Record<string, unknown> | undefined
 }
 
-// === fixture：官方 session JSONL ==============================================
-
-const OFFICIAL_SESSION = [
-  { type: 'session', version: 3, id: 'sess-official', timestamp: '2025-01-01T00:00:00.000Z', cwd: '/tmp/repo' },
-  {
-    type: 'message',
-    id: 'm1',
-    parentId: null,
-    timestamp: '2025-01-01T00:00:01.000Z',
-    message: { role: 'user', content: [{ type: 'text', text: '你好' }] }
-  },
-  {
-    type: 'message',
-    id: 'm2',
-    parentId: 'm1',
-    timestamp: '2025-01-01T00:00:02.000Z',
-    message: { role: 'assistant', content: [{ type: 'text', text: '你好！有什么可以帮你' }] }
-  },
-  {
-    type: 'message',
-    id: 'm3',
-    parentId: 'm2',
-    timestamp: '2025-01-01T00:00:03.000Z',
-    message: { role: 'toolResult', content: '[ok]', toolCallId: 't1', toolName: 'bash' }
-  },
-  {
-    type: 'model_change',
-    id: 'm4',
-    parentId: 'm3',
-    timestamp: '2025-01-01T00:00:04.000Z',
-    provider: 'openai',
-    modelId: 'gpt-5'
-  },
-  {
-    type: 'compaction',
-    id: 'm5',
-    parentId: 'm4',
-    timestamp: '2025-01-01T00:00:05.000Z',
-    summary: '前面的对话已压缩',
-    firstKeptEntryId: 'm3',
-    tokensBefore: 1000
-  }
-]
-
-// === 假 ChatService ===========================================================
-
-function fakeChatService(): ChatService {
-  const now = new Date().toISOString()
-  const message: StoredMessage = {
-    id: 'message-1',
-    role: 'user',
-    createdAt: now,
-    driverId: 'openai',
-    raw: { kind: 'text', text: '帮我看看' },
-    parts: [
-      { driverId: 'openai', type: 'text', text: '帮我看看' },
-      { driverId: 'openai', type: 'openai.tool-call', toolCallId: 'tc-1', name: 'read', input: { path: 'a.ts' } },
-      { driverId: 'openai', type: 'openai.tool-result', toolCallId: 'tc-1', output: '内容' }
-    ]
-  }
+function span(partial: Partial<AgentSpan>): AgentSpan {
   return {
-    listChats: () => [
-      { id: 'chat-1', title: '测试对话', createdAt: now, updatedAt: now, messageCount: 1, model: 'openai:default' }
-    ],
-    getChat: (id: string) =>
-      id === 'chat-1'
-        ? {
-            conversation: {
-              id: 'chat-1',
-              title: '测试对话',
-              createdAt: now,
-              updatedAt: now,
-              messageCount: 1,
-              messages: []
-            },
-            messages: [message]
-          }
-        : undefined
-  } as unknown as ChatService
+    spanId: 'evt-t1-1',
+    traceId: 't1',
+    type: 'agent.run',
+    name: 'Agent',
+    status: 'completed',
+    startedAt: 1000,
+    endedAt: 2000,
+    durationMs: 1000,
+    sequence: 1,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    ...partial
+  }
 }
 
-describe('pi-trace-events', () => {
-  it('扫描 traces 目录并解析 events.jsonl 事件映射', async () => {
-    const agentDir = temporaryRoot('pi')
-    writePiTraceSession(agentDir, 'sess-pi', PI_TRACE_EVENTS)
-
-    const sessions = listPiTraceSessions(agentDir)
-    expect(sessions).toHaveLength(1)
-    expect(sessions[0]!.sessionId).toBe('sess-pi')
-    expect(sessions[0]!.startedAt).toBe(new Date(1750000000000).toISOString())
-    expect(sessions[0]!.traceHtmlPath).toBeUndefined()
-
-    const entries = await parsePiTraceEvents(sessions[0]!.eventsFile)
-    const summary = entries.map((e) => `${e.type}:${e.title}`)
-    expect(summary[0]).toBe('session_start:执行会话开始')
-    expect(summary).toContain('message:用户输入')
-    expect(summary).toContain('status:轮次 0 开始')
-    expect(summary).toContain('thinking:LLM 调用（step 1 · turn 0）')
-    expect(summary).toContain('thinking:LLM 请求（step 1 · turn 0）')
-    expect(summary).toContain('message:AI')
-    expect(summary).toContain('thinking:思考（step 1 · turn 0）')
-    expect(summary).toContain('tool_call:工具 grep')
-    expect(summary).toContain('tool_result:工具结果 grep')
-    expect(summary).toContain('diff:edit src/login.ts')
-    expect(summary).toContain('status:轮次 0 汇总')
-    expect(summary).toContain('session_end:执行会话结束')
-    // 未知事件类型被跳过
-    expect(summary.some((s) => s.includes('future_event'))).toBe(false)
-    // 摘要信息（tokens / 工具统计）
-    const turnSummary = entries.find((e) => e.type === 'status' && e.title.includes('汇总'))
-    expect(turnSummary?.detail).toContain('tokens: in 100 / out 50')
-    expect(turnSummary?.detail).toContain('cache读 30')
-    expect(turnSummary?.detail).toContain('grep×1')
-
-    // A1：llm_request 展示完整 user prompt（仅 user 消息,不含 system）
-    const llmRequest = entries.find((e) => e.type === 'thinking' && e.title.includes('LLM 请求'))
-    expect(llmRequest?.detail).toContain('修复登录 bug 的完整复现步骤')
-    expect(llmRequest?.detail).not.toContain('You are an expert')
-    expect((llmRequest?.payload as { messages?: unknown[] }).messages).toHaveLength(2)
-
-    // A2：step_end.toolCalls 兜底出 tool_call 条目（带 toolCallId 供前端配对）
-    const toolFromStepEnd = entries.find(
-      (e) => e.type === 'tool_call' && e.title === '工具 grep' && (e.payload as { toolCallId?: string }).toolCallId === 'tc1'
-    )
-    expect(toolFromStepEnd).toBeDefined()
-    // A3：turn_summary.steps[].thinking 展开为独立 thinking 条目
-    // - step 1 的 thinking 已由 step_end 产出（turn 0 · step 1）→ 跳过，防双写；
-    // - step 2 仅存在于 turn_summary → 展开。
-    const stepThinking = entries.find((e) => e.type === 'thinking' && e.title.includes('step 1') && e.detail === 'Let me trace the login flow first.')
-    expect(stepThinking).toBeUndefined()
-    const stepThinking2 = entries.find((e) => e.type === 'thinking' && e.title.includes('step 2') && e.detail === 'Step 2 thinking only in summary.')
-    expect(stepThinking2).toBeDefined()
-    // 汇总条目 id 与派生 thinking 条目 id 不同（React key 不冲突）
-    expect(stepThinking2!.id).not.toBe(turnSummary!.id)
-    // 所有 entry 的 traceId 与会话目录名一致（sessionId 修复）
-    expect(entries.every((e) => e.traceId === 'sess-pi')).toBe(true)
-
-    // A4：summarizePiTrace 聚合 cache tokens / toolStats / duration
-    const stats = await summarizePiTrace(sessions[0]!.eventsFile)
-    expect(stats.tokens).toEqual({ input: 100, output: 50, total: 150, cacheRead: 30, cacheWrite: 5 })
-    expect(stats.toolStats).toEqual([{ name: 'grep', count: 1, errors: 0 }])
-    expect(stats.model).toBe('gpt-5')
-    expect(stats.durationMs).toBe(14000)
-  })
-
-  it('目录不存在时返回空列表', () => {
-    expect(listPiTraceSessions(temporaryRoot('empty'))).toEqual([])
-  })
-
-  it('Windows 风格路径也能解析出 sessionId（dirnameOf 跨平台回归）', async () => {
-    // 直接解析一个 Windows 路径形式的 events.jsonl：sessionId 应从父目录名取，而非 'events'。
-    const entries = await parsePiTraceEvents('C:\\Users\\robin\\.pi\\agent\\traces\\sess-win\\events.jsonl')
-    // 文件不存在 → 返回空，但验证不抛错（历史 basenameWithoutExt 只按 / 分割会得到 '.'）
-    expect(entries).toEqual([])
-    // 用真实文件验证：unix 路径下目录名正确
-    const agentDir = temporaryRoot('win')
-    const dir = writePiTraceSession(agentDir, 'sess-win', [PI_TRACE_EVENTS[0]!])
-    const unixEntries = await parsePiTraceEvents(join(dir, 'events.jsonl'))
-    expect(unixEntries[0]!.traceId).toBe('sess-win')
-  })
-
-  it('损坏行不中断整体解析', async () => {
-    const agentDir = temporaryRoot('bad')
-    const dir = writePiTraceSession(agentDir, 'sess-bad', [
-      PI_TRACE_EVENTS[0],
-      'not-json{{',
-      PI_TRACE_EVENTS[PI_TRACE_EVENTS.length - 1]!
+describe('spansToAgentEvents（看板执行 Tab 适配）', () => {
+  it('task.run 根不产事件（只是执行树锚点），agent.run → status 事件', () => {
+    const events = spansToAgentEvents([
+      span({ spanId: 's1', type: 'task.run', name: '任务执行', sequence: 1 }),
+      span({ spanId: 's2', type: 'agent.run', name: 'Agent implementing', parentSpanId: 's1', sequence: 2 })
     ])
-    const entries = await parsePiTraceEvents(join(dir, 'events.jsonl'))
-    expect(entries).toHaveLength(2)
-  })
-})
-
-describe('pi-session-trace', () => {
-  it('解析官方 session JSONL 为 TraceEntry', () => {
-    const root = temporaryRoot('official')
-    const file = join(root, 'pi-sessions', 'sess-official.jsonl')
-    mkdirSync(join(root, 'pi-sessions'), { recursive: true })
-    writeFileSync(file, OFFICIAL_SESSION.map((e) => JSON.stringify(e)).join('\n'), 'utf8')
-
-    expect(sessionIdFromFile(file)).toBe('sess-official')
-    const entries = parsePiSessionFile(file)
-    const types = entries.map((e) => `${e.type}:${e.title}`)
-    expect(types[0]).toBe('session_start:Pi 会话开始')
-    expect(types).toContain('message:用户')
-    expect(types).toContain('message:AI')
-    expect(types).toContain('tool_result:工具结果')
-    expect(types).toContain('status:切换模型')
-    expect(types).toContain('status:上下文压缩')
-    expect(entries.find((e) => e.title === 'AI')?.detail).toBe('你好！有什么可以帮你')
+    expect(events.map((e) => e.kind)).toEqual(['status'])
+    expect(events[0]!.title).toBe('Agent implementing')
   })
 
-  it('文件缺失返回空数组', () => {
-    expect(parsePiSessionFile('/nonexistent/sess.jsonl')).toEqual([])
-  })
-})
-
-describe('TraceService', () => {
-  it('聚合 task / chat / pi_session 三类 summary，并按更新时间排序', async () => {
-    const dataDir = temporaryRoot('svc')
-    const agentDir = temporaryRoot('svc-agent')
-    const store = new TaskStore(':memory:')
-    const task = store.createTask({ title: '示例任务', description: 'desc' })
-    store.addEvent({ taskId: task.id, kind: 'status', title: '开始执行' })
-    // 任务 sessionUsage → stats（Token / 成本 / 时长 / 模型）
-    store.updateTask(task.id, {
-      sessionUsage: {
-        provider: 'qoder',
-        inputTokens: 100,
-        outputTokens: 50,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-        totalTokens: 150,
-        costUsd: 0.01,
-        durationMs: 30000,
-        turns: 2
-      },
-      qoderModel: 'qoder:claude-sonnet-4.5'
-    })
-
-    // ③ 官方 session
-    mkdirSync(join(dataDir, 'pi-sessions'), { recursive: true })
-    writeFileSync(
-      join(dataDir, 'pi-sessions', 'sess-official.jsonl'),
-      OFFICIAL_SESSION.map((e) => JSON.stringify(e)).join('\n'),
-      'utf8'
-    )
-    // ④ pi-trace session
-    writePiTraceSession(agentDir, 'sess-pi', PI_TRACE_EVENTS)
-
-    const service = new TraceService(store, fakeChatService(), dataDir, agentDir)
-    const summaries = await service.listSummaries()
-    const kinds = summaries.map((s) => s.kind)
-    expect(kinds).toContain('task')
-    expect(kinds).toContain('chat')
-    expect(kinds).toContain('pi_session')
-    // 倒序：最新的在前面
-    for (let i = 1; i < summaries.length; i += 1) {
-      expect(summaries[i - 1]!.updatedAt >= summaries[i]!.updatedAt).toBe(true)
-    }
-    const taskSummary = summaries.find((s) => s.kind === 'task')
-    expect(taskSummary?.entryCount).toBe(1)
-    expect(taskSummary?.state).toBe('draft')
-    // 任务 stats 来自 sessionUsage
-    expect(taskSummary?.stats).toMatchObject({
-      turns: 2,
-      tokens: { input: 100, output: 50, total: 150 },
-      costUsd: 0.01,
-      durationMs: 30000,
-      model: 'qoder:claude-sonnet-4.5'
-    })
-    // pi-trace stats 流式聚合 turn_summary（fixture 里 usage input=100 / output=50 / cost=0.001）
-    const piTraceSummary = summaries.find((s) => s.kind === 'pi_session' && s.traceId === 'sess-pi')
-    expect(piTraceSummary?.stats).toMatchObject({
-      turns: 1,
-      tokens: { input: 100, output: 50, total: 150 },
-      costUsd: 0.001
-    })
-    // 对话 stats 只带模型
-    expect(summaries.find((s) => s.kind === 'chat')?.stats?.model).toBe('openai:default')
-  })
-
-  it('getTrace task 合并 Qoder 执行 trace 补充事件', async () => {
-    const dataDir = temporaryRoot('gq')
-    const store = new TaskStore(':memory:')
-    const task = store.createTask({ title: '任务', description: 'd' })
-    store.addEvent({ taskId: task.id, kind: 'status', title: '开始执行' })
-    // Qoder trace：thinking / tool_call（events 表里没有的 step 级细节）
-    const sink = new QoderTraceSink(dataDir)
-    sink.append(task.id, {
-      type: 'stream_event',
-      event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: '分析中' } }
-    })
-    sink.append(task.id, {
-      type: 'stream_event',
-      event: {
-        type: 'content_block_start',
-        content_block: { type: 'tool_use', id: 'tc1', name: 'read', input: { path: 'x.ts' } }
-      }
-    })
-
-    const service = new TraceService(store, fakeChatService(), dataDir, temporaryRoot('gqa'))
-    const entries = await service.getTrace(task.id, 'task')
-    const types = entries.map((e) => e.type)
-    expect(types).toContain('status') // events 原有
-    expect(types).toContain('thinking') // qoder 补充
-    expect(types).toContain('tool_call') // qoder 补充
-    expect(entries.find((e) => e.type === 'tool_call')?.detail).toContain('x.ts')
-    // 合并后按时间排序
-    for (let i = 1; i < entries.length; i += 1) {
-      expect(Date.parse(entries[i - 1]!.createdAt) <= Date.parse(entries[i]!.createdAt)).toBe(true)
-    }
-  })
-
-  it('getTrace 按 kind 返回：task 来自 events 表', async () => {
-    const store = new TaskStore(':memory:')
-    const task = store.createTask({ title: '任务', description: 'd' })
-    store.addEvent({ taskId: task.id, kind: 'error', title: '出错了', detail: 'boom' })
-    const service = new TraceService(store, fakeChatService(), temporaryRoot('g1'), temporaryRoot('g1a'))
-    const entries = await service.getTrace(task.id, 'task')
-    expect(entries).toHaveLength(1)
-    expect(entries[0]!.type).toBe('error')
-    expect(entries[0]!.detail).toBe('boom')
-  })
-
-  it('getTrace chat 来自对话 parts', async () => {
-    const service = new TraceService(
-      new TaskStore(':memory:'),
-      fakeChatService(),
-      temporaryRoot('g2'),
-      temporaryRoot('g2a')
-    )
-    const entries = await service.getTrace('chat-1', 'chat')
-    expect(entries.map((e) => e.type)).toEqual(['message', 'tool_call', 'tool_result'])
-    expect(entries[1]!.title).toBe('工具 read')
-  })
-
-  it('getTrace chat 不混入 qoder-chat 碎片(回归:防止 text 分块/thinking 重复)', async () => {
-    const dataDir = temporaryRoot('g2b')
-    // 对话 parts 是完整消息
-    const chatService = {
-      listChats: () => [
-        {
-          id: 'chat-1',
-          title: '对话',
-          createdAt: '2025-01-01T00:00:00Z',
-          updatedAt: '2025-01-01T00:00:01Z',
-          messageCount: 1,
-          model: 'qoder:m1',
-          driverId: 'qoder'
-        }
-      ],
-      getChat: () => ({
-        conversation: { id: 'chat-1' },
-        messages: [
-          {
-            id: 'm1',
-            role: 'assistant',
-            createdAt: '2025-01-01T00:00:00.000Z',
-            driverId: 'qoder',
-            raw: {},
-            parts: [
-              { driverId: 'qoder', type: 'text', text: '第一段' },
-              { driverId: 'qoder', type: 'text', text: '第二段' }
-            ]
-          }
-        ]
+  it('tool.execute → use/result 两条（Timeline 按 toolUseId 配对）', () => {
+    const events = spansToAgentEvents([
+      span({
+        spanId: 's1',
+        type: 'tool.execute',
+        name: 'bash',
+        status: 'completed',
+        input: { cmd: 'ls' },
+        output: 'file.ts',
+        meta: { toolCallId: 'tc1' },
+        sequence: 1
       })
-    } as unknown as ChatService
-    // qoder-chat 目录存在碎片(理论上不该混入)
-    const sink = new QoderTraceSink(dataDir)
-    sink.appendChat('chat-1', {
-      type: 'stream_event',
-      event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: '碎片思考' } }
-    })
-    const service = new TraceService(new TaskStore(':memory:'), chatService, dataDir, temporaryRoot('g2c'))
-    const entries = await service.getTrace('chat-1', 'chat')
-    // 只有 chats-v3 parts 的两条 text 碎片,chatEntries 层已合并为一条完整 message;无 qoder-chat 的 thinking 碎片
-    expect(entries.map((e) => e.type)).toEqual(['message'])
-    expect(entries[0]!.detail).toBe('第一段第二段')
-    expect(entries.every((e) => e.detail !== '碎片思考')).toBe(true)
-  })
-
-  it('getTrace pi_session 优先 pi-trace 执行视图，缺省回退官方 session', async () => {
-    const dataDir = temporaryRoot('g3')
-    const agentDir = temporaryRoot('g3a')
-    const store = new TaskStore(':memory:')
-    const task = store.createTask({ title: '任务', description: 'd' })
-    store.updateTask(task.id, { piSessionPath: join(dataDir, 'pi-sessions', 'sess-official.jsonl') })
-
-    // 两个数据源都有
-    mkdirSync(join(dataDir, 'pi-sessions'), { recursive: true })
-    writeFileSync(
-      join(dataDir, 'pi-sessions', 'sess-official.jsonl'),
-      OFFICIAL_SESSION.map((e) => JSON.stringify(e)).join('\n'),
-      'utf8'
-    )
-    writePiTraceSession(agentDir, 'sess-official', PI_TRACE_EVENTS)
-
-    const service = new TraceService(store, fakeChatService(), dataDir, agentDir)
-    const viaPiTrace = await service.getTrace('sess-official', 'pi_session')
-    // ④ 优先：执行视图（含 session_start 执行会话开始）
-    expect(viaPiTrace[0]!.source).toBe('pi_trace')
-    expect(viaPiTrace[0]!.title).toBe('执行会话开始')
-  })
-
-  it('D6：pi_session_path 匹配关联任务 → Pi 会话并入任务 Trace，不再单列', async () => {
-    const dataDir = temporaryRoot('d6')
-    const agentDir = temporaryRoot('d6a')
-    const store = new TaskStore(':memory:')
-    const task = store.createTask({ title: '任务', description: 'd' })
-    store.updateTask(task.id, { piSessionPath: join(dataDir, 'pi-sessions', 'sess-pi.jsonl') })
-    writePiTraceSession(agentDir, 'sess-pi', PI_TRACE_EVENTS)
-
-    const service = new TraceService(store, fakeChatService(), dataDir, agentDir)
-    // 关联任务的 Pi 会话不再单列为独立记录（一个任务只对应一条 Trace 记录）。
-    const summaries = await service.listSummaries()
-    expect(summaries.some((s) => s.kind === 'pi_session' && s.traceId === 'sess-pi')).toBe(false)
-    const taskSummary = summaries.find((s) => s.kind === 'task' && s.traceId === task.id)
-    expect(taskSummary).toBeDefined()
-    // 任务详情按时间顺序合并 Pi 执行条目（pi-trace 解析，无折叠分组字段）。
-    const entries = await service.getTrace(task.id, 'task')
-    expect(entries.some((e) => e.source === 'pi_trace' && e.type === 'tool_call')).toBe(true)
-    expect(entries.some((e) => e.source === 'pi_trace' && e.parentTaskId !== undefined)).toBe(false)
-    for (let i = 1; i < entries.length; i += 1) {
-      expect(Date.parse(entries[i - 1]!.createdAt) <= Date.parse(entries[i]!.createdAt)).toBe(true)
-    }
-  })
-
-  it('未知 trace 返回空数组', async () => {
-    const service = new TraceService(
-      new TaskStore(':memory:'),
-      fakeChatService(),
-      temporaryRoot('g4'),
-      temporaryRoot('g4a')
-    )
-    expect(await service.getTrace('nope', 'pi_session')).toEqual([])
-    expect(await service.getTrace('nope', 'task')).toEqual([])
-  })
-
-  it('「其它」业务事件：listSummaries 包含 kind=other 条目，getTrace 返回单条 entry', async () => {
-    const store = new TaskStore(':memory:')
-    const event = store.addTraceEvent({
-      category: 'other',
-      subType: 'agent_template_generation',
-      title: 'AI 生成 Agent 模板',
-      detail: '描述：为支付服务补充幂等性指引\n参考仓库：payment-service',
-      payload: { model: 'qoder:claude-sonnet-4.5', repositoryIds: ['r1'] }
-    })
-
-    const service = new TraceService(store, fakeChatService(), temporaryRoot('g5'), temporaryRoot('g5a'))
-    const summaries = await service.listSummaries()
-    const otherSummary = summaries.find((s) => s.kind === 'other' && s.traceId === event.id)
-    expect(otherSummary).toBeDefined()
-    expect(otherSummary?.title).toBe('AI 生成 Agent 模板')
-    expect(otherSummary?.entryCount).toBe(1)
-    expect(otherSummary?.state).toBe('ended')
-
-    const entries = await service.getTrace(event.id, 'other')
-    expect(entries).toHaveLength(1)
-    expect(entries[0]!.kind).toBe('other')
-    expect(entries[0]!.title).toBe('AI 生成 Agent 模板')
-    expect(entries[0]!.detail).toContain('支付服务')
-    expect(entries[0]!.payload).toMatchObject({
-      category: 'other',
-      subType: 'agent_template_generation',
-      model: 'qoder:claude-sonnet-4.5'
-    })
-  })
-
-  it('「其它」详情不存在时返回空数组', async () => {
-    const service = new TraceService(
-      new TaskStore(':memory:'),
-      fakeChatService(),
-      temporaryRoot('g6'),
-      temporaryRoot('g6a')
-    )
-    expect(await service.getTrace('does-not-exist', 'other')).toEqual([])
-  })
-})
-
-// 避免未使用告警：TraceEntry 类型引用保留
-export type { TraceEntry }
-
-describe('eventToTraceEntry', () => {
-  /**
-   * 旧数据兜底:老版本 log.ts 只在 payload 里写 subtaskId / sdkSubtype,不写 parentTaskId;
-   * eventToTraceEntry 现在从 payload 把这些字段提到 entry 顶层(否则 groupByParentTask
-   * 在 entry 顶层看不到,旧数据全部进 main 流)。回归测试保护这条数据通路。
-   */
-  it('旧数据: payload 只有 subtaskId / sdkSubtype → entry 顶层有 taskId + parentTaskId(自指) + sdkSubtype', () => {
-    const entry = eventToTraceEntry({
-      id: 'ev-1',
-      taskId: 'task-1',
-      kind: 'status',
-      title: 'Qoder 子任务启动',
-      detail: '{"type":"system",...}',
-      payload: {
-        subtaskId: 'sub-old',
-        sdkSubtype: 'task_started',
-        taskType: 'Explore',
-        description: '在仓库里搜代码'
-      },
-      createdAt: '2026-08-08T00:00:00.000Z'
-    })
-    expect(entry.taskId).toBe('sub-old')
-    expect(entry.parentTaskId).toBe('sub-old')
-    expect(entry.sdkSubtype).toBe('task_started')
-  })
-
-  it('新数据: payload 同时有 subtaskId + parentTaskId → 优先用 subtaskId 自指(与 log.ts 写入路径一致)', () => {
-    const entry = eventToTraceEntry({
-      id: 'ev-2',
-      taskId: 'task-2',
-      kind: 'status',
-      title: 'Qoder 子任务进度',
-      detail: '{}',
-      payload: {
-        parentTaskId: 'sub-new',
-        subtaskId: 'sub-new',
-        sdkSubtype: 'task_progress'
-      },
-      createdAt: '2026-08-08T00:00:00.000Z'
-    })
-    expect(entry.parentTaskId).toBe('sub-new')
-    expect(entry.taskId).toBe('sub-new')
-    expect(entry.sdkSubtype).toBe('task_progress')
-  })
-
-  it('主流程 entry: payload 不含 subtaskId / parentTaskId → entry 顶层不挂子任务字段', () => {
-    const entry = eventToTraceEntry({
-      id: 'ev-3',
-      taskId: 'task-3',
-      kind: 'message',
-      title: 'Qoder Agent',
-      detail: '主流程回复',
-      payload: { usage: { total_tokens: 100 } },
-      createdAt: '2026-08-08T00:00:00.000Z'
-    })
-    expect(entry.parentTaskId).toBeUndefined()
-    expect(entry.taskId).toBeUndefined()
-    expect(entry.sdkSubtype).toBeUndefined()
-    // payload 原样保留
-    expect(entry.payload).toEqual({ usage: { total_tokens: 100 } })
-  })
-
-  it('task summary 的 toolStats/errorCount: 同 toolUseId 的 use/result 只计一次,result 失败计错', async () => {
-    const store = new TaskStore(':memory:')
-    const task = store.createTask({ title: '工具统计', description: 'desc' })
-    // 工具 A：use + result(成功) → 计 1 次
-    store.addEvent({
-      taskId: task.id,
-      kind: 'tool',
-      title: 'Edit',
-      payload: { toolName: 'Edit', toolUseId: 'ta', phase: 'use', input: { path: '/a.ts' } }
-    })
-    store.addEvent({
-      taskId: task.id,
-      kind: 'tool',
-      title: 'Edit',
-      payload: { toolName: 'Edit', toolUseId: 'ta', phase: 'result', output: 'ok' }
-    })
-    // 工具 B：use + result(失败) → 计 1 次 + errors 1
-    store.addEvent({
-      taskId: task.id,
-      kind: 'tool',
-      title: 'Bash',
-      payload: { toolName: 'Bash', toolUseId: 'tb', phase: 'use', input: { command: 'false' } }
-    })
-    store.addEvent({
-      taskId: task.id,
-      kind: 'tool',
-      title: 'Bash',
-      payload: { toolName: 'Bash', toolUseId: 'tb', phase: 'result', output: 'failed', isError: true }
-    })
-    // 独立 error 事件 → errorCount 计入
-    store.addEvent({ taskId: task.id, kind: 'error', title: '执行错误', detail: 'boom' })
-    // 无 toolUseId 的旧数据：use/result 各计一次（可接受）
-    store.addEvent({
-      taskId: task.id,
-      kind: 'tool',
-      title: 'Grep',
-      payload: { toolName: 'Grep', phase: 'use', input: { pattern: 'x' } }
-    })
-    store.addEvent({
-      taskId: task.id,
-      kind: 'tool',
-      title: 'Grep',
-      payload: { toolName: 'Grep', phase: 'result', output: 'line', isError: true }
-    })
-
-    const service = new TraceService(store, fakeChatService(), temporaryRoot('ts'), temporaryRoot('ta'))
-    const summaries = await service.listSummaries()
-    const taskSummary = summaries.find((s) => s.kind === 'task' && s.traceId === task.id)
-    expect(taskSummary?.stats?.toolStats).toEqual([
-      { name: 'Grep', count: 2, errors: 1 },
-      { name: 'Edit', count: 1, errors: 0 },
-      { name: 'Bash', count: 1, errors: 1 }
     ])
-    expect(taskSummary?.stats?.errorCount).toBe(1)
+    expect(events).toHaveLength(2)
+    expect(events[0]!.payload).toMatchObject({ toolName: 'bash', toolUseId: 'tc1', phase: 'use', input: { cmd: 'ls' } })
+    expect(events[1]!.payload).toMatchObject({ toolName: 'bash', toolUseId: 'tc1', phase: 'result', output: 'file.ts' })
+  })
+
+  it('tool.execute 失败 → result 带 isError + 无独立 error 事件', () => {
+    const events = spansToAgentEvents([
+      span({
+        spanId: 's1',
+        type: 'tool.execute',
+        name: 'bash',
+        status: 'error',
+        error: { message: 'boom' },
+        meta: { toolCallId: 'tc1' },
+        sequence: 1
+      })
+    ])
+    expect(events.filter((e) => e.kind === 'error')).toHaveLength(0)
+    expect(payloadOf(events.find((e) => payloadOf(e)?.phase === 'result')!)?.isError).toBe(true)
+  })
+
+  it('subtask.run → status 带 subtaskId/parentTaskId/sdkSubtype，其内 llm/tool 继承 parentTaskId', () => {
+    const events = spansToAgentEvents([
+      span({
+        spanId: 's1',
+        type: 'subtask.run',
+        name: '实现登录',
+        status: 'completed',
+        meta: { taskId: 'sub1', sdkSubtype: 'task_started', summary: '完成', toolUseId: 'tc-delegate' },
+        sequence: 1
+      }),
+      span({
+        spanId: 's2',
+        type: 'llm.generate',
+        name: 'qwen-max',
+        parentSpanId: 's1',
+        meta: { source: 'qoder' },
+        sequence: 2
+      }),
+      span({
+        spanId: 's3',
+        type: 'tool.execute',
+        name: 'edit_file',
+        parentSpanId: 's1',
+        meta: { toolCallId: 'tc1', source: 'qoder' },
+        sequence: 3
+      })
+    ])
+    const sub = events.find((e) => payloadOf(e)?.subtaskId === 'sub1')!
+    expect(sub.kind).toBe('status')
+    expect(payloadOf(sub)?.sdkSubtype).toBe('task_started')
+    expect(payloadOf(sub)?.summary).toBe('完成')
+    // 委派工具 callId 透传:Timeline 据此把主流程发起调用「吸收」进子任务卡(避免平级)
+    expect(payloadOf(sub)?.toolUseId).toBe('tc-delegate')
+    const llm = events.find((e) => e.title === 'LLM 调用')!
+    expect(payloadOf(llm)?.parentTaskId).toBe('sub1')
+    expect(payloadOf(events.find((e) => payloadOf(e)?.toolUseId === 'tc1')!)?.parentTaskId).toBe('sub1')
+  })
+
+  it('llm.generate error → message + error 事件', () => {
+    const events = spansToAgentEvents([
+      span({
+        spanId: 's1',
+        type: 'llm.generate',
+        name: 'gpt-4o',
+        status: 'error',
+        error: { message: 'boom' },
+        output: '半截回复',
+        model: 'gpt-4o',
+        sequence: 1
+      })
+    ])
+    expect(events.some((e) => e.kind === 'message' && payloadOf(e)?.model === 'gpt-4o')).toBe(true)
+    expect(events.some((e) => e.kind === 'error' && e.detail === 'boom')).toBe(true)
+  })
+
+  it('agent.run → 阶段容器（自指 parentTaskId，其内无 subtask 祖先的 llm/tool 折叠进阶段卡）', () => {
+    const events = spansToAgentEvents([
+      span({ spanId: 's1', type: 'task.run', name: '任务执行', sequence: 1 }),
+      span({
+        spanId: 's2',
+        type: 'agent.run',
+        name: 'Agent planning',
+        status: 'completed',
+        parentSpanId: 's1',
+        meta: { source: 'qoder', phase: 'planning' },
+        sequence: 2
+      }),
+      span({
+        spanId: 's3',
+        type: 'llm.generate',
+        name: 'qoder-lite',
+        parentSpanId: 's2',
+        meta: { source: 'qoder' },
+        model: 'qoder-lite',
+        sequence: 3
+      }),
+      span({
+        spanId: 's4',
+        type: 'tool.execute',
+        name: 'Grep',
+        parentSpanId: 's3',
+        meta: { toolCallId: 'tc1', source: 'qoder' },
+        sequence: 4
+      }),
+      // 子任务子树不受阶段容器影响，仍归 subtask 组
+      span({
+        spanId: 's5',
+        type: 'subtask.run',
+        name: '探索',
+        status: 'completed',
+        parentSpanId: 's3',
+        meta: { taskId: 'sub1', sdkSubtype: 'task_started', source: 'qoder' },
+        sequence: 5
+      }),
+      span({
+        spanId: 's6',
+        type: 'tool.execute',
+        name: 'Glob',
+        parentSpanId: 's5',
+        meta: { toolCallId: 'tc2', source: 'qoder' },
+        sequence: 6
+      })
+    ])
+    // 阶段容器自身：自指分组 + 阶段名徽章 + 状态（Timeline 据此折叠成卡）
+    const stage = events.find((e) => e.title === 'Agent planning')!
+    expect(payloadOf(stage)).toMatchObject({
+      subtaskId: 's2',
+      parentTaskId: 's2',
+      taskType: 'planning',
+      description: 'Agent planning',
+      status: 'completed'
+    })
+    // 阶段内 llm/tool（无 subtask 祖先）继承阶段 id（llm 事件标题带模型名）
+    expect(payloadOf(events.find((e) => e.title === 'LLM 调用 · qoder-lite')!)?.parentTaskId).toBe('s2')
+    expect(payloadOf(events.find((e) => payloadOf(e)?.toolUseId === 'tc1')!)?.parentTaskId).toBe('s2')
+    // subtask 子树仍归 subtask，不混入阶段卡
+    expect(payloadOf(events.find((e) => payloadOf(e)?.subtaskId === 'sub1')!)?.parentTaskId).toBe('sub1')
+    expect(payloadOf(events.find((e) => payloadOf(e)?.toolUseId === 'tc2')!)?.parentTaskId).toBe('sub1')
+  })
+
+  it('agent.run error → 阶段卡 status 映射为 failed（状态徽章不误判执行中）', () => {
+    const events = spansToAgentEvents([
+      span({
+        spanId: 's1',
+        type: 'agent.run',
+        name: 'Agent implementing',
+        status: 'error',
+        error: { message: 'boom' },
+        meta: { source: 'qoder', phase: 'implementing' },
+        sequence: 1
+      })
+    ])
+    const stage = events.find((e) => e.title === 'Agent implementing')!
+    expect(payloadOf(stage)?.status).toBe('failed')
+  })
+
+  it('归属重定向：meta.parentToolUseId 把子代理内部 span 归入 subtask 组（parentSpanId 只是当时锚点）', () => {
+    const events = spansToAgentEvents([
+      span({ spanId: 's1', type: 'task.run', name: '任务执行', sequence: 1 }),
+      span({
+        spanId: 's2',
+        type: 'tool.execute',
+        name: 'Agent',
+        parentSpanId: 's1',
+        input: { description: '探索代码库' },
+        meta: { toolCallId: 'call-1', source: 'qoder' },
+        sequence: 2
+      }),
+      span({
+        spanId: 's3',
+        type: 'subtask.run',
+        name: '探索代码库',
+        status: 'completed',
+        parentSpanId: 's1',
+        meta: { taskId: 'sub1', sdkSubtype: 'task_started', toolUseId: 'call-1', source: 'qoder' },
+        sequence: 3
+      }),
+      // 子代理内部 llm：parentSpanId 锚在根上（task_started 滞后），parentToolUseId 指向委派工具
+      span({
+        spanId: 's4',
+        type: 'llm.generate',
+        name: 'qoder-lite',
+        model: 'qoder-lite',
+        parentSpanId: 's1',
+        meta: { parentToolUseId: 'call-1', source: 'qoder' },
+        sequence: 4
+      }),
+      span({
+        spanId: 's5',
+        type: 'tool.execute',
+        name: 'Grep',
+        parentSpanId: 's1',
+        meta: { toolCallId: 'tc9', parentToolUseId: 'call-1', source: 'qoder' },
+        sequence: 5
+      })
+    ])
+    // 内部 llm/tool 按 parentToolUseId 重定向进 subtask 组，而不是平铺主流程
+    const llm = events.find((e) => e.title === 'LLM 调用 · qoder-lite')!
+    expect(payloadOf(llm)?.parentTaskId).toBe('sub1')
+    expect(payloadOf(events.find((e) => payloadOf(e)?.toolUseId === 'tc9')!)?.parentTaskId).toBe('sub1')
+    // span 来源事件带 spanId 标记（Timeline 去重豁免）
+    expect(payloadOf(llm)?.spanId).toBe('s4')
+  })
+
+  it('llm 事件标题：meta.traceLabel 语义名优先（关键词提取等辅助调用）', () => {
+    const events = spansToAgentEvents([
+      span({
+        spanId: 's1',
+        type: 'llm.generate',
+        name: 'deepseek-v4-flash',
+        model: 'deepseek-v4-flash',
+        meta: { traceLabel: '关键词提取', source: 'qoder' },
+        sequence: 1
+      })
+    ])
+    expect(events[0]!.title).toBe('关键词提取')
   })
 })

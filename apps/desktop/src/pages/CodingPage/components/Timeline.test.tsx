@@ -59,11 +59,48 @@ describe('normalizeTimelineItems', () => {
   })
 
   it('does not merge adjacent non-agent messages (用户消息保持独立)', () => {
-    const items = [
-      item('1', 'message', '你', '问题一'),
-      item('2', 'message', '你', '问题二')
-    ]
+    const items = [item('1', 'message', '你', '问题一'), item('2', 'message', '你', '问题二')]
     expect(normalizeTimelineItems(items).length).toBe(2)
+  })
+
+  it('keeps tool use/result pair (同 kind/title/detail 仅 phase 不同,不能被去重)', () => {
+    const use = item('1', 'tool', 'Read', undefined, {
+      toolName: 'Read',
+      toolUseId: 'call-1',
+      phase: 'use',
+      input: { file_path: '/a.ts' }
+    })
+    const result = item('2', 'tool', 'Read', undefined, {
+      toolName: 'Read',
+      toolUseId: 'call-1',
+      phase: 'result',
+      output: '文件内容'
+    })
+    const normalized = normalizeTimelineItems([use, result] as TimelineItem[])
+    expect(normalized.length).toBe(2)
+    expect(normalized.map((event) => (event.payload as { phase?: string }).phase)).toEqual(['use', 'result'])
+  })
+
+  /**
+   * span 来源事件(payload.spanId)豁免 5 秒内容去重:相邻的纯 thinking / 重复文本是
+   * 不同执行步骤(spanId 唯一),内容去重会误吞;无 spanId 的遗留事件仍按内容去重。
+   */
+  it('span 来源事件豁免 5 秒内容去重,遗留事件仍去重', () => {
+    // 同 kind/title/detail、相隔 1 秒的两条 LLM 记录:带 spanId → 都保留
+    const spanA = item('1', 'message', 'LLM 调用 · gpt-5', '继续推进', { spanId: 'sp-1' })
+    const spanB = {
+      ...item('2', 'message', 'LLM 调用 · gpt-5', '继续推进', { spanId: 'sp-2' }),
+      createdAt: '2026-08-01T00:00:02.000Z'
+    }
+    expect(normalizeTimelineItems([spanA, spanB])).toHaveLength(2)
+
+    // 同样的两条,无 spanId(遗留事件)→ 5 秒内容去重吞掉后者
+    const legacyA = item('3', 'message', 'LLM 调用 · gpt-5', '继续推进')
+    const legacyB = {
+      ...item('4', 'message', 'LLM 调用 · gpt-5', '继续推进'),
+      createdAt: '2026-08-01T00:00:04.000Z'
+    }
+    expect(normalizeTimelineItems([legacyA, legacyB])).toHaveLength(1)
   })
 })
 
@@ -694,14 +731,220 @@ describe('Timeline', () => {
       />
     )
 
-    // 主流程不出现 Task 工具行(被子任务卡吸收)
-    expect(screen.queryByRole('button', { name: /Task/ })).not.toBeInTheDocument()
+    // 主流程不出现独立的 Task 工具行(被吸收进子任务卡 header,无 "Tools -" 前缀)
+    expect(screen.queryByText('Tools - Task')).not.toBeInTheDocument()
     expect(screen.queryByText('子任务全部输出')).not.toBeInTheDocument()
-    // 展开子任务卡:notification summary 不展示,被吸收调用的 result 进「输出」段
+    // 子任务卡 header 即发起调用样式:工具名 Task + 摘要「查找代码」,点击展开
+    expect(screen.getByRole('button', { name: /Task/ })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /查找代码/ }))
     expect(screen.queryByText('找到 3 个文件')).not.toBeInTheDocument()
     expect(screen.getByText('输出')).toBeInTheDocument()
     expect(screen.getByText('子任务全部输出')).toBeInTheDocument()
+  })
+
+  /**
+   * 嵌套层级修复(问题 3):阶段容器(agent.run 自指)折叠成阶段卡后,
+   * 阶段内发起的子 Agent 组(stageId 指向阶段 id)必须嵌套进阶段卡内部,
+   * 不能与阶段卡平级。此前 nested 只在 interleaveTimeline 数据层生成、
+   * 渲染层被丢弃 —— 这条测试保护「阶段卡 → 子 Agent 卡 → 工具行」的树形层级。
+   */
+  it('nested 递归渲染:阶段卡内的子 Agent 卡嵌套展示,委派调用不重复成行', () => {
+    const { container } = render(
+      <Timeline
+        items={[
+          // 阶段容器(agent.run):parentTaskId/subtaskId 自指 → 折叠成阶段卡 header
+          item('1', 'status', 'Qoder Agent 阶段', 'Agent planning', {
+            parentTaskId: 'stage-1',
+            subtaskId: 'stage-1',
+            sdkSubtype: 'agent_run',
+            taskType: 'Agent',
+            description: 'Agent planning'
+          }),
+          // 阶段内普通工具
+          item('2', 'tool', 'Read', '{"file_path":"/tmp/a.ts"}', {
+            parentTaskId: 'stage-1',
+            sdkSubtype: undefined,
+            toolName: 'Read',
+            toolUseId: 'toolu_stage',
+            phase: 'use',
+            input: { file_path: '/tmp/a.ts' }
+          }),
+          item('3', 'tool', 'Read', '"ok"', {
+            parentTaskId: 'stage-1',
+            sdkSubtype: undefined,
+            toolName: 'Read',
+            toolUseId: 'toolu_stage',
+            phase: 'result',
+            output: 'ok'
+          }),
+          // 阶段内发起子 Agent 的委派调用(use + result 都在阶段卡 children 里)
+          item('4', 'tool', 'Task', '{"description":"查找代码"}', {
+            parentTaskId: 'stage-1',
+            sdkSubtype: undefined,
+            toolName: 'Task',
+            toolUseId: 'toolu_delegate',
+            phase: 'use',
+            input: { description: '查找代码' }
+          }),
+          item('5', 'tool', 'Task', '"委派输出"', {
+            parentTaskId: 'stage-1',
+            sdkSubtype: undefined,
+            toolName: 'Task',
+            toolUseId: 'toolu_delegate',
+            phase: 'result',
+            output: '委派输出'
+          }),
+          // 子 Agent(stageId 指向 stage-1 → Step 3 挂进阶段卡 nested)
+          item('6', 'status', 'Qoder 子任务启动', '查找代码', {
+            parentTaskId: 'sub-explore',
+            subtaskId: 'sub-explore',
+            sdkSubtype: 'task_started',
+            stageId: 'stage-1',
+            taskType: 'Explore',
+            description: '查找代码',
+            toolUseId: 'toolu_delegate'
+          }),
+          // 子 Agent 内工具
+          item('7', 'tool', 'Bash', '{"command":"ls"}', {
+            parentTaskId: 'sub-explore',
+            sdkSubtype: undefined,
+            toolName: 'Bash',
+            toolUseId: 'toolu_sub',
+            phase: 'use',
+            input: { command: 'ls' }
+          }),
+          item('8', 'tool', 'Bash', '"file1"', {
+            parentTaskId: 'sub-explore',
+            sdkSubtype: undefined,
+            toolName: 'Bash',
+            toolUseId: 'toolu_sub',
+            phase: 'result',
+            output: 'file1'
+          }),
+          // 子 Agent 收尾
+          item('9', 'status', 'Qoder 子任务收尾', '完成', {
+            parentTaskId: 'sub-explore',
+            subtaskId: 'sub-explore',
+            sdkSubtype: 'task_notification',
+            status: 'completed',
+            summary: '找到 3 个文件'
+          })
+        ]}
+      />
+    )
+
+    // 阶段卡可见(SubTaskHeader description)
+    expect(screen.getByText('Agent planning')).toBeInTheDocument()
+    // 委派调用被吸收:阶段卡内不出现独立的 Task 工具行
+    expect(screen.queryByText('Tools - Task')).not.toBeInTheDocument()
+
+    // 展开阶段卡(CollapsibleContent 折叠时内容不在 DOM,先展开才能看到内部)
+    fireEvent.click(screen.getByRole('button', { name: /Agent planning/ }))
+    // 阶段内工具行可见,子 Agent 卡 header 出现
+    expect(screen.getByText('Tools - Read')).toBeInTheDocument()
+    expect(screen.getByText('查找代码')).toBeInTheDocument()
+    // 子 Agent 卡在阶段卡 article 内部,不是平级 —— 嵌套层级成立的直接证据
+    const stageArticle = container.querySelector('[data-subtask-id="stage-1"]')!.closest('article')!
+    expect(stageArticle.querySelector('[data-subtask-id="sub-explore"]')).not.toBeNull()
+    // 子 Agent 卡默认折叠:卡内工具不可见
+    expect(screen.queryByText('Tools - Bash')).not.toBeInTheDocument()
+
+    // 展开子 Agent 卡 → 卡内工具行 + 被吸收委派调用的 result 输出段
+    fireEvent.click(screen.getByRole('button', { name: /查找代码/ }))
+    expect(screen.getByText('Tools - Bash')).toBeInTheDocument()
+    expect(screen.getByText('委派输出')).toBeInTheDocument()
+  })
+
+  /**
+   * 递归吸收(问题 3 的另一半):spawnerTaskByCallId / allToolPairs 必须递归遍历
+   * nested 组 —— 阶段卡 children 里的委派调用(use/result)能被吸收进嵌套子 Agent 卡,
+   * result 成为子卡底部「输出」段。此前的吸收逻辑只扫顶层 blocks,nested 组吸收不到。
+   */
+  it('递归吸收:阶段卡内发起的子 Agent,委派调用被吸收、result 进嵌套子卡输出段', () => {
+    render(
+      <Timeline
+        items={[
+          // 阶段容器
+          item('1', 'status', 'Qoder Agent 阶段', 'Agent planning', {
+            parentTaskId: 'stage-1',
+            subtaskId: 'stage-1',
+            sdkSubtype: 'agent_run',
+            taskType: 'Agent',
+            description: 'Agent planning'
+          }),
+          // 委派调用在阶段 children(use + result)
+          item('2', 'tool', 'Task', '{"description":"查发票代码"}', {
+            parentTaskId: 'stage-1',
+            sdkSubtype: undefined,
+            toolName: 'Task',
+            toolUseId: 'toolu_delegate',
+            phase: 'use',
+            input: { description: '查发票代码' }
+          }),
+          item('3', 'tool', 'Task', '"发票模块输出"', {
+            parentTaskId: 'stage-1',
+            sdkSubtype: undefined,
+            toolName: 'Task',
+            toolUseId: 'toolu_delegate',
+            phase: 'result',
+            output: '发票模块输出'
+          }),
+          // 子 Agent(stageId → 嵌套)
+          item('4', 'status', 'Qoder 子任务启动', '查发票代码', {
+            parentTaskId: 'sub-delegate',
+            subtaskId: 'sub-delegate',
+            sdkSubtype: 'task_started',
+            stageId: 'stage-1',
+            taskType: 'Explore',
+            description: '查发票代码',
+            toolUseId: 'toolu_delegate'
+          }),
+          item('5', 'status', 'Qoder 子任务收尾', '完成', {
+            parentTaskId: 'sub-delegate',
+            subtaskId: 'sub-delegate',
+            sdkSubtype: 'task_notification',
+            status: 'completed',
+            summary: '找到 2 处'
+          })
+        ]}
+      />
+    )
+
+    // 委派调用不重复成行
+    expect(screen.queryByText('Tools - Task')).not.toBeInTheDocument()
+    // 展开阶段卡 → 子 Agent 卡出现(header 即发起调用样式:工具名 Task,无 "Tools -" 前缀)
+    fireEvent.click(screen.getByRole('button', { name: /Agent planning/ }))
+    expect(screen.getByRole('button', { name: /Task/ })).toBeInTheDocument()
+    expect(screen.getByText('查发票代码')).toBeInTheDocument()
+    // 展开子 Agent 卡 → result 进「输出」段
+    fireEvent.click(screen.getByRole('button', { name: /查发票代码/ }))
+    expect(screen.getByText('发票模块输出')).toBeInTheDocument()
+  })
+
+  /**
+   * thinking 展示(问题 2):模型 thinking 是内部推理,不算主流程数据。
+   * trace-service 已把 output 拆成 { thinking, text },前端折叠标注「思考过程」,
+   * 默认收起,展开才看到完整推理 —— 主流程不被长推理文本刷屏。
+   */
+  it('thinking 折叠展示:标注「思考过程」,默认收起,展开可见完整推理', () => {
+    render(
+      <Timeline
+        items={[
+          item('1', 'message', 'Qoder Agent', '最终回答:发票模块在 src/invoice.ts', {
+            thinking: '先分析需求:需要定位发票推送相关代码,再搜索实现模式...'
+          })
+        ]}
+      />
+    )
+
+    // 主流程 detail 正常展示
+    expect(screen.getByText('最终回答:发票模块在 src/invoice.ts')).toBeInTheDocument()
+    // 「思考过程」标注可见,推理内容默认折叠(不算主流程数据)
+    expect(screen.getByText('思考过程')).toBeInTheDocument()
+    expect(screen.queryByText('先分析需求:需要定位发票推送相关代码,再搜索实现模式...')).not.toBeInTheDocument()
+    // 点击展开 → 推理内容可见
+    fireEvent.click(screen.getByRole('button', { name: /思考过程/ }))
+    expect(screen.getByText('先分析需求:需要定位发票推送相关代码,再搜索实现模式...')).toBeInTheDocument()
   })
 
   it('live 模式:无 result 的主流程工具调用显示 running 状态', () => {
@@ -720,5 +963,129 @@ describe('Timeline', () => {
     )
     // running → Loader2 转圈图标
     expect(container.querySelector('.animate-spin')).not.toBeNull()
+  })
+
+  /**
+   * 顶层阶段卡不缩进(此前统一 ml-7 border-l-2 让顶层「Agent planning」视觉上像
+   * 嵌套在上一条 LLM 调用之下);仅嵌套子 Agent 卡保留缩进表达层级。
+   * 包装 div(renderGroup 产出)在 article 外,缩进类断言落在它上面。
+   */
+  it('顶层阶段卡不缩进,嵌套子 Agent 卡保留缩进', () => {
+    const { container } = render(
+      <Timeline
+        items={[
+          // 阶段容器(顶层卡)
+          item('1', 'status', 'Qoder Agent 阶段', 'Agent planning', {
+            parentTaskId: 'stage-1',
+            subtaskId: 'stage-1',
+            sdkSubtype: 'agent_run',
+            taskType: 'Agent',
+            description: 'Agent planning'
+          }),
+          // 阶段内委派调用(被吸收,作为嵌套子卡锚点)
+          item('2', 'tool', 'Task', undefined, {
+            parentTaskId: 'stage-1',
+            toolName: 'Task',
+            toolUseId: 'toolu_delegate',
+            phase: 'use',
+            input: { description: '查代码' }
+          }),
+          // 嵌套子 Agent 卡(stageId → 挂进阶段卡)
+          item('3', 'status', 'Qoder 子任务启动', '查代码', {
+            parentTaskId: 'sub-1',
+            subtaskId: 'sub-1',
+            sdkSubtype: 'task_started',
+            stageId: 'stage-1',
+            taskType: 'Explore',
+            description: '查代码',
+            toolUseId: 'toolu_delegate'
+          })
+        ]}
+      />
+    )
+
+    // 顶层阶段卡的包装 div(article 的父元素):无 ml-7 缩进
+    const stageWrapper = container.querySelector('[data-subtask-id="stage-1"]')!.closest('article')!.parentElement!
+    expect(stageWrapper.className).toContain('mb-4')
+    expect(stageWrapper.className).not.toContain('ml-7')
+
+    // 展开阶段卡 → 嵌套子卡包装 div 带 ml-7 缩进(层级表达保留给真正的嵌套)
+    fireEvent.click(screen.getByRole('button', { name: /Agent planning/ }))
+    const nestedWrapper = container.querySelector('[data-subtask-id="sub-1"]')!.closest('article')!.parentElement!
+    expect(nestedWrapper.className).toContain('ml-7')
+  })
+
+  /**
+   * 阶段卡内容区时序:children 与 nested 子卡按 createdAt 合并排序(此前固定先
+   * children 后 nested —— 19:33 发生的子 Agent 卡排在 19:35 的 LLM 调用之后)。
+   * nested 子卡的时间锚点取「被吸收委派工具」在本卡 children 里的位置。
+   */
+  it('阶段卡内 children 与嵌套子卡按时间合并排序(子卡锚定在被吸收委派调用的位置)', () => {
+    render(
+      <Timeline
+        items={[
+          // 阶段容器 t=01
+          {
+            ...item('1', 'status', 'Qoder Agent 阶段', 'Agent planning', {
+              parentTaskId: 'stage-1',
+              subtaskId: 'stage-1',
+              sdkSubtype: 'agent_run',
+              taskType: 'Agent',
+              description: 'Agent planning'
+            }),
+            createdAt: '2026-08-01T00:00:01.000Z'
+          },
+          // 委派调用 use t=02(被吸收 → 嵌套子卡锚定在 t=02)
+          {
+            ...item('2', 'tool', 'Task', undefined, {
+              parentTaskId: 'stage-1',
+              toolName: 'Task',
+              toolUseId: 'toolu_delegate',
+              phase: 'use',
+              input: { description: '查代码' }
+            }),
+            createdAt: '2026-08-01T00:00:02.000Z'
+          },
+          // 嵌套子 Agent 卡 header t=02
+          {
+            ...item('3', 'status', 'Qoder 子任务启动', '查代码', {
+              parentTaskId: 'sub-1',
+              subtaskId: 'sub-1',
+              sdkSubtype: 'task_started',
+              stageId: 'stage-1',
+              taskType: 'Explore',
+              description: '查代码',
+              toolUseId: 'toolu_delegate'
+            }),
+            createdAt: '2026-08-01T00:00:02.500Z'
+          },
+          // 委派调用 result t=04(被吸收)
+          {
+            ...item('4', 'tool', 'Task', undefined, {
+              parentTaskId: 'stage-1',
+              toolName: 'Task',
+              toolUseId: 'toolu_delegate',
+              phase: 'result',
+              output: '完成'
+            }),
+            createdAt: '2026-08-01T00:00:04.000Z'
+          },
+          // 阶段内 LLM 调用 t=05(晚于子卡发生,必须排在子卡之后)
+          {
+            ...item('5', 'message', 'LLM 调用 · gpt-5', '规划完成', {
+              parentTaskId: 'stage-1',
+              spanId: 'sp-llm'
+            }),
+            createdAt: '2026-08-01T00:00:05.000Z'
+          }
+        ]}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /Agent planning/ }))
+    const nestedCard = screen.getByText('查代码')
+    const llmText = screen.getByText('规划完成')
+    // 嵌套子卡(锚定 t=02)必须排在 LLM 调用(t=05)之前 —— 时序错乱的回归断言
+    expect(nestedCard.compareDocumentPosition(llmText) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })

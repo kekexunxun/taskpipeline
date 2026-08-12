@@ -42,7 +42,7 @@ export function ChatHistoryItem({
           size={13}
         />
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-xs font-medium">{meta.title || '新对话'}</span>
+          <span className="block max-w-[16em] truncate text-xs font-medium">{meta.title || '新对话'}</span>
           <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
             {meta.workingDirectory && showDirectory ? (
               <>

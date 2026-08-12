@@ -88,16 +88,15 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
       const last = out[out.length - 1]
       // qoder.thinking / openai.thinking 都是流式增量拆分,合并成单个「思考过程」折叠块,
       // 避免流式渲染时刷屏(8+ 个空标题块)。
-      // 拼接方式不同:qoder 按行推送 delta(每条是独立一行,用 \n 分隔);
-      // openai 的 reasoning-delta 按 token 粒度推送(每条一个词),直接拼接,
-      // 否则每个词都会变成独立一行、思考过程被拆碎。
+      // 两者的 delta 都是 token 粒度(qoder 的 thinking_delta 与 openai 的 reasoning-delta
+      // 一样逐词推送),一律直接拼接;若用 \n 分隔会把每个词拆成独立一行,思考文案被拆碎。
       if (part.type === 'qoder.thinking' && last?.type === 'qoder.thinking') {
         const signature = part.signature && last.signature !== part.signature ? part.signature : last.signature
         const parentTaskId = part.parentTaskId ?? last.parentTaskId
         out[out.length - 1] = {
           driverId: part.driverId,
           type: 'qoder.thinking',
-          text: `${last.text}\n${part.text}`,
+          text: `${last.text}${part.text}`,
           ...(signature ? { signature } : {}),
           ...(parentTaskId ? { parentTaskId } : {})
         } as DriverPart

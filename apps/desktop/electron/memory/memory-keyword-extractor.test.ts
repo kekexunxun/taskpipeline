@@ -1,5 +1,38 @@
 import { describe, expect, it } from 'vitest'
-import { fallbackKeywords, parseExtractedKeywords } from './memory-keyword-extractor'
+import type { ChatDriver } from '../chat/drivers/chat-driver'
+import type { ChatStreamChunk } from '../chat/chat-types'
+import { extractKeywords, fallbackKeywords, parseExtractedKeywords } from './memory-keyword-extractor'
+
+/** 记录 streamChat 入参 + closeSession 调用的 fake driver（会话隔离断言用）。 */
+function createFakeDriver(replyText: string) {
+  const calls: Array<{ conversationId: string; traceId?: string; traceLabel?: string }> = []
+  const closed: string[] = []
+  const driver: ChatDriver = {
+    id: 'qoder',
+    displayName: 'Fake',
+    async listModels() {
+      return []
+    },
+    deserializeMessage(record) {
+      return { ...record, parts: [] }
+    },
+    serializeUserMessage(input) {
+      return { id: input.id, role: 'user', createdAt: input.createdAt, driverId: 'qoder', raw: { text: input.text } }
+    },
+    serializeAssistantMessage(input) {
+      return { id: input.id, role: 'assistant', createdAt: input.createdAt, driverId: 'qoder', raw: {} }
+    },
+    async *streamChat(input) {
+      calls.push({ conversationId: input.conversationId, traceId: input.traceId, traceLabel: input.traceLabel })
+      yield { type: 'part', part: { driverId: 'qoder', type: 'text', text: replyText } }
+    },
+    closeSession(id) {
+      closed.push(id)
+    },
+    dispose() {}
+  }
+  return { driver, calls, closed }
+}
 
 describe('parseExtractedKeywords', () => {
   it('解析干净 JSON 数组', () => {
@@ -94,5 +127,53 @@ describe('fallbackKeywords', () => {
     // 韩文 3 字 stretch,走 CJK n-gram 路径
     const result = fallbackKeywords('안녕하세요')
     expect(result.length).toBeGreaterThan(0)
+  })
+})
+
+describe('extractKeywords 会话隔离', () => {
+  it('两次调用使用不同的一次性 conversationId，且每次结束后 closeSession', async () => {
+    const { driver, calls, closed } = createFakeDriver('{"keywords":["结算页"]}')
+    const input = { driver, driverId: 'qoder' as const, model: 'lite', text: '结算页优惠券叠加报错' }
+
+    const first = await extractKeywords(input)
+    const second = await extractKeywords(input)
+
+    expect(first).toEqual(['结算页'])
+    expect(second).toEqual(['结算页'])
+    expect(calls).toHaveLength(2)
+    expect(calls[0]!.conversationId).toMatch(/^memory-keyword-extract-/)
+    expect(calls[1]!.conversationId).toMatch(/^memory-keyword-extract-/)
+    expect(calls[0]!.conversationId).not.toBe(calls[1]!.conversationId)
+    expect(closed).toEqual([calls[0]!.conversationId, calls[1]!.conversationId])
+  })
+
+  it('traceId 透传给 driver（join 调用方执行树），traceLabel 为语义名', async () => {
+    const { driver, calls } = createFakeDriver('{"keywords":["a"]}')
+    await extractKeywords({
+      driver,
+      driverId: 'qoder',
+      model: 'lite',
+      text: '查询',
+      traceId: 'trace-caller-1'
+    })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.traceId).toBe('trace-caller-1')
+    expect(calls[0]!.traceLabel).toBe('关键词提取')
+  })
+
+  it('driver 抛错时仍 closeSession 并回退 fallback 关键词', async () => {
+    const { driver, calls, closed } = createFakeDriver('')
+    const failing: ChatDriver = {
+      ...driver,
+      async *streamChat(): AsyncGenerator<ChatStreamChunk> {
+        yield* []
+        throw new Error('llm down')
+      }
+    }
+    const result = await extractKeywords({ driver: failing, driverId: 'qoder', model: 'lite', text: '死锁排查' })
+    expect(result.length).toBeGreaterThan(0)
+    expect(closed).toHaveLength(1)
+    expect(closed[0]).toMatch(/^memory-keyword-extract-/)
+    expect(calls).toHaveLength(0)
   })
 })

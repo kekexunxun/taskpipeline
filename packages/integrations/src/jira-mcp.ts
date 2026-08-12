@@ -63,15 +63,13 @@ export class AtlassianClientFactory {
     } as McpProfile)
   }
 
-  /** REST 校验通道的连接配置：URL+Token 未配置时返回 undefined；email 用于 Cloud Basic 鉴权。 */
+  /** REST 校验通道的连接配置：URL+Token 未配置时返回 undefined。 */
   restConfig(kind: 'jira' | 'confluence'): AtlassianRestConfig | undefined {
     const prefix = kind === 'jira' ? 'jira' : 'confluence'
     const url = this.resolver.get(`${prefix}Url`)
     const token = this.resolver.getSecret(`${prefix}Token`)
     if (!url || !token) return undefined
-    // Confluence 与 Jira 通常同一 Atlassian 账号：confluenceEmail 缺省时回退 jiraEmail。
-    const email = this.resolver.get(`${prefix}Email`) || (kind === 'confluence' ? this.resolver.get('jiraEmail') : '')
-    return { url, email: email || undefined, token }
+    return { url, token }
   }
 }
 

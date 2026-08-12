@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Loader2Icon, SaveIcon, Trash2Icon } from 'lucide-react'
+import type { CapabilityKey } from '@/api'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Dialog,
   DialogClose,
@@ -26,13 +28,23 @@ export type OpenAIProfile = {
   displayName?: string
   apiKeyConfigured: boolean
   isDefault?: boolean
+  /** 用户显式声明的可调参数能力；缺省 = 按 vendor 自动推断。 */
+  capabilities?: CapabilityKey[]
 }
+
+/** 能力多选项（与 driver 端 capabilitiesForProfile 的自动推断语义对齐）。 */
+const CAPABILITY_OPTIONS: { key: CapabilityKey; label: string }[] = [
+  { key: 'reasoningEffort', label: '推理力度' },
+  { key: 'thinking', label: '思考模式' },
+  { key: 'maxOutputTokens', label: '最大输出 Token' }
+]
 
 /**
  * OpenAI-Compatible 模型配置弹窗：
  * - 选择厂商（DeepSeek / OpenAI 官方 / 其它兼容端点）自动填充默认 URL；
  * - 填写 URL（Base URL）、API Key、显示名称、Model ID；
- * - 「设为默认」：系统级调用（关键词提取 / 记忆整理 / 计划 / 实现 / Review）使用默认配置；
+ * - 「设为默认」：组内默认 profile（失效 fallback 与系统级 OpenAI 调用取用）；
+ * - 「参数能力」：显式声明该模型支持的可调参数（覆盖按 vendor 的自动推断）；
  * - 支持新增/编辑两种模式，编辑时若 API Key 为空则保留已有值。
  */
 export function OpenAIProfileDialog({
@@ -56,6 +68,7 @@ export function OpenAIProfileDialog({
     displayName?: string
     apiKey: string | undefined
     isDefault: boolean
+    capabilities?: CapabilityKey[]
   }): void
   onDeleted?(): void
   onError?(reason: unknown): void
@@ -66,6 +79,8 @@ export function OpenAIProfileDialog({
   const [displayName, setDisplayName] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [isDefault, setIsDefault] = useState(false)
+  const [manualCapabilities, setManualCapabilities] = useState(false)
+  const [capabilities, setCapabilities] = useState<CapabilityKey[]>([])
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   useEffect(() => {
@@ -76,6 +91,8 @@ export function OpenAIProfileDialog({
     setDisplayName(initial?.displayName ?? '')
     setApiKey(initial?.apiKeyConfigured ? '__configured__' : '')
     setIsDefault(initial?.isDefault ?? false)
+    setManualCapabilities(initial?.capabilities !== undefined)
+    setCapabilities(initial?.capabilities ?? [])
   }, [open, initial])
   const trimmedBase = baseUrl.trim()
   const trimmedModel = model.trim()
@@ -92,7 +109,8 @@ export function OpenAIProfileDialog({
         model: trimmedModel,
         displayName: displayName.trim() || undefined,
         apiKey: apiKeyValue,
-        isDefault
+        isDefault,
+        capabilities: manualCapabilities ? capabilities : undefined
       })
     } catch (reason) {
       onError?.(reason)
@@ -174,8 +192,31 @@ export function OpenAIProfileDialog({
             <Field label="使用的模型 (Model)">
               <Input value={model} onChange={(event) => setModel(event.target.value)} placeholder="gpt-4o-mini" />
             </Field>
-            <Field label="设为默认（系统级调用使用）">
+            <Field label="设为默认（组内默认 profile）">
               <Switch checked={isDefault} onCheckedChange={setIsDefault} />
+            </Field>
+            <Field label="参数能力（选择器可调参数）">
+              <div className="flex items-center gap-2">
+                <Switch checked={manualCapabilities} onCheckedChange={setManualCapabilities} />
+                <span className="text-[11px] text-muted-foreground">手动指定（关闭时按厂商自动推断）</span>
+              </div>
+              {manualCapabilities && (
+                <div className="flex flex-wrap gap-3 pt-1">
+                  {CAPABILITY_OPTIONS.map((option) => (
+                    <label key={option.key} className="flex cursor-pointer items-center gap-1.5 text-xs">
+                      <Checkbox
+                        checked={capabilities.includes(option.key)}
+                        onCheckedChange={(checked) =>
+                          setCapabilities((current) =>
+                            checked ? [...current, option.key] : current.filter((key) => key !== option.key)
+                          )
+                        }
+                      />
+                      {option.label}
+                    </label>
+                  ))}
+                </div>
+              )}
             </Field>
             {trimmedModel && (
               <div className="flex items-center gap-2 rounded-md border bg-card/40 px-2.5 py-1.5 text-xs text-muted-foreground">

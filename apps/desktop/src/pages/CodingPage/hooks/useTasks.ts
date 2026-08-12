@@ -49,11 +49,15 @@ export function useTasks(): CodingPageState {
   const pendingTaskIdRef = useRef<string | undefined>(undefined)
 
   const acceptDetail = useCallback(
-    (next: TaskDetail) => {
+    (next: TaskDetail, options?: { syncRunning?: boolean }) => {
       // 竞态保护：只接受当前选中任务的响应
       if (next.task?.id && next.task.id !== pendingTaskIdRef.current) return
       setDetail(next)
       planningRef.current = next.task?.state === 'planning'
+      // 主进程 activeTaskOperations 的权威运行中标记：应用重启/事件丢失时恢复 running，
+      // 避免 planning 中的任务误显示"继续生成计划"。仅初始加载/切换/手动操作后同步，
+      // 事件驱动路径（agent_start/agent_end）仍以事件为准，不覆盖。
+      if (options?.syncRunning && next.running !== undefined) setRunning(next.running)
       if (next.task?.state === 'awaiting_plan_approval') {
         const key = `${next.task.id}:${next.task.planRevision ?? 0}`
         if (notifiedPlanRef.current !== key) {
@@ -91,7 +95,7 @@ export function useTasks(): CodingPageState {
   const loadDetail = useCallback(
     async (id: string) => {
       try {
-        acceptDetail(await api.getTask(id))
+        acceptDetail(await api.getTask(id), { syncRunning: true })
       } catch (reason) {
         showError(reason instanceof Error ? reason.message : String(reason))
       }
@@ -120,12 +124,14 @@ export function useTasks(): CodingPageState {
         planningRef.current = event.phase === 'planning'
         liveMessageId.current = crypto.randomUUID()
       }
-      if (event.type === 'task_changed') {
+      if (event.type === 'task_changed' || event.type === 'trace_span') {
         const taskId = selectedId
         window.clearTimeout(changeTimer)
         changeTimer = window.setTimeout(() => {
           void refresh()
-          if (taskId && taskId === event.taskId) void api.getTask(taskId).then(acceptDetail)
+          if (taskId && (event.type === 'task_changed' ? taskId === event.taskId : true)) {
+            void api.getTask(taskId).then(acceptDetail)
+          }
         }, 100)
       }
       if (['agent_end', 'agent_error', 'process_exit'].includes(event.type)) {
@@ -175,7 +181,7 @@ export function useTasks(): CodingPageState {
     setSending(false)
     if (selectedId) {
       pendingTaskIdRef.current = selectedId
-      void api.getTask(selectedId).then(acceptDetail)
+      void api.getTask(selectedId).then((detail) => acceptDetail(detail, { syncRunning: true }))
     } else {
       // 没有选中任务时清空详情
       pendingTaskIdRef.current = undefined
@@ -188,7 +194,7 @@ export function useTasks(): CodingPageState {
       try {
         await action()
         await refresh()
-        if (selectedId) acceptDetail(await api.getTask(selectedId))
+        if (selectedId) acceptDetail(await api.getTask(selectedId), { syncRunning: true })
       } catch (reason) {
         showError(reason instanceof Error ? reason.message : String(reason))
       }

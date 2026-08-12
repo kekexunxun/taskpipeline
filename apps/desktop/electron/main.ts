@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } from 'electron'
@@ -23,8 +22,15 @@ import {
   LocalFileKeyStore,
   boardColumnFor,
   transitionTask,
+  JsonlTraceStorage,
+  summarizeTrace,
+  traceEventsDir,
+  traceInfoFile,
+  lookupCostRate,
   type AgentEvent,
   type AgentProfile,
+  type AgentSpan,
+  type AgentSpanUsage,
   type Memory,
   type MemoryScope,
   type MemorySearchHit,
@@ -34,8 +40,7 @@ import {
   type TaskEventSink,
   type TaskRepository,
   type TaskStartMode,
-  type TaskState,
-  type TraceKind
+  type TaskState
 } from '@task-pipeline/core'
 import {
   AtlassianClientFactory,
@@ -43,6 +48,7 @@ import {
   fetchJiraTasks,
   GitService,
   importJiraIssue,
+  McpClient,
   MergeStatusRefresher,
   openTaskEditor,
   OpenCodeReviewService,
@@ -65,13 +71,16 @@ import {
   type UsageInfo
 } from '@qoder-ai/qoder-agent-sdk'
 import { TraceService } from './trace/trace-service.js'
-import { QoderTraceSink } from './trace/qoder-trace.js'
+import { TracePipeline } from './trace/bus/trace-pipeline.js'
+import { PiTraceBuilder } from './trace/instrument/pi-trace-builder.js'
+import { QoderTraceBuilder } from './trace/instrument/qoder-trace-builder.js'
 import { resolveBundledOcrBinary, resolveOcrBinary, createOcrRunner } from './ocr.js'
 import { parsePlanDecision } from './plan-content.js'
-import { ChatService } from './chat/chat-service.js'
+import { ChatService, type ChatTraceManager } from './chat/chat-service.js'
 import { ChatDriverRegistry } from './chat/drivers/driver-registry.js'
 import { QoderChatDriver } from './chat/drivers/qoder-chat-driver.js'
 import { OpenAIChatDriver } from './chat/drivers/openai-chat-driver.js'
+import { createMcpServiceResolver } from './chat/mcp-services.js'
 import { JiraTaskCreationBackend } from './chat/task-backends/jira.js'
 import type { ChatDriverId, ChatConversation } from './chat/chat-types.js'
 import { MemoryService, renderMemoryContext, type KeywordRewriter } from './memory/memory-service.js'
@@ -84,7 +93,7 @@ import {
   nextStepForPlan,
   parseImplementationDecision
 } from './task-readiness.js'
-import { QoderTaskAgentDriver } from './task-agent/qoder-task-agent.js'
+import { QoderTaskAgentDriver, stripQoderModelPrefix } from './task-agent/qoder-task-agent.js'
 import { describeToolAction, isDangerousTool } from './task-agent/dangerous-tools.js'
 import { closeQoderQuerySafely, recordQoderMessage } from './task-agent/log.js'
 import { parseTestCaseGeneration } from './task-agent/parsers/test-case-parser.js'
@@ -92,7 +101,6 @@ import { AgentService, type OperationKind } from './agents/agent-service.js'
 import { AGENT_TEMPLATES } from './agents/templates.js'
 import {
   buildAgentGenerationPrompt,
-  formatAgentGenerationDetail,
   formatRepoContext,
   parseAgentGenerationResult,
   type AgentGenerationRepository,
@@ -148,14 +156,78 @@ const pendingUi = new Map<string, (response: Record<string, unknown>) => void>()
 const dataDir = process.env.TASK_PIPELINE_DATA_DIR ?? join(app.getPath('userData'), 'data')
 process.env.TASK_PIPELINE_DATA_DIR = dataDir
 mkdirSync(dataDir, { recursive: true })
-const store = new TaskStore(join(dataDir, 'task-pipeline.db'))
+const store = new (class extends TaskStore {
+  /**
+   * 任务终态统一收尾：任何路径（workflow / completer / merge-refresher / IPC / updateState）
+   * 把任务置为终态都会经过这里，收尾任务 Trace（endTrace 幂等），避免「任务已完成但 Trace
+   * 仍显示进行中」。tracePipeline / qoderTaskAgent 在模块后段初始化，运行时已就绪。
+   */
+  override updateTask(id: string, patch: Parameters<TaskStore['updateTask']>[1]): Task {
+    const updated = super.updateTask(id, patch)
+    if (updated.state === 'completed' || updated.state === 'failed' || updated.state === 'cancelled') {
+      finalizeTaskTrace(id)
+    }
+    return updated
+  }
+
+  override deleteTask(id: string): void {
+    finalizeTaskTrace(id)
+    super.deleteTask(id)
+  }
+})(join(dataDir, 'task-pipeline.db'))
 const keyStore = new LocalFileKeyStore(dataDir)
+
+/**
+ * 在途的任务记忆整理 promise（finishImplementation 异步触发时登记）。
+ * finalizeTaskTrace 发现 pending 时把 endTrace 链到整理完成之后——endTrace 会强制收尾
+ * 所有未关 span，直接收尾会把正在执行的整理 LLM 调用截断（endTrace 幂等，重复触发安全）。
+ */
+const taskMemoryPending = new Map<string, Promise<void>>()
+
+/**
+ * 任务终态统一收尾（唯一出口）：
+ * - Finish 终端标记：endTrace 前写入完结 span（meta.finalState 承载最终业务状态
+ *   completed/failed/cancelled——两态模型下 trace status 只有「进行中/已结束」，
+ *   业务成败由 Finish span 与任务状态机承载，不由 trace status 表达）；
+ * - qoder 路径：QoderTraceBuilder 关闭未收尾 span 并清理 taskId 状态；
+ * - pi 路径：丢弃 PiTraceBuilder（未收尾 span 由 endTrace 兜底关闭）；
+ * - TracePipeline.endTrace：聚合摘要 + 写 info 摘要文件，幂等（已结束的 trace 直接忽略）。
+ */
+function finalizeTaskTrace(taskId: string): void {
+  qoderTaskAgent?.finishTrace(taskId)
+  piTraceBuilders.delete(taskId)
+  if (tracePipeline.isActive(taskId)) {
+    const task = store.getTask(taskId)
+    const finalState = task?.state
+    if (finalState === 'completed' || finalState === 'failed' || finalState === 'cancelled') {
+      try {
+        const finishSpan = tracePipeline.startSpan(taskId, {
+          type: 'agent.run',
+          name: 'Finish',
+          meta: { source: providerForTask(taskId) === 'qoder' ? 'qoder' : 'pi', phase: 'finish', finalState }
+        })
+        tracePipeline.endSpan(taskId, finishSpan)
+      } catch {
+        /* trace 收尾失败不影响任务 */
+      }
+    }
+  }
+  const memoryPending = taskMemoryPending.get(taskId)
+  if (memoryPending) {
+    void memoryPending.then(() => tracePipeline.endTrace(taskId))
+    return
+  }
+  tracePipeline.endTrace(taskId)
+}
 const memoryService = new MemoryService(store)
 // Agent 体系：可配置多 Agent + 仓库白名单绑定 + 模型路由（配置存 settings key `agentProfiles`）。
+// 第 4/5 个参数：系统默认模型运行时动态回填（不落盘）+ 存储模型值的存在性校验（失效回落默认）。
 const agentService = new AgentService(
   (key) => store.getSetting(key),
   (key, value) => store.setSetting(key, value),
-  (repositoryId) => memoryService.listRepoWikiDocs(repositoryId)
+  (repositoryId) => memoryService.listRepoWikiDocs(repositoryId),
+  () => syncSystemDefaultModel(),
+  (model) => isModelValueAvailable(model)
 )
 let activeTaskId: string | undefined
 let activeQoderQuery: Query | undefined
@@ -317,7 +389,8 @@ function emitTaskChanged(taskId: string): void {
   sendTaskEvent({ type: 'task_changed', taskId })
 }
 function addTaskEvent(event: Parameters<TaskStore['addEvent']>[0]): void {
-  store.addEvent(event)
+  // 全量替换：不再写 events 表（看板执行 Tab 改读任务 trace span 树，见 getTaskEvents）。
+  // 保留 live 通知驱动前端刷新。
   emitTaskChanged(event.taskId)
 }
 function updatePiUsage(taskId: string): void {
@@ -342,6 +415,7 @@ function updateState(task: Task, state: Task['state']): Task {
   const updated = store.updateTask(task.id, { state })
   addTaskEvent({ taskId: task.id, kind: 'status', title: `状态更新为 ${taskStateLabels[state]}` })
   // 任务进入终态:释放该任务常驻的 Qoder 会话(qodercli 进程),避免悬挂到应用退出。
+  // Trace 收尾由 store.updateTask 包装统一处理（覆盖 workflow/completer/merge-refresher 等全部路径）。
   if (['failed', 'completed', 'cancelled'].includes(state)) {
     qoderTaskAgent?.closeSession(task.id)
   }
@@ -375,8 +449,12 @@ function runTaskOperation<T>(taskId: string, action: (signal: AbortSignal) => Pr
   return promise
 }
 
+/**
+ * 系统级 provider 兜底：Qoder 优先 —— 配置了 Qoder Token 即默认走 Qoder，
+ * 仅当 Qoder 未配置时才落到 OpenAI（与模型选择器默认值规则一致）。
+ */
 function modelProvider(): 'qoder' | 'openai' {
-  return readOpenAIProfiles().length > 0 ? 'openai' : 'qoder'
+  return protectedValue('qoderToken') ? 'qoder' : 'openai'
 }
 
 /**
@@ -501,25 +579,118 @@ const mergeRefresher = new MergeStatusRefresher(store, desktopResolver, desktopS
 const taskCompleter = new TaskCompleter(store, desktopSink)
 const atlassianFactory = new AtlassianClientFactory(desktopResolver)
 
+// 埋点管线：span 写入（脱敏/预计算/持久化）+ live 推送（前端实时刷新）。
+const tracePipeline = new TracePipeline(new JsonlTraceStorage(dataDir), (event) => sendTaskEvent(event))
+/** taskId → Pi 任务 span 转换器（OpenAI 任务路径）。 */
+const piTraceBuilders = new Map<string, PiTraceBuilder>()
+/** chatId → 对话回合 traceId（一次用户提问 = 一个 Trace，主对话 + 关键词提取 + 记忆整理共用）。 */
+const chatTurnTraceIds = new Map<string, string>()
+/** chatId → 当前阶段容器 agent.run span（keyword/chat/memory，endStage 收尾）。 */
+const chatStageSpans = new Map<string, AgentSpan>()
+/** chatId → 本回合 driver source（阶段容器 meta.source 用，与任务路径阶段同构）。 */
+const chatStageSources = new Map<string, 'qoder' | 'openai'>()
+/** 对话阶段 phase → 阶段名（与 stage-label 的 agentStageLabel 映射保持一致）。 */
+const chatStageNames: Record<'keyword' | 'chat' | 'memory', string> = {
+  keyword: '关键词提取并注入',
+  chat: '对话生成',
+  memory: '记忆整理'
+}
+/** 对话回合 trace 管理器：注入 ChatService，回合 begin/end + 辅助 LLM 调用 join。 */
+const chatTraceManager: ChatTraceManager = {
+  beginTurn(chatId, messageId, text, driverId, model, extras) {
+    const traceId = `chat-${chatId}-${messageId}`
+    tracePipeline.beginTrace({
+      traceId,
+      kind: 'chat',
+      title: text.slice(0, 80),
+      source: driverId === 'qoder' ? 'qoder' : 'openai',
+      agentName: driverId === 'qoder' ? 'Qoder' : 'OpenAI',
+      model
+    })
+    // ensureRootSpan：同 traceId 重开（恢复场景）复用历史 session.start 根，不重复建根。
+    // 本回合 MCP / Agent 选择态写入根 meta（PayloadInspector 按 meta 展示，自然可见）。
+    tracePipeline.ensureRootSpan(traceId, {
+      type: 'session.start',
+      name: '对话',
+      meta: {
+        source: driverId,
+        ...(extras?.mcpServices?.length ? { mcpServices: extras.mcpServices } : {}),
+        ...(extras?.agentId ? { agentId: extras.agentId } : {})
+      }
+    })
+    chatTurnTraceIds.set(chatId, traceId)
+    chatStageSources.set(chatId, driverId === 'qoder' ? 'qoder' : 'openai')
+    return traceId
+  },
+  endTurn(chatId) {
+    const traceId = chatTurnTraceIds.get(chatId)
+    if (traceId) {
+      // 阶段容器异常在途（如提前 endTurn）兜底收尾，避免悬挂到 endTrace 才关闭。
+      const stage = chatStageSpans.get(chatId)
+      if (stage) {
+        chatStageSpans.delete(chatId)
+        try {
+          tracePipeline.endSpan(traceId, stage)
+        } catch {
+          /* trace 已结束时忽略 */
+        }
+      }
+      tracePipeline.endTrace(traceId)
+      chatTurnTraceIds.delete(chatId)
+      chatStageSources.delete(chatId)
+    }
+  },
+  traceIdForChat(chatId) {
+    return chatTurnTraceIds.get(chatId)
+  },
+  beginStage(chatId, phase) {
+    const traceId = chatTurnTraceIds.get(chatId)
+    if (!traceId || !tracePipeline.isActive(traceId)) return
+    // 与任务路径阶段容器同构：agent.run + meta.phase，期间的 span 按栈自动挂入。
+    const span = tracePipeline.startSpan(traceId, {
+      type: 'agent.run',
+      name: chatStageNames[phase],
+      meta: { source: chatStageSources.get(chatId) ?? 'openai', phase }
+    })
+    chatStageSpans.set(chatId, span)
+  },
+  endStage(chatId, status) {
+    const traceId = chatTurnTraceIds.get(chatId)
+    const span = chatStageSpans.get(chatId)
+    chatStageSpans.delete(chatId)
+    if (!traceId || !span || !tracePipeline.isActive(traceId)) return
+    tracePipeline.endSpan(
+      traceId,
+      span,
+      status === 'error' ? { status: 'error', error: { message: '阶段执行失败' } } : undefined
+    )
+  }
+}
+
 // Chat driver registry — 统一装 Qoder / OpenAI 两份 driver；后续接入更多 driver 仅需改此处。
+// MCP 服务解析器：凭据复用现有 store 设置 + protectedValue（driver 不感知凭据来源）。
+const chatMcpResolver = createMcpServiceResolver({
+  getSetting: (key) => store.getSetting(key),
+  getSecret: (key) => protectedValue(key)
+})
 const chatDriverRegistry = new ChatDriverRegistry()
 chatDriverRegistry.register(
-  new QoderChatDriver(
-    () => protectedValue('qoderToken'),
-    getQoderStatus,
-    // B2：对话路径 SDKMessage 逐条落盘到 traces/qoder-chat/，让对话执行细节可追溯。
-    (conversationId, message) => qoderTraceSink.appendChat(conversationId, message)
-  )
+  new QoderChatDriver(() => protectedValue('qoderToken'), getQoderStatus, tracePipeline, chatMcpResolver)
 )
 chatDriverRegistry.register(
-  new OpenAIChatDriver(store, (profile) => {
-    if (profile?.id) {
-      const scoped = protectedValue(`modelApiKey:${profile.id}`)
-      if (scoped) return scoped
-    }
-    if (profile?.isDefault || !profile?.id) return protectedValue('modelApiKey')
-    return undefined
-  })
+  new OpenAIChatDriver(
+    store,
+    (profile) => {
+      if (profile?.id) {
+        const scoped = protectedValue(`modelApiKey:${profile.id}`)
+        if (scoped) return scoped
+      }
+      if (profile?.isDefault || !profile?.id) return protectedValue('modelApiKey')
+      return undefined
+    },
+    tracePipeline,
+    chatMcpResolver
+  )
 )
 
 /**
@@ -530,12 +701,19 @@ chatDriverRegistry.register(
  * 模型选择：关键词提取只是几行 JSON，Qoder 走 lite 模型节省 credits，
  * OpenAI 跟随用户配置的 modelProfile（`openai:<model>`）。
  */
-const keywordRewriter: KeywordRewriter = async (query) => {
-  const { driverId } = resolveTaskChatModel()
+const keywordRewriter: KeywordRewriter = (query) => keywordRewriterWithTrace(query)
+
+/**
+ * 带 trace 归属的关键词提取：辅助 LLM 调用显式 join 所属回合/任务 trace
+ * （一次用户提问 = 一个 Trace），避免关键词提取产生独立 trace 记录。
+ * 传 task 时模型驱动跟随任务 runtime provider（Qoder 任务走 qoder-lite，不跟全局 OpenAI profile）。
+ */
+async function keywordRewriterWithTrace(query: string, traceId?: string, task?: Task): Promise<string[]> {
+  const { driverId } = await resolveTaskChatModel(task)
   const driver = chatDriverRegistry.tryGet(driverId)
   if (!driver) return []
   const model = await resolveLiteModel(driverId)
-  return extractKeywords({ driver, driverId, model, text: query })
+  return extractKeywords({ driver, driverId, model, text: query, traceId })
 }
 
 /**
@@ -556,10 +734,18 @@ async function resolveLiteModel(driverId: ChatDriverId): Promise<string> {
         enabled.find((m) => m.priceFactor === 0) ??
         enabled.find((m) => /(^|[^a-z])(lite|haiku|flash|mini)([^a-z]|$)/i.test(`${m.value} ${m.displayName ?? ''}`))
       if (free?.value) return free.value
+      // 没有 lite 特征模型时回落 Qoder 默认模型（isDefault 优先），避免硬编码。
+      const pick = enabled.find((m) => m.isDefault) ?? enabled[0]
+      if (pick?.value) return pick.value
     } catch {
       /* 静默回落到默认 */
     }
-    return store.getSetting('defaultModel') ?? 'claude-sonnet-4.5'
+    const legacy = store.getSetting('defaultModel')
+    if (legacy) return legacy
+    // 兜底跟随系统默认解析（Qoder 段返回 `qoder:<model>`，这里去前缀保持裸模型形态）。
+    const system = syncSystemDefaultModel()
+    if (system?.provider === 'qoder') return system.model.replace(/^qoder:/, '')
+    return 'claude-sonnet-4.5'
   }
   return resolveOpenAIModelValue()
 }
@@ -584,6 +770,45 @@ function resolveOpenAIModelValue(): string {
   return 'openai:default'
 }
 
+/**
+ * 系统默认模型（同步版，基于 Qoder 状态探测缓存）：
+ *  - Qoder 已连接且有模型 → 取 isDefault 模型（否则第一个），value 形如 `qoder:<model>`；
+ *  - 否则 OpenAI profiles 非空 → 取默认 profile，value 形如 `openai:<model>`；
+ *  - 都没有 → undefined。
+ * 缓存尚未建立（启动后未探测过）时 Qoder 段跳过，不误判；
+ * AgentService / 任务路径的运行时回填用它，默认变更后自动跟随（不落盘）。
+ */
+function syncSystemDefaultModel(): { provider: 'qoder' | 'openai'; model: string } | undefined {
+  const status = qoderStatusCache?.status
+  if (status && status.enabled && status.connected && status.models.length > 0) {
+    const enabled = status.models.filter((m) => m.isEnabled !== false)
+    const pick = enabled.find((m) => m.isDefault) ?? enabled[0]
+    if (pick?.value) return { provider: 'qoder', model: `qoder:${pick.value}` }
+  }
+  const profile = defaultOpenAIProfile()
+  if (profile?.model) return { provider: 'openai', model: `openai:${profile.model}` }
+  return undefined
+}
+
+/**
+ * 模型 value 存在性校验（对话/任务/Agent 存储值的失效判定）。
+ * - `openai:<model>[@id]`：按当前 profiles 匹配；无任何 profile 时视为失效；
+ * - Qoder 模型：按最近一次状态探测的模型列表匹配；缓存未建立时不校验（避免启动早期误判失效）。
+ */
+function isModelValueAvailable(model: string): boolean {
+  if (model.startsWith('openai:')) {
+    const profiles = readOpenAIProfiles().filter((p) => p.baseUrl && p.model)
+    if (profiles.length === 0) return false
+    if (model === 'openai:default') return true
+    return profiles.some((p) => `openai:${p.model}` === model || (p.id ? `openai:${p.model}@${p.id}` === model : false))
+  }
+  const status = qoderStatusCache?.status
+  if (!status) return true
+  if (!status.enabled || !status.connected) return false
+  const raw = model.startsWith('qoder:') ? model.slice('qoder:'.length) : model
+  return status.models.some((m) => m.value === raw)
+}
+
 const chatService = new ChatService(
   store,
   dataDir,
@@ -595,21 +820,80 @@ const chatService = new ChatService(
     if (resolveDefaultBackend() === 'jira') return new JiraTaskCreationBackend(atlassianFactory)
     return undefined
   },
-  async ({ conversationId, query }) =>
-    memoryService.buildSystemPrompt({
+  async ({ conversationId, query }) => {
+    // 关键词提取 join 当前对话回合（若在回合内），避免产生独立 trace。
+    const turnTraceId = chatTraceManager.traceIdForChat(conversationId)
+    const result = await memoryService.search({
       userId: memoryService.ensureUserId(),
       conversationId,
       query,
-      keywordRewriter
-    }),
-  consolidateChatMemory
+      keywordRewriter: (q) => keywordRewriterWithTrace(q, turnTraceId)
+    })
+    // 记忆 / Repowiki 检索结果落 span（keyword 阶段容器窗口内，自动挂入阶段）：
+    // input=实际检索关键词，output=命中摘要 —— 此前检索无埋点，Trace 里看不到搜索结果。
+    if (turnTraceId && tracePipeline.isActive(turnTraceId)) {
+      const span = tracePipeline.startSpan(turnTraceId, {
+        type: 'tool.execute',
+        name: '记忆与 Repowiki 检索',
+        input: { query, keywords: result.keywords }
+      })
+      tracePipeline.endSpan(turnTraceId, span, {
+        output: {
+          memories: result.memories.map((m) => ({
+            scope: m.scope,
+            title: m.title,
+            snippet: m.content.slice(0, 200)
+          })),
+          wikiDocs: result.wikiDocs.map((doc) => ({
+            path: doc.path,
+            title: doc.title,
+            snippet: doc.content.slice(0, 200)
+          }))
+        }
+      })
+    }
+    return renderMemoryContext(result.memories, result.wikiDocs)
+  },
+  consolidateChatMemory,
+  chatTraceManager
 )
 
-// Trace 服务：聚合任务 / 对话 / Pi 会话执行轨迹（Trace 页面数据源）。
-// ④ pi-trace-extension 的 traces 目录默认在 ~/.pi/agent/traces，可用 settings `piAgentDir` 覆盖。
-const traceService = new TraceService(store, chatService, dataDir, join(homedir(), '.pi', 'agent'))
-// Qoder 执行 trace：任务消息流落盘为 dataDir/traces/qoder/<taskId>.jsonl（Trace 页 step 级展示）。
-const qoderTraceSink = new QoderTraceSink(dataDir)
+// Trace 服务 v2：新 trace 管道查询（Trace 页面数据源）。埋点/写入见 electron/trace/（Bus + 两路适配器）。
+const traceService = new TraceService(dataDir)
+
+/**
+ * 孤儿 trace 启动收口：应用崩溃/强杀会留下只有 events、没有 info 摘要的 trace，
+ * 列表页永远显示「进行中」。启动时扫描 events/：mtime 超过阈值（10 分钟，进行中的
+ * 任务/对话仍在写文件不会命中）且不在活跃 pipeline → 按全量快照 finalize 为
+ * 「已结束 + interrupted」。kind 从根 span 类型推断；title 无法从 events 复原
+ * （ctx 只在内存），退化为 traceId —— 后续同 traceId 恢复执行时会以真实 ctx 重写摘要。
+ */
+function sweepInterruptedTraces(): void {
+  const ORPHAN_STALE_MS = 10 * 60_000
+  const storage = new JsonlTraceStorage(dataDir)
+  let names: string[] = []
+  try {
+    names = readdirSync(traceEventsDir(dataDir)).filter((name) => name.endsWith('.jsonl'))
+  } catch {
+    return
+  }
+  const now = Date.now()
+  for (const name of names) {
+    const traceId = name.replace(/\.jsonl$/, '')
+    try {
+      if (existsSync(traceInfoFile(dataDir, traceId))) continue
+      if (tracePipeline.isActive(traceId)) continue
+      if (now - statSync(join(traceEventsDir(dataDir), name)).mtimeMs < ORPHAN_STALE_MS) continue
+      const spans = storage.loadSpans(traceId)
+      if (!spans?.length) continue
+      const root = spans.find((span) => span.type === 'task.run' || span.type === 'session.start')
+      const summary = summarizeTrace(traceId, root?.type === 'session.start' ? 'chat' : 'task', traceId, spans)
+      storage.finalize(traceId, { ...summary, interrupted: true })
+    } catch {
+      /* 单个文件收口失败不影响其它 */
+    }
+  }
+}
 
 // Task agent driver — 负责"任务执行"路径(plan / implementation / test_generation)。
 // 当前只注册 Qoder；接口已经摆好，后续接入其它 agent 运行时仅需 add() 一行。
@@ -620,6 +904,7 @@ function createQoderTaskAgent(): QoderTaskAgentDriver {
     dataDir,
     addTaskEvent,
     emitPi,
+    tracePipeline,
     emit: (event) => {
       // TaskAgentEvent 透传给 UI 通道(以及失败后续接 session id 持久化)。
       if (event.type === 'agent_session') {
@@ -704,7 +989,8 @@ async function callQoderReviewer(
   prompt: string,
   taskId: string,
   model?: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onMessage?: (message: unknown) => void
 ): Promise<string> {
   const token = protectedValue('qoderToken')
   if (!token) throw new Error('请先配置 Qoder Token')
@@ -721,6 +1007,9 @@ async function callQoderReviewer(
       persistSession: false,
       permissionMode: 'default',
       controlRequestTimeoutMs: 15_000,
+      // 非流式 query 默认只发全量 assistant 消息（llm span 在消息到达时才创建即结束，
+      // 时序失真为 0~1ms）；开启流式增量让 trace 从首个 stream delta 开始计时。
+      includePartialMessages: true,
       ...(model ? { model } : {})
     }
   })
@@ -740,6 +1029,8 @@ async function callQoderReviewer(
           // 哨兵 taskId（如 AI 生成 Agent 模板的 `__agent_generator__`）不挂任务 —— recordQoderMessage 内部
           // 会识别（任务不存在时早返），不会触发 events 表 FK 异常或 updateTask 'Task not found' 异常。
           recordQoderMessage(store, taskId, message, { recordText: true, addTaskEvent, emitPi })
+          // review 阶段 trace：消息透传给调用方的 QoderTraceBuilder（CodeReview 容器内产 llm/tool span）。
+          onMessage?.(message)
           if (message.type === 'assistant') {
             const content = (message as unknown as { message?: { content?: Array<{ type: string; text?: string }> } })
               .message?.content
@@ -769,6 +1060,79 @@ async function callQoderReviewer(
   }
 }
 
+/**
+ * 工作流阶段容器 span（review 等由 main.ts 工作流驱动的独立阶段）：
+ * 确保任务 trace 活跃（begin 幂等 + ensureRootSpan 复用历史根），再开 agent.run 阶段 span。
+ * 返回 undefined 表示 trace 不可用（任务不存在），调用方退化为无埋点执行。
+ */
+function startTaskStageSpan(
+  task: Task | undefined,
+  taskId: string,
+  name: string,
+  phase: string
+): AgentSpan | undefined {
+  if (!task) return undefined
+  try {
+    const source = providerForTask(taskId) === 'qoder' ? 'qoder' : 'pi'
+    tracePipeline.beginTrace({
+      traceId: taskId,
+      kind: 'task',
+      title: task.title,
+      source,
+      ...(task.qoderModel ? { model: stripQoderModelPrefix(task.qoderModel) } : {})
+    })
+    tracePipeline.ensureRootSpan(taskId, { type: 'task.run', name: '任务执行', meta: { source } })
+    return tracePipeline.startSpan(taskId, { type: 'agent.run', name, meta: { source, phase } })
+  } catch {
+    return undefined
+  }
+}
+
+/** OpenAI reviewer：HTTP 一次性调用无 SDK 事件流，手建 llm span（input=review prompt，output=review 结果，usage 取响应）。 */
+async function runOpenAIReviewWithSpan(
+  input: Parameters<OpenAICompatReviewer['call']>[0],
+  taskId: string,
+  model: string | undefined,
+  signal: AbortSignal | undefined,
+  prompt: string,
+  stage: AgentSpan | undefined
+): Promise<string> {
+  const modelName = stripOpenAIModelPrefix(model)
+  const llmSpan = stage
+    ? tracePipeline.startSpan(taskId, {
+        type: 'llm.generate',
+        name: modelName ?? 'OpenAI Review',
+        ...(modelName ? { model: modelName } : {}),
+        input: prompt,
+        meta: { source: 'pi' }
+      })
+    : undefined
+  let usage: AgentSpanUsage | undefined
+  try {
+    const text = await openAIReviewer.call(input, taskId, modelName, signal, prompt, (u) => {
+      usage = u
+    })
+    if (llmSpan) tracePipeline.endSpan(taskId, llmSpan, { output: text, ...(usage ? { usage } : {}) })
+    return text
+  } catch (error) {
+    if (llmSpan) {
+      tracePipeline.endSpan(taskId, llmSpan, {
+        status: 'error',
+        error: { message: error instanceof Error ? error.message : String(error) }
+      })
+    }
+    throw error
+  } finally {
+    if (stage) {
+      try {
+        tracePipeline.endSpan(taskId, stage)
+      } catch {
+        /* trace 收尾失败不影响 review */
+      }
+    }
+  }
+}
+
 function callQoderOrOpenAIReviewer(
   input: Parameters<OpenAICompatReviewer['call']>[0],
   taskId: string,
@@ -780,8 +1144,10 @@ function callQoderOrOpenAIReviewer(
   const repos = task ? store.listTaskRepositories(taskId) : []
   const { roleBody } = agentService.resolveOperationAgent('review', task ?? undefined, repos)
   const prompt = buildReviewPromptForQoder(input, roleBody)
-  if (providerForTask(taskId) !== 'qoder')
-    return openAIReviewer.call(input, taskId, stripOpenAIModelPrefix(model), signal, prompt)
+  // review 阶段容器：CodeReview 进入任务阶段链（关键词提取→Plan→Exec→CodeReview→…），
+  // per repo 调用在容器内产 llm/tool span（此前 review 完全没接 trace，阶段链数据缺失）。
+  const stage = startTaskStageSpan(task, taskId, 'CodeReview', 'review')
+  if (providerForTask(taskId) !== 'qoder') return runOpenAIReviewWithSpan(input, taskId, model, signal, prompt, stage)
   // Review 逐仓库执行：按 input.repo 匹配仓库，注入该仓库 Agent 的指引（领域约定）。
   let finalPrompt = prompt
   if (task) {
@@ -792,7 +1158,33 @@ function callQoderOrOpenAIReviewer(
     const body = [agent?.systemPrompt, agent?.engineeringGuidelines].filter(Boolean).join('\n\n')
     if (body) finalPrompt = `## Agent 指引 — 仓库 ${input.repo}\n${body}\n\n${prompt}`
   }
-  return callQoderReviewer(finalPrompt, taskId, model, signal)
+  // Qoder reviewer：SDK 消息流经 QoderTraceBuilder 转成 llm/tool span（挂栈顶落入 review 容器）。
+  const builder = stage
+    ? new QoderTraceBuilder(tracePipeline, taskId, 'task', 'qoder', stripQoderModelPrefix(model))
+    : undefined
+  const onMessage = builder
+    ? (message: unknown) => {
+        try {
+          builder.onMessage(message as never)
+        } catch {
+          /* trace 采集失败不影响 review */
+        }
+      }
+    : undefined
+  return callQoderReviewer(finalPrompt, taskId, model, signal, onMessage).finally(() => {
+    try {
+      builder?.finish()
+    } catch {
+      /* ignore */
+    }
+    if (stage) {
+      try {
+        tracePipeline.endSpan(taskId, stage)
+      } catch {
+        /* trace 收尾失败不影响 review */
+      }
+    }
+  })
 }
 
 /**
@@ -814,9 +1206,9 @@ const AGENT_GENERATION_TIMEOUT_MS = 120_000
 async function callQoderForAgentGeneration(
   prompt: string,
   model: string,
-  options: { additionalDirectories?: string[]; signal?: AbortSignal } = {}
+  options: { additionalDirectories?: string[]; signal?: AbortSignal; onMessage?: (message: unknown) => void } = {}
 ): Promise<string> {
-  const { additionalDirectories = [], signal } = options
+  const { additionalDirectories = [], signal, onMessage } = options
   const token = protectedValue('qoderToken')
   if (!token) throw new Error('请先配置 Qoder Token')
   const abort = new AbortController()
@@ -832,6 +1224,8 @@ async function callQoderForAgentGeneration(
       persistSession: false,
       permissionMode: 'default',
       controlRequestTimeoutMs: 15_000,
+      // 同 callQoderReviewer：开启流式增量让 trace 从首个 stream delta 开始计时（时序真实化）。
+      includePartialMessages: true,
       // 只允许只读工具：模型可以用 Read / Glob / Grep 进一步探索仓库补充细节，
       // 但不能修改任何文件或执行 shell 指令。
       allowedTools: ['Read', 'Glob', 'Grep'],
@@ -859,6 +1253,7 @@ async function callQoderForAgentGeneration(
       (async () => {
         let text = ''
         for await (const message of q) {
+          onMessage?.(message)
           if (message.type === 'assistant') {
             const content = (message as unknown as { message?: { content?: Array<{ type: string; text?: string }> } })
               .message?.content
@@ -1109,7 +1504,9 @@ async function runQoder(
   taskId: string,
   extraPrompt?: string,
   signal?: AbortSignal,
-  resumeSessionId?: string
+  resumeSessionId?: string,
+  /** 阶段 span 标记：trigger=恢复/续接来源，round=auto-fix 重跑轮次（渲染层区分 Exec/ReExec/续接）。 */
+  traceMark?: { trigger?: 'resume' | 'followup'; round?: number }
 ): Promise<void> {
   const task = await taskWorkflow.prepare(taskId, signal)
   const repos = store.listTaskRepositories(task.id)
@@ -1128,7 +1525,9 @@ async function runQoder(
       repos,
       signal,
       ...(resumeSessionId ? { resumeSessionId } : {}),
-      ...(extraPrompt ? { extraPrompt } : {})
+      ...(extraPrompt ? { extraPrompt } : {}),
+      ...(traceMark?.trigger ? { trigger: traceMark.trigger } : {}),
+      ...(traceMark?.round !== undefined ? { round: traceMark.round } : {})
     })
     const { responseTexts } = qoderTaskAgent.collectResult(taskId, 'implementation')
     await finishImplementation(task.id, responseTexts, signal)
@@ -1158,7 +1557,13 @@ async function runQoderTestCases(taskId: string, signal?: AbortSignal): Promise<
   return parseTestCaseGeneration(responseTexts)
 }
 
-async function runQoderPlan(taskId: string, feedback?: string, signal?: AbortSignal): Promise<void> {
+async function runQoderPlan(
+  taskId: string,
+  feedback?: string,
+  signal?: AbortSignal,
+  /** 恢复标记：resumeTask 计划失败重跑 Plan 时传 'resume'（阶段 span meta.trigger）。 */
+  trigger?: 'resume' | 'followup'
+): Promise<void> {
   const task = store.getTask(taskId)
   if (!task || task.state !== 'planning') throw new Error('当前任务不能生成计划')
   const repos = store.listTaskRepositories(task.id)
@@ -1169,7 +1574,13 @@ async function runQoderPlan(taskId: string, feedback?: string, signal?: AbortSig
   activePlanText = ''
   signal?.throwIfAborted()
   try {
-    await qoderTaskAgent.runPlan({ task, repos, signal, ...(feedback ? { feedback } : {}) })
+    await qoderTaskAgent.runPlan({
+      task,
+      repos,
+      signal,
+      ...(feedback ? { feedback } : {}),
+      ...(trigger ? { trigger } : {})
+    })
     const { responseTexts } = qoderTaskAgent.collectResult(taskId, 'plan')
     await savePlanDecision(taskId, responseTexts)
   } catch (error) {
@@ -1345,7 +1756,7 @@ async function runReviewWithAutoFix(taskId: string, signal?: AbortSignal): Promi
   // 嵌套会 abort 当前 operation 的 signal，导致修订后 review 通过时旧 advanceAfterValidation
   // 用已 abort 的 signal 调 submitMergeRequests，git 操作被立即取消、自动提交失败一次。
   if (runtimeProvider(task) === 'qoder') {
-    await runQoder(taskId, fixPrompt, signal).catch((error) =>
+    await runQoder(taskId, fixPrompt, signal, undefined, { round: used + 1 }).catch((error) =>
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     )
     return
@@ -1414,7 +1825,13 @@ async function finishImplementation(taskId: string, responseTexts: string[], sig
     return
   }
   // 实现已结束（成功 / 结论待确认等），异步整理任务执行记录为记忆，不阻塞后续校验流程。
-  void consolidateTaskMemory(taskId, responseTexts)
+  // 登记在途 promise：任务终态收尾（finalizeTaskTrace）会等它完成再 endTrace，
+  // 避免在途的整理 span 被强制收尾。
+  const memoryPending = consolidateTaskMemory(taskId, responseTexts)
+  taskMemoryPending.set(taskId, memoryPending)
+  void memoryPending.then(() => {
+    if (taskMemoryPending.get(taskId) === memoryPending) taskMemoryPending.delete(taskId)
+  })
   let changedFiles: Awaited<ReturnType<typeof taskChangedFiles>>
   try {
     changedFiles = await taskChangedFiles(taskId, false)
@@ -1507,6 +1924,10 @@ function syncPiModelConfig(): void {
     if (!profile.baseUrl || !profile.model) continue
     // 每个 profile 一个唯一 provider key：有 id 用 `company-openai:<id>`，无 id（历史）用 `company-openai`。
     const providerKey = profile.id ? `company-openai:${profile.id}` : 'company-openai'
+    // 计费：models.json 缺 cost 时 pi 按 0 计费（会话消耗面板成本恒 0）。按内置单价表注入；
+    // pi 的 cost 单位是 USD / 1M tokens（单价表是 per 1K，×1000 换算）；
+    // cacheRead/cacheWrite 无统一刊例，按行业惯例近似：cacheRead ≈ input × 0.1、cacheWrite ≈ input。
+    const rate = lookupCostRate(profile.model)
     providersNext[providerKey] = {
       baseUrl: profile.baseUrl,
       api: 'openai-completions',
@@ -1517,6 +1938,16 @@ function syncPiModelConfig(): void {
           name: profile.model,
           reasoning: true,
           input: ['text', 'image'],
+          ...(rate
+            ? {
+                cost: {
+                  input: rate.inputPer1k * 1000,
+                  output: rate.outputPer1k * 1000,
+                  cacheRead: rate.inputPer1k * 100,
+                  cacheWrite: rate.inputPer1k * 1000
+                }
+              }
+            : {}),
           contextWindow: 128000,
           maxTokens: 32768
         }
@@ -1529,115 +1960,6 @@ function syncPiModelConfig(): void {
   const temporaryPath = `${modelsPath}.tmp`
   writeFileSync(temporaryPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
   renameSync(temporaryPath, modelsPath)
-}
-
-/**
- * Pi 会话事件 → openai_events 表（OpenAI 任务路径，对称 recordQoderMessage）。
- *
- * Pi 会话事件原本只走 live 通道（sendTaskEvent），执行 Tab / Trace 详情刷新后即丢；
- * 这里把关键事件独立落库 openai_events 表（与 Qoder events 分离，按时间顺序合并展示），
- * 让执行 Tab 与 Qoder 任务一样可回放：
- * - message_end（assistant）→ kind=message（含 stopReason / usage）；stopReason=error 追加 error 条目；
- * - tool_execution_start / end → kind=tool，按 toolCallId + phase 配对（对齐 Qoder 的 toolUseId 约定）；
- * - agent_start / end → kind=status 阶段边界。
- *
- * 任务不存在时跳过（openai_events 表 task_id 有 FK 约束，recordQoderMessage 同款防御）。
- */
-function recordPiMessage(taskId: string, record: Record<string, unknown>): void {
-  if (!store.getTask(taskId)) return
-  switch (record.type) {
-    case 'message_end': {
-      const message = record.message as
-        | { role?: string; stopReason?: string; errorMessage?: string; usage?: unknown }
-        | undefined
-      if (message?.role !== 'assistant') return
-      const text = agentMessageText(message)
-      const payload: Record<string, unknown> = {
-        ...(message.stopReason ? { stopReason: message.stopReason } : {}),
-        ...(message.usage && typeof message.usage === 'object' ? { usage: message.usage } : {})
-      }
-      store.addOpenAiEvent({
-        taskId,
-        kind: 'message',
-        title: 'OpenAI Agent',
-        ...(typeof text === 'string' && text ? { detail: text } : {}),
-        ...(Object.keys(payload).length > 0 ? { payload } : {})
-      })
-      if (message.stopReason === 'error' || message.errorMessage) {
-        store.addOpenAiEvent({
-          taskId,
-          kind: 'error',
-          title: '执行错误',
-          detail: message.errorMessage || '模型流式输出异常结束'
-        })
-      }
-      break
-    }
-    case 'tool_execution_start': {
-      const tool = record as { toolCallId?: string; toolName?: string; args?: unknown }
-      store.addOpenAiEvent({
-        taskId,
-        kind: 'tool',
-        title: tool.toolName ?? '工具',
-        detail: safeStringify(tool.args).slice(0, 2000),
-        payload: {
-          toolName: tool.toolName,
-          toolUseId: tool.toolCallId,
-          phase: 'use' as const,
-          input: tool.args
-        }
-      })
-      break
-    }
-    case 'tool_execution_end': {
-      const tool = record as { toolCallId?: string; toolName?: string; result?: unknown; isError?: boolean }
-      store.addOpenAiEvent({
-        taskId,
-        kind: 'tool',
-        title: tool.toolName ?? '工具',
-        detail: safeStringify(tool.result).slice(0, 2000),
-        payload: {
-          toolName: tool.toolName,
-          toolUseId: tool.toolCallId,
-          phase: 'result' as const,
-          output: tool.result,
-          ...(tool.isError ? { isError: true } : {})
-        }
-      })
-      break
-    }
-    case 'agent_start':
-      store.addOpenAiEvent({ taskId, kind: 'status', title: 'Agent 执行开始' })
-      break
-    case 'agent_end':
-      store.addOpenAiEvent({ taskId, kind: 'status', title: 'Agent 执行结束' })
-      break
-  }
-}
-
-/** 从 AgentMessage 提取可见文本（content 可能为 string 或 block 数组，防御式处理）。 */
-function agentMessageText(message: unknown): string | undefined {
-  if (!message || typeof message !== 'object') return undefined
-  const content = (message as { content?: unknown }).content
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    const texts = content
-      .filter((part): part is { text: string } =>
-        Boolean(part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string')
-      )
-      .map((part) => (part as { text: string }).text)
-    if (texts.length > 0) return texts.join('\n')
-  }
-  return undefined
-}
-
-function safeStringify(value: unknown): string {
-  if (value === undefined) return ''
-  try {
-    return typeof value === 'string' ? value : JSON.stringify(value, null, 2)
-  } catch {
-    return '[unserializable]'
-  }
 }
 
 function emitPi(event: unknown): void {
@@ -1668,11 +1990,44 @@ function emitPi(event: unknown): void {
   )
     updatePiUsage(activeTaskId)
   if (activeTaskId && record.type === 'tool_execution_end') emitTaskChanged(activeTaskId)
-  // OpenAI 任务：Pi 会话事件落库 events 表（执行 Tab / Trace 详情可回放，刷新不丢）。
-  if (activeTaskId && providerForTask(activeTaskId) === 'openai') recordPiMessage(activeTaskId, record)
-  // Qoder 任务消息流 → 本地 trace 文件（thinking / 工具 / 文本 / result 汇总）。
-  if (record.type === 'qoder_event' && typeof record.taskId === 'string')
-    qoderTraceSink.append(record.taskId, record.message)
+  // OpenAI 任务：Pi 事件 → 执行树 span（一次任务执行 = 一个 Trace）。
+  if (
+    activeTaskId &&
+    providerForTask(activeTaskId) === 'openai' &&
+    [
+      'agent_start',
+      'agent_end',
+      'message_start',
+      'message_update',
+      'message_end',
+      'tool_execution_start',
+      'tool_execution_end'
+    ].includes(String(record.type))
+  ) {
+    const taskId = activeTaskId
+    if (!piTraceBuilders.has(taskId)) {
+      const task = store.getTask(taskId)
+      if (task) {
+        tracePipeline.beginTrace({
+          traceId: taskId,
+          kind: 'task',
+          title: task.title,
+          source: 'pi',
+          ...(task.qoderModel ? { model: task.qoderModel } : {})
+        })
+        // ensureRootSpan：任务恢复/续接（finalize 后 builder 被清、应用重启后内存标记丢失）
+        // 重新走到这里时复用历史 task.run 根，不再向同一 JSONL 追加第二个根（Bug A）。
+        tracePipeline.ensureRootSpan(taskId, { type: 'task.run', name: '任务执行', meta: { source: 'pi' } })
+        piTraceBuilders.set(taskId, new PiTraceBuilder(tracePipeline, taskId, 'task'))
+      }
+    }
+    try {
+      piTraceBuilders.get(taskId)?.onEvent(record)
+    } catch {
+      /* 忽略:trace 采集失败不能影响任务 */
+    }
+  }
+  // OpenAI 任务：Pi 事件已转执行树 span，不再写 openai_events 表。
   sendTaskEvent(typeof record.taskId === 'string' || !activeTaskId ? record : { ...record, taskId: activeTaskId })
   if (
     record.type === 'agent_end' &&
@@ -1793,17 +2148,8 @@ async function startPi(taskId: string): Promise<void> {
   // 使用 `require.resolve` 让两种布局都能解析到 `dist/index.js`。
   const require = createRequire(import.meta.url)
   const extension = require.resolve('@task-pipeline/pi-package')
+  // 注意：不再加载 pi-trace-extension（已废弃）。trace 采集由自研埋点层完成（见 electron/trace/）。
   const additionalExtensionPaths = [extension]
-  // 若用户已通过 `pi install npm:pi-trace-extension` 安装，追加加载（提供执行视角 trace 数据源）。
-  // 缺失时静默降级：仅数据源④不可用，任务 / 对话 / 官方 session 三路 trace 不受影响。
-  // `pi install` 的实际落盘是 `<agentDir>/npm/node_modules/pi-trace-extension`（npm 标准布局），
-  // 兼容旧式 `<agentDir>/npm/pi-trace-extension` 两种路径。
-  const traceExtensionCandidates = [
-    join(agentDir, 'npm', 'node_modules', 'pi-trace-extension', 'extensions', 'trace', 'index.ts'),
-    join(agentDir, 'npm', 'pi-trace-extension', 'extensions', 'trace', 'index.ts')
-  ]
-  const traceExtension = traceExtensionCandidates.find((candidate) => existsSync(candidate))
-  if (traceExtension) additionalExtensionPaths.push(traceExtension)
   const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, additionalExtensionPaths })
   await resourceLoader.reload({
     resolveProjectTrust: async () => {
@@ -1970,7 +2316,7 @@ async function resumeTask(taskId: string): Promise<void> {
   if (failedDuringPlanning) {
     const task = await runTaskOperation(taskId, (signal) => taskWorkflow.begin(taskId, 'plan', undefined, signal))
     if (runtimeProvider(task) === 'qoder') {
-      void runTaskOperation(taskId, (signal) => runQoderPlan(taskId, undefined, signal)).catch((error) =>
+      void runTaskOperation(taskId, (signal) => runQoderPlan(taskId, undefined, signal, 'resume')).catch((error) =>
         emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
       )
       return
@@ -1995,7 +2341,7 @@ async function resumeTask(taskId: string): Promise<void> {
   const task = await runTaskOperation(taskId, (signal) => taskWorkflow.prepare(taskId, signal))
   if (runtimeProvider(task) === 'qoder') {
     void runTaskOperation(taskId, (signal) =>
-      runQoder(taskId, resumeImplementationInstruction, signal, task.qoderSessionId)
+      runQoder(taskId, resumeImplementationInstruction, signal, task.qoderSessionId, { trigger: 'resume' })
     ).catch((error) =>
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     )
@@ -2047,7 +2393,7 @@ async function resumePausedTask(taskId: string): Promise<void> {
   addTaskEvent({ taskId, kind: 'status', title: '任务已恢复执行' })
   if (runtimeProvider(task) === 'qoder') {
     void runTaskOperation(taskId, (signal) =>
-      runQoder(taskId, resumeImplementationInstruction, signal, task.qoderSessionId)
+      runQoder(taskId, resumeImplementationInstruction, signal, task.qoderSessionId, { trigger: 'resume' })
     ).catch((error) =>
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     )
@@ -2167,7 +2513,9 @@ async function sendTaskMessage(taskId: string, message: string): Promise<void> {
   else if (task.state !== 'implementing') task = updateState(task, 'implementing')
   store.updateTask(task.id, { reviewStatus: 'pending' })
   if (runtimeProvider(task) === 'qoder') {
-    void runTaskOperation(taskId, (signal) => runQoder(taskId, message, signal)).catch((error) =>
+    void runTaskOperation(taskId, (signal) =>
+      runQoder(taskId, message, signal, undefined, { trigger: 'followup' })
+    ).catch((error) =>
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     )
     return
@@ -2215,6 +2563,23 @@ async function stopTaskOperations(taskId: string, markFailed: boolean): Promise<
     await operation?.promise
   } catch {
     /* Cancellation is expected while removing a task. */
+  }
+}
+
+/**
+ * 用户主动结束任务（等待计划确认等非运行态场景）：
+ * 先中止该任务一切进行中的操作并释放常驻会话，再把任务置为 cancelled（终态触发 Trace 收尾）。
+ */
+async function cancelTask(taskId: string): Promise<void> {
+  const task = store.getTask(taskId)
+  if (!task) throw new Error('Task not found')
+  if (['failed', 'completed', 'cancelled', 'await_merge'].includes(task.state)) {
+    throw new Error('当前状态的任务不能结束')
+  }
+  await stopTaskOperations(taskId, false)
+  const current = store.getTask(taskId)
+  if (current && !['failed', 'completed', 'cancelled'].includes(current.state)) {
+    updateState(current, 'cancelled')
   }
 }
 
@@ -2280,6 +2645,12 @@ async function deleteTask(taskId: string, mode: TaskRemovalMode = 'all'): Promis
   }
 
   store.deleteTask(taskId)
+  // 任务删除 → 同步删除任务 trace 文件（events/*.jsonl + info/*.json），
+  // 避免 Trace 页面残留已删除任务的记录（进行中任务被删时尤其明显：
+  // deleteTask 的 finalizeTaskTrace 会把 running trace 收尾成已完成摘要并写 info，
+  // 不删文件的话列表会继续显示这条「已完成」trace）。
+  // 顺序：先 finalize（收尾活跃态、写摘要）再删文件，避免 endTrace 重建摘要。
+  await traceService.deleteTrace(taskId)
   memoryService.deleteConversationMemories(`task:${taskId}`)
   if (activeTaskId === taskId) activeTaskId = undefined
 }
@@ -2429,11 +2800,7 @@ type TaskBackendInfo = { id: TaskBackendId; displayName: string; configured: boo
  * - GitHub / Linear 后端本期未实现，显示但 configured=false，方便 UI 提示用户。
  */
 function listTaskBackends(): TaskBackendInfo[] {
-  const jiraConfigured = !!(
-    desktopResolver.get('jiraBaseUrl') &&
-    desktopResolver.get('jiraEmail') &&
-    desktopResolver.get('jiraApiToken')
-  )
+  const jiraConfigured = !!(desktopResolver.get('jiraBaseUrl') && desktopResolver.get('jiraApiToken'))
   // 计划内的占位项：实际接入由后续任务负责。
   return [
     { id: 'jira', displayName: 'Jira', configured: jiraConfigured },
@@ -2537,6 +2904,14 @@ async function getQoderStatus(): Promise<QoderStatus> {
   const token = protectedValue('qoderToken')
   if (!token) {
     updateCredential('qoder', { status: 'skipped', message: '未配置', checkedAt: Date.now() })
+    // Token 被清除（或尚未配置）：如果之前探测过且连接可用，通知渲染进程刷新模型列表。
+    if (qoderStatusCache?.status && (qoderStatusCache.status.enabled || qoderStatusCache.status.connected))
+      sendTaskEvent({ type: 'qoder_status_changed' })
+    qoderStatusCache = {
+      at: Date.now(),
+      token: '',
+      status: { enabled: false, connected: false, running: false, models: [] }
+    }
     return { enabled: false, connected: false, running: false, models: [] }
   }
   if (qoderStatusInflight) return qoderStatusInflight
@@ -2544,6 +2919,11 @@ async function getQoderStatus(): Promise<QoderStatus> {
     qoderStatusInflight = null
   })
   const status = await qoderStatusInflight
+  // Qoder 连接/启用状态变化直接影响 listModels 结果（未连接时模型列表为空），
+  // 广播给渲染进程刷新模型选择栏，避免用户看到的模型列表一直停留在空态。
+  const prev = qoderStatusCache?.status
+  if (prev && (prev.connected !== status.connected || prev.enabled !== status.enabled))
+    sendTaskEvent({ type: 'qoder_status_changed' })
   qoderStatusCache = { at: Date.now(), token, status }
   // 回写全局凭据状态：UI 轮询 / 各处探测都会自动维持 qoder 项新鲜度。
   updateCredential(
@@ -2663,6 +3043,34 @@ async function checkGitLabCredential(token: string): Promise<Pick<CredentialStat
   }
 }
 
+/** GitLab MCP 握手：复用 gitlabUrl/gitlabToken，经 npx @zereight/mcp-gitlab（stdio）listTools 验证连通。 */
+async function testGitlabMcp(): Promise<{ ok: boolean; message: string }> {
+  const url = store.getSetting('gitlabUrl')?.trim().replace(/\/$/, '')
+  const token = protectedValue('gitlabToken')
+  if (!url || !token) return { ok: false, message: '请先配置 GitLab URL 与 Token' }
+  const client = new McpClient({
+    id: 'gitlab-mcp',
+    name: 'GitLab MCP',
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y', '@zereight/mcp-gitlab'],
+    env: {
+      GITLAB_PERSONAL_ACCESS_TOKEN: token,
+      GITLAB_API_URL: `${url}/api/v4`
+    },
+    tools: {}
+  })
+  try {
+    // npx 冷启动可能需下载包，超时放宽到 30s（与 McpClient 内部 request 超时一致）。
+    const tools = await withTimeout(client.listTools(), 30_000, 'GitLab MCP 连接超时（30s）')
+    return { ok: true, message: `已连接，发现 ${tools.length} 个工具` }
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) }
+  } finally {
+    client.close()
+  }
+}
+
 /**
  * 汇总探测四类凭据：Qoder Token / GitLab Token / Jira / Confluence。
  * - 各项结果（含未配置的 skipped）统一写入全局凭据状态并广播快照，
@@ -2704,10 +3112,18 @@ async function checkCredentialHealth(): Promise<CredentialState[]> {
     )
   }
 
-  // GitLab：调 /api/v4/user 验证 Token 有效性。
+  // GitLab：URL 与 Token 齐全时走 GitLab MCP 握手（/api/v4/mcp）；仅 Token 时回落 REST 验权。
   const gitlabToken = protectedValue('gitlabToken')
   if (!gitlabToken) {
     skip('gitlab')
+  } else if (store.getSetting('gitlabUrl')?.trim()) {
+    start(
+      'gitlab',
+      testGitlabMcp().then(
+        (result): Pick<CredentialState, 'status' | 'message'> =>
+          result.ok ? { status: 'ok' } : { status: 'failed', message: result.message }
+      )
+    )
   } else {
     start('gitlab', checkGitLabCredential(gitlabToken))
   }
@@ -2735,15 +3151,24 @@ async function checkCredentialHealth(): Promise<CredentialState[]> {
 // === Memory 任务上下文(检索/注入/整理) ========================================
 
 /**
- * 选择当前任务执行(consolidate memory)用的 chat 模型:固定跟随系统 modelProfile 决定 driver。
- * - driverId = "qoder" / "openai"
+ * 选择任务上下文检索 / 关键词提取用的 chat 模型。
+ * - 有 task 时跟随任务 runtime provider（任务显式 qoderModel > Agent preferredProvider > 系统全局），
+ *   否则关键词提取会跟全局 modelProfile 走错驱动（用户配了 OpenAI profile 时任务明明是 Qoder 却走 openai）；
+ * - 无 task（对话记忆检索等）时跟随系统 modelProfile。
  * - model 是 OpenAI 协议下的具体模型 value（`openai:<model>`，Qoder 模式下不使用,driver 内部自己拿默认）
  */
-function resolveTaskChatModel(): { driverId: ChatDriverId; model: string } {
-  if (modelProvider() === 'openai') {
-    return { driverId: 'openai', model: resolveOpenAIModelValue() }
-  }
-  return { driverId: 'qoder', model: store.getSetting('defaultModel') ?? 'claude-sonnet-4.5' }
+async function resolveTaskChatModel(task?: Task): Promise<{ driverId: ChatDriverId; model: string }> {
+  const provider = task ? runtimeProvider(task) : modelProvider()
+  const primary =
+    provider === 'openai'
+      ? ({ driverId: 'openai', model: resolveOpenAIModelValue() } as const)
+      : ({ driverId: 'qoder', model: store.getSetting('defaultModel') ?? 'claude-sonnet-4.5' } as const)
+  // 存储值失效（profile 删除 / 模型下线）时回落系统默认，可能换 driver。
+  if (isModelValueAvailable(primary.model)) return primary
+  const fallback = syncSystemDefaultModel()
+  if (!fallback) return primary
+  if (fallback.provider === 'qoder') return { driverId: 'qoder', model: fallback.model.replace(/^qoder:/, '') }
+  return { driverId: 'openai', model: fallback.model }
 }
 
 async function taskMemoryContext(task: Task, repos: TaskRepository[]): Promise<string | undefined> {
@@ -2751,12 +3176,13 @@ async function taskMemoryContext(task: Task, repos: TaskRepository[]): Promise<s
     // 关键词提取走 LLM 同步起调用(Qoder 跳 lite,OpenAI 跟随),需要把这一步单独记
     // 到 trace 里:模型、返回的关键词数组、耗时。生产环境调 OpenAI 关键词提取本身
     // 一次几百毫秒 ~ 几秒,不记会让用户看到“检索”却不知道背后是 LLM 调用,trace 会误导。
-    const { driverId } = resolveTaskChatModel()
+    // 驱动跟随任务 runtime provider（Qoder 任务即使全局配了 OpenAI profile 也走 qoder-lite）。
+    const { driverId } = await resolveTaskChatModel(task)
     const keywordModel = await resolveLiteModel(driverId)
     const tracedRewriter: KeywordRewriter = async (query) => {
       const start = Date.now()
       try {
-        const kw = await keywordRewriter(query)
+        const kw = await keywordRewriterWithTrace(query, task.id, task)
         const ms = Date.now() - start
         addTaskEvent({
           taskId: task.id,
@@ -2873,30 +3299,60 @@ async function consolidateTaskMemory(taskId: string, responseTexts: string[]): P
       ...events.slice(-80).map((event) => `[${event.kind}] ${event.title}${event.detail ? `\n${event.detail}` : ''}`),
       ...responseTexts.slice(-5).map((text) => `AI 输出：\n${text}`)
     ].join('\n\n')
-    const { driverId, model } = resolveTaskChatModel()
+    // 复用任务执行模型（任务显式 > Agent 配置 > 系统默认），与任务同路径同模型整理记忆；
+    // 缺运行时解析结果时回落任务级 chat 模型解析。
+    const runtime = agentService.resolveRuntime(task, repos)
+    const { driverId, model } =
+      runtime.provider && runtime.model
+        ? { driverId: runtime.provider as ChatDriverId, model: runtime.model }
+        : await resolveTaskChatModel(task)
     const driver = chatDriverRegistry.tryGet(driverId)
     if (!driver) return
-    const extracted = await extractMemories({
-      driver,
-      driverId,
-      model,
-      text: transcript,
-      context: 'task',
-      allowedScopes: ['user', 'repo']
-    })
-    if (!extracted.length) return
-    const saved = memoryService.consolidateMemories(
-      extracted,
-      repos.map((repo) => repo.repositoryId),
-      `task:${taskId}`
-    )
-    if (saved > 0) {
-      addTaskEvent({
-        taskId,
-        kind: 'status',
-        title: '记忆整理完成',
-        detail: `从任务执行记录中整理并保存 ${saved} 条记忆`
+    // 记忆整理并入任务 Trace（不再产生独立 chat trace）：阶段容器（phase: memory）
+    // + traceId join 任务执行树。trace 本不活跃（任务已终态）时 beginTrace 重开它，
+    // 结束后由这里兜底 endTrace；活跃期 join 的收尾归 finalizeTaskTrace。
+    const wasActive = tracePipeline.isActive(taskId)
+    const stage = startTaskStageSpan(task, taskId, '记忆整理', 'memory')
+    const joined = tracePipeline.isActive(taskId)
+    try {
+      const extracted = await extractMemories({
+        driver,
+        driverId,
+        model,
+        text: transcript,
+        context: 'task',
+        allowedScopes: ['user', 'repo'],
+        ...(joined ? { traceId: taskId } : {})
       })
+      if (!extracted.length) return
+      const saved = memoryService.consolidateMemories(
+        extracted,
+        repos.map((repo) => repo.repositoryId),
+        `task:${taskId}`
+      )
+      if (saved > 0) {
+        addTaskEvent({
+          taskId,
+          kind: 'status',
+          title: '记忆整理完成',
+          detail: `从任务执行记录中整理并保存 ${saved} 条记忆`
+        })
+      }
+    } finally {
+      if (stage) {
+        try {
+          tracePipeline.endSpan(taskId, stage)
+        } catch {
+          /* trace 收尾失败不影响整理结果 */
+        }
+      }
+      if (!wasActive && joined) {
+        try {
+          tracePipeline.endTrace(taskId)
+        } catch {
+          /* endTrace 幂等，与 finalizeTaskTrace 双触发安全 */
+        }
+      }
     }
   } catch (error) {
     console.warn('[memory] task consolidate failed:', error)
@@ -2916,6 +3372,8 @@ async function consolidateChatMemory(input: {
   signal: AbortSignal
   driverId: ChatDriverId
   model: string
+  /** 所属对话回合 traceId：记忆整理 LLM 调用 join 同一执行树。 */
+  traceId?: string
 }): Promise<void> {
   try {
     const driver = chatDriverRegistry.tryGet(input.driverId)
@@ -2940,7 +3398,9 @@ async function consolidateChatMemory(input: {
       text,
       context: 'chat',
       allowedScopes: ['user', 'conversation'],
-      signal: input.signal
+      signal: input.signal,
+      // join 当前对话回合：记忆整理 LLM 调用与主对话同树。
+      traceId: input.traceId
     })
     if (!extracted.length) return
     memoryService.consolidateMemories(extracted, [], input.conversation.id)
@@ -2952,11 +3412,11 @@ async function consolidateChatMemory(input: {
 // === IPC 路由(全部保留) =======================================================
 
 function registerIpc(): void {
-  // Trace 页面：聚合四路数据源（tasks+events / chats-v3 / pi-sessions / pi-trace events.jsonl）。
+  // Trace 页面（v2）：列表 / 详情 / 仪表盘统计。
   ipcMain.handle('trace:list', () => traceService.listSummaries())
-  ipcMain.handle('trace:get', (_event, kind: string, traceId: string) =>
-    traceService.getTrace(traceId, kind as TraceKind)
-  )
+  ipcMain.handle('trace:get', (_event, _kind: string, traceId: string) => traceService.getTrace(traceId))
+  ipcMain.handle('trace:dashboard', () => traceService.dashboardStats())
+  ipcMain.handle('trace:delete', (_event, _kind: string, traceId: string) => traceService.deleteTrace(traceId))
   ipcMain.handle('tasks:list', async () => {
     await mergeRefresher.refresh()
     return taskCardsWithCurrentChanges()
@@ -2965,9 +3425,13 @@ function registerIpc(): void {
     await mergeRefresher.refresh()
     return {
       task: store.getTask(id),
+      // 运行中标记：前端 running 只由 agent_start/agent_end 事件驱动，应用重启后事件流丢失，
+      // 必须用 activeTaskOperations 兜底恢复，否则 planning 中的任务会误显示"继续生成计划"按钮。
+      running: activeTaskOperations.has(id),
       repositories: store.listTaskRepositories(id),
-      events: store.listEvents(id),
-      openAiEvents: store.listOpenAiEvents(id),
+      // 看板执行 Tab 数据源：任务 trace span 树（events 表已废弃，历史任务无 span 则为空）。
+      events: await traceService.getTaskEvents(id),
+      openAiEvents: [],
       approvals: store.listApprovals(id),
       changedFiles: await taskChangedFiles(id)
     }
@@ -3066,6 +3530,7 @@ function registerIpc(): void {
   ipcMain.handle('tasks:retry-validation', (_event, taskId: string) => retryTaskValidation(taskId))
   ipcMain.handle('tasks:message', (_event, taskId: string, message: string) => sendTaskMessage(taskId, message))
   ipcMain.handle('tasks:abort', () => (activeTaskId ? stopTaskOperations(activeTaskId, true) : undefined))
+  ipcMain.handle('tasks:cancel', (_event, taskId: string) => cancelTask(taskId))
   ipcMain.handle('tasks:review', (_event, taskId: string) =>
     runTaskOperation(taskId, (signal) => runReviewWithAutoFix(taskId, signal))
   )
@@ -3151,6 +3616,7 @@ function registerIpc(): void {
     if (!rest) return { ok: false, message: `请先配置 ${kind === 'jira' ? 'Jira' : 'Confluence'} URL 与 Token` }
     return testAtlassianConnectionRest(kind, rest)
   })
+  ipcMain.handle('gitlab:test-mcp', () => testGitlabMcp())
   ipcMain.handle('settings:check-credentials', () => checkCredentialHealth())
   ipcMain.handle('credentials:state', () => credentialStateSnapshot())
   ipcMain.handle('task:ui-response', (_event, response: Record<string, unknown>) =>
@@ -3186,32 +3652,7 @@ function registerIpc(): void {
         keywordRewriter,
         ...options
       })
-      // 只有 dev probe 调用才落 trace。生产流程（chat / task）中的检索不写 trace_events：
-      // - chat 路径的 LLM 调用本身走 `qoder_event` 与 ChatService 事件流；
-      // - task 路径的 `recordQoderMessage` 会写 `events` 表 + 更新 sessionUsage；
-      // 两者都不需要也不适合在中间被"检索"这一步额外插一条"其它"事件。
-      if (options?.traceSource === 'dev-probe') {
-        try {
-          store.addTraceEvent({
-            category: 'other',
-            subType: 'memory_search_dev_probe',
-            title: `记忆检索 dev probe（关键词 ${result.keywords.length} / 记忆 ${result.memories.length} / Wiki ${result.wikiDocs.length}）`,
-            detail: `query: ${query}\nkeywords: ${result.keywords.join(', ')}`,
-            payload: {
-              query,
-              keywords: result.keywords,
-              repositoryIds: options.repositoryIds ?? [],
-              conversationId: options.conversationId,
-              limit: options.limit,
-              memoryHitCount: result.memories.length,
-              wikiHitCount: result.wikiDocs.length
-            }
-          })
-        } catch (error) {
-          // trace 写入失败不影响检索结果返回
-          console.warn('[memory] dev probe trace failed:', error)
-        }
-      }
+      // trace_events 表已废弃（v2 只走 AgentSpan 管道）：dev probe 不再写"其它" trace 事件。
       return result
     }
   )
@@ -3290,53 +3731,62 @@ function registerIpc(): void {
       // qoder 路径走专用轻量调用（只读工具 / maxTurns=3 / 120s 超时）——见 callQoderForAgentGeneration 注释。
       // openai 路径走纯 prompt fetch（不启工具，超时也压到 120s 与 Qoder 对齐）。
       const isQoder = model.startsWith('qoder:')
-      const raw = isQoder
-        ? await callQoderForAgentGeneration(prompt, model.slice('qoder:'.length), {
-            additionalDirectories: repositories.map((repo) => repo.localPath)
-          })
-        : await callOpenAIForPrompt(prompt, AGENT_GENERATOR_TASK_ID, model, undefined, { timeoutMs: 120_000 })
-      const result = parseAgentGenerationResult(raw)
-      // 记录"其它"trace 事件：仅在生成成功后写入，失败不入库。
-      // - `detail`：Timeline 直接以 `<pre>` 渲染给用户看，必须包含 4 个生成字段的实际内容
-      //   （名称 / 说明 / 系统提示词 / 工程约定），同时在顶部保留用户输入上下文。
-      // - `payload`：结构化字段（4 个字段实际文本 + 长度 + 模型 + 仓库 ID / 名）供后续统计 / 筛选 / 详情展开。
-      const repositoryNames = repositories.map((repository) => repository.name).join('、')
-      const detail = formatAgentGenerationDetail({
-        description: description.trim(),
-        repositoryNames,
-        result
+      // v2 trace：一次「AI 生成 Agent 说明」= 一个独立 trace（kind=task），记录所选模型与
+      // 完整调用过程（qoder 路径含 Read/Glob/Grep 工具调用；openai 路径为单次 llm span）。
+      const traceId = `agent-gen-${randomUUID()}`
+      const qoderModel = model.slice('qoder:'.length)
+      const openaiModel = stripOpenAIModelPrefix(model)
+      tracePipeline.beginTrace({
+        traceId,
+        kind: 'task',
+        title: `生成 Agent 说明：${description.replace(/\s+/g, ' ').trim().slice(0, 60)}`,
+        source: isQoder ? 'qoder' : 'openai',
+        agentName: isQoder ? 'Qoder' : 'OpenAI',
+        ...(isQoder || openaiModel ? { model: isQoder ? qoderModel : openaiModel } : {})
       })
+      const builder = isQoder ? new QoderTraceBuilder(tracePipeline, traceId, 'task', 'qoder', qoderModel) : undefined
+      // openai 路径：请求前开 span（耗时覆盖完整请求），成功后补 output。
+      const openaiSpan = isQoder
+        ? undefined
+        : tracePipeline.startSpan(traceId, {
+            type: 'llm.generate',
+            name: '生成 Agent 说明',
+            ...(openaiModel ? { model: openaiModel } : {})
+          })
       try {
-        store.addTraceEvent({
-          category: 'other',
-          subType: 'agent_template_generation',
-          title: 'AI 生成 Agent 模板',
-          detail,
-          payload: {
-            model,
-            description: description.trim(),
-            repositoryIds: repositories.map((repository) => repository.id),
-            repositoryNames: repositories.map((repository) => repository.name),
-            // 4 个生成字段：完整内容 + 长度同时存，避免详情面板需要重读库。
-            title: result.title,
-            generatedDescription: result.description,
-            systemPrompt: result.systemPrompt,
-            engineeringGuidelines: result.engineeringGuidelines,
-            titleLength: result.title.length,
-            descriptionLength: result.description.length,
-            systemPromptLength: result.systemPrompt.length,
-            engineeringGuidelinesLength: result.engineeringGuidelines.length
-          }
-        })
-      } catch (reason) {
-        // trace 写入失败不影响主功能：只输出错误，不向用户抛错。
-        console.error('[agents] 写入 trace 事件失败', reason)
+        const raw = isQoder
+          ? await callQoderForAgentGeneration(prompt, qoderModel, {
+              additionalDirectories: repositories.map((repo) => repo.localPath),
+              onMessage: (message) => {
+                try {
+                  builder?.onMessage(message as never)
+                } catch {
+                  /* 忽略：trace 采集失败不影响生成 */
+                }
+              }
+            })
+          : await callOpenAIForPrompt(prompt, AGENT_GENERATOR_TASK_ID, model, undefined, { timeoutMs: 120_000 })
+        if (openaiSpan) tracePipeline.endSpan(traceId, openaiSpan, { output: raw })
+        const result = parseAgentGenerationResult(raw)
+        // trace_events 表已废弃（v2 只走 AgentSpan 管道）：生成结果不再写"其它" trace 事件。
+        return result
+      } catch (error) {
+        if (openaiSpan) {
+          tracePipeline.endSpan(traceId, openaiSpan, {
+            status: 'error',
+            error: { message: error instanceof Error ? error.message : String(error) }
+          })
+        }
+        throw error
+      } finally {
+        builder?.finish()
+        tracePipeline.endTrace(traceId)
       }
-      return result
     }
   )
   // === Chat 对话(Codex 样式) =================================================
   ipcMain.handle('chats:list', () => chatService.listChats())
+  ipcMain.handle('chats:list-projects', () => chatService.listProjects())
   ipcMain.handle('chats:get', (_event, id: string) => chatService.getChat(id))
   ipcMain.handle(
     'chats:create',
@@ -3351,6 +3801,7 @@ function registerIpc(): void {
     chatService.setChatWorkingDirectory(id, workingDirectory)
   )
   ipcMain.handle('chats:list-models', () => chatService.listModels())
+  ipcMain.handle('chats:default-model', () => chatService.getDefaultModel())
   ipcMain.handle('chats:start-stream', (_event, input) => {
     void chatService.startChatStream(input).catch((reason) => console.error('[chat] stream failed', reason))
   })
@@ -3406,6 +3857,8 @@ app.whenReady().then(() => {
   }
   registerIpc()
   void createWindow()
+  // 孤儿 trace 收口：崩溃/强杀残留的 events 文件 finalize 为「已结束 + interrupted」。
+  sweepInterruptedTraces()
   for (const repo of store.listRepositoryProfiles()) {
     void memoryService
       .refreshRepoWiki(repo.id, repo.localPath)

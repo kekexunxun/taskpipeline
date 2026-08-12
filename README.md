@@ -24,7 +24,7 @@ Monorepo,基于 npm workspaces 管理:
 
 - **运行时**:Node.js(npm@10.9.8),Electron 37
 - **前端**:React 19 + Vite 6 + Tailwind CSS 4 + Radix UI
-- **存储**:better-sqlite3(任务、事件、Trace、记忆均落 SQLite)
+- **存储**:better-sqlite3(任务、审批、记忆)+ 本地 JSONL(`dataDir/traces/`,Trace 执行树)
 - **Agent 引擎**:@earendil-works/pi-coding-agent、@qoder-ai/qoder-agent-sdk
 - **质量**:ESLint + Prettier + Stylelint + Husky + lint-staged + Vitest
 

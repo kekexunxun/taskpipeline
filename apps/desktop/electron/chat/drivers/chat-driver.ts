@@ -24,10 +24,12 @@ import type {
   ChatStreamChunk,
   ChatModelInfo,
   DriverPart,
+  McpServiceId,
+  ModelParams,
   StoredMessage,
   StoredMessageRecord
-} from "../chat-types.js";
-import type { ToolSource } from "./tool-source.js";
+} from '../chat-types.js'
+import type { ToolSource } from './tool-source.js'
 
 /**
  * StreamChat 输入参数。
@@ -39,18 +41,40 @@ import type { ToolSource } from "./tool-source.js";
  *   就 emit `{ type: "task-created", result }` chunk,ChatService 据此把任务创建结果写入消息元数据。
  */
 export type StreamChatInput = {
-  conversationId: string;
-  model: string;
-  history: StoredMessage[];
-  userInput: { id: string; text: string; createdAt: string };
-  signal: AbortSignal;
-  toolSource?: ToolSource;
+  conversationId: string
+  model: string
+  /**
+   * 运行时模型参数（推理力度 / 思考模式 / 最大输出 Token 等）。
+   * driver 按自己支持的能力翻译到协议参数；不认识 / 不支持的 key 一律忽略。
+   */
+  modelParams?: ModelParams
+  history: StoredMessage[]
+  userInput: { id: string; text: string; createdAt: string }
+  signal: AbortSignal
+  toolSource?: ToolSource
+  /**
+   * 用户选中的 MCP 服务（gitlab / jira / confluence）。driver 负责真正注入：
+   * Qoder 走 SDK mcpServers（stdio 子进程），OpenAI 走 MCP 客户端桥接成 ai-sdk 工具。
+   */
+  mcpServices?: McpServiceId[]
   /**
    * 对话绑定的工作目录(项目对话)。driver 应让 Agent 在该目录下执行;
    * 缺省时回退到进程当前目录。
    */
-  cwd?: string;
-};
+  cwd?: string
+  /**
+   * 加入已存在的对话回合 trace（一次用户提问 = 一个 Trace）。
+   * 主对话由 ChatService 传入；关键词提取 / 记忆整理等辅助 LLM 调用显式 join，
+   * 让一次提问下的多次 LLM 调用串联在同一棵执行树里。缺省时 driver 自建独立 trace。
+   */
+  traceId?: string
+  /**
+   * trace 语义名：辅助 LLM 调用（关键词提取 / 记忆整理）的 span 名称覆盖。
+   * 否则 span 名直接用模型名，任务执行树里会出现与任务模型无关的
+   * 「LLM deepseek-v4-flash」等条目，被误读为任务主体模型。
+   */
+  traceLabel?: string
+}
 
 /**
  * ChatDriver 接口。
@@ -59,24 +83,29 @@ export type StreamChatInput = {
  * 上层 (ChatService) 通过 `driverId` 选 driver,完全不感知 driver 内部的 SDK 细节。
  */
 export interface ChatDriver {
-  readonly id: ChatDriverId;
-  readonly displayName: string;
-  listModels(): Promise<ChatModelInfo[]>;
+  readonly id: ChatDriverId
+  readonly displayName: string
+  listModels(): Promise<ChatModelInfo[]>
   /**
    * 把 driver 自己的 `raw` 形态反序列化为运行时 `StoredMessage`(带 `parts`)。
    * `raw` 由 driver.serializeUserMessage / driver.serializeAssistantMessage 决定形态。
    */
-  deserializeMessage(record: StoredMessageRecord): StoredMessage;
+  deserializeMessage(record: StoredMessageRecord): StoredMessage
   /**
    * 把当前用户输入包装成 driver 自己的 `raw` 形态(给存储层用)。
    */
-  serializeUserMessage(input: { id: string; text: string; createdAt: string }): StoredMessageRecord;
+  serializeUserMessage(input: { id: string; text: string; createdAt: string }): StoredMessageRecord
   /**
    * 把 assistant 消息在流式过程中累积的 `parts` 包装成 driver 自己的 `raw` 形态(给存储层用)。
    * driver 内部负责决定"如何把 parts 平展成 raw JSON",存储层不解析。
    * 对于 Qoder 之类能在 SDK 内继续续接 session 的 driver,可选择把 `sessionId` 写入 raw。
    */
-  serializeAssistantMessage(input: { id: string; parts: DriverPart[]; createdAt: string; sessionId?: string }): StoredMessageRecord;
+  serializeAssistantMessage(input: {
+    id: string
+    parts: DriverPart[]
+    createdAt: string
+    sessionId?: string
+  }): StoredMessageRecord
   /**
    * 流式生成。driver 内部负责:
    *  - 把 `history` 翻译成自己的 prompt / message 协议;
@@ -85,12 +114,12 @@ export interface ChatDriver {
    *    `{ type: "task-created", result }` chunk;
    *  - 调 `signal.aborted` 主动停止自己内部的子进程 / 请求。
    */
-  streamChat(input: StreamChatInput): AsyncGenerator<ChatStreamChunk>;
+  streamChat(input: StreamChatInput): AsyncGenerator<ChatStreamChunk>
   /**
    * 关闭一个逻辑会话(删除对话 / 任务结束)。支持常驻会话的 driver(如 Qoder)实现;
    * 无状态 driver(如 OpenAI,每轮全量发送)可不实现。
    */
-  closeSession?(id: string): void;
+  closeSession?(id: string): void
   /** 释放 driver 持有的资源(MCP client / HTTP pool / SDK 子进程)。 */
-  dispose(): void;
+  dispose(): void
 }

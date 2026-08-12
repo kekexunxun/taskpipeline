@@ -23,7 +23,7 @@ import { MemoryDialog } from './MemoryDialog'
 import { OpenAIProfileDialog, type OpenAIProfile } from './OpenAIProfileDialog'
 import { ModelBadges } from '@/components/ModelBadges'
 import { detectVendor, type ModelVendor } from '@/utils/model-vendors'
-import { api, type MemorySearchResult } from '@/api'
+import { api, type CapabilityKey, type MemorySearchResult, type SystemDefaultModel } from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
 import { useAgents } from '@/hooks/useAgents'
 import { cn } from '@/lib/utils'
@@ -61,10 +61,8 @@ type Settings = {
   gitlabUrl: string
   gitlabToken: string
   jiraUrl: string
-  jiraEmail: string
   jiraToken: string
   confluenceUrl: string
-  confluenceEmail: string
   confluenceToken: string
   autoCreateMergeRequests: string
   openCodeReviewEnabled: string
@@ -86,6 +84,8 @@ type OpenAIDraft = {
   displayName: string
   apiKeyConfigured: boolean
   isDefault: boolean
+  /** 用户显式声明的参数能力；缺省 = driver 按 vendor 自动推断。 */
+  capabilities?: CapabilityKey[]
 }
 const defaults: Settings = {
   defaultModel: 'claude-sonnet-4.5',
@@ -93,10 +93,8 @@ const defaults: Settings = {
   gitlabUrl: '',
   gitlabToken: '',
   jiraUrl: '',
-  jiraEmail: '',
   jiraToken: '',
   confluenceUrl: '',
-  confluenceEmail: '',
   confluenceToken: '',
   autoCreateMergeRequests: 'false',
   openCodeReviewEnabled: 'false',
@@ -109,9 +107,7 @@ const ordinaryKeys = [
   'defaultModel',
   'gitlabUrl',
   'jiraUrl',
-  'jiraEmail',
   'confluenceUrl',
-  'confluenceEmail',
   'autoCreateMergeRequests',
   'openCodeReviewEnabled',
   'createTestCasesEnabled',
@@ -627,6 +623,8 @@ export function SettingsDialog({
   const [agentDialog, setAgentDialog] = useState<{ open: boolean; initial?: AgentProfile }>({ open: false })
   const [deleteAgent, setDeleteAgent] = useState<AgentProfile | undefined>(undefined)
   const [openAIProfiles, setOpenAIProfiles] = useState<OpenAIDraft[]>([])
+  /** 系统级默认模型（Qoder 优先）：「默认」徽章展示它，而非 settings.defaultModel 字面比较。 */
+  const [systemDefault, setSystemDefault] = useState<SystemDefaultModel | undefined>()
   const [openAIDialog, setOpenAIDialog] = useState<{ open: boolean; mode: 'create' | 'edit'; editing?: OpenAIDraft }>({
     open: false,
     mode: 'create'
@@ -678,7 +676,9 @@ export function SettingsDialog({
                 displayName: item.displayName ?? '',
                 apiKeyConfigured: false,
                 // 历史数据缺 id 的配置视为默认（与主进程读取约定一致：无 id/默认 → 回退 modelApiKey）
-                isDefault: item.isDefault ?? !(item as { id?: string }).id
+                isDefault: item.isDefault ?? !(item as { id?: string }).id,
+                // 用户显式声明的参数能力（缺省 = driver 按 vendor 自动推断）
+                capabilities: (item as { capabilities?: CapabilityKey[] }).capabilities
               }))
             // 每个 profile 的 API Key 是否已配置：优先 `modelApiKey:<id>`，默认配置回退历史 `modelApiKey`
             const keyStates = await Promise.all(
@@ -722,6 +722,11 @@ export function SettingsDialog({
           setOpenAIProfiles([])
         }
       }
+      // 系统级默认模型（Qoder 优先）：「默认」徽章数据源；失败不影响设置页主体。
+      void api
+        .getDefaultModel()
+        .then(setSystemDefault)
+        .catch(() => undefined)
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -760,6 +765,7 @@ export function SettingsDialog({
     displayName?: string
     apiKey: string | undefined
     isDefault: boolean
+    capabilities?: CapabilityKey[]
   }) => {
     try {
       const id = input.id ?? `openai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -778,21 +784,23 @@ export function SettingsDialog({
         model: input.model,
         displayName: input.displayName ?? '',
         apiKeyConfigured: input.apiKey ? true : (openAIProfiles.find((p) => p.id === id)?.apiKeyConfigured ?? false),
-        isDefault: willBeDefault
+        isDefault: willBeDefault,
+        capabilities: input.capabilities
       })
       // key 始终按 profile 存 `modelApiKey:<id>`（默认/非默认一致，切换默认无需迁移）；历史 `modelApiKey` 仅作读取回退
       if (input.apiKey !== undefined) await api.setSetting(`modelApiKey:${id}`, input.apiKey, true)
       await api.setSetting(
         'modelProfiles',
         JSON.stringify(
-          next.map(({ id: pid, vendor, baseUrl, model, displayName, isDefault }) => ({
+          next.map(({ id: pid, vendor, baseUrl, model, displayName, isDefault, capabilities }) => ({
             id: pid,
             provider: 'company-openai',
             vendor,
             baseUrl,
             model,
             displayName,
-            isDefault
+            isDefault,
+            capabilities
           }))
         )
       )
@@ -815,14 +823,15 @@ export function SettingsDialog({
       await api.setSetting(
         'modelProfiles',
         JSON.stringify(
-          next.map(({ id: pid, vendor, baseUrl, model, displayName, isDefault }) => ({
+          next.map(({ id: pid, vendor, baseUrl, model, displayName, isDefault, capabilities }) => ({
             id: pid,
             provider: 'company-openai',
             vendor,
             baseUrl,
             model,
             displayName,
-            isDefault
+            isDefault,
+            capabilities
           }))
         )
       )
@@ -944,7 +953,8 @@ export function SettingsDialog({
         model: openAIDialog.editing.model,
         displayName: openAIDialog.editing.displayName || undefined,
         apiKeyConfigured: openAIDialog.editing.apiKeyConfigured,
-        isDefault: openAIDialog.editing.isDefault
+        isDefault: openAIDialog.editing.isDefault,
+        capabilities: openAIDialog.editing.capabilities
       }
     : undefined
 
@@ -972,6 +982,9 @@ export function SettingsDialog({
               <TabsList className="flex h-full flex-col items-stretch justify-start gap-0.5 rounded-none border-r bg-card/40 p-2">
                 <TabsTrigger className="h-7 justify-start px-2 text-xs!" value="general">
                   通用
+                </TabsTrigger>
+                <TabsTrigger className="h-7 justify-start px-2 text-xs!" value="gitlab">
+                  Gitlab
                 </TabsTrigger>
                 <TabsTrigger className="h-7 justify-start px-2 text-xs!" value="atlassian">
                   Atlassian
@@ -1021,25 +1034,6 @@ export function SettingsDialog({
                           )}
                         </div>
                       )}
-                    </FieldGroup>
-                  </Section>
-                  <Section title="GitLab" description="用于代码仓库和 Merge Request 集成。">
-                    <FieldGroup className="gap-2.5">
-                      <SettingField label="GitLab URL">
-                        <Input
-                          value={settings.gitlabUrl}
-                          onChange={(event) => update('gitlabUrl', event.target.value)}
-                          placeholder="自建实例地址，如 https://gitlab.company.com"
-                        />
-                      </SettingField>
-                      <SettingField label="GitLab Token">
-                        <SecretInput
-                          aria-label="GitLab Token"
-                          value={settings.gitlabToken}
-                          onChange={(event) => update('gitlabToken', event.target.value)}
-                          placeholder="GitLab Token"
-                        />
-                      </SettingField>
                     </FieldGroup>
                   </Section>
                   <Section title="任务自动化" description="控制实现完成后的 Review / 测试用例生成 / MR 提交流程。">
@@ -1129,6 +1123,35 @@ export function SettingsDialog({
                     </div>
                   </Section>
                 </TabsContent>
+                <TabsContent value="gitlab" className="space-y-5">
+                  <Section title="GitLab" description="用于代码仓库和 Merge Request 集成。">
+                    <FieldGroup className="gap-2.5">
+                      <SettingField label="GitLab URL">
+                        <Input
+                          value={settings.gitlabUrl}
+                          onChange={(event) => update('gitlabUrl', event.target.value)}
+                          placeholder="自建实例地址，如 https://gitlab.company.com"
+                        />
+                      </SettingField>
+                      <SettingField label="GitLab Token">
+                        <SecretInput
+                          aria-label="GitLab Token"
+                          value={settings.gitlabToken}
+                          onChange={(event) => update('gitlabToken', event.target.value)}
+                          placeholder="GitLab Token"
+                        />
+                      </SettingField>
+                    </FieldGroup>
+                  </Section>
+                  <Section
+                    title="GitLab MCP"
+                    description="通过 MCP 协议让 AI 访问 GitLab 数据。MCP 服务复用上方 URL 与 Token，使用 npx @zereight/mcp-gitlab 建立连接。"
+                  >
+                    <FieldGroup className="gap-2.5">
+                      <TestButton kind="gitlab" label="测试 GitLab MCP 连接" />
+                    </FieldGroup>
+                  </Section>
+                </TabsContent>
                 <TabsContent value="atlassian" className="space-y-5">
                   <Section title="Jira">
                     <FieldGroup className="gap-2.5">
@@ -1137,13 +1160,6 @@ export function SettingsDialog({
                           value={settings.jiraUrl}
                           onChange={(event) => update('jiraUrl', event.target.value)}
                           placeholder="请输入Jira Host"
-                        />
-                      </SettingField>
-                      <SettingField label="Jira Email">
-                        <Input
-                          value={settings.jiraEmail}
-                          onChange={(event) => update('jiraEmail', event.target.value)}
-                          placeholder="请输入Jira Email"
                         />
                       </SettingField>
                       <SettingField label="Jira Token">
@@ -1164,13 +1180,6 @@ export function SettingsDialog({
                           value={settings.confluenceUrl}
                           onChange={(event) => update('confluenceUrl', event.target.value)}
                           placeholder="请输入Confluence Host"
-                        />
-                      </SettingField>
-                      <SettingField label="Confluence Email">
-                        <Input
-                          value={settings.confluenceEmail}
-                          onChange={(event) => update('confluenceEmail', event.target.value)}
-                          placeholder="请输入Confluence Email"
                         />
                       </SettingField>
                       <SettingField label="Confluence Token">
@@ -1413,7 +1422,9 @@ export function SettingsDialog({
                             <QoderModelCard
                               key={item.value}
                               model={item}
-                              isDefault={item.value === settings.defaultModel}
+                              isDefault={
+                                systemDefault?.driverId === 'qoder' && systemDefault.model === `qoder:${item.value}`
+                              }
                             />
                           ))}
                         </div>
@@ -1426,7 +1437,7 @@ export function SettingsDialog({
                   </Section>
                   <Section
                     title="OpenAI-Compatible"
-                    description="连接兼容 OpenAI API 格式的模型服务，可配置多个并指定系统级调用使用的默认配置。"
+                    description="连接兼容 OpenAI API 格式的模型服务，可配置多个并指定组内默认 profile（Qoder 不可用时系统默认跟随它）。"
                   >
                     <FieldGroup className="gap-2">
                       {openAIProfiles.length > 0 ? (

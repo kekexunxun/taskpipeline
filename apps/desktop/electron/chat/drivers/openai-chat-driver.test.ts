@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { TaskStore } from '@task-pipeline/core'
+import type { TracePipeline } from '../../trace/bus/trace-pipeline'
 
 /**
  * 假 ai-sdk streamText:用 `vi.mock` 替换 `ai`,把 `streamText().fullStream` 接到一个可脚本化的
@@ -7,7 +8,11 @@ import type { TaskStore } from '@task-pipeline/core'
  */
 type StreamChunk = { type: string; [key: string]: unknown }
 
-type StreamTextOptions = { messages: Array<{ role: string }>; system?: string }
+type StreamTextOptions = {
+  messages: Array<{ role: string }>
+  system?: string
+  providerOptions?: Record<string, Record<string, unknown>>
+}
 
 /** 可脚本化的流:noFinish=true 时省略 finish chunk(模拟底层静默中断)。 */
 type StreamScript = { chunks: StreamChunk[]; error?: Error; noFinish?: boolean }
@@ -99,6 +104,7 @@ function fakeStoreProfiles(
     model: string
     displayName?: string
     isDefault?: boolean
+    capabilities?: string[]
   }>
 ): TaskStore {
   return {
@@ -125,6 +131,7 @@ function driverWithProfiles(
       model: string
       displayName?: string
       isDefault?: boolean
+      capabilities?: string[]
     }>
     apiKeyFor?: (profile?: { id?: string; isDefault?: boolean }) => string | undefined
   } = { profiles: [] }
@@ -521,18 +528,101 @@ describe('OpenAIChatDriver', () => {
     }).rejects.toThrow(/未配置/)
   })
 
-  it('rejects a non-openai model value', async () => {
-    await expect(async () => {
-      for await (const _ of driver({ profile: { baseUrl: 'https://api.example.com', model: 'gpt-5' } }).streamChat({
+  it('falls back to the default profile when the model value is unknown', async () => {
+    // 失效 value（如其它 driver 的值 / 已删除的 profile）不再抛错，回落默认 profile 的模型。
+    resetCalledModels()
+    aiMock.__pushStreamScript({ chunks: [{ type: 'text-delta', text: 'hi' }] })
+    await collect(
+      driver({ profile: { baseUrl: 'https://api.example.com', model: 'gpt-5' } }).streamChat({
         conversationId: 'c',
         model: 'qoder:claude-sonnet-4.5',
         history: [],
         userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
         signal: new AbortController().signal
-      })) {
-        void _
-      }
-    }).rejects.toThrow(/未知的 OpenAI 模型/)
+      })
+    )
+    expect(vendorCalls).toEqual([{ vendor: 'openai-compatible', model: 'gpt-5' }])
+  })
+
+  it('listModels declares capabilities by vendor and honors explicit override', async () => {
+    const models = await driverWithProfiles({
+      profiles: [
+        { id: 'ds', baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat' },
+        { id: 'oai', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5' },
+        { id: 'compat', baseUrl: 'https://api.example.com', model: 'glm-4' },
+        { id: 'manual', baseUrl: 'https://api.example.com', model: 'kimi', capabilities: ['maxOutputTokens'] }
+      ]
+    }).listModels()
+    const byValue = new Map(models.map((m) => [m.value, m]))
+    // deepseek：自动推断推理力度 + 思考开关
+    expect(byValue.get('openai:deepseek-chat')?.capabilities).toEqual([
+      { key: 'reasoningEffort', kind: 'enum', options: ['low', 'medium', 'high'] },
+      { key: 'thinking', kind: 'toggle' }
+    ])
+    // openai 官方：自动推断推理力度 + 最大输出 Token
+    expect(byValue.get('openai:gpt-5')?.capabilities).toEqual([
+      { key: 'reasoningEffort', kind: 'enum', options: ['low', 'medium', 'high'] },
+      { key: 'maxOutputTokens', kind: 'number' }
+    ])
+    // 兼容端点：不声明任何能力（避免假开关）
+    expect(byValue.get('openai:glm-4')?.capabilities).toBeUndefined()
+    // 显式配置覆盖自动推断
+    expect(byValue.get('openai:kimi')?.capabilities).toEqual([{ key: 'maxOutputTokens', kind: 'number' }])
+  })
+
+  it('passes modelParams as vendor-scoped providerOptions to streamText', async () => {
+    aiMock.__pushStreamScript({ chunks: [{ type: 'text-delta', text: 'hi' }] })
+    await collect(
+      driverWithProfiles({
+        profiles: [{ baseUrl: 'https://api.openai.com/v1', model: 'gpt-5', isDefault: true }]
+      }).streamChat({
+        conversationId: 'c',
+        model: 'openai:gpt-5',
+        modelParams: { reasoningEffort: 'high', maxOutputTokens: 4096 },
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    expect(aiMock.__streamCalls.at(-1)?.providerOptions).toEqual({
+      openai: { reasoningEffort: 'high', maxCompletionTokens: 4096 }
+    })
+  })
+
+  it('maps thinking toggle to deepseek providerOptions', async () => {
+    aiMock.__pushStreamScript({ chunks: [{ type: 'text-delta', text: 'hi' }] })
+    await collect(
+      driverWithProfiles({
+        profiles: [{ baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat', isDefault: true }]
+      }).streamChat({
+        conversationId: 'c',
+        model: 'openai:deepseek-chat',
+        modelParams: { reasoningEffort: 'low', thinking: true },
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    expect(aiMock.__streamCalls.at(-1)?.providerOptions).toEqual({
+      deepseek: { reasoningEffort: 'low', thinking: { type: 'enabled' } }
+    })
+  })
+
+  it('omits providerOptions for openai-compatible endpoints', async () => {
+    aiMock.__pushStreamScript({ chunks: [{ type: 'text-delta', text: 'hi' }] })
+    await collect(
+      driverWithProfiles({
+        profiles: [{ baseUrl: 'https://api.example.com', model: 'glm-4', isDefault: true }]
+      }).streamChat({
+        conversationId: 'c',
+        model: 'openai:glm-4',
+        modelParams: { reasoningEffort: 'high' },
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    expect(aiMock.__streamCalls.at(-1)?.providerOptions).toBeUndefined()
   })
 
   it('routes official DeepSeek baseUrl to @ai-sdk/deepseek', async () => {
@@ -630,5 +720,143 @@ describe('OpenAIChatDriver', () => {
       raw: { kind: 'assistant', parts: [{ driverId: 'openai', type: 'text', text: 'hi' }] }
     })
     expect(assistantMsg.parts[0]?.type).toBe('text')
+  })
+
+  it('trace：llm span 按 step 边界切分，同批工具显式平级挂当前 step（不互嵌）', async () => {
+    // 记录 pipeline 调用的最小替身：startSpan 返内存 span（status: 'started' 供 finally 兜底判断）。
+    const started: Array<{
+      spanId: string
+      type: string
+      name?: string
+      parentSpanId?: string
+      stepIndex?: unknown
+      traceLabel?: unknown
+      hasInput: boolean
+    }> = []
+    const ended: Array<{ spanId: string; patch: { status?: string; usage?: { inputTokens?: number } } }> = []
+    let seq = 0
+    let endTraceCount = 0
+    const pipeline = {
+      beginTrace: () => undefined,
+      ensureActive: () => undefined,
+      startSpan: (
+        _traceId: string,
+        init: { type: string; name?: string; parentSpanId?: string; input?: unknown; meta?: Record<string, unknown> }
+      ) => {
+        seq += 1
+        const span = { spanId: `span-${seq}`, status: 'started' as const, type: init.type }
+        started.push({
+          spanId: span.spanId,
+          type: init.type,
+          name: init.name,
+          parentSpanId: init.parentSpanId,
+          stepIndex: init.meta?.stepIndex,
+          traceLabel: init.meta?.traceLabel,
+          hasInput: init.input !== undefined
+        })
+        return span
+      },
+      endSpan: (
+        _traceId: string,
+        span: { spanId: string },
+        patch: { status?: string; usage?: { inputTokens?: number } }
+      ) => {
+        ended.push({ spanId: span.spanId, patch })
+      },
+      endTrace: () => {
+        endTraceCount += 1
+      }
+    } as unknown as TracePipeline
+
+    // 两步工具循环：step0 产出两个并发工具调用，step1 给最终回答；finish chunk 由 mock 自动补齐。
+    aiMock.__pushStreamScript({
+      chunks: [
+        { type: 'start-step' },
+        { type: 'text-delta', text: '先查一下' },
+        { type: 'tool-call', toolCallId: 'tc-1', toolName: 'list_dir', input: { path: '.' } },
+        { type: 'tool-call', toolCallId: 'tc-2', toolName: 'grep', input: { pattern: 'foo' } },
+        { type: 'tool-result', toolCallId: 'tc-1', output: ['a.ts'] },
+        { type: 'tool-result', toolCallId: 'tc-2', output: ['a.ts:1'] },
+        { type: 'finish-step', finishReason: 'tool-calls', usage: { inputTokens: 10, outputTokens: 5 } },
+        { type: 'start-step' },
+        { type: 'text-delta', text: '结果如下' },
+        { type: 'finish-step', finishReason: 'stop', usage: { inputTokens: 20, outputTokens: 8 } }
+      ]
+    })
+    const d = new OpenAIChatDriver(
+      fakeStore({ baseUrl: 'https://api.example.com', model: 'gpt-5' }),
+      () => 'key',
+      pipeline
+    )
+    await collect(
+      d.streamChat({
+        conversationId: 'c',
+        model: 'openai:gpt-5',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+
+    const llmSpans = started.filter((s) => s.type === 'llm.generate')
+    const toolSpans = started.filter((s) => s.type === 'tool.execute')
+    // 每个 step 一个 llm span（不再是一个覆盖全程的巨 span），尾部 finish chunk 不再建 span
+    expect(llmSpans).toHaveLength(2)
+    expect(llmSpans.map((s) => s.stepIndex)).toEqual([0, 1])
+    // 首步记录完整 input；后续步省略（tool-result 回填内容不重复落库）
+    expect(llmSpans[0]!.hasInput).toBe(true)
+    expect(llmSpans[1]!.hasInput).toBe(false)
+    // 同批并发工具显式挂同一 step llm span：平级，不逐个互嵌
+    expect(toolSpans).toHaveLength(2)
+    expect(toolSpans.map((s) => s.parentSpanId)).toEqual([llmSpans[0]!.spanId, llmSpans[0]!.spanId])
+    // usage 取 finish-step 的单步用量，收尾状态 completed
+    const llmEnd0 = ended.find((e) => e.spanId === llmSpans[0]!.spanId)
+    const llmEnd1 = ended.find((e) => e.spanId === llmSpans[1]!.spanId)
+    expect(llmEnd0?.patch.usage?.inputTokens).toBe(10)
+    expect(llmEnd0?.patch.status).toBe('completed')
+    expect(llmEnd1?.patch.usage?.inputTokens).toBe(20)
+    // 非 join 模式：driver 负责 endTrace
+    expect(endTraceCount).toBe(1)
+  })
+
+  it('trace：traceLabel 语义名写入 llm span 的 name 与 meta.traceLabel', async () => {
+    // 最小 pipeline 替身：只关心 startSpan 的 name/meta。
+    const started: Array<{ name?: string; traceLabel?: unknown }> = []
+    const pipeline = {
+      beginTrace: () => undefined,
+      startSpan: (_traceId: string, init: { name?: string; meta?: Record<string, unknown> }) => {
+        started.push({ name: init.name, traceLabel: init.meta?.traceLabel })
+        return { spanId: `span-${started.length}`, status: 'started' as const }
+      },
+      endSpan: () => undefined,
+      endTrace: () => undefined
+    } as unknown as TracePipeline
+
+    aiMock.__pushStreamScript({
+      chunks: [
+        { type: 'start-step' },
+        { type: 'text-delta', text: '{"keywords":["a"]}' },
+        { type: 'finish-step', finishReason: 'stop', usage: { inputTokens: 3, outputTokens: 1 } }
+      ]
+    })
+    const d = new OpenAIChatDriver(
+      fakeStore({ baseUrl: 'https://api.example.com', model: 'gpt-5' }),
+      () => 'key',
+      pipeline
+    )
+    await collect(
+      d.streamChat({
+        conversationId: 'memory-keyword-extract-x',
+        model: 'openai:gpt-5',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal,
+        traceLabel: '关键词提取'
+      })
+    )
+    const llm = started.find((s) => s.name !== undefined && s.name !== '对话')
+    // span.name 与 meta.traceLabel 双写：读时转换按 meta.traceLabel 出标题，缺它会回退成模型名
+    expect(llm?.name).toBe('关键词提取')
+    expect(llm?.traceLabel).toBe('关键词提取')
   })
 })

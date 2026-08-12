@@ -19,13 +19,13 @@
  *  - test_generation: 在实现完成之后,生成最小测试集。
  */
 
-import type { Task, TaskRepository } from "@task-pipeline/core";
+import type { Task, TaskRepository } from '@task-pipeline/core'
 
 /** 当前支持的 task agent 运行时。 */
-export type TaskAgentId = "qoder";
+export type TaskAgentId = 'qoder'
 
 /** 任务执行阶段。driver 在事件里标注当前阶段。 */
-export type TaskAgentPhase = "planning" | "implementation" | "test_generation";
+export type TaskAgentPhase = 'planning' | 'implementation' | 'test_generation'
 
 /**
  * driver 推给上层的事件。main.ts 处理每个事件:
@@ -36,84 +36,99 @@ export type TaskAgentPhase = "planning" | "implementation" | "test_generation";
  *  - agent_error: 写 error event + 推 failed。
  */
 export type TaskAgentEvent =
-  | { type: "agent_start"; phase: TaskAgentPhase }
-  | { type: "agent_end"; phase: TaskAgentPhase }
-  | { type: "agent_text"; phase: TaskAgentPhase; text: string }
-  | { type: "agent_session"; taskId: string; sessionId: string }
-  | { type: "agent_usage"; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd?: number; durationMs?: number; turns?: number }
-  | { type: "agent_log"; message: unknown }
-  | { type: "agent_error"; message: string };
+  | { type: 'agent_start'; phase: TaskAgentPhase }
+  | { type: 'agent_end'; phase: TaskAgentPhase }
+  | { type: 'agent_text'; phase: TaskAgentPhase; text: string }
+  | { type: 'agent_session'; taskId: string; sessionId: string }
+  | {
+      type: 'agent_usage'
+      inputTokens: number
+      outputTokens: number
+      cacheReadTokens: number
+      cacheWriteTokens: number
+      costUsd?: number
+      durationMs?: number
+      turns?: number
+    }
+  | { type: 'agent_log'; message: unknown }
+  | { type: 'agent_error'; message: string }
 
 /** 阶段产物 — driver 在 collectResult 时返回。 */
 export type TaskAgentResult = {
   /** driver 在执行阶段累积的 assistant / result 文本。 */
-  responseTexts: string[];
+  responseTexts: string[]
   /** Qoder SDK 输出的 session id (用于失败后续接)。 */
-  sessionId?: string;
-};
+  sessionId?: string
+}
 
 export type RunPlanInput = {
-  task: Task;
-  repos: TaskRepository[];
-  signal?: AbortSignal;
+  task: Task
+  repos: TaskRepository[]
+  signal?: AbortSignal
   /** "修订计划" 路径下,把上一版计划的调整意见追加到 prompt。 */
-  feedback?: string;
-};
+  feedback?: string
+  /** 恢复/续接标记：resumeTask 计划失败重跑 Plan 时传 'resume'，写入阶段 span meta 供展示层区分。 */
+  trigger?: 'resume' | 'followup'
+}
 
 export type RunImplementationInput = {
-  task: Task;
-  repos: TaskRepository[];
-  signal?: AbortSignal;
+  task: Task
+  repos: TaskRepository[]
+  signal?: AbortSignal
   /** 失败后续接:driver 用 resume 恢复原会话,避免重复注入完整上下文。 */
-  resumeSessionId?: string;
+  resumeSessionId?: string
   /** 续接时附加给 agent 的指令(实现阶段)。 */
-  extraPrompt?: string;
-};
+  extraPrompt?: string
+  /** 恢复/续接标记：resumeTask/resumePausedTask 传 'resume'，sendTaskMessage 追加指令传 'followup'。 */
+  trigger?: 'resume' | 'followup'
+  /** auto-fix 重跑轮次（reviewFixCount）：渲染层据此区分 Exec / ReExec #n。 */
+  round?: number
+}
 
 export type RunTestGenerationInput = {
-  task: Task;
-  repos: TaskRepository[];
-  signal?: AbortSignal;
-};
+  task: Task
+  repos: TaskRepository[]
+  signal?: AbortSignal
+}
 
 /** TaskAgentDriver 构造时需要的依赖。 */
 export type TaskAgentDeps = {
   /** 主流程注入的回调,driver 推事件(已经合并了 driver 内部缓冲)。 */
-  emit: (event: TaskAgentEvent) => void;
+  emit: (event: TaskAgentEvent) => void
   /** 任务级 model 覆盖(可选)。 */
-  resolveModel?: (task: Task) => string | undefined;
+  resolveModel?: (task: Task) => string | undefined
   /** Qoder 提示词前置的记忆上下文(可选)。 */
-  resolveMemoryContext?: (task: Task, repos: TaskRepository[]) => Promise<string | undefined>;
+  resolveMemoryContext?: (task: Task, repos: TaskRepository[]) => Promise<string | undefined>
   /**
    * 按任务关联仓库解析的 Agent 指引段(可选)。
    * 非 resume 场景注入到 prompt 最前;resume(真实续接)时由调用方不提供。
    */
-  resolveAgentContext?: (task: Task, repos: TaskRepository[]) => Promise<{ sections: string[] }>;
-};
+  resolveAgentContext?: (task: Task, repos: TaskRepository[]) => Promise<{ sections: string[] }>
+}
 
 export interface TaskAgentDriver {
-  readonly id: TaskAgentId;
-  readonly displayName: string;
+  readonly id: TaskAgentId
+  readonly displayName: string
   /**
    * 执行"计划"阶段。driver 内部: 拼 prompt、起 query、解析 plan JSON。
    * 完成后通过 collectResult("plan") 拿到 responseTexts,主流程再 parsePlanDecision。
    */
-  runPlan(input: RunPlanInput): Promise<void>;
+  runPlan(input: RunPlanInput): Promise<void>
   /**
    * 执行"实现"阶段。driver 内部: 拼 prompt、起 query (permissionMode=acceptEdits)、
    * 收集 assistant / result 文本、流式推到 emit。失败后续接走 resumeSessionId。
    */
-  runImplementation(input: RunImplementationInput): Promise<void>;
+  runImplementation(input: RunImplementationInput): Promise<void>
   /**
    * 执行"测试用例生成"阶段。driver 内部: 拼 prompt (TEST_CASE_GENERATION_PROMPT)、
    * 跑完返回 parseTestCaseGeneration 的结果文本(在 responseTexts 里)。
    */
-  runTestGeneration(input: RunTestGenerationInput): Promise<void>;
+  runTestGeneration(input: RunTestGenerationInput): Promise<void>
   /**
    * 取出 driver 内部累积的阶段产物。driver 是进程级单例,可能同时服务多个任务:
    * 产物按 (taskId, phase) 隔离,主流程拿 responseTexts 去 parse 各种决策 JSON。
    */
-  collectResult(taskId: string, phase: "plan" | "implementation" | "test"): TaskAgentResult;
+  collectResult(taskId: string, phase: 'plan' | 'implementation' | 'test'): TaskAgentResult
   /** 释放 driver 持有的资源。 */
-  dispose(): void;
+  dispose(): void
 }

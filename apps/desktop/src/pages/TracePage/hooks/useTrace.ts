@@ -1,53 +1,65 @@
-import { useCallback, useEffect, useState } from 'react'
-import type { TraceEntry, TraceKind, TraceSummary } from '@task-pipeline/core'
-import { api } from '../../../api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { AgentSpan, TraceDashboardStats, TraceSummary } from '@task-pipeline/core'
+import { api } from '@/api'
 
 /**
- * Trace 页面数据 hook。
- * - summaries：四路数据源聚合的列表（60s 轮询）；
- * - detail：单条 trace 完整轨迹；
- * - 实时刷新：复用现有 `task:event` 推送（任务状态变化时触发重拉），不新增推送通道。
+ * Trace 页面数据 hook（v2）。
+ * - 挂载即拉列表 + 仪表盘统计，5 分钟轮询 + task:event 推送触发重拉；
+ * - 详情按需加载（getTrace → AgentSpan 列表，前端组瀑布树）。
  */
 export function useTrace() {
   const [summaries, setSummaries] = useState<TraceSummary[]>([])
-  const [loading, setLoading] = useState(true)
-  const [detail, setDetail] = useState<TraceEntry[]>([])
+  const [dashboard, setDashboard] = useState<TraceDashboardStats | undefined>(undefined)
+  const [detail, setDetail] = useState<AgentSpan[]>([])
   const [detailLoading, setDetailLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const mounted = useRef(true)
 
-  const refresh = useCallback(async () => {
-    try {
-      setSummaries(await api.listTrace())
-    } catch {
-      /* 拉取失败静默，保留旧数据 */
-    } finally {
-      setLoading(false)
-    }
+  const reload = useCallback(async () => {
+    const [list, stats] = await Promise.all([api.listTrace(), api.dashboardTrace()])
+    if (!mounted.current) return
+    setSummaries(list)
+    setDashboard(stats)
+    setLoading(false)
   }, [])
 
   useEffect(() => {
-    void refresh()
-    const timer = window.setInterval(() => void refresh(), 5 * 60_000)
-    return () => window.clearInterval(timer)
-  }, [refresh])
-
-  // 任务执行事件 → 实时刷新
-  useEffect(() => {
-    const off = api.onTaskEvent((event) => {
-      if (['task_changed', 'agent_end', 'agent_error', 'process_exit'].includes(event.type)) void refresh()
+    mounted.current = true
+    void reload()
+    const timer = setInterval(() => void reload(), 5 * 60 * 1000)
+    const unsubscribe = api.onTaskEvent?.((event: { type?: string }) => {
+      // 新 span / 任务状态变更 → 重拉列表与统计
+      if (event?.type === 'trace_span' || event?.type === 'agent_end' || event?.type === 'agent_error') void reload()
     })
-    return off
-  }, [refresh])
+    return () => {
+      mounted.current = false
+      clearInterval(timer)
+      unsubscribe?.()
+    }
+  }, [reload])
 
-  const loadDetail = useCallback(async (kind: TraceKind, traceId: string) => {
+  const loadDetail = useCallback(async (kind: string, traceId: string) => {
     setDetailLoading(true)
     try {
-      setDetail(await api.getTrace(kind, traceId))
-    } catch {
-      setDetail([])
+      const spans = await api.getTrace(kind, traceId)
+      if (mounted.current) setDetail(spans ?? [])
     } finally {
-      setDetailLoading(false)
+      if (mounted.current) setDetailLoading(false)
     }
   }, [])
 
-  return { summaries, loading, detail, detailLoading, refresh, loadDetail, setDetail }
+  const clearDetail = useCallback(() => {
+    setDetail([])
+  }, [])
+
+  /** 删除一条 trace 并重拉列表与统计（删除当前详情时由页面负责清空路由）。 */
+  const remove = useCallback(
+    async (kind: string, traceId: string) => {
+      await api.deleteTrace(kind, traceId)
+      await reload()
+    },
+    [reload]
+  )
+
+  return { summaries, dashboard, detail, detailLoading, loading, loadDetail, clearDetail, remove }
 }

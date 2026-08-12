@@ -2,17 +2,22 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import Database from 'better-sqlite3'
-import type {
-  AgentEvent,
-  Approval,
-  RepositoryProfile,
-  Task,
-  TaskCard,
-  TaskRepository,
-  TaskSource,
-  TraceEvent
-} from './types.js'
+import type { AgentEvent, Approval, RepositoryProfile, Task, TaskCard, TaskRepository, TaskSource } from './types.js'
 import { boardColumnFor } from './types.js'
+
+/**
+ * trace_events 表兼容类型（旧 trace 系统遗留，仅保证存量库文件可读写；
+ * 新 trace 管道不再使用该表，见 packages/core/src/trace/）。
+ */
+type TraceEvent = {
+  id: string
+  category: 'other'
+  subType: string
+  title: string
+  detail?: string
+  payload?: unknown
+  createdAt: string
+}
 
 export class TaskStore {
   readonly db: Database.Database

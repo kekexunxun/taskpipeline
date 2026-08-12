@@ -12,23 +12,31 @@
  * 上层 (ChatService) 完全不感知 ai-sdk 协议。
  */
 
-import { stepCountIs, streamText, tool as aiTool, type ModelMessage } from 'ai'
+import { jsonSchema, stepCountIs, streamText, tool as aiTool, type ModelMessage } from 'ai'
 import { z } from 'zod'
-import type { TaskStore } from '@task-pipeline/core'
+import type { AgentSpan, TaskStore } from '@task-pipeline/core'
+import { McpClient } from '@task-pipeline/integrations'
 import type {
   ChatModelInfo,
   ChatStreamChunk,
   ChatTaskCreationResult,
   ChatUsage,
   DriverPart,
+  ModelCapability,
+  ModelParams,
   StoredMessage,
   StoredMessageRecord
 } from '../chat-types.js'
+import type { McpServiceProfileResolver } from '../mcp-services.js'
+import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
 import { detectVendor, createVendorModel, type ModelVendor } from './model-providers.js'
 import type { ChatDriver, StreamChatInput } from './chat-driver.js'
 import type { ToolSource } from './tool-source.js'
 
 type OpenAITokenProvider = (profile?: OpenAIProfile) => string | undefined
+
+/** 可配置到 profile 上的能力 key（设置页多选项，覆盖按 vendor 的自动推断）。 */
+type CapabilityKey = ModelCapability['key']
 
 type OpenAIProfile = {
   id?: string
@@ -38,6 +46,62 @@ type OpenAIProfile = {
   displayName?: string
   apiKeyEnv?: string
   isDefault?: boolean
+  /** 用户显式声明的可调参数能力；缺省时按 vendor 自动推断。 */
+  capabilities?: CapabilityKey[]
+}
+
+/** 能力 key → 前端渲染用的 schema 描述。 */
+function capabilityOf(key: CapabilityKey): ModelCapability {
+  if (key === 'reasoningEffort') return { key, kind: 'enum', options: ['low', 'medium', 'high'] }
+  if (key === 'thinking') return { key, kind: 'toggle' }
+  return { key: 'maxOutputTokens', kind: 'number' }
+}
+
+/**
+ * profile 的能力集：用户显式配置优先；否则按 vendor 自动推断
+ * （deepseek: 推理力度 + 思考开关；openai 官方: 推理力度 + 最大输出 Token；
+ * 其它兼容端点不声明任何能力，避免传不支持的参数）。
+ */
+function capabilitiesForProfile(profile: OpenAIProfile): ModelCapability[] {
+  const vendor = profile.vendor ?? detectVendor(profile.baseUrl)
+  const keys: CapabilityKey[] =
+    profile.capabilities ??
+    (vendor === 'deepseek'
+      ? ['reasoningEffort', 'thinking']
+      : vendor === 'openai'
+        ? ['reasoningEffort', 'maxOutputTokens']
+        : [])
+  return keys.map(capabilityOf)
+}
+
+/**
+ * 把运行时模型参数翻译成 ai-sdk providerOptions（按 vendor 分桶）。
+ * 不认识 / 不支持的 key 一律忽略；无任何有效参数时返回 undefined。
+ */
+function buildProviderOptions(
+  vendor: ModelVendor,
+  params: ModelParams | undefined
+): Record<string, Record<string, unknown>> | undefined {
+  if (!params) return undefined
+  const effort = typeof params.reasoningEffort === 'string' ? params.reasoningEffort : undefined
+  const thinking = typeof params.thinking === 'boolean' ? params.thinking : undefined
+  const maxOutputTokens =
+    typeof params.maxOutputTokens === 'number' && params.maxOutputTokens > 0
+      ? Math.round(params.maxOutputTokens)
+      : undefined
+  if (vendor === 'openai') {
+    const openai: Record<string, unknown> = {}
+    if (effort) openai.reasoningEffort = effort
+    if (maxOutputTokens) openai.maxCompletionTokens = maxOutputTokens
+    return Object.keys(openai).length ? { openai } : undefined
+  }
+  if (vendor === 'deepseek') {
+    const deepseek: Record<string, unknown> = {}
+    if (effort) deepseek.reasoningEffort = effort
+    if (thinking !== undefined) deepseek.thinking = { type: thinking ? 'enabled' : 'disabled' }
+    return Object.keys(deepseek).length ? { deepseek } : undefined
+  }
+  return undefined
 }
 
 /**
@@ -256,7 +320,11 @@ export class OpenAIChatDriver implements ChatDriver {
 
   constructor(
     private readonly store: TaskStore,
-    private readonly getApiKey: OpenAITokenProvider
+    private readonly getApiKey: OpenAITokenProvider,
+    /** 埋点管线：对话路径 span 采集（可选，缺省不采集）。 */
+    private readonly tracePipeline?: TracePipeline,
+    /** 用户勾选的 MCP 服务 → stdio 配置（缺省 = 不注入外部 MCP）。 */
+    private readonly mcpProfileResolver?: McpServiceProfileResolver
   ) {
     if (!store) throw new Error('OpenAIChatDriver requires a TaskStore')
     if (!getApiKey) throw new Error('OpenAIChatDriver requires an api key provider')
@@ -271,11 +339,15 @@ export class OpenAIChatDriver implements ChatDriver {
       .map((profile) => ({ profile, value: `openai:${profile.model}` }))
     const countByValue = new Map<string, number>()
     for (const m of models) countByValue.set(m.value, (countByValue.get(m.value) ?? 0) + 1)
-    return models.map(({ profile, value }) => ({
-      value: (countByValue.get(value) ?? 0) > 1 && profile.id ? `${value}@${profile.id}` : value,
-      displayName: profile.displayName || profile.model || 'OpenAI-Compatible',
-      isDefault: profile.isDefault === true
-    }))
+    return models.map(({ profile, value }) => {
+      const capabilities = capabilitiesForProfile(profile)
+      return {
+        value: (countByValue.get(value) ?? 0) > 1 && profile.id ? `${value}@${profile.id}` : value,
+        displayName: profile.displayName || profile.model || 'OpenAI-Compatible',
+        isDefault: profile.isDefault === true,
+        ...(capabilities.length ? { capabilities } : {})
+      }
+    })
   }
 
   serializeUserMessage(input: { id: string; text: string; createdAt: string }): StoredMessageRecord {
@@ -314,7 +386,13 @@ export class OpenAIChatDriver implements ChatDriver {
   async *streamChat(input: StreamChatInput): AsyncGenerator<ChatStreamChunk> {
     const profiles = readProfiles(this.store)
     if (profiles.length === 0) throw new Error('OpenAI-Compatible profile 未配置')
-    const resolved = resolveProfileForValue(profiles, input.model)
+    // 失效 value（profile 已删除 / 历史占位值无法匹配）→ 回落默认 profile，不直接报错。
+    const resolved =
+      resolveProfileForValue(profiles, input.model) ??
+      (() => {
+        const fallback = profiles.find((p) => p.isDefault) ?? profiles[0]
+        return fallback?.baseUrl && fallback.model ? { profile: fallback, model: fallback.model } : undefined
+      })()
     if (!resolved) throw new Error(`未知的 OpenAI 模型: ${input.model}`)
     const profile = resolved.profile
     const modelName = resolved.model
@@ -323,14 +401,44 @@ export class OpenAIChatDriver implements ChatDriver {
     const apiKey = (profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : undefined) ?? this.getApiKey(profile)
     // 按厂商选 ai-sdk provider 包：deepseek/openai 官方端点用专用包（reasoning/structured outputs 等
     // 官方能力），未知端点回落 openai-compatible。vendor 未配置时按 baseUrl 主机名自动识别。
-    const model = createVendorModel(
-      profile.vendor ?? detectVendor(profile.baseUrl),
-      { baseUrl: profile.baseUrl, apiKey },
-      modelName
-    )
+    const vendor = profile.vendor ?? detectVendor(profile.baseUrl)
+    const model = createVendorModel(vendor, { baseUrl: profile.baseUrl, apiKey }, modelName)
 
     const taskSource = input.toolSource
     const tools = taskSource ? buildAiTools(taskSource) : undefined
+    // 用户勾选的 MCP 服务：McpClient 连上后桥接成 ai-sdk 工具（JSON Schema 直接透传，
+    // 不做 zod 转换）。独立于 taskSource 注入——纯对话也可能只挂 MCP 工具。
+    // 单个服务连接失败跳过该服务（不阻断对话）；全部客户端在流收尾时统一 close。
+    const mcpClients: McpClient[] = []
+    let mergedTools: Record<string, ReturnType<typeof aiTool>> | undefined = tools
+    if (input.mcpServices?.length && this.mcpProfileResolver) {
+      const bridged: Record<string, ReturnType<typeof aiTool>> = {}
+      for (const serviceId of input.mcpServices) {
+        const mcpProfile = this.mcpProfileResolver(serviceId)
+        if (!mcpProfile) continue
+        const client = new McpClient(mcpProfile)
+        try {
+          const listed = (await client.listTools()) as Array<{
+            name?: string
+            description?: string
+            inputSchema?: unknown
+          }>
+          for (const def of listed) {
+            const toolName = def.name
+            if (!toolName) continue
+            bridged[toolName] = aiTool({
+              description: def.description,
+              inputSchema: jsonSchema((def.inputSchema ?? { type: 'object', properties: {} }) as never) as never,
+              execute: async (args) => client.callTool(toolName, (args ?? {}) as Record<string, unknown>)
+            }) as unknown as ReturnType<typeof aiTool>
+          }
+          mcpClients.push(client)
+        } catch {
+          client.close()
+        }
+      }
+      if (Object.keys(bridged).length) mergedTools = { ...(mergedTools ?? {}), ...bridged }
+    }
     // ai-sdk 7 起 system 内容必须走 `system` 选项,messages 里不允许 system 角色:
     // 合并「工作目录 + 历史 system + 任务工具 systemPrompt」三段,统一从选项传入。
     const { messages, systemText } = historyToModelMessages(input.history)
@@ -341,7 +449,12 @@ export class OpenAIChatDriver implements ChatDriver {
     ]
       .filter(Boolean)
       .join('\n\n')
-    messages.push({ role: 'user', content: input.userInput.text })
+    // 当前用户消息已由编排层（ChatService）写入 history（history 末尾即本条提问）：
+    // 直接 push 会造成 prompt 里两条一模一样的 user 消息，这里只在确实缺失时才追加。
+    const last = messages.at(-1)
+    const alreadyHasCurrentInput =
+      last?.role === 'user' && typeof last.content === 'string' && last.content === input.userInput.text
+    if (!alreadyHasCurrentInput) messages.push({ role: 'user', content: input.userInput.text })
 
     const parts: DriverPart[] = []
     let taskCreated: ChatTaskCreationResult | undefined
@@ -350,21 +463,102 @@ export class OpenAIChatDriver implements ChatDriver {
     // 无异常），for-await 会直接结束。用 sawFinish 兜底检测，避免「半截回复 + 显示成功」。
     let sawFinish = false
 
+    // 对话 trace：一次用户提问 = 一个 Trace。主对话由 ChatService 传 traceId（join），
+    // 辅助 LLM 调用（关键词提取/记忆整理）也 join 同一回合；无 traceId 时自建独立 trace。
+    const traceId = input.traceId ?? `chat-${input.conversationId}-${input.userInput.id}`
+    const join = Boolean(input.traceId)
+    const traceTools = new Map<string, AgentSpan>()
+    // llm span 按 ai-sdk step 边界切分：start-step 创建 / finish-step 收尾，
+    // 每轮 API 调用一个 span——不再用一个覆盖全程的巨 span（多步工具循环下
+    // 时序与层级都失真：一次循环只产出一个 llm 巨 span，同批工具挂栈顶互嵌）。
+    let stepLlm: AgentSpan | undefined
+    let stepText: string[] = []
+    let stepIndex = 0
+    if (this.tracePipeline) {
+      if (join) {
+        this.tracePipeline.ensureActive({
+          traceId,
+          kind: 'chat',
+          title: input.userInput.text.slice(0, 80),
+          source: 'openai',
+          agentName: 'OpenAI',
+          model: modelName
+        })
+      } else {
+        this.tracePipeline.beginTrace({
+          traceId,
+          kind: 'chat',
+          title: input.userInput.text.slice(0, 80),
+          source: 'openai',
+          agentName: 'OpenAI',
+          model: modelName
+        })
+        this.tracePipeline.startSpan(traceId, { type: 'session.start', name: '对话', meta: { source: 'openai' } })
+      }
+    }
+
+    // 运行时模型参数（推理力度 / 思考开关 / 最大输出 Token）→ 按 vendor 翻译成 providerOptions。
+    const providerOptions = buildProviderOptions(vendor, input.modelParams)
+
     const result = streamText({
       model,
       messages,
       abortSignal: input.signal,
       ...(system ? { system } : {}),
-      ...(taskSource ? { tools, stopWhen: stepCountIs(10) } : {})
+      ...(providerOptions ? { providerOptions: providerOptions as never } : {}),
+      // 任务工具与 MCP 桥接工具合并注入；只有 MCP 工具（无 taskSource）时同样启用多步循环。
+      ...(mergedTools ? { tools: mergedTools, stopWhen: stepCountIs(10) } : {})
     })
 
     try {
       for await (const chunk of result.fullStream) {
         if (input.signal.aborted) return
         // chunk.type 是 TextStreamPart 的 type 字段
-        if (chunk.type === 'text-delta' && 'text' in chunk && chunk.text) {
+        if (chunk.type === 'start-step') {
+          // 每个 step = 一轮 API 调用：起一个 llm.generate span。
+          // 首步记录完整 input（messages + system）；后续步的 input 是上一轮的
+          // tool-result 回填，全量落库冗余且体积大，省略。
+          if (this.tracePipeline) {
+            stepLlm = this.tracePipeline.startSpan(traceId, {
+              type: 'llm.generate',
+              // 辅助调用（关键词提取/记忆整理）用语义名，模型仍在 model 字段（tooltip/指标用）。
+              // traceLabel 同步落 meta：读时转换（spansToAgentEvents 标题 / Waterfall 标签）
+              // 只认 meta.traceLabel，仅写 span.name 会导致执行 Tab 回退成「LLM 调用 · 模型名」。
+              name: input.traceLabel ?? modelName,
+              model: modelName,
+              ...(stepIndex === 0 ? { input: { messages, system } } : {}),
+              meta: { source: 'openai', stepIndex, ...(input.traceLabel ? { traceLabel: input.traceLabel } : {}) }
+            })
+            stepText = []
+            stepIndex += 1
+          }
+        } else if (chunk.type === 'finish-step') {
+          const step = chunk as unknown as {
+            usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number }
+            finishReason?: string
+          }
+          if (this.tracePipeline && stepLlm) {
+            const u = step.usage
+            const hasUsage = Boolean(u && ((u.inputTokens ?? 0) > 0 || (u.outputTokens ?? 0) > 0))
+            this.tracePipeline.endSpan(traceId, stepLlm, {
+              ...(stepText.length > 0 ? { output: stepText.join('') } : {}),
+              ...(hasUsage && u
+                ? {
+                    usage: {
+                      inputTokens: u.inputTokens ?? 0,
+                      outputTokens: u.outputTokens ?? 0,
+                      totalTokens: u.totalTokens ?? (u.inputTokens ?? 0) + (u.outputTokens ?? 0)
+                    }
+                  }
+                : {}),
+              status: step.finishReason === 'error' ? 'error' : 'completed'
+            })
+            stepLlm = undefined
+          }
+        } else if (chunk.type === 'text-delta' && 'text' in chunk && chunk.text) {
           const part: DriverPart = { driverId: 'openai', type: 'text', text: chunk.text }
           parts.push(part)
+          if (stepText.length < 20000) stepText.push(chunk.text)
           yield { type: 'part', part }
         } else if (chunk.type === 'reasoning-delta' && 'text' in chunk && chunk.text) {
           // 推理模型（DeepSeek reasoner 等）的思考流:转发成 openai.thinking part,
@@ -382,6 +576,18 @@ export class OpenAIChatDriver implements ChatDriver {
             input: tc.input
           }
           parts.push(part)
+          if (this.tracePipeline) {
+            const toolSpan = this.tracePipeline.startSpan(traceId, {
+              type: 'tool.execute',
+              name: tc.toolName,
+              input: tc.input,
+              // 显式父级：挂当前 step 的 llm span，不挂栈顶——
+              // 挂栈顶会让同批并发工具逐个嵌套（后发的工具挂到前一个未收尾的工具下）。
+              parentSpanId: stepLlm?.spanId,
+              meta: { source: 'openai', toolCallId: tc.toolCallId }
+            })
+            traceTools.set(tc.toolCallId, toolSpan)
+          }
           yield { type: 'part', part }
         } else if (chunk.type === 'tool-result') {
           const tr = chunk as unknown as { toolCallId: string; output: unknown }
@@ -392,6 +598,13 @@ export class OpenAIChatDriver implements ChatDriver {
             output: tr.output
           }
           parts.push(part)
+          if (this.tracePipeline) {
+            const toolSpan = traceTools.get(tr.toolCallId)
+            if (toolSpan) {
+              traceTools.delete(tr.toolCallId)
+              this.tracePipeline.endSpan(traceId, toolSpan, { output: tr.output })
+            }
+          }
           yield { type: 'part', part }
           if (taskSource) {
             const described = taskSource.describeResult(tr.output)
@@ -407,12 +620,14 @@ export class OpenAIChatDriver implements ChatDriver {
           throw chunk.error
         } else if (chunk.type === 'finish') {
           sawFinish = true
-          // 捕获用量（ai-sdk 7 的 usage 字段是 inputTokens / outputTokens / totalTokens），
-          // 由 done chunk 带回给 ChatService 持久化；finishReason=error 视为流异常结束。
+          // 捕获总用量：ai-sdk 7 的 finish chunk 字段是 `totalUsage`（各 step 累计；
+          // 单 step 的 usage 已在 finish-step 落到对应 llm span）。这里只用于 done chunk
+          // 带回给 ChatService 持久化兜底，不再建覆盖全程的巨 span。
+          // finishReason=error 视为流异常结束。
           if ('finishReason' in chunk && chunk.finishReason === 'error') {
             throw new Error('模型流式输出异常结束（finish_reason: error）')
           }
-          const u = (chunk as { usage?: unknown }).usage as
+          const u = (chunk as { totalUsage?: unknown }).totalUsage as
             | { inputTokens?: number; outputTokens?: number; totalTokens?: number }
             | undefined
           if (u && (u.inputTokens ?? 0) > 0) {
@@ -427,7 +642,43 @@ export class OpenAIChatDriver implements ChatDriver {
     } catch (error) {
       // 除用户主动 abort 外,一律上抛:让 ChatService 标记 error 并推送错误提示,
       // 避免「已有部分输出就吞掉错误」导致界面显示不完整回答且没有任何提示。
+      if (this.tracePipeline && stepLlm && !input.signal.aborted) {
+        this.tracePipeline.endSpan(traceId, stepLlm, {
+          status: 'error',
+          error: { message: error instanceof Error ? error.message : String(error) }
+        })
+        stepLlm = undefined
+      }
       if (!input.signal.aborted) throw error
+    } finally {
+      // MCP 客户端统一关闭（stdio 子进程）；无论成功 / 失败 / abort。
+      for (const client of mcpClients) client.close()
+      // 对话 trace 收尾：无论成功 / 失败 / abort 都 finalize。
+      if (this.tracePipeline) {
+        for (const toolSpan of traceTools.values()) {
+          this.tracePipeline.endSpan(traceId, toolSpan, { status: 'cancelled' })
+        }
+        traceTools.clear()
+        // 当前 step span 未正常收尾（abort / 流静默断开）时的兜底：
+        // finish-step 未到达，step usage 不可得，用 finish chunk 的总用量兜底。
+        if (stepLlm && stepLlm.status === 'started') {
+          this.tracePipeline.endSpan(traceId, stepLlm, {
+            ...(stepText.length > 0 ? { output: stepText.join('') } : {}),
+            usage: streamUsage
+              ? {
+                  inputTokens: streamUsage.inputTokens,
+                  outputTokens: streamUsage.outputTokens,
+                  totalTokens: streamUsage.totalTokens,
+                  ...(streamUsage.costUsd ? { costUsd: streamUsage.costUsd } : {})
+                }
+              : undefined,
+            status: input.signal.aborted ? 'cancelled' : 'completed'
+          })
+          stepLlm = undefined
+        }
+        // join 模式：trace 生命周期由回合层（ChatService）统一 endTrace。
+        if (!join) this.tracePipeline.endTrace(traceId)
+      }
     }
 
     // 流静默中断兜底:未收到 finish chunk 且非用户取消,视为异常（可能已有部分输出,

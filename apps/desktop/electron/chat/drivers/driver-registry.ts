@@ -6,27 +6,27 @@
  * 单测可以塞 fake driver 进去。
  */
 
-import type { ChatDriver } from "./chat-driver.js";
-import type { ChatDriverId } from "../chat-types.js";
+import type { ChatDriverId } from '../chat-types.js'
+import type { ChatDriver } from './chat-driver.js'
 
 export class ChatDriverRegistry {
-  private readonly drivers = new Map<ChatDriverId, ChatDriver>();
+  private readonly drivers = new Map<ChatDriverId, ChatDriver>()
 
   register(driver: ChatDriver): void {
-    this.drivers.set(driver.id, driver);
+    this.drivers.set(driver.id, driver)
   }
 
   get(id: ChatDriverId): ChatDriver {
-    const driver = this.drivers.get(id);
-    if (!driver) throw new Error(`未注册的 chat driver: ${id}`);
-    return driver;
+    const driver = this.drivers.get(id)
+    if (!driver) throw new Error(`未注册的 chat driver: ${id}`)
+    return driver
   }
 
   tryGet(id: ChatDriverId): ChatDriver | undefined {
-    return this.drivers.get(id);
+    return this.drivers.get(id)
   }
 
   list(): ChatDriver[] {
-    return Array.from(this.drivers.values());
+    return Array.from(this.drivers.values())
   }
 }

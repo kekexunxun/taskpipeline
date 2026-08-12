@@ -138,12 +138,12 @@ export type AgentEvent = {
   /**
    * 归属子任务 ID（Qoder 子 Agent）。
    *
-   * - 与 `TraceEntry.parentTaskId` 语义一致: undefined 表示主流程,有值表示嵌套在子任务内。
+   * - 与 span meta 的 `taskId`（subtask.run）语义一致: undefined 表示主流程,有值表示嵌套在子任务内。
    * - 由 `recordQoderMessage` 透传 SDKMessage.parent_tool_use_id 反查 task_started 的结果。
    * - 其它源(本地状态变更 / 内存注入 / 用户操作)不携带该字段。
    *
    * 命名说明: `taskId` 已是 AgentEvent 归属任务的 ID,这里另起 `parentTaskId`(本字段)
-   * 表达"这条 AgentEvent 在哪个子任务里",与 TraceEntry.parentTaskId 同义。
+   * 表达"这条 AgentEvent 在哪个子任务里"。
    */
   parentTaskId?: string
   /** 仅 task_started / task_progress / task_notification 三类系统消息持有,标识子任务本体。 */
@@ -333,98 +333,3 @@ export type RepoWikiDoc = {
 
 export type MemorySearchHit = Memory & { score: number }
 export type RepoWikiSearchHit = RepoWikiDoc & { score: number }
-
-// === Trace 系统（对话 / 任务 / Pi 会话统一执行轨迹） ==========================
-
-/** Trace 归属类型：任务 / 对话 / Pi 会话。 */
-export type TraceKind = 'task' | 'chat' | 'pi_session' | 'other'
-
-/** 归一化后的执行轨迹条目类型。 */
-export type TraceEntryType =
-  | 'session_start'
-  | 'session_end'
-  | 'message'
-  | 'thinking'
-  | 'tool_call'
-  | 'tool_result'
-  | 'status'
-  | 'error'
-  | 'review'
-  | 'diff'
-
-/** 归一化 trace 条目，各数据源（events 表 / chats-v3 / pi session / pi-trace events）统一映射为它。 */
-export type TraceEntry = {
-  /** 全局唯一：`${source}-${traceId}-${seq}`。 */
-  id: string
-  /** 归属：taskId / chatId / piSessionId。 */
-  traceId: string
-  kind: TraceKind
-  type: TraceEntryType
-  title: string
-  detail?: string
-  /** 原始数据（AgentEvent / SDK raw / events.jsonl 事件）。 */
-  payload?: unknown
-  createdAt: string
-  source: 'events' | 'chat' | 'pi' | 'pi_trace' | 'qoder'
-  /**
-   * 归属子任务 ID（Qoder 子 Agent）。
-   *
-   * - 仅 Qoder 源使用；其它源恒为 undefined。
-   * - 来自 SDKMessage.parent_tool_use_id 反查 task_started.tool_use_id 后得到的 task_id。
-   * - 为 undefined 表示"主流程"；有值表示"嵌套在该子任务内"。
-   *
-   * 注意：JSONL 落盘形态不动（你确认的"落盘保持原样,只在解析时计算"），该字段在
-   * parseQoderTraceFile 阶段被注入到内存 entry 上。
-   */
-  parentTaskId?: string
-  /** 仅 task_started / task_progress / task_notification 三类系统消息持有，标识子任务本体。 */
-  taskId?: string
-  /** Qoder SDKMessage.subtype 透传（如 task_started / task_progress / hook_started 等），UI 据此路由。 */
-  sdkSubtype?: string
-}
-
-/** Trace 列表项（列表页用，不携带完整条目）。 */
-export type TraceSummary = {
-  traceId: string
-  kind: TraceKind
-  title: string
-  createdAt: string
-  updatedAt: string
-  entryCount: number
-  state?: string
-  /** 执行统计：Token / 成本 / 时长 / 模型等关键指标。 */
-  stats?: {
-    turns?: number
-    tokens?: { input: number; output: number; total: number; cacheRead?: number; cacheWrite?: number }
-    costUsd?: number
-    model?: string
-    durationMs?: number
-    /** 工具调用统计（analysis 用）：工具名 → 次数 / 失败数。 */
-    toolStats?: Array<{ name: string; count: number; errors: number }>
-    /** 错误 / 失败事件计数（analysis 用）。 */
-    errorCount?: number
-  }
-  lastEntry?: Pick<TraceEntry, 'type' | 'title' | 'createdAt'>
-  /** pi-trace 源存在 trace.html 时给出（前端"在浏览器打开"用）。 */
-  traceHtmlPath?: string
-  /** pi_session 源关联到的任务（D6：pi_session_path 匹配 / 时间窗兜底）。 */
-  linkedTaskId?: string
-}
-
-/**
- * 跨数据源归一化后的 trace 业务事件（写入 trace_events / 用于 Trace 列表"其它"分类）。
- *
- * 与 `AgentEvent` 的区别：不需要挂载 taskId，归属完全靠 `source` 区分；
- * 详情由 `detail` + `payload` 透传给 Trace 页面。
- */
-export type TraceEvent = {
-  id: string
-  /** 业务分类标签，前端 Trace 列表可按它过滤。固定为 "other"，保留扩展位。 */
-  category: 'other'
-  /** 业务子类型，例如 "agent_template_generation" —— UI 可用它判图标 / 摘要。 */
-  subType: string
-  title: string
-  detail?: string
-  payload?: unknown
-  createdAt: string
-}
