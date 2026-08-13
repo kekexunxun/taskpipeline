@@ -55,6 +55,13 @@ function ChatMessageImpl({
   // 用户消息保留气泡式 max-width。
   const widthClass = isUser ? 'max-w-[78%]' : 'max-w-[78%]'
   const alignClass = isUser ? 'items-end' : 'items-start'
+  // 消息级操作区(shadcn MessageFooter 语义):置于消息内容下方、与消息同侧对齐。
+  // 只有该消息存在可复制的正文文本时才渲染。
+  const copyAction = messageText ? (
+    <div className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
+      <MessageCopyButton text={messageText} aria-label="复制消息" />
+    </div>
+  ) : null
 
   return (
     <div className={cn('flex w-full', containerClass)} data-role={message.role} data-driver-id={message.driverId}>
@@ -79,10 +86,12 @@ function ChatMessageImpl({
               <UserIcon size={10} />
             </span>
           )}
-          {messageText && <MessageCopyButton text={messageText} className="size-5" />}
         </div>
         {isUser ? (
-          <UserBubble message={message} />
+          <>
+            <UserBubble message={message} />
+            {copyAction}
+          </>
         ) : (
           <>
             {isStreaming && message.parts.length === 0 ? (
@@ -102,6 +111,7 @@ function ChatMessageImpl({
                 )}
               </>
             )}
+            {copyAction}
             {taskCreation && taskKey && (
               <div className="flex w-full flex-wrap items-center gap-2 border-l-2 border-primary/50 pl-3 text-xs">
                 <span className="font-mono font-semibold text-foreground">{taskKey}</span>
