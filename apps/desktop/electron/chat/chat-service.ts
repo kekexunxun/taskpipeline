@@ -298,6 +298,9 @@ export class ChatService {
     let streamUsage: ChatUsage | undefined
     let errorMessage: string | undefined
     let userPersisted = false
+    // 本轮是否执行了记忆提取注入（整轮成功后写 conversation.memoryInjected；
+    // 失败/中止不置位，重试仍会重新提取 —— 避免首轮失败后记忆注入永久丢失）。
+    let memoryInjectedThisTurn = false
     const taskBackend = input.mode === 'task-create' ? this.resolveTaskBackend?.() : undefined
     // task-create 优先注入任务后端工具（Jira 等）；否则项目对话（绑定了工作目录）注入只读
     // 查询工具集，让模型能真正读取代码回答项目问题；普通对话仍无工具（行为不变）。
@@ -323,9 +326,18 @@ export class ChatService {
       userPersisted = true
 
       // keyword 阶段容器：关键词提取 + 记忆/Repowiki 检索（期间的 llm/tool span 挂入阶段）。
-      const memoryContext = await this.withStage(Boolean(turnTraceId), input.chatId, turnKey, 'keyword', async () =>
-        this.memoryContext?.({ conversationId: input.chatId, query: input.message.text })
-      )
+      // 每对话只提取注入一次（conversation.memoryInjected 持久化判定）：后续轮次跳过，省掉每轮
+      // 一次的关键词提取 LLM 调用（对话回复变慢的主要来源之一）。提取期间推 status 提示，避免用户干等。
+      const memoryContext = !conversation.memoryInjected
+        ? await this.withStage(Boolean(turnTraceId), input.chatId, turnKey, 'keyword', async () => {
+            if (!this.memoryContext) return undefined
+            this.dispatch(effective, { type: 'status', text: '正在提取关键词并检索记忆上下文…' })
+            const ctx = await this.memoryContext?.({ conversationId: input.chatId, query: input.message.text })
+            memoryInjectedThisTurn = true
+            this.dispatch(effective, { type: 'status', text: '记忆上下文已就绪' })
+            return ctx
+          })
+        : undefined
       const historyRecords = memoryContext
         ? [
             ...messages.slice(0, -1),
@@ -387,6 +399,14 @@ export class ChatService {
         this.dispatch(effective, { type: 'error', message })
       }
     } finally {
+      // 整轮成功后才记「记忆已注入」：失败/中止（error/aborted/空响应）不消耗资格，重试仍会重新提取。
+      if (status === 'done' && memoryInjectedThisTurn && !conversation.memoryInjected) {
+        try {
+          this.storage.updateMeta(input.chatId, { memoryInjected: true })
+        } catch {
+          /* 标记写入失败不影响本轮 */
+        }
+      }
       // 用量/模型已在 done chunk 里随 dispatch 透传给前端，此处只负责落盘（见下方 serializeAssistantMessage）。
       try {
         if (userPersisted) {

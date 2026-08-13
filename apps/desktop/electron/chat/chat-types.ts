@@ -145,6 +145,8 @@ export type ChatStreamChunk =
   | { type: 'part'; part: DriverPart }
   | { type: 'model'; model: string }
   | { type: 'task-created'; result: ChatTaskCreationResult }
+  /** 阶段提示：主进程在执行耗时的预处理（关键词提取/记忆检索等）时推给前端展示，避免用户干等。 */
+  | { type: 'status'; text: string }
   | { type: 'error'; message: string }
   | { type: 'done'; status: ChatMessageStatus; usage?: ChatUsage; model?: string }
 
@@ -211,6 +213,11 @@ export type ChatConversationMeta = {
    * 无值/undefined = 普通对话。
    */
   workingDirectory?: string
+  /**
+   * 是否已做过记忆上下文提取注入（每对话只做一次；整轮成功后才置位，失败/中止不消耗资格，
+   * 重试仍会重新提取）。持久化保证应用重启后不重复提取。
+   */
+  memoryInjected?: boolean
 }
 /**
  * 对话完整形态。`messages` 是 driver 透传的 record 列表(不包含运行时 `parts`),

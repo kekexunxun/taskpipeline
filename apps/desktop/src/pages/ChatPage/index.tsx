@@ -136,6 +136,7 @@ function ChatPageInner() {
         <ChatConversation
           messages={chat.messages}
           streaming={chat.streaming}
+          hint={chat.hint}
           onExecuteJira={async (taskKey) => {
             try {
               const task = await api.importJiraTask(taskKey)

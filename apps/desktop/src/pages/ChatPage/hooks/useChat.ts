@@ -92,6 +92,8 @@ export function useChat() {
     [model, modelGroups]
   )
   const [status, setStatus] = useState<ChatStatus>('idle')
+  /** 阶段提示文案：主进程关键词提取/记忆检索期间推 status chunk 展示，首个 part 到达后清空。 */
+  const [hint, setHint] = useState<string>()
   const [taskCreationEnabled, setTaskCreationEnabled] = useState(false)
   const [taskBackend, setTaskBackend] = useState<{ id: string; displayName: string; configured: boolean }>()
   /** 选中的 MCP 服务列表（随对话落盘，切换对话时按落盘值恢复）。 */
@@ -194,6 +196,7 @@ export function useChat() {
       activeStream.current?.abort()
       activeStream.current = undefined
       setStatus('idle')
+      setHint(undefined)
       setActiveId(id)
       setConversation(undefined)
       setMessages([])
@@ -230,6 +233,7 @@ export function useChat() {
           activeStream.current?.abort()
           activeStream.current = undefined
           setStatus('idle')
+          setHint(undefined)
           setActiveId(undefined)
           setConversation(undefined)
           setMessages([])
@@ -293,6 +297,7 @@ export function useChat() {
       // 立刻把 user 消息和"在飞"的 assistant 消息都 push 进去,UI 立即看到。
       setMessages((current) => [...current, userMessage, assistantMessage])
       setStatus('submitted')
+      setHint(undefined)
 
       const session = transport.start({
         streamId,
@@ -353,6 +358,7 @@ export function useChat() {
         if (activeStream.current?.streamId !== streamId) return
         activeStream.current = undefined
         setStatus('idle')
+        setHint(undefined)
         await refreshMetas()
       })
 
@@ -378,6 +384,11 @@ export function useChat() {
    * 使用 functional setState 保证多次事件间的状态不会相互覆盖。
    */
   const applyChunk = useCallback((assistantId: string, chunk: ChatStreamChunk) => {
+    if (chunk.type === 'status') {
+      // 阶段提示：只更新提示文案，不改动消息列表（keyword 阶段在 start 之前，尚无 part）。
+      setHint(chunk.text)
+      return
+    }
     setMessages((current) =>
       current.map((message) => {
         if (message.id !== assistantId) return message
@@ -407,10 +418,14 @@ export function useChat() {
       })
     )
     if (chunk.type === 'part') {
-      // 收到第一个 part 时切换到 streaming 状态(让 UI 的流式动画启用)。
+      // 收到第一个 part 时切换到 streaming 状态(让 UI 的流式动画启用)，并清掉阶段提示（正文开始）。
       setStatus('streaming')
+      setHint(undefined)
     }
-    if (chunk.type === 'error') setStatus('error')
+    if (chunk.type === 'error') {
+      setStatus('error')
+      setHint(undefined)
+    }
   }, [])
 
   const streaming = status === 'streaming' || status === 'submitted'
@@ -425,6 +440,7 @@ export function useChat() {
       draft,
       streaming,
       status,
+      hint,
       modelGroups,
       model,
       driverId,
@@ -457,6 +473,7 @@ export function useChat() {
       draft,
       streaming,
       status,
+      hint,
       modelGroups,
       model,
       driverId,

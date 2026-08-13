@@ -171,6 +171,8 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
   private readonly traceAgentSpans = new Map<string, AgentSpan>()
   /** (taskId, phase) → 已执行次数：阶段 span meta.attempt（同 phase 第几次执行，恢复/续接展示用）。 */
   private readonly phaseAttempts = new Map<string, number>()
+  /** 已做过「关键词提取 + 记忆上下文注入」的任务（每任务只做一次；finishTrace 清理，任务重跑会重置）。 */
+  private readonly keywordInjected = new Set<string>()
 
   constructor(private readonly deps: QoderTaskAgentDeps) {
     if (!deps) throw new Error('QoderTaskAgentDriver requires deps')
@@ -227,6 +229,28 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     }
   }
 
+  /**
+   * 任务上下文解析（记忆提取注入每任务只做一次）：
+   * - 首次：keyword 阶段容器内全量解析 —— LLM 关键词提取 + 记忆/Repowiki 检索注入 + Agent 指引；
+   * - 之后：仅组装 Agent 指引，跳过记忆检索（省掉重复的关键词提取 LLM 调用——Plan/Exec 重跑、
+   *   feedback 再触发时不再重复提取注入）；任务终态 finishTrace 清标记，任务重跑会重新提取。
+   */
+  private async resolveTaskContext(
+    task: Task,
+    repos: TaskRepository[]
+  ): Promise<{ memoryContext: string | undefined; agentContext: { sections: string[] } | undefined }> {
+    if (this.keywordInjected.has(task.id)) {
+      const agentContext = await this.deps.resolveAgentContext?.(task, repos)
+      return { memoryContext: undefined, agentContext }
+    }
+    this.keywordInjected.add(task.id)
+    return this.withKeywordStage(task.id, async () => {
+      const memoryContext = await this.deps.resolveMemoryContext?.(task, repos)
+      const agentContext = await this.deps.resolveAgentContext?.(task, repos)
+      return { memoryContext, agentContext }
+    })
+  }
+
   async runPlan(input: RunPlanInput): Promise<void> {
     const { task, repos, signal, feedback, trigger } = input
     // 任务 trace 提前 begin：在记忆/Agent 上下文检索之前就绪（幂等），
@@ -239,13 +263,9 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     // 无条件 init 会导致此前分析/计划数据全部丢失。
     const hasSession = Boolean(this.sessions.get(task.id))
 
-    // 串行:先取记忆上下文再取 Agent 指引,保证 trace 中“检索记忆上下文”先于“注入 Agent 上下文”出现。
-    // keyword 阶段容器：这段解析（含关键词提取 llm 调用）归入独立阶段卡，与 Plan/Exec 顶层平铺。
-    const { memoryContext, agentContext } = await this.withKeywordStage(task.id, async () => {
-      const memory = await this.deps.resolveMemoryContext?.(task, repos)
-      const agent = await this.deps.resolveAgentContext?.(task, repos)
-      return { memoryContext: memory, agentContext: agent }
-    })
+    // 任务上下文解析：记忆（关键词提取 + 检索注入）只做一次，Agent 指引每次组装。
+    // keyword 阶段容器：首次解析（含关键词提取 llm 调用）归入独立阶段卡，与 Plan/Exec 顶层平铺。
+    const { memoryContext, agentContext } = await this.resolveTaskContext(task, repos)
     const prompt = hasSession
       ? [
           feedback
@@ -303,11 +323,7 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
       ].join('\n')
     } else {
       // 无会话(直接进入实现阶段,未经过 plan):全量上下文兜底。
-      const [agentContext, memoryContext] = await this.withKeywordStage(task.id, async () => {
-        const memory = await this.deps.resolveMemoryContext?.(task, repos)
-        const agent = await this.deps.resolveAgentContext?.(task, repos)
-        return [agent, memory] as const
-      })
+      const { agentContext, memoryContext } = await this.resolveTaskContext(task, repos)
       prompt = [
         ...(agentContext?.sections ?? []),
         memoryContext ?? '',
@@ -397,6 +413,7 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
       this.traceBuilders.delete(taskId)
     }
     this.traceStarted.delete(taskId)
+    this.keywordInjected.delete(taskId)
     this.traceAgentSpans.delete(taskId)
     for (const key of this.phaseAttempts.keys()) {
       if (key.startsWith(`${taskId}:`)) this.phaseAttempts.delete(key)

@@ -485,19 +485,17 @@ function providerForTask(taskId: string | undefined): 'qoder' | 'openai' {
 }
 
 /**
- * piSession 路径的完整 prompt 组装：Agent 指引段在最前，其次 memoryContext，最后任务正文。
- * OpenAI 路径的 resume 是重新 prompt（新会话无原上下文），因此与 Qoder 路径不同，需要注入。
+ * piSession 路径的完整 prompt 组装：Agent 指引段在最前，最后任务正文。
+ * 不注入记忆上下文（不调 taskMemoryContext）：pi 路径每次 startPi 都重建全新会话，
+ * 且每次开辟的可能是新任务——记忆检索/关键词提取的收益有限、成本却是一次 LLM 调用，
+ * 故省去（Qoder 路径有常驻会话与 keyword 阶段容器，按每任务首次提取注入）。
  */
 async function buildAgentPrompt(task: Task, body: string): Promise<string> {
   const repos = store.listTaskRepositories(task.id)
-  const [agentContext, memoryContext] = await Promise.all([
-    agentService.resolveAgentContext(task, repos),
-    taskMemoryContext(task, repos)
-  ])
-  const sections = agentContext.sections
+  const sections = (await agentService.resolveAgentContext(task, repos)).sections
   if (sections.length)
     addTaskEvent({ taskId: task.id, kind: 'status', title: '注入 Agent 上下文', detail: sections.join('\n\n') })
-  return `${sections.length ? `${sections.join('\n\n')}\n\n` : ''}${memoryContext ? `${memoryContext}\n\n` : ''}${body}`
+  return `${sections.length ? `${sections.join('\n\n')}\n\n` : ''}${body}`
 }
 
 /** 启动校验：路由到 qoder 但未配置 Token 时明确报错，不静默切换执行路径。 */

@@ -20,10 +20,13 @@ import { cn } from '@/lib/utils'
 function ChatMessageImpl({
   message,
   isAnimating,
+  hint,
   onExecuteJira
 }: {
   message: ChatMessage
   isAnimating?: boolean
+  /** 阶段提示（关键词提取/记忆检索中…）：优先于默认思考文案展示在 pending 占位里。 */
+  hint?: string
   onExecuteJira?(taskKey: string): Promise<void>
 }) {
   const [executing, setExecuting] = useState(false)
@@ -98,7 +101,7 @@ function ChatMessageImpl({
             {isStreaming && message.parts.length === 0 ? (
               <div className="flex items-center gap-2 rounded-xl border border-border/40 bg-muted/30 px-3.5 py-2.5 text-xs text-muted-foreground">
                 <Loader2Icon className="animate-spin-slow" size={12} />
-                {driverLabel(message.driverId)} 正在思考…
+                {hint ?? `${driverLabel(message.driverId)} 正在思考…`}
               </div>
             ) : (
               <>
