@@ -627,6 +627,54 @@ describe('QoderChatDriver 工具输入输出与思考去重', () => {
     expect(joined).toBe('分析问题') // 四个单字碎片全部保留,无吞字符
   })
 
+  it('tool_use input 为 null 时不抛异常(Anthropic 协议允许 null,Object.keys(null) 会抛并中断 consume)', async () => {
+    // 回归:此前 flushToolUse 的 input 判定 `typeof input === 'object'` 挡不住 null,
+    // `Object.keys(null)` 抛 TypeError → consume 循环中断 → 后续 SDK 消息不再喂给
+    // onMessage(trace 采集),表现为「对话产出正常但 Trace 没数据」。
+    sdkMock.__pushScript({
+      messages: [
+        {
+          type: 'stream_event',
+          session_id: 'sess-n1',
+          event: {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'tool_use', id: 'tc-null', name: 'glob' }
+          }
+        },
+        {
+          type: 'assistant',
+          session_id: 'sess-n1',
+          message: { content: [{ type: 'tool_use', id: 'tc-null', name: 'glob', input: null }] }
+        },
+        {
+          type: 'user',
+          session_id: 'sess-n1',
+          message: { content: [{ type: 'tool_result', tool_use_id: 'tc-null', content: 'ok' }] }
+        },
+        textDelta('完成', 'sess-n1'),
+        resultMessage('完成', 'sess-n1')
+      ]
+    })
+    const events = await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'glob', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const parts = events.flatMap((e) => (e.type === 'part' ? [e.part] : []))
+    // 回合完整收尾:null input 落定为 {} 而非抛异常,result 之后的 text 也正常到达
+    const toolUses = parts.filter((p) => p.type === 'qoder.tool-use')
+    expect(toolUses).toHaveLength(1)
+    expect(toolUses[0]?.type === 'qoder.tool-use' && toolUses[0].input).toEqual({})
+    expect(parts.some((p) => p.type === 'text' && p.text === '完成')).toBe(true)
+    const toolResults = parts.filter((p) => p.type === 'qoder.tool-result')
+    expect(toolResults).toHaveLength(1)
+  })
+
   it('content_block_stop 兜底:无 assistant 快照时用累积入参落定工具调用(中断不丢)', async () => {
     sdkMock.__pushScript({
       messages: [

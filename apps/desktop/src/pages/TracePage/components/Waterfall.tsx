@@ -229,19 +229,6 @@ export function Waterfall({
         >
           {/* 树列：缩进只影响本列内容，不移动时间轴 */}
           <div className="flex min-w-0 items-center gap-1.5" style={{ paddingLeft: 8 + depth * 18 }}>
-            {kids.length > 0 && (
-              <button
-                type="button"
-                aria-label={isCollapsed ? `展开 ${span.name}` : `折叠 ${span.name}`}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  toggle(span.spanId)
-                }}
-                className="flex h-4 w-4 shrink-0 cursor-pointer items-center justify-center rounded text-muted-foreground hover:bg-accent"
-              >
-                {isCollapsed ? <ChevronRightIcon size={12} /> : <ChevronDownIcon size={12} />}
-              </button>
-            )}
             <span className={cn('max-w-40 shrink-0 truncate text-[10px] tabular-nums', color.label)} title={typeLabel}>
               {typeLabel}
             </span>
@@ -257,6 +244,19 @@ export function Waterfall({
                 </span>
               )}
             </span>
+            {kids.length > 0 && (
+              <button
+                type="button"
+                aria-label={isCollapsed ? `展开 ${span.name}` : `折叠 ${span.name}`}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  toggle(span.spanId)
+                }}
+                className="flex h-4 w-4 shrink-0 cursor-pointer items-center justify-center rounded text-muted-foreground hover:bg-accent"
+              >
+                {isCollapsed ? <ChevronRightIcon size={12} /> : <ChevronDownIcon size={12} />}
+              </button>
+            )}
           </div>
           {/* 时间轴列：网格线 + 色块（与标尺同列，全行对齐） */}
           <div className="relative h-full min-w-0">

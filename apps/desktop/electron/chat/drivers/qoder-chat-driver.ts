@@ -204,7 +204,7 @@ export class QoderChatDriver implements ChatDriver {
     const token = this.tokenProvider()
     if (!token) throw new Error('请先在设置中配置 Qoder Token')
 
-    // 对话 trace：一次用户提问 = 一个 Trace。主对话由 ChatService 传 traceId（join），
+    // 对话 trace：对话级 traceId（一个对话 = 一个 Trace）。主对话由 ChatService 传 traceId（join），
     // 辅助 LLM 调用也 join 同一回合；无 traceId 时自建独立 trace。
     const traceId = input.traceId ?? `chat-${input.conversationId}-${input.userInput.id}`
     const join = Boolean(input.traceId)
@@ -228,6 +228,13 @@ export class QoderChatDriver implements ChatDriver {
     }
 
     const model = input.model.startsWith('qoder:') ? input.model.slice(6) : input.model
+    // 本回合的 trace builder：闭包引用 + 注册到 map（onMessage 按 key 反查）。
+    // 对话级 traceId 下多回合共享同一 key —— 回合被新回合接管（连发/打断）时 map 会被覆盖，
+    // 收尾必须只 finish/delete 自己的 builder，不能误伤新回合的（否则新回合采集全空）。
+    // 辅助回合（记忆整理/关键词提取，带 traceLabel）用独立 key，避免与主回合 builder
+    // 互相覆盖（辅助调用是独立 session + 一次性，onMessage 闭包捕获同一 aux key）。
+    const builderKey = input.traceLabel ? `aux:${traceId}` : traceId
+    let traceBuilder: QoderTraceBuilder | undefined
     if (this.tracePipeline) {
       if (join) {
         this.tracePipeline.ensureActive({
@@ -250,11 +257,11 @@ export class QoderChatDriver implements ChatDriver {
         this.tracePipeline.startSpan(traceId, { type: 'session.start', name: '对话', meta: { source: 'qoder' } })
       }
       // 辅助调用（关键词提取/记忆整理）传入 traceLabel 作 llm span 语义名。
-      const builder = new QoderTraceBuilder(this.tracePipeline, traceId, 'chat', 'qoder', model, input.traceLabel)
+      traceBuilder = new QoderTraceBuilder(this.tracePipeline, traceId, 'chat', 'qoder', model, input.traceLabel)
       // 本回合发送给模型的用户输入：作首个 llm span 的 input（SDK 不一定回显 user 文本消息，
       // 尤其一次性辅助会话——关键词提取/记忆整理的 span 此前因此看不到 Prompt）。
-      builder.setTurnInput(input.userInput.text)
-      this.traceBuilders.set(traceId, builder)
+      traceBuilder.setTurnInput(input.userInput.text)
+      this.traceBuilders.set(builderKey, traceBuilder)
     }
 
     // 一个回合:消息入队 → 实时转发输出 → result / error / abort 收尾。
@@ -269,14 +276,17 @@ export class QoderChatDriver implements ChatDriver {
     } catch (error) {
       // 回合失败说明会话状态可能已损坏(消费循环已结束),关闭它,下次自动重建全新会话。
       this.closeSession(input.conversationId)
-      this.traceBuilders
-        .get(traceId)
-        ?.finish({ status: 'error', error: { message: error instanceof Error ? error.message : String(error) } })
+      traceBuilder?.finish({
+        status: 'error',
+        error: { message: error instanceof Error ? error.message : String(error) }
+      })
+      if (this.traceBuilders.get(builderKey) === traceBuilder) this.traceBuilders.delete(builderKey)
       throw error
     } finally {
       if (this.tracePipeline) {
-        this.traceBuilders.get(traceId)?.finish()
-        this.traceBuilders.delete(traceId)
+        traceBuilder?.finish()
+        // 只清理自己的 builder：map 里已是新回合的 builder 时（并发接管）不误删。
+        if (this.traceBuilders.get(builderKey) === traceBuilder) this.traceBuilders.delete(builderKey)
         // join 模式：trace 生命周期由回合层（ChatService）统一 endTrace。
         if (!join) this.tracePipeline.endTrace(traceId)
       }
@@ -322,9 +332,11 @@ export class QoderChatDriver implements ChatDriver {
       permissionMode: 'default' as const,
       controlRequestTimeoutMs: 15_000,
       // 对话 trace：SDKMessage 逐条喂给 span 转换器（采集失败不影响主流程）。
+      // 主回合与辅助回合（traceLabel 存在）按各自 key 路由，互不覆盖。
       onMessage: (message: unknown) => {
         try {
-          if (traceId) this.traceBuilders.get(traceId)?.onMessage(message as never)
+          const key = input.traceLabel ? `aux:${traceId}` : traceId
+          if (key) this.traceBuilders.get(key)?.onMessage(message as never)
         } catch {
           /* 忽略:trace 采集失败不能影响对话 */
         }

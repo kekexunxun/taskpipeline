@@ -341,9 +341,13 @@ export class QoderTraceBuilder {
     if (!span) return
     this.tools.delete(callId)
     // 流式入参补全：content_block_start 时 input 常为空/缺失，结束时若有累积则合并。
+    // SDK 的 input 可能为 null（Anthropic 协议允许），必须显式排除 —— `Object.keys(null)`
+    // 会抛 TypeError 导致本条消息 span 采集失败（driver 层吞掉，Trace 数据缺失）。
     const buf = this.toolInputBuf.get(callId)
     const inputEmpty =
-      span.input === undefined || (typeof span.input === 'object' && Object.keys(span.input as object).length === 0)
+      span.input === undefined ||
+      span.input === null ||
+      (typeof span.input === 'object' && Object.keys(span.input as object).length === 0)
     if (buf && inputEmpty) {
       try {
         const parsed = JSON.parse(buf) as unknown

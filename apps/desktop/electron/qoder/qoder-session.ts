@@ -462,6 +462,9 @@ export class QoderSession {
      * tool_use 落定 push:输入取「调用方传入(assistant 快照,优先)或累积解析值」,同 callId 只
      * push 一次。stream 阶段不 push(SDK 的 content_block_start 常带空 input),完整入参由
      * input_json_delta 累积、assistant 快照 / 工具结束 / content_block_stop 兜底落定。
+     * 注意:SDK 的 input 可能为 null(Anthropic 协议允许),必须显式排除 —— `Object.keys(null)`
+     * 会抛 TypeError,而 handleMessage 内抛异常会中断 consume 循环,后续 SDK 消息不再喂给
+     * onMessage(trace 采集)与 handleMessage,表现为「对话还在,Trace 没数据」。
      */
     const flushToolUse = (callId: string, name?: string, input?: unknown): void => {
       if (turn.pushedToolUseIds.has(callId)) return
@@ -469,7 +472,7 @@ export class QoderSession {
       if (!finalName) return // 名字都未知(纯孤儿 tool_result),不强行造行
       turn.pushedToolUseIds.add(callId)
       const finalInput =
-        input !== undefined && typeof input === 'object' && Object.keys(input as object).length > 0
+        input !== null && input !== undefined && typeof input === 'object' && Object.keys(input as object).length > 0
           ? input
           : (turn.toolUseInput.get(callId) ?? input ?? {})
       turn.toolUseInput.delete(callId)

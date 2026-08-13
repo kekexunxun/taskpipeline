@@ -278,6 +278,33 @@ describe('QoderTraceBuilder', () => {
     expect(tools[0]!.status).toBe('completed') // 不因旧 span 残留而悬挂
   })
 
+  it('tool_use input 为 null 时不抛异常、工具 span 正常落库（Object.keys(null) 会中断采集）', async () => {
+    pipeline.beginTrace({ traceId: 'q4b', kind: 'chat', title: 'x', source: 'qoder' })
+    pipeline.startSpan('q4b', { type: 'session.start', name: '会话' })
+    const builder = new QoderTraceBuilder(pipeline, 'q4b', 'chat')
+    // Anthropic 协议允许 input 为 null：startTool 透传 null 后 endTool 的 inputEmpty 判断
+    // 不能对 null 调 Object.keys，否则抛 TypeError → 本条消息 span 采集失败（Trace 数据缺失）。
+    builder.onMessage({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'tc-null', name: 'glob', input: null }
+      }
+    })
+    builder.onMessage({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'tc-null', content: ['a.ts'] }] }
+    })
+    builder.onMessage({ type: 'result' })
+    pipeline.endTrace('q4b')
+
+    const spans = await storage.getTrace('q4b')
+    const tools = spans!.filter((s) => s.type === 'tool.execute')
+    expect(tools).toHaveLength(1)
+    expect(tools[0]!.status).toBe('completed') // 正常收尾不悬挂
+  })
+
   it('input_json_delta 累积回填：start 无 input 的工具结束时不缺参数', async () => {
     pipeline.beginTrace({ traceId: 'q5', kind: 'chat', title: 'x', source: 'qoder' })
     pipeline.startSpan('q5', { type: 'session.start', name: '会话' })

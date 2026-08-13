@@ -138,6 +138,72 @@ describe('ChatService (driver-based)', () => {
     expect(reloaded?.messages[1]?.parts[0]?.type).toBe('text')
   })
 
+  it('回合 trace 契约：beginTurn 返回的 traceId 贯穿 endTurn / beginStage / endStage（回合隔离）', async () => {
+    // 对话级 trace 下回合按 turnTraceId 隔离：endTurn 与阶段容器必须收到 beginTurn
+    // 返回的同一 traceId，才能在被新回合接管时只收尾自己的 stage、不误关新回合 trace。
+    const calls: Array<[string, string]> = []
+    const traceManager = {
+      beginTurn: (chatId: string, messageId: string) => {
+        const turnKey = `${chatId}:${messageId}`
+        calls.push(['beginTurn', turnKey])
+        return { traceId: `trace-${chatId}`, turnKey }
+      },
+      endTurn: (chatId: string, turnKey?: string) => {
+        calls.push(['endTurn', turnKey ?? ''])
+      },
+      traceIdForChat: () => undefined,
+      beginStage: (chatId: string, phase: string, turnKey: string) => {
+        calls.push(['beginStage', turnKey])
+      },
+      endStage: (chatId: string, turnKey: string) => {
+        calls.push(['endStage', turnKey])
+      }
+    } as never
+    const driver = createFakeDriver({
+      id: 'qoder',
+      displayName: 'Qoder',
+      scripts: [
+        {
+          emit: [
+            { type: 'part', part: { driverId: 'qoder', type: 'text', text: 'hi' } },
+            { type: 'done', status: 'done' }
+          ]
+        }
+      ],
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
+    })
+    const registry = new ChatDriverRegistry()
+    registry.register(driver)
+    const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow
+    const service = new ChatService(
+      fakeStore(),
+      dataDir,
+      registry,
+      () => win,
+      undefined,
+      undefined,
+      undefined,
+      traceManager
+    )
+    const conv = service.createChat('qoder', 'qoder:test')
+    await service.startChatStream({
+      streamId: 'stream-t',
+      chatId: conv.id,
+      driverId: 'qoder',
+      model: 'qoder:test',
+      message: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() }
+    })
+    // memory 阶段是 fire-and-forget 异步任务（void async），等它把 endTurn 执行完
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    const begin = calls.find(([k]) => k === 'beginTurn')?.[1]
+    expect(begin).toBe(`${conv.id}:u1`)
+    // endTurn 与各阶段容器都收到 beginTurn 返回的同一回合令牌 turnKey
+    for (const [kind, traceId] of calls) {
+      if (kind === 'beginTurn') continue
+      expect(traceId).toBe(begin)
+    }
+  })
+
   it('dispatches an error chunk and persists errorMessage when the driver stream fails', async () => {
     const driver = createFakeDriver({
       id: 'openai',

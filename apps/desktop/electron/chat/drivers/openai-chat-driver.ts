@@ -463,7 +463,7 @@ export class OpenAIChatDriver implements ChatDriver {
     // 无异常），for-await 会直接结束。用 sawFinish 兜底检测，避免「半截回复 + 显示成功」。
     let sawFinish = false
 
-    // 对话 trace：一次用户提问 = 一个 Trace。主对话由 ChatService 传 traceId（join），
+    // 对话 trace：对话级 traceId（一个对话 = 一个 Trace）。主对话由 ChatService 传 traceId（join），
     // 辅助 LLM 调用（关键词提取/记忆整理）也 join 同一回合；无 traceId 时自建独立 trace。
     const traceId = input.traceId ?? `chat-${input.conversationId}-${input.userInput.id}`
     const join = Boolean(input.traceId)

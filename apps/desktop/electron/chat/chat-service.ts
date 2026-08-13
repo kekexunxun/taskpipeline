@@ -37,11 +37,17 @@ type ConversationConsolidator = (input: {
 }) => Promise<void>
 
 /**
- * 对话回合 trace 管理器（一次用户提问 = 一个 Trace）。
+ * 对话回合 trace 管理器（对话级：一个对话 = 一个 Trace，回合间重开续接）。
  * 由主进程注入：回合 begin/end 控制 trace 生命周期，辅助 LLM 调用（关键词提取/记忆整理）
  * 通过 traceIdForChat 拿到 traceId 后 join 同一回合。
  */
 export type ChatTraceManager = {
+  /**
+   * 开启一个对话回合的 trace。
+   * 返回回合句柄：traceId 供 driver/辅助调用 join（对话级，跨回合不变）；
+   * turnKey 是回合隔离令牌（每回合递增），endTurn / 阶段容器按它识别「自己回合」，
+   * 避免回合被新回合接管（连发/打断）时误关新回合的 trace 或误收新回合的阶段容器。
+   */
   beginTurn(
     chatId: string,
     messageId: string,
@@ -50,15 +56,16 @@ export type ChatTraceManager = {
     model: string,
     /** 本回合选择态（MCP 服务 / Agent）：写入根 span meta，Trace 里可见。 */
     extras?: { mcpServices?: McpServiceId[]; agentId?: string }
-  ): string | undefined
-  endTurn(chatId: string): void
+  ): { traceId: string; turnKey: string } | undefined
+  endTurn(chatId: string, turnKey?: string): void
   traceIdForChat(chatId: string): string | undefined
   /**
    * 阶段容器（可选）：begin/end 成对调用，包裹期间产生的 span 自动挂入
    * agent.run 阶段容器（keyword/chat/memory），Trace 页据此按阶段分组而非平铺。
+   * turnKey 隔离：回合被新回合接管（连发/打断）时，旧回合只收尾自己的阶段容器。
    */
-  beginStage?(chatId: string, phase: ChatStagePhase): void
-  endStage?(chatId: string, status?: 'completed' | 'error'): void
+  beginStage?(chatId: string, phase: ChatStagePhase, turnKey: string): void
+  endStage?(chatId: string, turnKey: string, status?: 'completed' | 'error'): void
 }
 
 /** 对话回合的阶段划分：关键词提取并注入 / 对话生成 / 记忆整理。 */
@@ -219,17 +226,18 @@ export class ChatService {
   private async withStage<T>(
     traceActive: boolean,
     chatId: string,
+    turnKey: string | undefined,
     phase: ChatStagePhase,
     fn: () => Promise<T>
   ): Promise<T> {
-    if (!traceActive || !this.traceManager?.beginStage || !this.traceManager.endStage) return fn()
-    this.traceManager.beginStage(chatId, phase)
+    if (!traceActive || !turnKey || !this.traceManager?.beginStage || !this.traceManager.endStage) return fn()
+    this.traceManager.beginStage(chatId, phase, turnKey)
     try {
       const result = await fn()
-      this.traceManager.endStage(chatId)
+      this.traceManager.endStage(chatId, turnKey)
       return result
     } catch (error) {
-      this.traceManager.endStage(chatId, 'error')
+      this.traceManager.endStage(chatId, turnKey, 'error')
       throw error
     }
   }
@@ -249,9 +257,9 @@ export class ChatService {
     this.activeStreams.set(input.chatId, { streamId: input.streamId, abort })
 
     const now = input.message.createdAt
-    // 对话回合 trace：一次用户提问 = 一个 Trace（主对话 + 关键词提取 + 记忆整理共用）。
+    // 对话回合 trace：对话级（一个对话 = 一个 Trace，跨回合重开续接，显示多条「对话生成」记录）。
     // extras 带上 MCP / Agent 选择态，写入根 span meta（Trace 里可见本回合注入了什么）。
-    const turnTraceId = this.traceManager?.beginTurn(
+    const turn = this.traceManager?.beginTurn(
       effective.chatId,
       effective.message.id,
       effective.message.text,
@@ -262,6 +270,8 @@ export class ChatService {
         ...(effective.agentId ? { agentId: effective.agentId } : {})
       }
     )
+    const turnTraceId = turn?.traceId
+    const turnKey = turn?.turnKey
     const userRecord = driver.serializeUserMessage({ id: input.message.id, text: input.message.text, createdAt: now })
     const existing = conversation.messages.filter((message) => message.id !== userRecord.id)
     // 选中 Agent 的 systemPrompt：以 system 消息插入本轮上下文（复用 memoryContext 的插入模式），
@@ -309,7 +319,7 @@ export class ChatService {
       userPersisted = true
 
       // keyword 阶段容器：关键词提取 + 记忆/Repowiki 检索（期间的 llm/tool span 挂入阶段）。
-      const memoryContext = await this.withStage(Boolean(turnTraceId), input.chatId, 'keyword', async () =>
+      const memoryContext = await this.withStage(Boolean(turnTraceId), input.chatId, turnKey, 'keyword', async () =>
         this.memoryContext?.({ conversationId: input.chatId, query: input.message.text })
       )
       const historyRecords = memoryContext
@@ -334,7 +344,7 @@ export class ChatService {
       })
 
       // chat 阶段容器：主对话生成（driver 流式期间的 llm/tool/subtask span 挂入阶段）。
-      await this.withStage(Boolean(turnTraceId), input.chatId, 'chat', async () => {
+      await this.withStage(Boolean(turnTraceId), input.chatId, turnKey, 'chat', async () => {
         for await (const chunk of driver.streamChat({
           conversationId: input.chatId,
           model: effective.model,
@@ -408,7 +418,7 @@ export class ChatService {
             // memory 阶段容器包裹整理过程（整理 LLM span 挂入阶段）。
             void (async () => {
               try {
-                await this.withStage(Boolean(turnTraceId), input.chatId, 'memory', async () => {
+                await this.withStage(Boolean(turnTraceId), input.chatId, turnKey, 'memory', async () => {
                   await this.consolidateConversation?.({
                     conversation,
                     signal: abort.signal,
@@ -420,15 +430,15 @@ export class ChatService {
               } catch (reason) {
                 console.warn('[memory] chat consolidate failed:', reason)
               } finally {
-                this.traceManager?.endTurn(input.chatId)
+                this.traceManager?.endTurn(input.chatId, turnKey)
               }
             })()
           } else {
-            this.traceManager?.endTurn(input.chatId)
+            this.traceManager?.endTurn(input.chatId, turnKey)
           }
         } else {
           // 错误 / 中止：无记忆整理，直接收尾回合。
-          this.traceManager?.endTurn(input.chatId)
+          this.traceManager?.endTurn(input.chatId, turnKey)
         }
       }
     }
