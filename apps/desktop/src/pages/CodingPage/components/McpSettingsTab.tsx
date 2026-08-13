@@ -53,7 +53,7 @@ import { Textarea } from '@/components/ui/textarea'
 type McpTestState =
   | { state: 'idle' }
   | { state: 'testing' }
-  | { state: 'ok'; tools: string[]; message: string }
+  | { state: 'ok'; tools: Array<{ name: string; description?: string }>; message: string }
   | { state: 'error'; message: string }
 
 function commandLine(server: McpServerEntry): string {
@@ -140,10 +140,17 @@ export function McpSettingsTab() {
     setExpanded((current) => ({ ...current, [server.id]: true }))
     try {
       const result: McpServerTestResult = await api.testMcpServer(server.id)
+      // 兼容旧主进程返回 string[] 的情况（主进程未重启时仍返回纯字符串）
+      const rawTools = result.tools as unknown[]
+      const tools: Array<{ name: string; description?: string }> = (rawTools ?? []).map((tool) =>
+        typeof tool === 'string'
+          ? { name: tool, description: undefined }
+          : (tool as { name: string; description?: string })
+      )
       setTests((current) => ({
         ...current,
         [server.id]: result.ok
-          ? { state: 'ok', tools: result.tools, message: result.message }
+          ? { state: 'ok', tools, message: result.message }
           : { state: 'error', message: result.message }
       }))
     } catch (reason) {
@@ -343,21 +350,28 @@ function McpServerCard({
         </div>
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="space-y-2 border-t bg-background/40 px-3 py-2.5">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-1.5">
-              {test.state === 'ok' && test.tools.length > 0 ? (
-                test.tools.map((tool) => (
-                  <Badge key={tool} variant="outline" className="font-mono text-[10px]">
-                    {tool}
-                  </Badge>
-                ))
-              ) : (
-                <span className="text-[11px] text-muted-foreground">
-                  {test.state === 'error' ? test.message : '展开后点击「测试连接」验证配置有效性'}
-                </span>
-              )}
-            </div>
+        <div className="border-t bg-background/40 px-3 py-2.5">
+          <div className="flex items-start justify-between gap-2">
+            {test.state === 'ok' && test.tools.length > 0 ? (
+              <div className="max-h-40 min-w-0 flex-1 space-y-0.5 overflow-y-auto">
+                {test.tools.map((tool) => (
+                  <div key={tool.name} className="flex items-baseline gap-2 py-0.5">
+                    <Badge variant="outline" className="shrink-0 font-mono text-[10px]">
+                      {tool.name}
+                    </Badge>
+                    {tool.description && (
+                      <span className="min-w-0 truncate text-[11px] text-muted-foreground" title={tool.description}>
+                        {tool.description}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <span className="flex-1 text-[11px] text-muted-foreground">
+                {test.state === 'error' ? test.message : '展开后点击「测试连接」验证配置有效性'}
+              </span>
+            )}
             <Button variant="secondary" size="sm" disabled={test.state === 'testing'} onClick={onTest}>
               {test.state === 'testing' ? (
                 <Loader2Icon className="animate-spin-slow" size={11} />

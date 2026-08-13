@@ -3149,15 +3149,25 @@ async function checkGitLabCredential(token: string): Promise<Pick<CredentialStat
  * 通用 MCP 连接测试：按 id 解析出 profile（统一 mcp.json + 凭据注入），
  * 经 McpClient.listTools() 验证连通并返回工具列表。内置/自定义服务共用。
  */
-async function testMcpConnectionById(id: string): Promise<{ ok: boolean; tools: string[]; message: string }> {
+async function testMcpConnectionById(
+  id: string
+): Promise<{ ok: boolean; tools: Array<{ name: string; description?: string }>; message: string }> {
   const profile = chatMcpResolver(id)
   if (!profile) return { ok: false, tools: [], message: '未找到该服务，或未启用 / 凭据缺失' }
   const client = new McpClient(profile)
   try {
     // npx/uvx 冷启动可能需下载包，超时放宽到 30s（与 McpClient 内部 request 超时一致）。
     const tools = await withTimeout(client.listTools(), 30_000, 'MCP 连接超时（30s）')
-    const names = tools.map((tool) => String((tool as { name?: unknown })?.name ?? '').trim()).filter(Boolean)
-    return { ok: true, tools: names, message: `已连接，发现 ${tools.length} 个工具` }
+    const infos = tools
+      .map((tool) => {
+        const t = tool as { name?: unknown; description?: unknown }
+        const name = String(t?.name ?? '').trim()
+        if (!name) return null
+        const description = typeof t?.description === 'string' ? t.description.trim() || undefined : undefined
+        return { name, description }
+      })
+      .filter((x): x is { name: string; description?: string } => x !== null)
+    return { ok: true, tools: infos, message: `已连接，发现 ${tools.length} 个工具` }
   } catch (error) {
     return { ok: false, tools: [], message: error instanceof Error ? error.message : String(error) }
   } finally {

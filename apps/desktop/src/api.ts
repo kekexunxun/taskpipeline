@@ -450,7 +450,8 @@ export type McpServerEntry = {
   headers?: Record<string, string>
 }
 
-export type McpServerTestResult = { ok: boolean; tools: string[]; message: string }
+export type McpToolInfo = { name: string; description?: string }
+export type McpServerTestResult = { ok: boolean; tools: McpToolInfo[]; message: string }
 
 /** Skill 条目（dataDir/skills/<name>/SKILL.md，Agent Skills 标准）。 */
 export type SkillInfo = {
@@ -1015,7 +1016,7 @@ export const api: AgentApi = window.agentApi ?? {
     return [] as McpServerEntry[]
   },
   async testMcpServer() {
-    return { ok: false, tools: [] as string[], message: 'Electron is required' }
+    return { ok: false, tools: [] as McpToolInfo[], message: 'Electron is required' }
   },
   async listSkills() {
     return [] as SkillInfo[]

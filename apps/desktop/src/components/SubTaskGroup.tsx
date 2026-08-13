@@ -362,7 +362,7 @@ export function SubTaskGroup({
     //   <div className="grid size-6 place-items-center rounded-full border bg-muted text-muted-foreground">
     //     <GitBranchIcon size={12} />
     //   </div>
-    <article className={cn('mb-4 grid gap-2', className)}>
+    <article className={cn('mb-4 grid w-full gap-2', className)}>
       {/* <div className="grid size-6 place-items-center rounded-full border bg-muted text-muted-foreground">
         <GitBranchIcon size={12} />
       </div> */}
@@ -395,7 +395,7 @@ export function SubTaskGroup({
 /** 子任务 header 视觉块,给 trace 详情页和 timeline 共用。 */
 export function SubTaskHeader({
   description,
-  taskType,
+  // taskType,
   subagentType,
   status
 }: {
@@ -405,13 +405,13 @@ export function SubTaskHeader({
   status: SubTaskStatus
 }) {
   return (
-    <span className="inline-flex min-w-0 items-center gap-1.5">
+    <span className="inline-flex w-full min-w-0 items-center gap-1.5">
       <span className="min-w-0 truncate text-xs font-medium text-foreground/80">{description || '子任务'}</span>
-      {taskType && (
+      {/* {taskType && (
         <Badge variant="outline" className="shrink-0 px-1 py-0 font-mono text-[10px]">
           {taskType}
         </Badge>
-      )}
+      )} */}
       {subagentType && (
         <Badge variant="outline" className="shrink-0 px-1 py-0 font-mono text-[10px]">
           {subagentType}
@@ -610,7 +610,7 @@ export function ToolCallRow({
   const hasDetails = hasInput || hasOutput
   const isError = status === 'error'
   return (
-    <article className={cn('mb-4 grid grid-cols-[26px_minmax(0,1fr)] gap-2', className)}>
+    <article className={cn('mb-4 grid w-full grid-cols-[26px_minmax(0,1fr)] gap-2', className)}>
       <div
         className={cn(
           'grid size-6 place-items-center rounded-full border bg-muted text-muted-foreground',
