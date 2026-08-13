@@ -1,12 +1,12 @@
 import { Link, useLocation } from 'react-router-dom'
-import { ActivityIcon, MessageSquareTextIcon, Code2Icon, type LucideIcon } from 'lucide-react'
+import { MessageSquareTextIcon, Code2Icon, type LucideIcon, WaypointsIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 const items: Array<{ label: string; to: string; icon: LucideIcon }> = [
   { label: '对话', to: '/chat', icon: MessageSquareTextIcon },
   { label: '编码', to: '/coding', icon: Code2Icon },
-  { label: '追踪', to: '/trace', icon: ActivityIcon }
+  { label: '追踪', to: '/trace', icon: WaypointsIcon }
 ]
 
 /**
