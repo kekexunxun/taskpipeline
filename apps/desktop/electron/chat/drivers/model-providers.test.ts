@@ -52,6 +52,13 @@ describe('detectVendor', () => {
     expect(detectVendor('https://api.openai.com')).toBe('openai')
   })
 
+  it('recognizes DashScope Token Plan baseUrl', () => {
+    expect(detectVendor('https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1')).toBe(
+      'dashscope-token-plan'
+    )
+    expect(detectVendor('https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic')).toBe('dashscope-token-plan')
+  })
+
   it('falls back to openai-compatible for unknown or invalid baseUrl', () => {
     expect(detectVendor('https://gateway.example.com/v1')).toBe('openai-compatible')
     expect(detectVendor('https://api.siliconflow.cn/v1')).toBe('openai-compatible')
@@ -91,10 +98,13 @@ describe('createVendorModel', () => {
 })
 
 describe('MODEL_VENDORS', () => {
-  it('lists the three supported vendors with distinct ids and default baseUrls', () => {
-    expect(MODEL_VENDORS.map((v) => v.id)).toEqual(['deepseek', 'openai', 'openai-compatible'])
+  it('lists the supported vendors with distinct ids and default baseUrls', () => {
+    expect(MODEL_VENDORS.map((v) => v.id)).toEqual(['deepseek', 'openai', 'dashscope-token-plan', 'openai-compatible'])
     expect(MODEL_VENDORS.find((v) => v.id === 'deepseek')?.defaultBaseUrl).toBe('https://api.deepseek.com')
     expect(MODEL_VENDORS.find((v) => v.id === 'openai')?.defaultBaseUrl).toBe('https://api.openai.com/v1')
+    expect(MODEL_VENDORS.find((v) => v.id === 'dashscope-token-plan')?.defaultBaseUrl).toBe(
+      'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1'
+    )
     expect(MODEL_VENDORS.find((v) => v.id === 'openai-compatible')?.defaultBaseUrl).toBe('')
   })
 })

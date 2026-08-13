@@ -19,7 +19,7 @@ import {
 } from '@/api'
 import { useChatModels } from '@/hooks/useChatModels'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
-import { isModelAvailable, pickSystemDefaultModel } from '@/utils/chat-models'
+import { isModelAvailable, isOpenAIModelValue, pickSystemDefaultModel } from '@/utils/chat-models'
 
 const transport = new ElectronChatTransport()
 
@@ -64,7 +64,7 @@ function driverOfModelValue(value: string | undefined, groups: ChatModelGroup[])
   }
   // 2. 回退:用 value 的前缀判断
   if (value.startsWith('qoder:')) return 'qoder'
-  if (value.startsWith('openai:')) return 'openai'
+  if (isOpenAIModelValue(value)) return 'openai'
   return undefined
 }
 

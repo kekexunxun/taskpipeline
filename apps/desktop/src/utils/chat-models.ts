@@ -12,6 +12,18 @@ import type { ChatModelGroup, ChatModelInfo, SystemDefaultModel } from '../api'
 export type { SystemDefaultModel }
 
 /**
+ * OpenAI 兼容组的前缀集合（与 electron/chat/drivers/model-value.ts 双写）：
+ * value 前缀 = profile 的 vendor（deepseek / openai / openai-compatible / dashscope-token-plan），
+ * driver 组仍是 openai。
+ */
+export const OPENAI_MODEL_PREFIXES = ['deepseek', 'openai', 'openai-compatible', 'dashscope-token-plan'] as const
+
+/** model value 是否属于 OpenAI 兼容 driver 组（按前缀判定；无前缀 / qoder: 均不属于）。 */
+export function isOpenAIModelValue(value: string): boolean {
+  return OPENAI_MODEL_PREFIXES.some((prefix) => value === prefix || value.startsWith(`${prefix}:`))
+}
+
+/**
  * lite 特征词（完整 word 匹配，词边界避免误命中 MiniMax 等含 mini 前缀的模型名）。
  * 与 electron/chat/system-default-model.ts 的 LITE_MODEL_PATTERN 双写保持一致。
  */

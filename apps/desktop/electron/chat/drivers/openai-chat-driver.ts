@@ -30,6 +30,7 @@ import type {
 import type { McpServiceProfileResolver } from '../mcp-services.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
 import { detectVendor, createVendorModel, type ModelVendor } from './model-providers.js'
+import { isOpenAIModelValue, prefixOfVendor, stripModelPrefix } from './model-value.js'
 import type { ChatDriver, StreamChatInput } from './chat-driver.js'
 import type { ToolSource } from './tool-source.js'
 
@@ -105,9 +106,10 @@ function buildProviderOptions(
 }
 
 /**
- * 模型 value 的形态：`openai:<model>`（model 为用户配置的真实模型名）。
- * - 同名模型配了多个 profile 时，listModels 产出 `openai:<model>@<profileId>` 消歧；
- * - 兼容历史值 `openai:default`（早期版本硬编码的占位 value → 默认 profile）。
+ * 模型 value 的形态：`<厂商前缀>:<model>`（前缀 = profile.vendor，model 为用户配置的
+ * 真实模型名；openai 厂商与历史格式一致）。
+ * - 同名模型配了多个 profile 时，listModels 产出 `<前缀>:<model>@<profileId>` 消歧；
+ * - 兼容历史值 `openai:<model>` / `openai:default`（早期统一 `openai:` 前缀）。
  */
 
 /** 按 value 解析出目标 profile 与真实模型名（无 @id 时优先默认 profile，其次按模型名匹配）。 */
@@ -117,13 +119,14 @@ function resolveProfileForValue(
 ): { profile: OpenAIProfile; model: string } | undefined {
   const defaultProfile = profiles.find((p) => p.isDefault) ?? profiles[0]
   if (!defaultProfile) return undefined
-  if (!value.startsWith('openai:') || value === 'openai:') return undefined
-  const raw = value.slice('openai:'.length).trim()
-  if (!raw || raw === 'default') {
+  if (!isOpenAIModelValue(value)) return undefined
+  const raw = stripModelPrefix(value).trim()
+  if (raw === '') return undefined
+  if (raw === 'default') {
     // `openai:default` → 默认 profile 的真实模型名
     return defaultProfile.model ? { profile: defaultProfile, model: defaultProfile.model } : undefined
   }
-  // 消歧后缀 `openai:<model>@<profileId>`：仅当 @ 后段确实是已配置的 profile id 才拆分，
+  // 消歧后缀 `<前缀>:<model>@<profileId>`：仅当 @ 后段确实是已配置的 profile id 才拆分，
   // 避免模型名自身包含 @（如 `gpt-4@mini`）被误拆。
   const at = raw.lastIndexOf('@')
   if (at > 0) {
@@ -335,10 +338,13 @@ export class OpenAIChatDriver implements ChatDriver {
   async listModels(): Promise<ChatModelInfo[]> {
     const profiles = readProfiles(this.store)
     if (profiles.length === 0) return []
-    // value 携带真实模型名（`openai:<model>`）；同名模型配了多个 profile 时附加 `@<id>` 消歧。
+    // value 携带厂商前缀与真实模型名（`<vendor>:<model>`）；同名模型配了多个 profile 时附加 `@<id>` 消歧。
     const models = profiles
       .filter((p) => p.baseUrl && p.model)
-      .map((profile) => ({ profile, value: `openai:${profile.model}` }))
+      .map((profile) => ({
+        profile,
+        value: `${prefixOfVendor(profile.vendor ?? detectVendor(profile.baseUrl))}:${profile.model}`
+      }))
     const countByValue = new Map<string, number>()
     for (const m of models) countByValue.set(m.value, (countByValue.get(m.value) ?? 0) + 1)
     return models.map(({ profile, value }) => {
@@ -346,6 +352,8 @@ export class OpenAIChatDriver implements ChatDriver {
       return {
         value: (countByValue.get(value) ?? 0) > 1 && profile.id ? `${value}@${profile.id}` : value,
         displayName: profile.displayName || profile.model || 'OpenAI-Compatible',
+        /** 厂商 id（前端据此查 MODEL_VENDORS 展示厂商名，如「DeepSeek 官方」）。 */
+        vendor: profile.vendor ?? detectVendor(profile.baseUrl),
         isDefault: profile.isDefault === true,
         ...(capabilities.length ? { capabilities } : {})
       }

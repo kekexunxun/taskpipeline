@@ -289,6 +289,8 @@ export type ChatProject = {
 export type ChatModelInfo = {
   value: string
   displayName: string
+  /** 厂商 id（前端据 MODEL_VENDORS 展示厂商名；Qoder 模型无此字段）。 */
+  vendor?: string
   isDefault?: boolean
   isReasoning?: boolean
   isVl?: boolean
@@ -406,7 +408,7 @@ export type AgentGenerationRepository = {
   defaultBranch?: string
 }
 export type AgentGenerationInput = {
-  /** 该 Agent 选定的首选模型（与 ChatModelSelector 的 value 一致：`qoder:xxx` / `openai:<model>`）。 */
+  /** 该 Agent 选定的首选模型（与 ChatModelSelector 的 value 一致：`qoder:xxx` / `<厂商前缀>:<model>`）。 */
   model: string
   /** 用户自然语言描述。 */
   description: string

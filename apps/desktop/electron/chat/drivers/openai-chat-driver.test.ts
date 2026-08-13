@@ -453,8 +453,34 @@ describe('OpenAIChatDriver', () => {
     const models = await driver({
       profile: { baseUrl: 'https://api.example.com', model: 'gpt-5', displayName: 'GPT-5' }
     }).listModels()
-    // value 携带真实模型名（`openai:<model>`），displayName 保持用户配置的展示名
-    expect(models).toEqual([{ value: 'openai:gpt-5', displayName: 'GPT-5', isDefault: true }])
+    // value 携带厂商前缀与真实模型名（`<vendor>:<model>`；example.com → openai-compatible），
+    // displayName 保持用户配置的展示名
+    expect(models).toEqual([
+      { value: 'openai-compatible:gpt-5', displayName: 'GPT-5', vendor: 'openai-compatible', isDefault: true }
+    ])
+  })
+
+  it('prefixes DashScope Token Plan profiles with dashscope-token-plan', async () => {
+    const models = await driverWithProfiles({
+      profiles: [
+        {
+          id: 'tp',
+          vendor: 'dashscope-token-plan',
+          baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          model: 'qwen3.8-max',
+          displayName: 'Token Plan',
+          isDefault: true
+        }
+      ]
+    }).listModels()
+    expect(models).toEqual([
+      {
+        value: 'dashscope-token-plan:qwen3.8-max',
+        displayName: 'Token Plan',
+        vendor: 'dashscope-token-plan',
+        isDefault: true
+      }
+    ])
   })
 
   it('lists every configured profile as a model, marking the default one', async () => {
@@ -471,8 +497,18 @@ describe('OpenAIChatDriver', () => {
       ]
     }).listModels()
     expect(models).toEqual([
-      { value: 'openai:DeepSeek-V4-Flash', displayName: 'HammerCloud', isDefault: true },
-      { value: 'openai:gpt-4o', displayName: '公司网关', isDefault: false }
+      {
+        value: 'openai-compatible:DeepSeek-V4-Flash',
+        displayName: 'HammerCloud',
+        vendor: 'openai-compatible',
+        isDefault: true
+      },
+      {
+        value: 'openai-compatible:gpt-4o',
+        displayName: '公司网关',
+        vendor: 'openai-compatible',
+        isDefault: false
+      }
     ])
   })
 
@@ -483,8 +519,8 @@ describe('OpenAIChatDriver', () => {
         { id: 'p2', baseUrl: 'https://b.example.com', model: 'gpt-4o' }
       ]
     }).listModels()
-    expect(models.map((m) => m.value).sort()).toEqual(['openai:gpt-4o@p1', 'openai:gpt-4o@p2'])
-    expect(models.find((m) => m.value === 'openai:gpt-4o@p1')?.isDefault).toBe(true)
+    expect(models.map((m) => m.value).sort()).toEqual(['openai-compatible:gpt-4o@p1', 'openai-compatible:gpt-4o@p2'])
+    expect(models.find((m) => m.value === 'openai-compatible:gpt-4o@p1')?.isDefault).toBe(true)
   })
 
   it('streams with the profile selected by @id and passes its api key', async () => {
@@ -504,7 +540,7 @@ describe('OpenAIChatDriver', () => {
     await collect(
       d.streamChat({
         conversationId: 'c',
-        model: 'openai:gpt-4o@p2',
+        model: 'openai-compatible:gpt-4o@p2',
         history: [],
         userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
         signal: new AbortController().signal
@@ -554,20 +590,20 @@ describe('OpenAIChatDriver', () => {
       ]
     }).listModels()
     const byValue = new Map(models.map((m) => [m.value, m]))
-    // deepseek：自动推断推理力度 + 思考开关
-    expect(byValue.get('openai:deepseek-chat')?.capabilities).toEqual([
+    // deepseek：自动推断推理力度 + 思考开关（前缀 deepseek:）
+    expect(byValue.get('deepseek:deepseek-chat')?.capabilities).toEqual([
       { key: 'reasoningEffort', kind: 'enum', options: ['low', 'medium', 'high'] },
       { key: 'thinking', kind: 'toggle' }
     ])
-    // openai 官方：自动推断推理力度 + 最大输出 Token
+    // openai 官方：自动推断推理力度 + 最大输出 Token（前缀 openai:，与历史格式一致）
     expect(byValue.get('openai:gpt-5')?.capabilities).toEqual([
       { key: 'reasoningEffort', kind: 'enum', options: ['low', 'medium', 'high'] },
       { key: 'maxOutputTokens', kind: 'number' }
     ])
-    // 兼容端点：不声明任何能力（避免假开关）
-    expect(byValue.get('openai:glm-4')?.capabilities).toBeUndefined()
+    // 兼容端点：不声明任何能力（避免假开关），前缀 openai-compatible:
+    expect(byValue.get('openai-compatible:glm-4')?.capabilities).toBeUndefined()
     // 显式配置覆盖自动推断
-    expect(byValue.get('openai:kimi')?.capabilities).toEqual([{ key: 'maxOutputTokens', kind: 'number' }])
+    expect(byValue.get('openai-compatible:kimi')?.capabilities).toEqual([{ key: 'maxOutputTokens', kind: 'number' }])
   })
 
   it('passes modelParams as vendor-scoped providerOptions to streamText', async () => {

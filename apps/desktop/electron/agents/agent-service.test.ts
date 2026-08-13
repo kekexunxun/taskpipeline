@@ -235,7 +235,7 @@ describe('AgentService resolveRuntime', () => {
 
   it('routes `openai:` prefixed task model to the openai path', () => {
     const service = makeService()
-    // Task 页面模型选择器保存的 value 是 `openai:<model>`（如 openai:DeepSeek-V4-Flash），
+    // Task 页面模型选择器保存的 value 是 `<厂商前缀>:<model>`（历史统一为 openai:<model>），
     // 必须按前缀识别 provider —— 否则会把 openai 模型当 Qoder 模型传给 qodercli。
     expect(service.resolveRuntime(task('openai:DeepSeek-V4-Flash'), [repo])).toEqual({
       provider: 'openai',
@@ -244,6 +244,13 @@ describe('AgentService resolveRuntime', () => {
     // 历史占位值 `openai:default` 同样走 openai 路径
     expect(service.resolveRuntime(task('openai:default'), [repo]).provider).toBe('openai')
     expect(service.resolveModelForTask(task('openai:DeepSeek-V4-Flash'), [repo])).toBe('openai:DeepSeek-V4-Flash')
+  })
+
+  it('routes vendor-prefixed task models (deepseek / openai-compatible) to the openai path', () => {
+    const service = makeService()
+    expect(service.resolveRuntime(task('deepseek:deepseek-v4'), [repo]).provider).toBe('openai')
+    expect(service.resolveRuntime(task('openai-compatible:gpt-5.4-mini'), [repo]).provider).toBe('openai')
+    expect(service.resolveRuntime(task('dashscope-token-plan:qwen3.8-max'), [repo]).provider).toBe('openai')
   })
 
   it('treats a legacy prefix-less task model as qoder', () => {

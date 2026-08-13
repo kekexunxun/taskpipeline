@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ChatModelGroup } from '../api'
-import { isModelAvailable, pickSystemDefaultModel } from './chat-models'
+import { isModelAvailable, isOpenAIModelValue, pickSystemDefaultModel } from './chat-models'
 
 /** 构造分组测试替身。 */
 function group(
@@ -64,5 +64,22 @@ describe('isModelAvailable(加载对话失效校验)', () => {
     expect(isModelAvailable(groups, 'openai:gpt-4o')).toBe(true)
     expect(isModelAvailable(groups, 'openai:deleted-profile')).toBe(false)
     expect(isModelAvailable(groups, undefined)).toBe(false)
+  })
+})
+
+describe('isOpenAIModelValue(厂商前缀判定)', () => {
+  it('识别三种厂商前缀与历史 openai: 前缀', () => {
+    expect(isOpenAIModelValue('deepseek:deepseek-v4')).toBe(true)
+    expect(isOpenAIModelValue('openai:gpt-5')).toBe(true)
+    expect(isOpenAIModelValue('openai-compatible:gpt-5.4-mini')).toBe(true)
+    expect(isOpenAIModelValue('openai-compatible:gpt-5.4-mini@p1')).toBe(true)
+    expect(isOpenAIModelValue('dashscope-token-plan:qwen3.8-max')).toBe(true)
+  })
+
+  it('排除 qoder: 前缀、无前缀与纯前缀', () => {
+    expect(isOpenAIModelValue('qoder:claude-sonnet-4.5')).toBe(false)
+    expect(isOpenAIModelValue('claude-sonnet-4.5')).toBe(false)
+    expect(isOpenAIModelValue('openai')).toBe(true)
+    expect(isOpenAIModelValue('deepseek:')).toBe(true)
   })
 })

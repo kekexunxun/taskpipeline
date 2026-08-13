@@ -20,22 +20,32 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import type { LanguageModelV4 } from '@ai-sdk/provider'
 
 /** 厂商类型：决定用哪个 ai-sdk provider 包创建模型实例。 */
-export type ModelVendor = 'deepseek' | 'openai' | 'openai-compatible'
+export type ModelVendor = 'deepseek' | 'openai' | 'openai-compatible' | 'dashscope-token-plan'
 
 /** 厂商清单（UI 选择器）：新建配置时按厂商自动填充默认 baseURL，用户可再手动修改。 */
 export const MODEL_VENDORS: ReadonlyArray<{ id: ModelVendor; name: string; defaultBaseUrl: string }> = [
-  { id: 'deepseek', name: 'DeepSeek 官方', defaultBaseUrl: 'https://api.deepseek.com' },
-  { id: 'openai', name: 'OpenAI 官方', defaultBaseUrl: 'https://api.openai.com/v1' },
+  { id: 'deepseek', name: 'DeepSeek', defaultBaseUrl: 'https://api.deepseek.com' },
+  { id: 'openai', name: 'OpenAI', defaultBaseUrl: 'https://api.openai.com/v1' },
+  {
+    id: 'dashscope-token-plan',
+    name: '百炼 Token Plan',
+    defaultBaseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1'
+  },
   { id: 'openai-compatible', name: '其它兼容端点', defaultBaseUrl: '' }
 ]
 
-/** 按 baseURL 主机名识别厂商；非法 URL 或未知主机一律走 openai-compatible。 */
+/**
+ * 按 baseURL 主机名识别厂商；非法 URL 或未知主机一律走 openai-compatible。
+ * 百炼 Token Plan 的主机 `token-plan.<region>.maas.aliyuncs.com` 精确识别（Key 以 sk-sp-
+ * 开头、仅北京地域，与通用百炼端点隔离，不能混用）。
+ */
 export function detectVendor(baseUrl: string | undefined): ModelVendor {
   if (!baseUrl) return 'openai-compatible'
   try {
     const host = new URL(baseUrl).hostname.toLowerCase()
     if (host === 'api.deepseek.com' || host === 'api.openai.com')
       return host === 'api.deepseek.com' ? 'deepseek' : 'openai'
+    if (host.startsWith('token-plan.') && host.endsWith('.maas.aliyuncs.com')) return 'dashscope-token-plan'
   } catch {
     /* 非法 URL 走兜底 */
   }

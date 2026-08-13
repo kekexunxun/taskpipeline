@@ -82,6 +82,8 @@ import { LITE_MODEL_PATTERN } from './chat/system-default-model.js'
 import { ChatDriverRegistry } from './chat/drivers/driver-registry.js'
 import { QoderChatDriver } from './chat/drivers/qoder-chat-driver.js'
 import { OpenAIChatDriver } from './chat/drivers/openai-chat-driver.js'
+import { isOpenAIModelValue, prefixOfVendor, stripModelPrefix } from './chat/drivers/model-value.js'
+import { detectVendor } from './chat/drivers/model-providers.js'
 import { createMcpServiceResolver } from './chat/mcp-services.js'
 import {
   loadMcpServers,
@@ -765,7 +767,7 @@ chatDriverRegistry.register(
  * 不会拖垃检索链路。任务上下文 / 会话上下文 / dev probe 共用这一个实例。
  *
  * 模型选择：关键词提取只是几行 JSON，Qoder 走 lite 模型节省 credits，
- * OpenAI 跟随用户配置的 modelProfile（`openai:<model>`）。
+ * OpenAI 跟随用户配置的 modelProfile（`<厂商前缀>:<model>`）。
  */
 const keywordRewriter: KeywordRewriter = (query) => keywordRewriterWithTrace(query)
 
@@ -786,7 +788,7 @@ async function keywordRewriterWithTrace(query: string, traceId?: string, task?: 
  * 轻量任务的模型选择策略（关键词提取 / MR 描述生成等短输出场景共用）：
  * - Qoder: 从 getQoderStatus() 拉模型列表，直接找名字含 lite 的免费模型；
  *   找不到或 Qoder 未连接时回落到系统 defaultModel。
- * - OpenAI: 跟随用户配置的 modelProfile（`openai:<model>` 形态）。
+ * - OpenAI: 跟随用户配置的 modelProfile（`<厂商前缀>:<model>` 形态）。
  */
 async function resolveLiteModel(driverId: ChatDriverId): Promise<string> {
   if (driverId === 'qoder') {
@@ -816,30 +818,30 @@ async function resolveLiteModel(driverId: ChatDriverId): Promise<string> {
   return resolveOpenAIModelValue()
 }
 
-/** 去掉 model value 上的 `openai:` provider 前缀,让 /chat/completions 能识别真实模型名。 */
+/** 去掉 model value 上的 `<厂商前缀>:`（deepseek: / openai: / openai-compatible:），让 /chat/completions 能识别真实模型名。 */
 function stripOpenAIModelPrefix(model: string | undefined): string | undefined {
   if (!model) return undefined
-  return model.startsWith('openai:') ? model.slice('openai:'.length) : model
+  return isOpenAIModelValue(model) ? stripModelPrefix(model) : model
 }
 
 /**
- * OpenAI 兼容模型当前的 value 形态：`openai:<model>`（model 为用户配置的真实模型名）。
+ * OpenAI 兼容模型当前的 value 形态：`<厂商前缀>:<model>`（前缀 = profile.vendor）。
  * 关键词提取 / 记忆整理等轻量 LLM 调用统一用它 —— 之前这里固定回退到
  * `defaultOpenAIModel ?? 'gpt-4o'`，与用户实际选择的模型脱节，且 `gpt-4o` 不是
- * `openai:` 前缀 value，OpenAIChatDriver 会直接拒绝（关键词提取永远走不到 LLM）。
+ * 带前缀的 value，OpenAIChatDriver 会直接拒绝（关键词提取永远走不到 LLM）。
  * 多个配置时取默认 profile（isDefault 优先，否则第一个）。
  * 未配置时返回兼容占位 `openai:default`（driver 内部映射到 profile.model）。
  */
 function resolveOpenAIModelValue(): string {
   const profile = defaultOpenAIProfile()
-  if (profile?.model) return `openai:${profile.model}`
+  if (profile?.model) return `${prefixOfVendor(profile.vendor ?? detectVendor(profile.baseUrl))}:${profile.model}`
   return 'openai:default'
 }
 
 /**
  * 系统默认模型（同步版，基于 Qoder 状态探测缓存）：
  *  - Qoder 已连接且有模型 → 取 isDefault 模型（否则第一个），value 形如 `qoder:<model>`；
- *  - 否则 OpenAI profiles 非空 → 取默认 profile，value 形如 `openai:<model>`；
+ *  - 否则 OpenAI profiles 非空 → 取默认 profile，value 形如 `<厂商前缀>:<model>`；
  *  - 都没有 → undefined。
  * 缓存尚未建立（启动后未探测过）时 Qoder 段跳过，不误判；
  * AgentService / 任务路径的运行时回填用它，默认变更后自动跟随（不落盘）。
@@ -857,21 +859,29 @@ function syncSystemDefaultModel(): { provider: 'qoder' | 'openai'; model: string
     if (pick?.value) return { provider: 'qoder', model: `qoder:${pick.value}` }
   }
   const profile = defaultOpenAIProfile()
-  if (profile?.model) return { provider: 'openai', model: `openai:${profile.model}` }
+  if (profile?.model)
+    return {
+      provider: 'openai',
+      model: `${prefixOfVendor(profile.vendor ?? detectVendor(profile.baseUrl))}:${profile.model}`
+    }
   return undefined
 }
 
 /**
  * 模型 value 存在性校验（对话/任务/Agent 存储值的失效判定）。
- * - `openai:<model>[@id]`：按当前 profiles 匹配；无任何 profile 时视为失效；
+ * - OpenAI 兼容组（`<厂商前缀>:<model>[@id]`，含历史 `openai:` 前缀）：按当前 profiles 匹配；
+ *   无任何 profile 时视为失效；`openai:default` 历史占位恒有效（只要存在 profile）；
  * - Qoder 模型：按最近一次状态探测的模型列表匹配；缓存未建立时不校验（避免启动早期误判失效）。
  */
 function isModelValueAvailable(model: string): boolean {
-  if (model.startsWith('openai:')) {
+  if (isOpenAIModelValue(model)) {
     const profiles = readOpenAIProfiles().filter((p) => p.baseUrl && p.model)
     if (profiles.length === 0) return false
     if (model === 'openai:default') return true
-    return profiles.some((p) => `openai:${p.model}` === model || (p.id ? `openai:${p.model}@${p.id}` === model : false))
+    return profiles.some((p) => {
+      const prefixed = `${prefixOfVendor(p.vendor ?? detectVendor(p.baseUrl))}:${p.model}`
+      return prefixed === model || (p.id ? `${prefixed}@${p.id}` === model : false)
+    })
   }
   const status = qoderStatusCache?.status
   if (!status) return true
@@ -1503,7 +1513,7 @@ async function runOperationAgent(
   const prompt = [roleBody, contextBody, body].filter(Boolean).join('\n\n')
   if (providerForTask(taskId) !== 'qoder') {
     // OpenAI 路径跟随：preferredModel 未配置时 callOpenAIForPrompt 内部回落系统 modelProfile.model。
-    // preferredModel 是 `openai:<model>` 形态的 value，需剥离前缀再传给 /chat/completions。
+    // preferredModel 是 `<厂商前缀>:<model>` 形态的 value，需剥离前缀再传给 /chat/completions。
     return callOpenAIForPrompt(prompt, taskId, stripOpenAIModelPrefix(roleAgent.preferredModel), signal)
   }
   // MR 描述生成只是短文本 JSON 输出，Qoder 走 lite 模型节省 credits（与关键词提取同策略）；
@@ -3872,7 +3882,7 @@ function registerIpc(): void {
       // 启用只读工具（Read / Glob / Grep）让模型按需补充细节。
       const repoContext = await loadRepoContext(repositories)
       const prompt = buildAgentGenerationPrompt({ description, repositories, repoContext })
-      // model 形如 `qoder:xxx` / `openai:<model>` / 其它自由字符串；按 `qoder:` 前缀判定驱动。
+      // model 形如 `qoder:xxx` / `<厂商前缀>:<model>` / 其它自由字符串；按 `qoder:` 前缀判定驱动。
       // qoder 路径走专用轻量调用（只读工具 / maxTurns=3 / 120s 超时）——见 callQoderForAgentGeneration 注释。
       // openai 路径走纯 prompt fetch（不启工具，超时也压到 120s 与 Qoder 对齐）。
       const isQoder = model.startsWith('qoder:')

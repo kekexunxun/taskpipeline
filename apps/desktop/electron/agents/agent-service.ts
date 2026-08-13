@@ -32,6 +32,7 @@ import {
   type Task,
   type TaskRepository
 } from '@task-pipeline/core'
+import { isOpenAIModelValue } from '../chat/drivers/model-value.js'
 
 const SETTINGS_KEY = 'agentProfiles'
 /** Agent 指引段总长上限；截断优先级 systemPrompt > engineeringGuidelines > wiki 全文。 */
@@ -255,10 +256,11 @@ export class AgentService {
    * 计算任务执行路径与模型。
    *
    * 优先级链：
-   *  1. 任务显式指定 task.qoderModel → 按 value 前缀路由（`openai:` → OpenAI 路径；
-   *     `qoder:` 或无前缀 → Qoder 路径）。模型选择器统一产出 `qoder:xxx` / `openai:<model>`
-   *     两种 value，必须按前缀识别 provider，否则用户选了 OpenAI 模型也会被当成
-   *     Qoder 模型传给 qodercli（报 `Invalid model "openai:default"`）。
+   *  1. 任务显式指定 task.qoderModel → 按 value 前缀路由（OpenAI 兼容组前缀
+   *     `deepseek:` / `openai:` / `openai-compatible:` → OpenAI 路径；`qoder:` 或无前缀 →
+   *     Qoder 路径）。模型选择器统一产出 `qoder:xxx` / `<厂商前缀>:<model>` 两种 value，
+   *     必须按前缀识别 provider，否则用户选了 OpenAI 模型也会被当成
+   *     Qoder 模型传给 qodercli（报 `Invalid model`）。
    *  2. primary 仓库 Agent 配置了 preferredProvider + preferredModel → 按 Agent 路由；
    *  3. 均未配置 → 运行时回填系统默认模型（不落盘；未注入解析器时保持 undefined 由调用方回退）。
    *
@@ -272,7 +274,7 @@ export class AgentService {
     )
     const available = (model: string) => !this.isModelAvailable || this.isModelAvailable(model)
     if (task.qoderModel && available(task.qoderModel)) {
-      if (task.qoderModel.startsWith('openai:')) return { provider: 'openai', model: task.qoderModel, agent }
+      if (isOpenAIModelValue(task.qoderModel)) return { provider: 'openai', model: task.qoderModel, agent }
       return { provider: 'qoder', model: task.qoderModel, agent }
     }
     if (agent?.preferredProvider && agent.preferredModel && available(agent.preferredModel)) {

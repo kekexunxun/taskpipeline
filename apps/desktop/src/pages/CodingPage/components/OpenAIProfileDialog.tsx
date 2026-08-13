@@ -96,6 +96,8 @@ export function OpenAIProfileDialog({
   }, [open, initial])
   const trimmedBase = baseUrl.trim()
   const trimmedModel = model.trim()
+  /** 当前厂商的开箱即用模型列表（空 = 自由填写）。 */
+  const vendorModels = MODEL_VENDORS.find((v) => v.id === vendor)?.models ?? []
   const canSave = trimmedBase.length > 0 && trimmedModel.length > 0 && !saving && !deleting
   const save = async () => {
     if (!canSave) return
@@ -190,7 +192,31 @@ export function OpenAIProfileDialog({
               />
             </Field>
             <Field label="使用的模型 (Model)">
-              <Input value={model} onChange={(event) => setModel(event.target.value)} placeholder="gpt-4o-mini" />
+              {vendorModels.length > 0 ? (
+                <>
+                  <Input
+                    value={model}
+                    onChange={(event) => setModel(event.target.value)}
+                    placeholder="选择或输入模型"
+                    list={`model-suggest-${vendor}`}
+                  />
+                  <datalist id={`model-suggest-${vendor}`}>
+                    {vendorModels.map((group) => (
+                      <optgroup key={group.label} label={group.label}>
+                        {group.items.map((option) => (
+                          <option key={option} value={option} />
+                        ))}
+                      </optgroup>
+                    ))}
+                  </datalist>
+                  <p className="text-[11px] leading-4 text-muted-foreground">
+                    {MODEL_VENDORS.find((v) => v.id === vendor)?.name} 支持开箱即用模型，点击输入框可下拉选择；
+                    非对话模型（生成/语音）不适用于对话，请勿选用
+                  </p>
+                </>
+              ) : (
+                <Input value={model} onChange={(event) => setModel(event.target.value)} placeholder="gpt-4o-mini" />
+              )}
             </Field>
             <Field label="设为默认（组内默认 profile）">
               <Switch checked={isDefault} onCheckedChange={setIsDefault} />
