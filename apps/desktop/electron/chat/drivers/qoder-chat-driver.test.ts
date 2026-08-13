@@ -23,7 +23,7 @@ type SdkMessage = Record<string, unknown> & {
   parent_tool_use_id?: string | null
   event?: {
     type?: string
-    delta?: { type?: string; text?: string; thinking?: string; signature?: string }
+    delta?: { type?: string; text?: string; thinking?: string; signature?: string; partial_json?: string }
     content_block?: {
       type?: string
       text?: string
@@ -393,6 +393,287 @@ describe('QoderChatDriver', () => {
         void _
       }
     }).rejects.toThrow(/Qoder Token/)
+  })
+})
+
+describe('QoderChatDriver 工具输入输出与思考去重', () => {
+  it('input_json_delta 流式入参累积:assistant 快照定型后工具调用展示完整输入', async () => {
+    sdkMock.__pushScript({
+      messages: [
+        {
+          type: 'stream_event',
+          session_id: 'sess-t1',
+          event: {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'tool_use', id: 'tc-glob', name: 'glob' }
+          }
+        },
+        {
+          type: 'stream_event',
+          session_id: 'sess-t1',
+          event: {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'input_json_delta', partial_json: '{"pattern"' }
+          }
+        },
+        {
+          type: 'stream_event',
+          session_id: 'sess-t1',
+          event: {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'input_json_delta', partial_json: ':"**/*.ts"}' }
+          }
+        },
+        // assistant 完整快照:带真实 input 的 tool_use —— 与流式累积的同一 callId 合并定型
+        {
+          type: 'assistant',
+          session_id: 'sess-t1',
+          message: { content: [{ type: 'tool_use', id: 'tc-glob', name: 'glob', input: { pattern: '**/*.ts' } }] }
+        },
+        assistantMessageWithToolResult('tc-glob', ['a.ts', 'b.ts']),
+        resultMessage('完成', 'sess-t1')
+      ]
+    })
+    const events = await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'glob', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const parts = events.flatMap((e) => (e.type === 'part' ? [e.part] : []))
+    // 同 callId 只 push 一次(stream 阶段不 push,快照定型),不重复
+    const toolUses = parts.filter((p) => p.type === 'qoder.tool-use')
+    expect(toolUses).toHaveLength(1)
+    expect(toolUses[0]?.type === 'qoder.tool-use' && toolUses[0].toolCallId).toBe('tc-glob')
+    expect(toolUses[0]?.type === 'qoder.tool-use' && toolUses[0].input).toEqual({ pattern: '**/*.ts' })
+    // 输出与输入按 callId 配对
+    const toolResults = parts.filter((p) => p.type === 'qoder.tool-result')
+    expect(toolResults).toHaveLength(1)
+    expect(toolResults[0]?.type === 'qoder.tool-result' && toolResults[0].toolCallId).toBe('tc-glob')
+    expect(toolResults[0]?.type === 'qoder.tool-result' && toolResults[0].output).toEqual(['a.ts', 'b.ts'])
+  })
+
+  it('user 消息里的 tool_result 产出工具输出(SDK 工具结果主要落点)', async () => {
+    sdkMock.__pushScript({
+      messages: [
+        assistantMessageWithToolUse('readFile', {}, 'tc-user', 'sess-u1'),
+        {
+          type: 'user',
+          session_id: 'sess-u1',
+          message: { content: [{ type: 'tool_result', tool_use_id: 'tc-user', content: '3 files found' }] }
+        },
+        resultMessage('ok', 'sess-u1')
+      ]
+    })
+    const events = await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'read', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const parts = events.flatMap((e) => (e.type === 'part' ? [e.part] : []))
+    const toolResults = parts.filter((p) => p.type === 'qoder.tool-result')
+    expect(toolResults).toHaveLength(1)
+    expect(toolResults[0]?.type === 'qoder.tool-result' && toolResults[0].toolCallId).toBe('tc-user')
+    expect(toolResults[0]?.type === 'qoder.tool-result' && toolResults[0].output).toBe('3 files found')
+    // 兜底:tool_result 先到(无 assistant 快照)时也补 push 对应的 tool-use 行,保证配对
+    const toolUses = parts.filter((p) => p.type === 'qoder.tool-use')
+    expect(toolUses).toHaveLength(1)
+  })
+
+  it('thinking 流式碎片 + 完整快照不重复展示(同一思考只出现一次)', async () => {
+    const thinking = '先分析问题,再设计方案。'
+    sdkMock.__pushScript({
+      messages: [
+        thinkingDelta('先分析问题', 'sess-th1'),
+        thinkingDelta(',再设计方案。', 'sess-th1'),
+        // assistant 完整快照携带同一 thinking —— 必须被去重,不能再次 push
+        { type: 'assistant', session_id: 'sess-th1', message: { content: [{ type: 'thinking', thinking }] } },
+        textDelta('结论', 'sess-th1'),
+        resultMessage('结论', 'sess-th1')
+      ]
+    })
+    const events = await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const parts = events.flatMap((e) => (e.type === 'part' ? [e.part] : []))
+    const thinkingParts = parts.filter((p) => p.type === 'qoder.thinking')
+    const joined = thinkingParts.map((p) => (p.type === 'qoder.thinking' ? p.text : '')).join('')
+    expect(joined).toBe(thinking) // 完整内容只出现一次
+  })
+
+  it('content_block_start 完整 thinking + 增量碎片去重(不重复拼接)', async () => {
+    sdkMock.__pushScript({
+      messages: [
+        {
+          type: 'stream_event',
+          session_id: 'sess-th2',
+          event: {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'thinking', thinking: '推理过程全文' }
+          }
+        },
+        {
+          type: 'stream_event',
+          session_id: 'sess-th2',
+          event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '推理过程全文' } }
+        },
+        textDelta('结论', 'sess-th2'),
+        resultMessage('结论', 'sess-th2')
+      ]
+    })
+    const events = await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const parts = events.flatMap((e) => (e.type === 'part' ? [e.part] : []))
+    const thinkingParts = parts.filter((p) => p.type === 'qoder.thinking')
+    const joined = thinkingParts.map((p) => (p.type === 'qoder.thinking' ? p.text : '')).join('')
+    expect(joined).toBe('推理过程全文') // 完整块与增量不重复拼接
+  })
+
+  it('start 完整 thinking 先到 + 碎片化 delta 后到不重复追加(快照覆盖判据)', async () => {
+    // 快照先推入后,碎片若已被快照覆盖则跳过 —— 防止「推理」「过程」被逐个重复追加。
+    sdkMock.__pushScript({
+      messages: [
+        {
+          type: 'stream_event',
+          session_id: 'sess-th2b',
+          event: {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'thinking', thinking: '推理过程全文' }
+          }
+        },
+        {
+          type: 'stream_event',
+          session_id: 'sess-th2b',
+          event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '推理' } }
+        },
+        {
+          type: 'stream_event',
+          session_id: 'sess-th2b',
+          event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '过程' } }
+        },
+        {
+          type: 'stream_event',
+          session_id: 'sess-th2b',
+          event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '全文' } }
+        },
+        textDelta('结论', 'sess-th2b'),
+        resultMessage('结论', 'sess-th2b')
+      ]
+    })
+    const events = await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const parts = events.flatMap((e) => (e.type === 'part' ? [e.part] : []))
+    const thinkingParts = parts.filter((p) => p.type === 'qoder.thinking')
+    const joined = thinkingParts.map((p) => (p.type === 'qoder.thinking' ? p.text : '')).join('')
+    expect(joined).toBe('推理过程全文') // 碎片全部被快照覆盖,不重复追加
+  })
+
+  it('thinking_delta 单字碎片不因 `includes` 误判重复而吞字符', async () => {
+    // 碎片判据用「拼接以本段结尾」:单字 token 若曾被包含会触发 includes 误判,改用 endsWith。
+    sdkMock.__pushScript({
+      messages: [
+        thinkingDelta('分', 'sess-th3'),
+        thinkingDelta('析', 'sess-th3'),
+        thinkingDelta('问', 'sess-th3'),
+        thinkingDelta('题', 'sess-th3'),
+        textDelta('结论', 'sess-th3'),
+        resultMessage('结论', 'sess-th3')
+      ]
+    })
+    const events = await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const parts = events.flatMap((e) => (e.type === 'part' ? [e.part] : []))
+    const thinkingParts = parts.filter((p) => p.type === 'qoder.thinking')
+    const joined = thinkingParts.map((p) => (p.type === 'qoder.thinking' ? p.text : '')).join('')
+    expect(joined).toBe('分析问题') // 四个单字碎片全部保留,无吞字符
+  })
+
+  it('content_block_stop 兜底:无 assistant 快照时用累积入参落定工具调用(中断不丢)', async () => {
+    sdkMock.__pushScript({
+      messages: [
+        {
+          type: 'stream_event',
+          session_id: 'sess-s1',
+          event: {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'tool_use', id: 'tc-s', name: 'search' }
+          }
+        },
+        {
+          type: 'stream_event',
+          session_id: 'sess-s1',
+          event: {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'input_json_delta', partial_json: '{"q":"docs"}' }
+          }
+        },
+        // 块结束但无 assistant 快照(中断路径):已累积入参应落定,工具调用不丢失
+        { type: 'stream_event', session_id: 'sess-s1', event: { type: 'content_block_stop', index: 0 } },
+        {
+          type: 'user',
+          session_id: 'sess-s1',
+          message: { content: [{ type: 'tool_result', tool_use_id: 'tc-s', content: '1 hit' }] }
+        },
+        resultMessage('done', 'sess-s1')
+      ]
+    })
+    const events = await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'search', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const parts = events.flatMap((e) => (e.type === 'part' ? [e.part] : []))
+    const toolUses = parts.filter((p) => p.type === 'qoder.tool-use')
+    expect(toolUses).toHaveLength(1)
+    expect(toolUses[0]?.type === 'qoder.tool-use' && toolUses[0].toolCallId).toBe('tc-s')
+    expect(toolUses[0]?.type === 'qoder.tool-use' && toolUses[0].input).toEqual({ q: 'docs' })
+    const toolResults = parts.filter((p) => p.type === 'qoder.tool-result')
+    expect(toolResults).toHaveLength(1)
   })
 })
 

@@ -113,3 +113,42 @@ describe('ChatMessageView error display', () => {
     expect(screen.getByText('失败')).toBeTruthy()
   })
 })
+
+describe('ChatMessageView copy action', () => {
+  it('copies the joined text parts when the copy button is clicked', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const message: ChatMessage = {
+      id: 'assistant-copy',
+      role: 'assistant',
+      driverId: 'qoder',
+      createdAt: new Date().toISOString(),
+      raw: { kind: 'assistant', parts: [] },
+      metadata: { createdAt: new Date().toISOString(), status: 'done' },
+      parts: [
+        { driverId: 'qoder', type: 'text', text: '第一段' },
+        { driverId: 'qoder', type: 'text', text: '第二段' }
+      ]
+    }
+    render(<ChatMessageView message={message} />)
+    fireEvent.click(screen.getByRole('button', { name: '复制消息' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('第一段\n第二段'))
+  })
+
+  it('does not render a copy button when the message has no text parts', () => {
+    const message: ChatMessage = {
+      id: 'assistant-tool-only',
+      role: 'assistant',
+      driverId: 'qoder',
+      createdAt: new Date().toISOString(),
+      raw: { kind: 'assistant', parts: [] },
+      metadata: { createdAt: new Date().toISOString(), status: 'done' },
+      parts: [
+        { driverId: 'qoder', type: 'qoder.tool-use', toolCallId: 'tc-1', name: 'glob', input: {} },
+        { driverId: 'qoder', type: 'qoder.tool-result', toolCallId: 'tc-1', output: [] }
+      ]
+    }
+    render(<ChatMessageView message={message} />)
+    expect(screen.queryByRole('button', { name: '复制消息' })).toBeNull()
+  })
+})

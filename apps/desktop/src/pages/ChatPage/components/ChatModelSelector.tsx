@@ -148,6 +148,7 @@ export function ChatModelSelector({
     <ModelSelector open={open} onOpenChange={setOpen}>
       <ModelSelectorTrigger asChild>
         <Button
+          type="button"
           variant="ghost"
           size="sm"
           disabled={disabled || !hasModels}

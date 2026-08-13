@@ -61,6 +61,7 @@ export function ChatAgentSelector({
     <ModelSelector open={open} onOpenChange={setOpen}>
       <ModelSelectorTrigger asChild>
         <Button
+          type="button"
           variant="ghost"
           size="sm"
           disabled={disabled}

@@ -60,7 +60,7 @@ export type RawSdkMessage = {
   parent_tool_use_id?: string | null
   event?: {
     type?: string
-    delta?: { type?: string; text?: string; thinking?: string; signature?: string }
+    delta?: { type?: string; text?: string; thinking?: string; signature?: string; partial_json?: string }
     content_block?: SdkContentBlock
     index?: number
     error?: { message?: string } | string
@@ -96,6 +96,20 @@ type ActiveTurn = {
   parts: DriverPart[]
   /** 回合级文本 buffer(SDK 文本增量去重,防止 result 与流式文本重复)。 */
   buffer: string
+  /** stream block index → toolCallId(input_json_delta 反查 / content_block_stop 兜底落定用)。 */
+  toolCallIdByIndex: Map<number, string>
+  /** callId → 工具名(stream 阶段暂存,完整入参定型后 push 用)。 */
+  toolNameByCallId: Map<string, string>
+  /** callId → 已 push 的 tool-use(assistant 快照 / 兜底重复出现时跳过)。 */
+  pushedToolUseIds: Set<string>
+  /** callId → input_json_delta 累积 JSON 文本(可解析时回填 toolUseInput)。 */
+  toolInputBuf: Map<string, string>
+  /** callId → 已解析的完整工具入参(start 非空 input / 增量累积 / 快照 input)。 */
+  toolUseInput: Map<string, unknown>
+  /** 回合内已 push 的 thinking 拼接(完整快照 ⊇ 增量碎片时去重,防思考重复展示)。 */
+  thinkingBuffer: string
+  /** 已 push 的完整 thinking 块(快照路径;碎片路径据此判断快照已覆盖本段,防重复追加)。 */
+  thinkingSnapshots: string[]
   /** 已派发过 task-created(去重:tool_result 与 result 都携带产出时只发一次)。 */
   taskCreated?: boolean
   toolSource?: ToolSource
@@ -218,6 +232,13 @@ export class QoderSession {
       waiters: [],
       parts: [],
       buffer: '',
+      toolCallIdByIndex: new Map(),
+      toolNameByCallId: new Map(),
+      pushedToolUseIds: new Set(),
+      toolInputBuf: new Map(),
+      toolUseInput: new Map(),
+      thinkingBuffer: '',
+      thinkingSnapshots: [],
       toolSource: input.toolSource
     }
     this.activeTurn = turn
@@ -392,6 +413,95 @@ export class QoderSession {
       return stamped
     }
 
+    /**
+     * thinking 增量去重 push:已 push 的拼接已覆盖本段则跳过,修复「thinking_delta 碎片 +
+     * content_block_start 完整块 + assistant 完整块」三路径重复展示同一思考的问题。
+     * - 碎片(thinking_delta)判据用「拼接以本段结尾」:增量是继续追加的 token,`includes`
+     *   会把此前已出现过的短 token(如单字「析」)误判为重复而吞字符;
+     * - 完整块(content_block_start / assistant 快照)判据用「拼接包含本段」:整段已在
+     *   碎片拼接中出现(快照 ⊇ 增量)则跳过,不再重复推入。
+     */
+    const pushThinking = (text: string, signature?: string, isSnapshot = false): void => {
+      if (!text) return
+      if (isSnapshot) {
+        // 完整块(content_block_start / assistant 快照):整段已在拼接中出现则跳过。
+        if (turn.thinkingBuffer.includes(text)) return
+      } else {
+        // 碎片(thinking_delta):增量是续写追加,用「拼接以本段结尾」判断 —— `includes`
+        // 会把此前已出现过的短 token(如单字「析」)误判为重复而吞字符。
+        if (turn.thinkingBuffer.endsWith(text)) return
+        // 完整快照先到(如 content_block_start 直接带整段)后,碎片若已被快照覆盖则跳过,
+        // 避免「快照 + 碎片化 delta」把同一思考逐个重复追加。
+        if (turn.thinkingSnapshots.some((snapshot) => snapshot.includes(text))) return
+      }
+      turn.thinkingBuffer += text
+      if (isSnapshot) turn.thinkingSnapshots.push(text)
+      pushPart({
+        driverId: 'qoder',
+        type: 'qoder.thinking',
+        text,
+        ...(signature ? { signature } : {})
+      })
+    }
+
+    /** 累积流式工具入参增量(input_json_delta),可解析时回填 toolUseInput。 */
+    const accumulateToolInput = (callId: string, partialJson: string): void => {
+      const buf = (turn.toolInputBuf.get(callId) ?? '') + partialJson
+      turn.toolInputBuf.set(callId, buf)
+      try {
+        const parsed = JSON.parse(buf) as unknown
+        if (parsed !== null && typeof parsed === 'object' && Object.keys(parsed as object).length > 0) {
+          turn.toolUseInput.set(callId, parsed)
+        }
+      } catch {
+        /* 片段未闭合,继续累积 */
+      }
+    }
+
+    /**
+     * tool_use 落定 push:输入取「调用方传入(assistant 快照,优先)或累积解析值」,同 callId 只
+     * push 一次。stream 阶段不 push(SDK 的 content_block_start 常带空 input),完整入参由
+     * input_json_delta 累积、assistant 快照 / 工具结束 / content_block_stop 兜底落定。
+     */
+    const flushToolUse = (callId: string, name?: string, input?: unknown): void => {
+      if (turn.pushedToolUseIds.has(callId)) return
+      const finalName = name ?? turn.toolNameByCallId.get(callId)
+      if (!finalName) return // 名字都未知(纯孤儿 tool_result),不强行造行
+      turn.pushedToolUseIds.add(callId)
+      const finalInput =
+        input !== undefined && typeof input === 'object' && Object.keys(input as object).length > 0
+          ? input
+          : (turn.toolUseInput.get(callId) ?? input ?? {})
+      turn.toolUseInput.delete(callId)
+      turn.toolInputBuf.delete(callId)
+      pushPart({ driverId: 'qoder', type: 'qoder.tool-use', toolCallId: callId, name: finalName, input: finalInput })
+    }
+
+    /** tool_result 处理(assistant 与 user 消息共用):配对 tool-use、产出输出、触发 task-created。 */
+    const handleToolResult = (block: SdkContentBlock): void => {
+      const toolCallId = typeof block.tool_use_id === 'string' ? block.tool_use_id : `qoder-${turn.parts.length}`
+      // 兜底:SDK 异常顺序(tool_result 先于 assistant 快照)时,先用已累积信息补 tool-use 行,
+      // 保证按 callId 配对不丢、输出能并入工具行展示。
+      flushToolUse(toolCallId)
+      const output = block.content
+      const toolResultPart: DriverPart = {
+        driverId: 'qoder',
+        type: 'qoder.tool-result',
+        toolCallId,
+        output,
+        ...(block.is_error ? { isError: true } : {})
+      }
+      turn.parts.push(toolResultPart)
+      this.pushChunk(turn, { type: 'part', part: toolResultPart })
+      if (turn.toolSource && !turn.taskCreated) {
+        const described = turn.toolSource.describeResult(output)
+        if (described) {
+          turn.taskCreated = true
+          this.pushChunk(turn, { type: 'task-created', result: described as ChatTaskCreationResult })
+        }
+      }
+    }
+
     if (typeof message.session_id === 'string' && message.session_id && message.session_id !== this.sessionId) {
       this.sessionId = message.session_id
       const sessionPart: DriverPart = { driverId: 'qoder', type: 'qoder.session', sessionId: message.session_id }
@@ -453,12 +563,12 @@ export class QoderSession {
           turn.buffer += delta.text
           pushPart({ driverId: 'qoder', type: 'text', text: delta.text })
         } else if (delta?.type === 'thinking_delta' && delta.thinking) {
-          pushPart({
-            driverId: 'qoder',
-            type: 'qoder.thinking',
-            text: delta.thinking,
-            ...(delta.signature ? { signature: delta.signature } : {})
-          })
+          pushThinking(delta.thinking, delta.signature)
+        } else if (delta?.type === 'input_json_delta' && delta.partial_json) {
+          // 工具入参增量:按 block index 反查 callId 后累积(stream 阶段 tool_use 不 push,
+          // 完整入参由 input_json_delta 累积、assistant 快照 / 工具结束时定型)。
+          const callId = event.index !== undefined ? turn.toolCallIdByIndex.get(event.index) : undefined
+          if (callId) accumulateToolInput(callId, delta.partial_json)
         }
       } else if (event?.type === 'content_block_start' && event.content_block) {
         const block = event.content_block
@@ -466,17 +576,25 @@ export class QoderSession {
           turn.buffer += block.text
           pushPart({ driverId: 'qoder', type: 'text', text: block.text })
         } else if (block.type === 'thinking' && block.thinking) {
-          pushPart({ driverId: 'qoder', type: 'qoder.thinking', text: block.thinking })
+          // content_block_start 的 thinking 是整块(可能部分):按快照判据去重。
+          pushThinking(block.thinking, undefined, true)
         } else if (block.type === 'tool_use' && block.name) {
-          const toolCallId = typeof block.id === 'string' ? block.id : `qoder-${turn.parts.length}`
-          pushPart({
-            driverId: 'qoder',
-            type: 'qoder.tool-use',
-            toolCallId,
-            name: block.name,
-            input: block.input ?? {}
-          })
+          const toolCallId = typeof block.id === 'string' ? block.id : `qoder-${event.index ?? turn.parts.length}`
+          if (event.index !== undefined) turn.toolCallIdByIndex.set(event.index, toolCallId)
+          turn.toolNameByCallId.set(toolCallId, block.name)
+          turn.toolInputBuf.set(toolCallId, '')
+          // 不在此 push:SDK 的 start 事件 input 常为空,真实入参由 input_json_delta 增量
+          // 累积、assistant 完整快照定型 —— 提前 push 会让 ToolCallRow 只显示 {}。
+          if (block.input && typeof block.input === 'object' && Object.keys(block.input as object).length > 0) {
+            turn.toolUseInput.set(toolCallId, block.input)
+          }
         }
+      } else if (event?.type === 'content_block_stop') {
+        // 兜底:块结束仍无 assistant 快照(中断等)时,把已累积的 tool_use 落定,避免工具调用丢失。
+        // 仅当累积入参已可解析(toolUseInput 有值)才落定:未闭合/无入参时等快照提供完整 input,
+        // 避免抢先 push 空 input 后快照因去重被跳过、工具调用永远显示 {}。
+        const callId = event.index !== undefined ? turn.toolCallIdByIndex.get(event.index) : undefined
+        if (callId && turn.toolUseInput.has(callId)) flushToolUse(callId)
       } else if (event?.type === 'error') {
         // 错误一律上抛:已有部分文本产出时也 failTurn,已产出的 parts 早已随流事件
         // 推给上层(ChatService 累积并落盘),不会丢;吞掉错误会导致失败界面无任何展示。
@@ -497,44 +615,24 @@ export class QoderSession {
           }
         } else if (block.type === 'tool_use' && block.name) {
           const toolCallId = typeof block.id === 'string' ? block.id : `qoder-${turn.parts.length}`
-          const toolUsePart: DriverPart = {
-            driverId: 'qoder',
-            type: 'qoder.tool-use',
-            toolCallId,
-            name: block.name,
-            input: block.input ?? {}
-          }
-          if (
-            !turn.parts.some((existing) => existing.type === 'qoder.tool-use' && existing.toolCallId === toolCallId)
-          ) {
-            turn.parts.push(toolUsePart)
-            this.pushChunk(turn, { type: 'part', part: toolUsePart })
-          }
+          // 完整快照带真实 input:与流式累积的同一 callId 合并定型(同 callId 只 push 一次)。
+          flushToolUse(toolCallId, block.name, block.input)
         } else if (block.type === 'tool_result') {
-          const toolCallId = typeof block.tool_use_id === 'string' ? block.tool_use_id : `qoder-${turn.parts.length}`
-          const output = block.content
-          const toolResultPart: DriverPart = {
-            driverId: 'qoder',
-            type: 'qoder.tool-result',
-            toolCallId,
-            output,
-            ...(block.is_error ? { isError: true } : {})
-          }
-          turn.parts.push(toolResultPart)
-          this.pushChunk(turn, { type: 'part', part: toolResultPart })
-          if (turn.toolSource && !turn.taskCreated) {
-            const described = turn.toolSource.describeResult(output)
-            if (described) {
-              turn.taskCreated = true
-              this.pushChunk(turn, { type: 'task-created', result: described as ChatTaskCreationResult })
-            }
-          }
+          handleToolResult(block)
         } else if (block.type === 'thinking' && block.thinking) {
-          const thinkingPart: DriverPart = { driverId: 'qoder', type: 'qoder.thinking', text: block.thinking }
-          if (!turn.parts.some((existing) => existing.type === 'qoder.thinking' && existing.text === block.thinking)) {
-            turn.parts.push(thinkingPart)
-            this.pushChunk(turn, { type: 'part', part: thinkingPart })
-          }
+          // 完整快照 vs 流式碎片:已推拼接已覆盖(或包含)则跳过,防止思考重复展示。
+          pushThinking(block.thinking, undefined, true)
+        }
+      }
+      return
+    }
+
+    if (message.type === 'user' && Array.isArray(message.message?.content)) {
+      // SDK 的工具输出(tool_result)主要落在 user 消息里(assistant 之外的落点,此前缺失
+      // 导致工具调用只有输入没有输出)。用户文本是回合输入,不在此处理。
+      for (const block of message.message.content) {
+        if (block.type === 'tool_result') {
+          handleToolResult(block)
         }
       }
       return

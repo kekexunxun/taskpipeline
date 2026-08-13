@@ -2,6 +2,7 @@ import { ArrowRightIcon, BotIcon, Loader2Icon, UserIcon } from 'lucide-react'
 import { memo, useMemo, useState } from 'react'
 import { QoderMessageView } from '../drivers/QoderMessageView'
 import { OpenAIMessageView } from '../drivers/OpenAIMessageView'
+import { MessageCopyButton } from '@/components/ai-elements/message'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import type { ChatDriverId, ChatMessage } from '@/api'
@@ -30,6 +31,15 @@ function ChatMessageImpl({
   const time = useMemo(
     () => formatTime(message.metadata?.createdAt ?? message.createdAt),
     [message.metadata?.createdAt, message.createdAt]
+  )
+  // 消息级复制:拼接全部 text part(助手正文 / 用户气泡都是 text part),不含思考过程与工具调用。
+  const messageText = useMemo(
+    () =>
+      message.parts
+        .filter((part): part is Extract<typeof part, { type: 'text' }> => part.type === 'text')
+        .map((part) => part.text)
+        .join('\n'),
+    [message.parts]
   )
   const metaStatus = message.metadata?.status
   const isAborted = metaStatus === 'aborted'
@@ -69,6 +79,7 @@ function ChatMessageImpl({
               <UserIcon size={10} />
             </span>
           )}
+          {messageText && <MessageCopyButton text={messageText} className="size-5" />}
         </div>
         {isUser ? (
           <UserBubble message={message} />
