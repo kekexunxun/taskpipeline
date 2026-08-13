@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BotIcon, CheckIcon, ChevronDownIcon, SparklesIcon, UserRoundIcon } from 'lucide-react'
+import { BotIcon, CheckIcon, ChevronDownIcon, PlusIcon, SparklesIcon, UserRoundIcon } from 'lucide-react'
 import type { AgentProfile } from '@task-pipeline/core'
 import { api } from '@/api'
 import { Button } from '@/components/ui/button'
@@ -13,6 +13,7 @@ import {
   ModelSelectorTrigger
 } from '@/components/ai-elements/model-selector'
 import { cn } from '@/lib/utils'
+import { openSettingsTab } from '@/utils/open-settings'
 
 /** 系统内置角色 Agent 的固定 id（与设置页 Agent Tab 分类一致）。 */
 const ROLE_AGENT_IDS = ['builtin-reviewer', 'builtin-test-writer', 'builtin-mr-writer']
@@ -138,6 +139,20 @@ export function ChatAgentSelector({
             <div className="px-3 py-4 text-center text-xs text-muted-foreground">暂无可用 Agent</div>
           )}
         </ModelSelectorList>
+        <div className="flex shrink-0 items-center justify-between border-t px-3 py-1.5">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 w-full justify-start gap-1 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+            onClick={() => {
+              setOpen(false)
+              openSettingsTab('agents')
+            }}
+          >
+            <PlusIcon size={11} />
+            新增 Agent
+          </Button>
+        </div>
       </ModelSelectorContent>
     </ModelSelector>
   )

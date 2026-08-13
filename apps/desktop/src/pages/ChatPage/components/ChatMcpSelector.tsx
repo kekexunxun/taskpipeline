@@ -6,6 +6,7 @@ import {
   CircleDotIcon,
   GitlabIcon,
   Loader2Icon,
+  PlusIcon,
   ServerIcon
 } from 'lucide-react'
 import type { CredentialState } from '@/api'
@@ -23,6 +24,7 @@ import {
 } from '@/components/ai-elements/model-selector'
 import { useCredentialStatusContext } from '@/hooks/useCredentialStatusContext'
 import { cn } from '@/lib/utils'
+import { openSettingsTab } from '@/utils/open-settings'
 
 export type McpServiceId = string
 
@@ -184,6 +186,20 @@ export function ChatMcpSelector({
               </div>
             )}
           </ModelSelectorGroup>
+          <div className="border-t px-3 py-1.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 w-full justify-start gap-1 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+              onClick={() => {
+                setOpen(false)
+                openSettingsTab('mcp')
+              }}
+            >
+              <PlusIcon size={11} />
+              新增 MCP
+            </Button>
+          </div>
         </ModelSelectorList>
         <div className="flex shrink-0 items-center justify-between gap-2 border-t px-3 py-2">
           <span className="text-[10px] text-muted-foreground">已选 {selected.length} 个</span>

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { CheckIcon, ChevronDownIcon, Loader2Icon, SparklesIcon } from 'lucide-react'
+import { CheckIcon, ChevronDownIcon, Loader2Icon, PlusIcon, SparklesIcon } from 'lucide-react'
 import { api, type SkillInfo } from '@/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -13,6 +13,7 @@ import {
   ModelSelectorTrigger
 } from '@/components/ai-elements/model-selector'
 import { cn } from '@/lib/utils'
+import { openSettingsTab } from '@/utils/open-settings'
 
 /**
  * Skill 选择器：dataDir/skills 下的技能（设置页 Skill Tab 导入），可多选。
@@ -121,6 +122,20 @@ export function ChatSkillSelector({
               <div className="px-3 py-2 text-[11px] text-muted-foreground">暂无技能，请到设置 → Skill 导入。</div>
             )}
           </ModelSelectorGroup>
+          <div className="border-t px-3 py-1.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 w-full justify-start gap-1 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+              onClick={() => {
+                setOpen(false)
+                openSettingsTab('skill')
+              }}
+            >
+              <PlusIcon size={11} />
+              新增 Skill
+            </Button>
+          </div>
         </ModelSelectorList>
         <div className="flex shrink-0 items-center justify-between gap-2 border-t px-3 py-2">
           <span className="text-[10px] text-muted-foreground">已选 {selected.length} 个</span>

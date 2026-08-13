@@ -84,6 +84,18 @@ export function AppShell() {
     setSettingsInitialTab(settingsTabForFailures(failures))
     setSettingsOpen(true)
   }
+  // 对话区选择器「立即新增」→ 打开设置并定位到对应 Tab（MCP / Skill / Agent）。
+  useEffect(() => {
+    const onOpenSettings = (event: Event) => {
+      const tab = (event as CustomEvent<string>).detail
+      if (typeof tab === 'string' && tab) {
+        setSettingsInitialTab(tab)
+        setSettingsOpen(true)
+      }
+    }
+    window.addEventListener('app:open-settings', onOpenSettings)
+    return () => window.removeEventListener('app:open-settings', onOpenSettings)
+  }, [])
   return (
     <FeedbackProvider value={feedback}>
       <QoderStatusProvider value={qoder}>
