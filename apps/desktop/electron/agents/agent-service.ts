@@ -9,9 +9,8 @@
  *
  * 设计：
  *  - 配置存 settings key `agentProfiles`（JSON 数组），与 modelProfile 同模式，不新增表；
- *  - `resolveAgentFor(repositoryId, agentId?)`：任务级覆盖（`task.agentProfileId`）优先，
- *    未覆盖时走仓库白名单（多个命中取最近修改），均未命中返回 undefined
- *    （调用方回退内置「通用」Agent，空内容 = 原行为，零配置完全兼容）；
+ *  - **仓库单一归属**：save() 保存时，本 Agent 勾选的仓库自动从其他 Agent 解绑
+ *    （一个仓库只属于一个 Agent）；importAll 走 save() 自动获得同一约束；
  *  - `resolveRuntime(task, repos)`：计算任务执行路径（qoder / openai）与模型，
  *    优先级链：任务显式 task.qoderModel > primary 仓库 Agent 的 preferredProvider+preferredModel
  *    > 系统默认模型（运行时动态回填，不落盘；失效模型经 isModelAvailable 校验后回落）；
@@ -181,12 +180,31 @@ export class AgentService {
     return profiles
   }
 
-  save(profile: AgentProfile): void {
+  /**
+   * 保存 Agent，并执行「仓库单一归属」约束：
+   * 本 profile 的 repositoryIds 中的仓库，自动从其他所有 Agent 的 repositoryIds 移除
+   * （同步更新其 updatedAt）。内置角色 Agent（review/test/mr）repositoryIds 恒空，天然不受影响；
+   * importAll 走 save() 自动获得同一约束。
+   * 返回本次受影响（被自动解绑仓库）的其他 Agent 数量（调用方可忽略）。
+   */
+  save(profile: AgentProfile): number {
     const profiles = this.list()
     const index = profiles.findIndex((item) => item.id === profile.id)
     if (index >= 0) profiles[index] = profile
     else profiles.push(profile)
+    const claimed = new Set(profile.repositoryIds)
+    let affected = 0
+    for (const other of profiles) {
+      if (other.id === profile.id || claimed.size === 0) continue
+      const next = other.repositoryIds.filter((id) => !claimed.has(id))
+      if (next.length !== other.repositoryIds.length) {
+        other.repositoryIds = next
+        other.updatedAt = new Date().toISOString()
+        affected++
+      }
+    }
     this.setSetting(SETTINGS_KEY, JSON.stringify(profiles))
+    return affected
   }
 
   delete(id: string): void {
@@ -220,7 +238,9 @@ export class AgentService {
    *  1. `agentId === AGENT_TASK_DISABLED` → undefined（任务级禁用，回退通用能力）；
    *  2. `repoAgentId` 指定（逐仓库覆盖）→ 直接返回该 enabled Agent；
    *  3. `agentId` 指定（任务级覆盖）→ 直接返回该 enabled Agent；
-   *  4. 否则按仓库白名单命中（多个取最近修改）；未命中返回 undefined（调用方回退「通用」）。
+   *  4. 否则按仓库白名单命中。单一归属后正常情况下每仓库至多命中一个；
+   *     多命中（历史数据 / 导入残留）时取最近修改，作为防御性兜底。
+   *     未命中返回 undefined（调用方回退「通用」）。
    */
   resolveAgentFor(repositoryId: string, agentId?: string, repoAgentId?: string): AgentProfile | undefined {
     if (agentId === AGENT_TASK_DISABLED) return undefined

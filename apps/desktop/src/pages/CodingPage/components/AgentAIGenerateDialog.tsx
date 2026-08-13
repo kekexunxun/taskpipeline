@@ -76,7 +76,7 @@ export function AgentAIGenerateDialog({
   }
   const generate = async () => {
     if (!model) {
-      setError('请先在 Agent 弹窗中选择模型后再生成')
+      setError('暂无可用的模型，请在设置中配置 Qoder 或 OpenAI 后再生成')
       return
     }
     if (!description.trim()) {
@@ -131,8 +131,8 @@ export function AgentAIGenerateDialog({
             AI 生成 Agent 内容
           </DialogTitle>
           <DialogDescription>
-            用选定模型基于说明 + 勾选仓库的本地背景（repowiki / agents.md / README.md）
-            生成名称、说明、系统提示词与工程约定；生成期间不可关闭。
+            用所选模型（未选时由系统自动选择）基于说明 + 勾选仓库的本地背景 （repowiki / agents.md /
+            README.md）生成名称、说明、系统提示词与工程约定；生成期间不可关闭。
           </DialogDescription>
         </DialogHeader>
         <div className="thin-scrollbar min-h-0 space-y-3 overflow-y-auto px-5 py-4">

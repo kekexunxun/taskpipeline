@@ -3,11 +3,19 @@ import type { ChatModelGroup } from '../api'
 import { isModelAvailable, pickSystemDefaultModel } from './chat-models'
 
 /** 构造分组测试替身。 */
-function group(driverId: 'qoder' | 'openai', models: Array<{ value: string; isDefault?: boolean }>): ChatModelGroup {
+function group(
+  driverId: 'qoder' | 'openai',
+  models: Array<{ value: string; isDefault?: boolean; priceFactor?: number }>
+): ChatModelGroup {
   return {
     driverId,
     displayName: driverId,
-    models: models.map((m) => ({ value: m.value, displayName: m.value, isDefault: m.isDefault }))
+    models: models.map((m) => ({
+      value: m.value,
+      displayName: m.value,
+      ...(m.isDefault !== undefined ? { isDefault: m.isDefault } : {}),
+      ...(m.priceFactor !== undefined ? { priceFactor: m.priceFactor } : {})
+    }))
   }
 }
 
@@ -26,6 +34,16 @@ describe('pickSystemDefaultModel(前端默认选择)', () => {
       group('qoder', [{ value: 'qoder:a' }, { value: 'qoder:b' }])
     ]
     expect(pickSystemDefaultModel(groups)).toEqual({ driverId: 'qoder', model: 'qoder:a' })
+  })
+
+  it('qoder 组无 isDefault 时回落免费 lite(无 credit 场景)', () => {
+    const groups = [
+      group('qoder', [
+        { value: 'qoder:claude-sonnet-4.5', priceFactor: 1 },
+        { value: 'qoder:qwen-lite', priceFactor: 0 }
+      ])
+    ]
+    expect(pickSystemDefaultModel(groups)).toEqual({ driverId: 'qoder', model: 'qoder:qwen-lite' })
   })
 
   it('无 qoder 组时落到第一个分组', () => {

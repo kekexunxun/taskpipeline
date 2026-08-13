@@ -312,6 +312,8 @@ export type ChatModelGroup = {
   driverId: ChatDriverId
   displayName: string
   models: ChatModelInfo[]
+  /** Qoder 组额度不足（无 credit / 仅免费模型可用）时置 true，前端据此提示「当前仅 lite 可用」。 */
+  quotaExhausted?: boolean
 }
 
 /** 系统默认模型解析结果（主进程 `chats:default-model` 返回形态）。 */

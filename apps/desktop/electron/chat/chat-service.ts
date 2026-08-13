@@ -5,7 +5,7 @@ import { ChatStorage } from './chat-storage.js'
 import type { ChatDriverRegistry } from './drivers/driver-registry.js'
 import { createProjectQueryToolSource } from './drivers/project-query-tools.js'
 import type { ToolSource } from './drivers/tool-source.js'
-import { isModelAvailable, pickSystemDefaultModel } from './system-default-model.js'
+import { isModelAvailable, pickGroupModel, pickSystemDefaultModel } from './system-default-model.js'
 import type { ChatDriver } from './drivers/chat-driver.js'
 import type {
   AbortChatStreamInput,
@@ -159,7 +159,9 @@ export class ChatService {
     }
     if (group?.models.length) {
       const driver = this.driverRegistry.tryGet(input.driverId)
-      const fallback = group.models.find((model) => model.isDefault) ?? group.models[0]
+      // 与系统默认解析同一回落规则（isDefault → lite → 第一个），
+      // 否则 Qoder 无 credit 时重试 fallback 可能落到非 lite 模型。
+      const fallback = pickGroupModel(group)
       if (driver && fallback) return { driver, model: fallback.value }
     }
     const systemDefault = pickSystemDefaultModel(groups)

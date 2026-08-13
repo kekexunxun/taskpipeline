@@ -178,6 +178,8 @@ export type ChatModelGroup = {
   driverId: ChatDriverId
   displayName: string
   models: ChatModelInfo[]
+  /** Qoder 组额度不足（无 credit / 仅免费模型可用）时置 true，前端据此提示「当前仅 lite 可用」。 */
+  quotaExhausted?: boolean
 }
 
 /** 可选的 MCP 服务 id（Chat 页 MCP 选择器与 driver 注入共用）。 */

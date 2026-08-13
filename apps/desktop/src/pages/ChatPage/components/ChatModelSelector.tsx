@@ -17,6 +17,7 @@ import {
 } from '@/components/ai-elements/model-selector'
 import { ModelBadges } from '@/components/ModelBadges'
 import { cn } from '@/lib/utils'
+import { pickSystemDefaultModel } from '@/utils/chat-models'
 
 const CAPABILITY_LABEL: Record<ModelCapability['key'], string> = {
   reasoningEffort: '推理力度',
@@ -113,9 +114,10 @@ function CapabilityControls({
  * 模型选择器：直接基于 ai-elements 的 ModelSelector + Command。
  * 触发按钮采用 11px 紧凑样式（与 ChatComposer 工具栏同高），下拉项紧凑。
  *
- * 纯受控：value 为空（含 undefined / 不在 groups 中的旧值）时按钮统一显示 "Auto"，
- * 下拉项 isActive 同样以 value 为准；调用方需自行决定是否在挂载时把默认模型写回 value，
- * 避免在组件内部偷偷调用 onChange 造成渲染期副作用与父子状态打架。
+ * 纯受控：value 为空（含 undefined / 不在 groups 中的旧值）时，按钮展示「系统自动选择」
+ * 的结果（如 Qoder 无额度时的 Lite），并在下拉中对该项打勾 + 「自动」徽章标明它来自
+ * 自动选择而非用户显式选择；调用方 value 保持不变（仍是 undefined），避免在组件内部
+ * 偷偷调用 onChange 造成渲染期副作用与父子状态打架。
  *
  * 参数调节：选中模型声明了 capabilities 且传入 onChangeParams 时，在该条目下方渲染内联控件，
  * 值经 onChangeParams 上抛（与 model value 一起按对话持久化）。
@@ -139,9 +141,13 @@ export function ChatModelSelector({
   const flat = groups.flatMap((group) =>
     group.models.map((model) => ({ ...model, driverId: group.driverId, driverDisplayName: group.displayName }))
   )
-  // 严格受控：仅当 value 能匹配到模型时才有 current；不再回退到 isDefault，
-  // 否则会导致「按钮显示默认名 / 下拉无勾选 / 调用方 value 仍为 undefined」的三方不一致。
+  // 严格受控：仅当 value 能匹配到模型时才有 current。
   const current = value ? flat.find((model) => model.value === value) : undefined
+  // 未显式选择时，展示系统自动选择的结果（与对话/任务默认解析同一规则）。
+  // 只用于展示与下拉标记，不写回 value，保持调用方状态不变。
+  const autoModel = value ? undefined : pickSystemDefaultModel(groups)
+  const autoInfo = autoModel ? flat.find((model) => model.value === autoModel.model) : undefined
+  const displayName = current?.displayName ?? autoInfo?.displayName ?? value ?? 'Auto'
   const hasModels = flat.length > 0
 
   return (
@@ -156,7 +162,18 @@ export function ChatModelSelector({
           aria-label="选择模型"
         >
           <CpuIcon size={10} className="opacity-70" />
-          <span className="max-w-32 truncate">{current?.displayName ?? value ?? 'Auto'}</span>
+          <span
+            className="max-w-32 truncate"
+            title={
+              current?.displayName
+                ? undefined
+                : autoInfo
+                  ? `未显式选择，系统自动选择：${autoInfo.displayName}`
+                  : undefined
+            }
+          >
+            {displayName}
+          </span>
           <ChevronDownIcon size={9} className="opacity-70" />
         </Button>
       </ModelSelectorTrigger>
@@ -177,8 +194,14 @@ export function ChatModelSelector({
                 </span>
               }
             >
+              {group.driverId === 'qoder' && group.quotaExhausted && (
+                <div className="mx-2 mb-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] leading-4 text-amber-500">
+                  Qoder 额度不足，当前仅 lite 免费模型可用
+                </div>
+              )}
               {group.models.map((model) => {
-                const isActive = model.value === value
+                const isAuto = Boolean(autoInfo && model.value === autoInfo.value)
+                const isActive = model.value === value || isAuto
                 return (
                   <div key={model.value}>
                     <ModelSelectorItem
@@ -194,6 +217,9 @@ export function ChatModelSelector({
                         <span className="rounded bg-muted px-1 text-[10px] font-medium text-muted-foreground">
                           默认
                         </span>
+                      )}
+                      {isAuto && (
+                        <span className="rounded bg-primary/10 px-1 text-[10px] font-medium text-primary">自动</span>
                       )}
                       <CheckIcon
                         size={11}

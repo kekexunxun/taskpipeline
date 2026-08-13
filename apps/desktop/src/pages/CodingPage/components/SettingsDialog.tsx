@@ -1483,6 +1483,11 @@ export function SettingsDialog({
                 <TabsContent value="model" className="space-y-5">
                   <Section title="Qoder 模型" description="可用模型由 Qoder 连接状态提供，徽章与对话面板保持一致。">
                     <FieldGroup className="gap-2.5">
+                      {qoder?.usage?.isQuotaExceeded && (
+                        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-4 text-amber-500">
+                          Qoder 额度不足，当前仅 lite 免费模型可用
+                        </div>
+                      )}
                       {qoder?.models.length ? (
                         <div className="grid gap-1.5">
                           {qoder.models.map((item) => (
@@ -1598,6 +1603,7 @@ export function SettingsDialog({
         initial={agentDialog.initial}
         repositories={repositories}
         templates={agentTemplates}
+        agents={agents}
         builtin={agentDialog.initial ? ROLE_AGENT_IDS.includes(agentDialog.initial.id) : false}
         onOpenChange={(next) => setAgentDialog((current) => ({ ...current, open: next }))}
         onError={(reason) => showError(reason instanceof Error ? reason.message : String(reason))}

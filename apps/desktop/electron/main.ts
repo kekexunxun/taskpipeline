@@ -78,6 +78,7 @@ import { QoderTraceBuilder } from './trace/instrument/qoder-trace-builder.js'
 import { resolveBundledOcrBinary, resolveOcrBinary, createOcrRunner } from './ocr.js'
 import { parsePlanDecision } from './plan-content.js'
 import { ChatService, type ChatTraceManager } from './chat/chat-service.js'
+import { LITE_MODEL_PATTERN } from './chat/system-default-model.js'
 import { ChatDriverRegistry } from './chat/drivers/driver-registry.js'
 import { QoderChatDriver } from './chat/drivers/qoder-chat-driver.js'
 import { OpenAIChatDriver } from './chat/drivers/openai-chat-driver.js'
@@ -765,7 +766,7 @@ async function keywordRewriterWithTrace(query: string, traceId?: string, task?: 
 
 /**
  * 轻量任务的模型选择策略（关键词提取 / MR 描述生成等短输出场景共用）：
- * - Qoder: 从 getQoderStatus() 拉模型列表，挑名字含 lite / haiku / mini / flash 的；
+ * - Qoder: 从 getQoderStatus() 拉模型列表，直接找名字含 lite 的免费模型；
  *   找不到或 Qoder 未连接时回落到系统 defaultModel。
  * - OpenAI: 跟随用户配置的 modelProfile（`openai:<model>` 形态）。
  */
@@ -774,14 +775,14 @@ async function resolveLiteModel(driverId: ChatDriverId): Promise<string> {
     try {
       const status = await getQoderStatus()
       const enabled = status.models.filter((m) => m.isEnabled !== false)
-      // 优先选 priceFactor === 0 的（语义上最便宜=“完全免费”的 Lite），
-      // 找不到再按名字特征回落（haiku/flash/lite/mini 作为完整 word 匹配，
-      // 避免 “MiniMax” 里的 “Mini” 被误命中）。
-      const free =
-        enabled.find((m) => m.priceFactor === 0) ??
-        enabled.find((m) => /(^|[^a-z])(lite|haiku|flash|mini)([^a-z]|$)/i.test(`${m.value} ${m.displayName ?? ''}`))
+      // 轻量任务直接用 lite 免费模型：Qoder 无 credit 时可用列表只剩 lite，
+      // 直接按名字找（不做 lite/haiku/flash/mini 多词匹配，避免 MiniMax 等误命中）。
+      const free = enabled.find((m) => {
+        const name = `${m.value} ${m.displayName ?? ''}`.toLowerCase()
+        return m.priceFactor === 0 || name.includes('lite')
+      })
       if (free?.value) return free.value
-      // 没有 lite 特征模型时回落 Qoder 默认模型（isDefault 优先），避免硬编码。
+      // 没有 lite 模型时回落 Qoder 默认模型（isDefault 优先），避免硬编码。
       const pick = enabled.find((m) => m.isDefault) ?? enabled[0]
       if (pick?.value) return pick.value
     } catch {
@@ -829,7 +830,12 @@ function syncSystemDefaultModel(): { provider: 'qoder' | 'openai'; model: string
   const status = qoderStatusCache?.status
   if (status && status.enabled && status.connected && status.models.length > 0) {
     const enabled = status.models.filter((m) => m.isEnabled !== false)
-    const pick = enabled.find((m) => m.isDefault) ?? enabled[0]
+    // Qoder 组内规则：isDefault → lite（priceFactor===0 或名字含 lite/haiku/flash/mini）→ 第一个。
+    // Qoder 无 credit 时可用列表只剩免费模型，回落稳定落在 lite，不依赖列表顺序。
+    const pick =
+      enabled.find((m) => m.isDefault) ??
+      enabled.find((m) => m.priceFactor === 0 || LITE_MODEL_PATTERN.test(`${m.value} ${m.displayName ?? ''}`)) ??
+      enabled[0]
     if (pick?.value) return { provider: 'qoder', model: `qoder:${pick.value}` }
   }
   const profile = defaultOpenAIProfile()
@@ -3772,7 +3778,7 @@ function registerIpc(): void {
   /**
    * 新增 Agent 弹窗中的"AI 生成"按钮：按用户选定的模型（驱动 + 模型名）一次性调 LLM，
    * 根据用户描述 + 选中仓库生成 systemPrompt / engineeringGuidelines。
-   * 入口由前端保证模型已选；此处再做一次前置校验（防御编程）。
+   * 未显式选择模型时由系统自动选择（与对话/任务默认解析同一规则：Qoder → isDefault → lite）。
    *
    * 成功后会在 trace_events 写一条 "其它" 事件，让 Trace 页能看到该次生成。
    */
@@ -3781,13 +3787,13 @@ function registerIpc(): void {
     async (
       _event,
       input: {
-        model: string
+        model?: string
         description: string
         repositories: AgentGenerationRepository[]
       }
     ) => {
-      const model = input?.model?.trim()
-      if (!model) throw new Error('请先在 Agent 弹窗中选择一个模型')
+      const model = input?.model?.trim() || (await chatService.getDefaultModel())?.model
+      if (!model) throw new Error('未配置可用模型，请先在设置中添加 Qoder Token 或 OpenAI 配置')
       const description = input?.description ?? ''
       const repositories = input?.repositories ?? []
       // 先读仓库本地背景（repowiki / agents.md / README.md）注入 prompt，
@@ -3868,7 +3874,22 @@ function registerIpc(): void {
   ipcMain.handle('chats:set-directory', (_event, id: string, workingDirectory?: string) =>
     chatService.setChatWorkingDirectory(id, workingDirectory)
   )
-  ipcMain.handle('chats:list-models', () => chatService.listModels())
+  ipcMain.handle('chats:list-models', async () => {
+    const groups = await chatService.listModels()
+    // Qoder 无 credit（配额用尽 / 可用模型只剩免费）时给 qoder 分组打标，
+    // 前端模型选择弹窗据此提示「当前仅 lite 免费模型可用」，避免用户困惑为何只有 lite。
+    const status = qoderStatusCache?.status
+    if (status?.enabled && status.connected) {
+      const enabled = status.models.filter((m) => m.isEnabled !== false)
+      const quotaExhausted =
+        status.usage?.isQuotaExceeded === true || (enabled.length > 0 && enabled.every((m) => m.priceFactor === 0))
+      if (quotaExhausted) {
+        const qoder = groups.find((group) => group.driverId === 'qoder')
+        if (qoder) qoder.quotaExhausted = true
+      }
+    }
+    return groups
+  })
   ipcMain.handle('chats:default-model', () => chatService.getDefaultModel())
   ipcMain.handle('chats:start-stream', (_event, input) => {
     void chatService.startChatStream(input).catch((reason) => console.error('[chat] stream failed', reason))

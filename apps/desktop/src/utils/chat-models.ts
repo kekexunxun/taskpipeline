@@ -7,15 +7,40 @@
  *  - 组内取 isDefault 标记的模型，无标记取第一个。
  */
 
-import type { ChatModelGroup, SystemDefaultModel } from '../api'
+import type { ChatModelGroup, ChatModelInfo, SystemDefaultModel } from '../api'
 
 export type { SystemDefaultModel }
+
+/**
+ * lite 特征词（完整 word 匹配，词边界避免误命中 MiniMax 等含 mini 前缀的模型名）。
+ * 与 electron/chat/system-default-model.ts 的 LITE_MODEL_PATTERN 双写保持一致。
+ */
+export const LITE_MODEL_PATTERN = /\b(lite|haiku|flash|mini)\b/i
+
+/**
+ * 组内挑选规则（与 electron/chat/system-default-model.ts 双写保持一致）：
+ *  isDefault 标记优先 → 无标记回落 lite（priceFactor===0 或名字含 lite/haiku/flash/mini）
+ *  → 最后兜底第一个。Qoder 无 credit 时可用列表只剩免费模型，回落稳定落在 lite。
+ * 仅对 Qoder 组应用 lite 回落；OpenAI 组保持 isDefault → 第一个（用户显式配置的 profile）。
+ */
+function pickGroupModel(preferred: ChatModelGroup): ChatModelInfo | undefined {
+  if (preferred.driverId !== 'qoder') {
+    return preferred.models.find((item) => item.isDefault) ?? preferred.models[0]
+  }
+  return (
+    preferred.models.find((item) => item.isDefault) ??
+    preferred.models.find(
+      (item) => item.priceFactor === 0 || LITE_MODEL_PATTERN.test(`${item.value} ${item.displayName ?? ''}`)
+    ) ??
+    preferred.models[0]
+  )
+}
 
 /** 从分组列表中挑系统默认模型；无任何可用模型时返回 undefined。 */
 export function pickSystemDefaultModel(groups: ChatModelGroup[]): SystemDefaultModel | undefined {
   const preferred = groups.find((group) => group.driverId === 'qoder') ?? groups[0]
   if (!preferred) return undefined
-  const model = preferred.models.find((item) => item.isDefault) ?? preferred.models[0]
+  const model = pickGroupModel(preferred)
   if (!model) return undefined
   return { driverId: preferred.driverId, model: model.value }
 }

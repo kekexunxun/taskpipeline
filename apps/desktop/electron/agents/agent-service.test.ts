@@ -129,21 +129,78 @@ describe('AgentService CRUD', () => {
   })
 })
 
+describe('AgentService 仓库单一归属', () => {
+  it('save claims repositories from other agents and reports the affected count', () => {
+    const service = makeService()
+    const a = createAgentDraft('A', ['r1', 'r2'])
+    service.save(a)
+    const b = createAgentDraft('B', ['r2'])
+    const affected = service.save(b)
+    expect(affected).toBe(1)
+    const list = service.list()
+    expect(list.find((item) => item.id === a.id)?.repositoryIds).toEqual(['r1'])
+    expect(list.find((item) => item.id === b.id)?.repositoryIds).toEqual(['r2'])
+    expect(service.resolveAgentFor('r2')?.id).toBe(b.id)
+  })
+
+  it('editing an agent without a previously claimed repo does not steal it back', () => {
+    const service = makeService()
+    const a = createAgentDraft('A', ['r1'])
+    service.save(a)
+    const b = createAgentDraft('B', ['r1'])
+    service.save(b)
+    // B 编辑后只勾 r2：r1 不被任何 Agent 绑定，也不会自动回到 A
+    service.save({ ...b, repositoryIds: ['r2'] })
+    expect(service.list().find((item) => item.id === a.id)?.repositoryIds).toEqual([])
+    expect(service.list().find((item) => item.id === b.id)?.repositoryIds).toEqual(['r2'])
+  })
+
+  it('role agents are also bound by single ownership (defensive)', () => {
+    const service = makeService()
+    service.save(createAgentDraft('A', ['r1']))
+    const role = service.list().find((item) => item.builtin)!
+    service.save({ ...role, repositoryIds: ['r1'] })
+    expect(service.list().find((item) => item.id === role.id)?.repositoryIds).toEqual(['r1'])
+    expect(service.list().find((item) => item.name === 'A')?.repositoryIds).toEqual([])
+  })
+
+  it('importAll inherits the single ownership constraint', () => {
+    const service = makeService()
+    service.save(createAgentDraft('A', ['r1']))
+    service.importAll([createAgentDraft('导入B', ['r1'])])
+    const list = service.list()
+    expect(list.find((item) => item.name === 'A')?.repositoryIds).toEqual([])
+    expect(list.find((item) => item.name === '导入B')?.repositoryIds).toEqual(['r1'])
+  })
+})
+
 describe('AgentService resolveAgentFor', () => {
-  it('matches enabled agents by repository whitelist, newest update wins', () => {
+  it('binds a repository to exactly one agent (single ownership after save)', () => {
     const service = makeService()
     service.save({ ...createAgentDraft('旧'), repositoryIds: ['r1'], updatedAt: '2026-01-01T00:00:00.000Z' })
     service.save({ ...createAgentDraft('新'), repositoryIds: ['r1'], updatedAt: '2026-02-01T00:00:00.000Z' })
-    service.save({
+    const list = service.list()
+    // 后保存的「新」独占 r1，旧 Agent 的 r1 被自动解绑
+    expect(list.find((a) => a.name === '旧')?.repositoryIds).toEqual([])
+    expect(list.find((a) => a.name === '新')?.repositoryIds).toEqual(['r1'])
+    expect(service.resolveAgentFor('r1')?.name).toBe('新')
+    service.save({ ...createAgentDraft('无关'), repositoryIds: ['r2'] })
+    expect(service.resolveAgentFor('r2')?.name).toBe('无关')
+    expect(service.resolveAgentFor('missing')).toBeUndefined()
+  })
+
+  it('keeps newest-update-wins as a defensive fallback for legacy/imported duplicate bindings', () => {
+    // 绕过 save() 的单一归属约束直接注入脏数据（历史/导入残留），resolveAgentFor 仍须可确定。
+    const a1 = { ...createAgentDraft('旧'), repositoryIds: ['r1'], updatedAt: '2026-01-01T00:00:00.000Z' }
+    const a2 = { ...createAgentDraft('新'), repositoryIds: ['r1'], updatedAt: '2026-02-01T00:00:00.000Z' }
+    const disabled = {
       ...createAgentDraft('禁用'),
       repositoryIds: ['r1'],
       enabled: false,
       updatedAt: '2026-03-01T00:00:00.000Z'
-    })
-    service.save({ ...createAgentDraft('无关'), repositoryIds: ['r2'] })
+    }
+    const service = makeService([a1, a2, disabled])
     expect(service.resolveAgentFor('r1')?.name).toBe('新')
-    expect(service.resolveAgentFor('r2')?.name).toBe('无关')
-    expect(service.resolveAgentFor('missing')).toBeUndefined()
   })
 
   it('honors an explicitly assigned agent id regardless of the whitelist', () => {

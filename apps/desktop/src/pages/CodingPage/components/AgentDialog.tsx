@@ -3,7 +3,7 @@ import { Loader2Icon, SaveIcon, SparklesIcon } from 'lucide-react'
 import type { AgentProfile, RepositoryProfile } from '@task-pipeline/core'
 import { ChatModelSelector } from '../../ChatPage/components/ChatModelSelector'
 import { AgentAIGenerateDialog } from './AgentAIGenerateDialog'
-import type { AgentGenerationResult, AgentTemplate, ChatModelGroup } from '@/api'
+import type { AgentGenerationResult, AgentTemplate, ChatModelGroup, SystemDefaultModel } from '@/api'
 import { api } from '@/api'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -65,6 +65,7 @@ export function AgentDialog({
   initial,
   repositories,
   templates,
+  agents,
   onSaved,
   onError,
   builtin
@@ -74,6 +75,8 @@ export function AgentDialog({
   initial?: AgentProfile
   repositories: RepositoryProfile[]
   templates: AgentTemplate[]
+  /** 全部 Agent（不含当前编辑项）：用于勾选仓库时提示「已被其他 Agent 绑定，勾选后将自动解绑」。 */
+  agents?: AgentProfile[]
   onSaved(agent: AgentProfile): void
   onError?(reason: unknown): void
   builtin?: boolean
@@ -120,6 +123,23 @@ export function AgentDialog({
       .listChatModels()
       .then((groups) => {
         if (!cancelled) setModelGroups(groups)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [open])
+  // 系统自动选择结果（未选「首选模型」时 AI 生成的 fallback 模型）：
+  // 规则与对话/任务默认解析一致（Qoder → isDefault → lite → 第一个 / OpenAI），
+  // 不落盘、不持久化，仅用于「未选择模型」时自动选择。
+  const [systemDefault, setSystemDefault] = useState<SystemDefaultModel | undefined>()
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    api
+      .getDefaultModel()
+      .then((model) => {
+        if (!cancelled) setSystemDefault(model)
       })
       .catch(() => undefined)
     return () => {
@@ -191,6 +211,8 @@ export function AgentDialog({
   }
   // 模型偏好：取一次放进局部变量，类型收窄到 string，下方判断/JSX 都用它。
   const preferredModel = draft.preferredModel?.trim() || undefined
+  // AI 生成实际使用的模型：首选模型优先；未选时由系统自动选择（不落盘、不持久化）。
+  const effectiveModel = preferredModel ?? systemDefault?.model
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
@@ -291,28 +313,40 @@ export function AgentDialog({
                 </div>
                 {!preferredModel && (
                   <p className="mt-1 text-[11px] text-muted-foreground">
-                    AI 生成需要先选定一个模型；不选模型时跟随系统全局模型设置。
+                    不选模型时由系统自动选择模型（AI 生成与任务执行均如此）。
                   </p>
                 )}
               </Field>
               {!builtin && (
                 <>
                   <div className="col-span-2">
-                    <p className="mb-1.5 text-xs font-medium text-foreground">适用仓库（白名单，可多选）</p>
+                    <p className="mb-1.5 text-xs font-medium text-foreground">
+                      适用仓库（单选归属：一个仓库只属于一个 Agent）
+                    </p>
                     {repositories.length ? (
                       <div className="grid max-h-40 grid-cols-2 gap-1 overflow-y-auto rounded-md border bg-card/40 p-2">
-                        {repositories.map((repository) => (
-                          <label
-                            key={repository.id}
-                            className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-muted/60"
-                          >
-                            <Checkbox
-                              checked={draft.repositoryIds.includes(repository.id)}
-                              onCheckedChange={(checked) => toggleRepository(repository.id, checked === true)}
-                            />
-                            <span className="truncate">{repository.name}</span>
-                          </label>
-                        ))}
+                        {repositories.map((repository) => {
+                          const holder = agents?.find(
+                            (agent) => agent.id !== draft.id && agent.repositoryIds.includes(repository.id)
+                          )
+                          const checked = draft.repositoryIds.includes(repository.id)
+                          return (
+                            <div key={repository.id} className="min-w-0 rounded">
+                              <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-muted/60">
+                                <Checkbox
+                                  checked={checked}
+                                  onCheckedChange={(checked) => toggleRepository(repository.id, checked === true)}
+                                />
+                                <span className="truncate">{repository.name}</span>
+                              </label>
+                              {holder && (
+                                <p className="px-1.5 pb-1 text-[10px] leading-3.5 text-amber-500">
+                                  当前由「{holder.name}」绑定，勾选后将自动解绑
+                                </p>
+                              )}
+                            </div>
+                          )
+                        })}
                       </div>
                     ) : (
                       <p className="rounded-md border border-dashed p-3 text-center text-[11px] text-muted-foreground">
@@ -341,14 +375,20 @@ export function AgentDialog({
             </FieldGroup>
           </div>
           <DialogFooter className="border-t px-5 py-2.5">
-            {/* AI 生成：未选模型时禁用，避免空请求；打开二级弹窗调模型填充系统提示词与工程约定。 */}
+            {/* AI 生成：未选模型时由系统自动选择模型（打开二级弹窗调模型填充系统提示词与工程约定）。 */}
             <Button
               variant="outline"
               size="sm"
               className="mr-auto gap-1"
-              disabled={!preferredModel || saving}
+              disabled={!effectiveModel || saving}
               onClick={() => setAiGenerateOpen(true)}
-              title={preferredModel ? '用选定模型生成系统提示词与工程约定' : '请先选择一个模型'}
+              title={
+                effectiveModel
+                  ? preferredModel
+                    ? '用选定模型生成系统提示词与工程约定'
+                    : '未选择模型，将由系统自动选择模型'
+                  : '暂无可用的模型，请先在设置中配置'
+              }
             >
               <SparklesIcon size={12} />
               AI 生成
@@ -365,13 +405,13 @@ export function AgentDialog({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      {/* AI 生成二级弹窗：未选模型时入口已在 AgentDialog 禁用，此处再做一次校验防御。
+      {/* AI 生成二级弹窗：model 已由 host 解析（首选模型优先，未选时系统自动选择）。
           仓库选择与 host 完全共享：受控透传 draft.repositoryIds，在二级弹窗调整后同步回 host。 */}
-      {preferredModel && (
+      {effectiveModel && (
         <AgentAIGenerateDialog
           open={aiGenerateOpen}
           onOpenChange={setAiGenerateOpen}
-          model={preferredModel}
+          model={effectiveModel}
           repositories={repositories}
           selectedRepositoryIds={draft.repositoryIds}
           onSelectedRepositoryIdsChange={(ids) => update('repositoryIds', ids)}
