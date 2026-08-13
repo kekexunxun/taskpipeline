@@ -96,6 +96,8 @@ export function useChat() {
   const [taskBackend, setTaskBackend] = useState<{ id: string; displayName: string; configured: boolean }>()
   /** 选中的 MCP 服务列表（随对话落盘，切换对话时按落盘值恢复）。 */
   const [mcpService, setMcpService] = useState<McpServiceId[]>([])
+  /** 选中的 Skill 名列表（随对话落盘，切换对话时按落盘值恢复）。 */
+  const [skills, setSkills] = useState<string[]>([])
   /** 选中的 Agent id（随对话落盘，切换对话时按落盘值恢复）。 */
   const [agentId, setAgentIdState] = useState<string>()
   const [agents, setAgents] = useState<AgentProfile[]>([])
@@ -175,9 +177,10 @@ export function useChat() {
           if (fallback) setModelAndDriver(fallback.model)
           setModelParams(undefined)
         }
-        // MCP / Agent 选择态按落盘值恢复（切换对话不丢失）；agents 列表异步到达，
+        // MCP / Skill / Agent 选择态按落盘值恢复（切换对话不丢失）；agents 列表异步到达，
         // selectedAgentRef 由上面的 effect 在列表加载后按 id 回填。
         setMcpService(next.conversation.mcpService ?? [])
+        setSkills(next.conversation.skills ?? [])
         setAgentIdState(next.conversation.agentId)
       } catch (reason) {
         showError(reason instanceof Error ? reason.message : String(reason))
@@ -300,6 +303,7 @@ export function useChat() {
         message: { id: userId, text, createdAt },
         mode: (taskCreationEnabled ? 'task-create' : 'chat') satisfies ChatAgentMode,
         mcpService,
+        skills,
         agentId,
         systemPrompt: selectedAgentRef.current?.systemPrompt,
         onEvent: (event) => {
@@ -354,7 +358,19 @@ export function useChat() {
 
       return targetId
     },
-    [activeId, agentId, draft, driverId, mcpService, model, modelParams, refreshMetas, showError, taskCreationEnabled]
+    [
+      activeId,
+      agentId,
+      draft,
+      driverId,
+      mcpService,
+      model,
+      modelParams,
+      refreshMetas,
+      showError,
+      skills,
+      taskCreationEnabled
+    ]
   )
 
   /**
@@ -416,6 +432,7 @@ export function useChat() {
       taskCreationEnabled,
       taskBackend,
       mcpService,
+      skills,
       agentId,
       setDraft,
       setModelAndDriver,
@@ -423,6 +440,7 @@ export function useChat() {
       setDriverId,
       setTaskCreationEnabled,
       setMcpService,
+      setSkills,
       setAgentId,
       select,
       create,
@@ -446,6 +464,7 @@ export function useChat() {
       taskCreationEnabled,
       taskBackend,
       mcpService,
+      skills,
       agentId,
       select,
       create,

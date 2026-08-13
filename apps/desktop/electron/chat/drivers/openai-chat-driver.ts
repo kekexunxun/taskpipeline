@@ -324,7 +324,9 @@ export class OpenAIChatDriver implements ChatDriver {
     /** 埋点管线：对话路径 span 采集（可选，缺省不采集）。 */
     private readonly tracePipeline?: TracePipeline,
     /** 用户勾选的 MCP 服务 → stdio 配置（缺省 = 不注入外部 MCP）。 */
-    private readonly mcpProfileResolver?: McpServiceProfileResolver
+    private readonly mcpProfileResolver?: McpServiceProfileResolver,
+    /** 用户勾选的 Skill → 正文（缺省 = 不注入技能；ai-sdk 无 skills 概念，正文拼进 system）。 */
+    private readonly resolveSkillContent?: (names: string[]) => string | undefined
   ) {
     if (!store) throw new Error('OpenAIChatDriver requires a TaskStore')
     if (!getApiKey) throw new Error('OpenAIChatDriver requires an api key provider')
@@ -445,7 +447,8 @@ export class OpenAIChatDriver implements ChatDriver {
     const system = [
       input.cwd ? `当前工作目录: ${input.cwd}` : '',
       systemText,
-      taskSource ? taskSource.systemPrompt() : ''
+      taskSource ? taskSource.systemPrompt() : '',
+      input.skills?.length && this.resolveSkillContent ? this.resolveSkillContent(input.skills) : ''
     ]
       .filter(Boolean)
       .join('\n\n')

@@ -19,6 +19,8 @@ import { RepositoryDialog, TestButton, type RepoDraft } from './RepositoryDialog
 import { AgentDialog } from './AgentDialog'
 import { MemoryDialog } from './MemoryDialog'
 import { OpenAIProfileDialog, type OpenAIProfile } from './OpenAIProfileDialog'
+import { McpSettingsTab } from './McpSettingsTab'
+import { SkillSettingsTab } from './SkillSettingsTab'
 import { ModelBadges } from '@/components/ModelBadges'
 import { detectVendor, type ModelVendor } from '@/utils/model-vendors'
 import { api, type CapabilityKey, type MemorySearchResult, type SystemDefaultModel } from '@/api'
@@ -1030,6 +1032,12 @@ export function SettingsDialog({
                 <TabsTrigger className="h-7 justify-start px-2 text-xs!" value="model">
                   模型
                 </TabsTrigger>
+                <TabsTrigger className="h-7 justify-start px-2 text-xs!" value="mcp">
+                  MCP
+                </TabsTrigger>
+                <TabsTrigger className="h-7 justify-start px-2 text-xs!" value="skill">
+                  Skill
+                </TabsTrigger>
               </TabsList>
               <div className="thin-scrollbar min-h-0 space-y-5 overflow-y-auto p-6">
                 <TabsContent value="general" className="space-y-5">
@@ -1575,6 +1583,12 @@ export function SettingsDialog({
                       </Button>
                     </FieldGroup>
                   </Section>
+                </TabsContent>
+                <TabsContent value="mcp" className="space-y-5">
+                  <McpSettingsTab />
+                </TabsContent>
+                <TabsContent value="skill" className="space-y-5">
+                  <SkillSettingsTab />
                 </TabsContent>
               </div>
             </Tabs>

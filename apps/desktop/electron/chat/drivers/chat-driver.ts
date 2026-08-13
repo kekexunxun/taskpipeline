@@ -57,6 +57,8 @@ export type StreamChatInput = {
    * Qoder 走 SDK mcpServers（stdio 子进程），OpenAI 走 MCP 客户端桥接成 ai-sdk 工具。
    */
   mcpServices?: McpServiceId[]
+  /** 选中的 Skill 名列表（driver 负责注入：Qoder 走 SDK skills，OpenAI 走 system 拼接）。 */
+  skills?: string[]
   /**
    * 对话绑定的工作目录(项目对话)。driver 应让 Agent 在该目录下执行;
    * 缺省时回退到进程当前目录。

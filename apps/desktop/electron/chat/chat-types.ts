@@ -182,8 +182,11 @@ export type ChatModelGroup = {
   quotaExhausted?: boolean
 }
 
-/** 可选的 MCP 服务 id（Chat 页 MCP 选择器与 driver 注入共用）。 */
-export type McpServiceId = 'gitlab' | 'jira' | 'confluence'
+/**
+ * 可选的 MCP 服务 id（Chat 页 MCP 选择器与 driver 注入共用）。
+ * 内置固定 gitlab / jira / confluence，另可由设置页新增自定义服务（统一存 dataDir/mcp.json）。
+ */
+export type McpServiceId = string
 
 /** 对话持久化形态。 */
 export type ChatConversationMeta = {
@@ -197,6 +200,8 @@ export type ChatConversationMeta = {
   modelParams?: ModelParams
   /** 最近一轮选中的 MCP 服务列表（随对话落盘，切换对话后恢复并注入 driver）。 */
   mcpService?: McpServiceId[]
+  /** 最近一轮选中的 Skill 名列表（随对话落盘，切换对话后恢复并注入 driver）。 */
+  skills?: string[]
   /** 最近一轮选中的 Agent id（随对话落盘，切换对话后恢复选择态）。 */
   agentId?: string
   messageCount: number
@@ -238,6 +243,8 @@ export type StartChatStreamInput = {
   mode?: ChatAgentMode
   /** 选中的 MCP 服务列表（落盘 + 注入 driver 工具：Qoder 走 mcpServers，OpenAI 走 MCP 桥接工具）。 */
   mcpService?: McpServiceId[]
+  /** 选中的 Skill 名列表（落盘 + 注入 driver：Qoder 走 SDK skills，OpenAI 走 system 拼接）。 */
+  skills?: string[]
   /** 选中 Agent 的 id（落盘与 Trace 展示用；systemPrompt 单独注入）。 */
   agentId?: string
   /** 选中 Agent 的 systemPrompt，注入为本轮 system 消息并随对话落盘。 */

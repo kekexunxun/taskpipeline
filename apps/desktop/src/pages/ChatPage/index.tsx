@@ -5,6 +5,7 @@ import { ChatConversation } from './components/ChatConversation'
 import { ChatComposer } from './components/ChatComposer'
 import { ChatModelSelector } from './components/ChatModelSelector'
 import { ChatMcpSelector } from './components/ChatMcpSelector'
+import { ChatSkillSelector } from './components/ChatSkillSelector'
 import { ChatAgentSelector } from './components/ChatAgentSelector'
 import { ChatDirectoryBadge } from './components/ChatDirectoryBadge'
 import { TaskCreationTool } from './components/TaskCreationTool'
@@ -174,6 +175,7 @@ function ChatPageInner() {
                   disabled={chat.streaming}
                 />
                 <ChatMcpSelector selected={chat.mcpService} onChange={chat.setMcpService} disabled={chat.streaming} />
+                <ChatSkillSelector selected={chat.skills} onChange={chat.setSkills} disabled={chat.streaming} />
                 <ChatAgentSelector selected={chat.agentId} onChange={chat.setAgentId} disabled={chat.streaming} />
                 <TaskCreationTool
                   selected={chat.taskCreationEnabled}

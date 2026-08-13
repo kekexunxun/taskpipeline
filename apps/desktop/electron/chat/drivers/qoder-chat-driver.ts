@@ -159,7 +159,12 @@ export class QoderChatDriver implements ChatDriver {
     /** 用户勾选的 MCP 服务 → stdio 配置（缺省 = 不注入外部 MCP）。 */
     private readonly mcpProfileResolver?: McpServiceProfileResolver,
     /** 工具调用 HITL：需要用户决策时回调（缺省 = 不注入，SDK 遇 can_use_tool 会抛错）。 */
-    private readonly onToolPermission?: QoderToolPermissionHandler
+    private readonly onToolPermission?: QoderToolPermissionHandler,
+    /**
+     * Skill 配置根（dataDir，其下有 skills/<name>/SKILL.md）。
+     * 选中技能时透传 SDK `skills` 并切 QODER_CONFIG_DIR 让 CLI 从该目录发现技能（实测定案，见计划 §4.2）。
+     */
+    private readonly skillsConfigRoot?: string
   ) {
     if (!tokenProvider) throw new Error('QoderChatDriver requires a token provider')
     if (!statusProvider) throw new Error('QoderChatDriver requires a status provider')
@@ -367,6 +372,14 @@ export class QoderChatDriver implements ChatDriver {
         ? {
             mcpServers,
             allowedMcpServerNames: serverNames
+          }
+        : {}),
+      // 选中的 Skill：SDK `skills` 按 SKILL.md name 映射 Skill(<name>) 工具 + CLI `<available_skills>`
+      // 注入；技能根不在 CLI 默认 ~/.qoder 时切 QODER_CONFIG_DIR（实测定案：config root 的 skills/ 即技能根）。
+      ...(input.skills?.length && this.skillsConfigRoot
+        ? {
+            skills: input.skills,
+            env: { QODER_CONFIG_DIR: this.skillsConfigRoot }
           }
         : {}),
       // 工具调用 HITL：SDK 的 can_use_tool 控制请求 → 上层弹窗让用户决策(allow 由用户显式确认，不自动放行)。

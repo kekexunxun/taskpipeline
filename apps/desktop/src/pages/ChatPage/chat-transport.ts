@@ -28,7 +28,9 @@ export class ElectronChatTransport {
     message: { id: string; text: string; createdAt: string }
     mode?: 'chat' | 'task-create'
     /** 选中的 MCP 服务列表（透传给主进程 ChatService）。 */
-    mcpService?: ('gitlab' | 'jira' | 'confluence')[]
+    mcpService?: string[]
+    /** 选中的 Skill 名列表（透传给主进程 ChatService）。 */
+    skills?: string[]
     /** 选中 Agent 的 id（落盘与 Trace 展示用；systemPrompt 单独透传）。 */
     agentId?: string
     /** 选中 Agent 的 systemPrompt（透传给主进程 ChatService 注入本轮对话）。 */
@@ -78,6 +80,7 @@ export class ElectronChatTransport {
         message: input.message,
         mode: input.mode,
         mcpService: input.mcpService,
+        skills: input.skills,
         agentId: input.agentId,
         systemPrompt: input.systemPrompt
       })

@@ -260,7 +260,9 @@ export type ChatConversationMeta = {
   /** 对话级运行时模型参数（推理力度/思考模式等），随对话持久化。 */
   modelParams?: ModelParams
   /** 最近一轮选中的 MCP 服务列表（随对话落盘，切换对话后恢复并注入 driver）。 */
-  mcpService?: ('gitlab' | 'jira' | 'confluence')[]
+  mcpService?: string[]
+  /** 最近一轮选中的 Skill 名列表（随对话落盘，切换对话后恢复并注入 driver）。 */
+  skills?: string[]
   /** 最近一轮选中的 Agent id（随对话落盘，切换对话后恢复选择态）。 */
   agentId?: string
   messageCount: number
@@ -330,7 +332,9 @@ export type StartChatStreamInput = {
   message: { id: string; text: string; createdAt: string }
   mode?: ChatAgentMode
   /** 选中的 MCP 服务列表（落盘 + 注入 driver 工具：Qoder 走 mcpServers，OpenAI 走 MCP 桥接工具）。 */
-  mcpService?: ('gitlab' | 'jira' | 'confluence')[]
+  mcpService?: string[]
+  /** 选中的 Skill 名列表（落盘 + 注入 driver：Qoder 走 SDK skills，OpenAI 走 system 拼接）。 */
+  skills?: string[]
   /** 选中 Agent 的 id（落盘与 Trace 展示用；systemPrompt 单独注入）。 */
   agentId?: string
   /** 选中 Agent 的 systemPrompt，由 ChatService 注入为本轮 system 消息。 */
@@ -419,6 +423,34 @@ export type AgentGenerationResult = {
   engineeringGuidelines: string
 }
 
+export type McpServerTransport = 'stdio' | 'sse' | 'streamable-http'
+
+/** 统一 mcp.json 中的单个 MCP 服务条目（与主进程 chat/mcp-config.ts 同构）。 */
+export type McpServerEntry = {
+  id: string
+  name: string
+  description?: string
+  /** 内置服务（gitlab/jira/confluence）：不可修改参数/删除，仅可切换 enabled。 */
+  builtin: boolean
+  enabled: boolean
+  transport: McpServerTransport
+  command?: string
+  args?: string[]
+  url?: string
+  env?: Record<string, string>
+  headers?: Record<string, string>
+}
+
+export type McpServerTestResult = { ok: boolean; tools: string[]; message: string }
+
+/** Skill 条目（dataDir/skills/<name>/SKILL.md，Agent Skills 标准）。 */
+export type SkillInfo = {
+  name: string
+  description: string
+  path: string
+  source: 'folder' | 'zip'
+}
+
 export type AgentApi = {
   listTasks(): Promise<TaskCard[]>
   getTask(id: string): Promise<TaskDetail>
@@ -464,6 +496,22 @@ export type AgentApi = {
   testAtlassian(kind: 'jira' | 'confluence'): Promise<{ ok: boolean; message: string }>
   /** 测试 GitLab MCP 连接（复用 gitlabUrl/gitlabToken，端点 {url}/api/v4/mcp 握手）。 */
   testGitlabMcp(): Promise<{ ok: boolean; message: string }>
+  /** 拉取统一 MCP 配置（内置 + 自定义）。 */
+  listMcpServers(): Promise<{ servers: McpServerEntry[]; filePath: string }>
+  /** 保存（新增/编辑）MCP 服务，返回更新后的完整列表。 */
+  saveMcpServer(entry: McpServerEntry): Promise<McpServerEntry[]>
+  /** 删除自定义 MCP 服务（内置拒绝），返回更新后的完整列表。 */
+  deleteMcpServer(id: string): Promise<McpServerEntry[]>
+  /** 连接测试指定 MCP 服务：listTools 验证并返回工具列表。 */
+  testMcpServer(id: string): Promise<McpServerTestResult>
+  /** 拉取已导入的 Skill 列表（dataDir/skills）。 */
+  listSkills(): Promise<SkillInfo[]>
+  /** 弹窗选择 zip 导入 Skill（取消返回 undefined）。 */
+  importSkillZip(): Promise<SkillInfo | undefined>
+  /** 弹窗选择文件夹导入 Skill（取消返回 undefined）。 */
+  importSkillFolder(): Promise<SkillInfo | undefined>
+  /** 删除 Skill，返回更新后的列表。 */
+  deleteSkill(name: string): Promise<SkillInfo[]>
   /** 触发一轮凭据探测，完成后返回最新全局状态快照。 */
   checkCredentials(): Promise<CredentialState[]>
   /** 拉取当前凭据全局状态快照。 */
@@ -947,6 +995,30 @@ export const api: AgentApi = window.agentApi ?? {
   },
   async testGitlabMcp() {
     return { ok: false, message: 'Electron is required' }
+  },
+  async listMcpServers() {
+    return { servers: [], filePath: '' }
+  },
+  async saveMcpServer() {
+    return [] as McpServerEntry[]
+  },
+  async deleteMcpServer() {
+    return [] as McpServerEntry[]
+  },
+  async testMcpServer() {
+    return { ok: false, tools: [] as string[], message: 'Electron is required' }
+  },
+  async listSkills() {
+    return [] as SkillInfo[]
+  },
+  async importSkillZip() {
+    return undefined
+  },
+  async importSkillFolder() {
+    return undefined
+  },
+  async deleteSkill() {
+    return [] as SkillInfo[]
   },
   async checkCredentials() {
     return [] as CredentialState[]

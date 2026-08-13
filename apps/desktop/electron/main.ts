@@ -83,6 +83,14 @@ import { ChatDriverRegistry } from './chat/drivers/driver-registry.js'
 import { QoderChatDriver } from './chat/drivers/qoder-chat-driver.js'
 import { OpenAIChatDriver } from './chat/drivers/openai-chat-driver.js'
 import { createMcpServiceResolver } from './chat/mcp-services.js'
+import {
+  loadMcpServers,
+  saveMcpServers,
+  validateMcpServerEntry,
+  BUILTIN_MCP_IDS,
+  type McpServerEntry
+} from './chat/mcp-config.js'
+import { listSkills, importSkillZip, importSkillFolder, deleteSkill, readSkillContent } from './chat/skill-store.js'
 import { JiraTaskCreationBackend } from './chat/task-backends/jira.js'
 import type { ChatDriverId, ChatConversation } from './chat/chat-types.js'
 import { MemoryService, renderMemoryContext, type KeywordRewriter } from './memory/memory-service.js'
@@ -158,6 +166,8 @@ const pendingUi = new Map<string, (response: Record<string, unknown>) => void>()
 const dataDir = process.env.TASK_PIPELINE_DATA_DIR ?? join(app.getPath('userData'), 'data')
 process.env.TASK_PIPELINE_DATA_DIR = dataDir
 mkdirSync(dataDir, { recursive: true })
+// Skill 根目录（dataDir/skills）：设置页管理 + 对话注入（Qoder 走 QODER_CONFIG_DIR，OpenAI 走 system 拼接）。
+const skillsRoot = join(dataDir, 'skills')
 const store = new (class extends TaskStore {
   /**
    * 任务终态统一收尾：任何路径（workflow / completer / merge-refresher / IPC / updateState）
@@ -686,11 +696,18 @@ const chatTraceManager: ChatTraceManager = {
 }
 
 // Chat driver registry — 统一装 Qoder / OpenAI 两份 driver；后续接入更多 driver 仅需改此处。
-// MCP 服务解析器：凭据复用现有 store 设置 + protectedValue（driver 不感知凭据来源）。
-const chatMcpResolver = createMcpServiceResolver({
+// MCP 配置唯一真相：dataDir/mcp.json（内置 gitlab/jira/confluence + 自定义，见 chat/mcp-config.ts）。
+const mcpConfigPath = join(dataDir, 'mcp.json')
+// MCP 服务解析器：每次调用实时读 mcp.json（配置修改立即生效）；凭据复用 store + protectedValue。
+const chatMcpResolver = createMcpServiceResolver(() => loadMcpServers(mcpConfigPath), {
   getSetting: (key) => store.getSetting(key),
   getSecret: (key) => protectedValue(key)
 })
+// 对话注入用的技能正文解析器（OpenAI driver：选中技能拼进 system；读 dataDir/skills/<name>/SKILL.md）。
+const resolveSkillContent = (names: string[]): string | undefined => {
+  const parts = names.map((name) => readSkillContent(skillsRoot, name)).filter((part): part is string => Boolean(part))
+  return parts.length > 0 ? parts.join('\n\n') : undefined
+}
 const chatDriverRegistry = new ChatDriverRegistry()
 chatDriverRegistry.register(
   new QoderChatDriver(
@@ -722,7 +739,9 @@ chatDriverRegistry.register(
           { timeout: 10 * 60_000, signal } // 会话中止/超时默认拒绝（安全兜底）
         )) ?? false
       return ok ? 'allow' : 'deny'
-    }
+    },
+    // 选中 Skill 时切 QODER_CONFIG_DIR 指向 dataDir（其下 skills/ 即 CLI 技能根，实测定案）。
+    dataDir
   )
 )
 chatDriverRegistry.register(
@@ -737,7 +756,8 @@ chatDriverRegistry.register(
       return undefined
     },
     tracePipeline,
-    chatMcpResolver
+    chatMcpResolver,
+    resolveSkillContent
   )
 )
 
@@ -3117,32 +3137,30 @@ async function checkGitLabCredential(token: string): Promise<Pick<CredentialStat
   }
 }
 
-/** GitLab MCP 握手：复用 gitlabUrl/gitlabToken，经 npx @zereight/mcp-gitlab（stdio）listTools 验证连通。 */
-async function testGitlabMcp(): Promise<{ ok: boolean; message: string }> {
-  const url = store.getSetting('gitlabUrl')?.trim().replace(/\/$/, '')
-  const token = protectedValue('gitlabToken')
-  if (!url || !token) return { ok: false, message: '请先配置 GitLab URL 与 Token' }
-  const client = new McpClient({
-    id: 'gitlab-mcp',
-    name: 'GitLab MCP',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@zereight/mcp-gitlab'],
-    env: {
-      GITLAB_PERSONAL_ACCESS_TOKEN: token,
-      GITLAB_API_URL: `${url}/api/v4`
-    },
-    tools: {}
-  })
+/**
+ * 通用 MCP 连接测试：按 id 解析出 profile（统一 mcp.json + 凭据注入），
+ * 经 McpClient.listTools() 验证连通并返回工具列表。内置/自定义服务共用。
+ */
+async function testMcpConnectionById(id: string): Promise<{ ok: boolean; tools: string[]; message: string }> {
+  const profile = chatMcpResolver(id)
+  if (!profile) return { ok: false, tools: [], message: '未找到该服务，或未启用 / 凭据缺失' }
+  const client = new McpClient(profile)
   try {
-    // npx 冷启动可能需下载包，超时放宽到 30s（与 McpClient 内部 request 超时一致）。
-    const tools = await withTimeout(client.listTools(), 30_000, 'GitLab MCP 连接超时（30s）')
-    return { ok: true, message: `已连接，发现 ${tools.length} 个工具` }
+    // npx/uvx 冷启动可能需下载包，超时放宽到 30s（与 McpClient 内部 request 超时一致）。
+    const tools = await withTimeout(client.listTools(), 30_000, 'MCP 连接超时（30s）')
+    const names = tools.map((tool) => String((tool as { name?: unknown })?.name ?? '').trim()).filter(Boolean)
+    return { ok: true, tools: names, message: `已连接，发现 ${tools.length} 个工具` }
   } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    return { ok: false, tools: [], message: error instanceof Error ? error.message : String(error) }
   } finally {
     client.close()
   }
+}
+
+/** GitLab MCP 握手（兼容旧 IPC/UI：复用通用测试，仅映射返回形态）。 */
+async function testGitlabMcp(): Promise<{ ok: boolean; message: string }> {
+  const result = await testMcpConnectionById('gitlab')
+  return { ok: result.ok, message: result.message }
 }
 
 /**
@@ -3696,6 +3714,61 @@ function registerIpc(): void {
   ipcMain.handle('task:ui-response', (_event, response: Record<string, unknown>) =>
     pendingUi.get(String(response.id))?.(response)
   )
+  // === MCP 统一配置（dataDir/mcp.json）：内置只读+启停，自定义可增改删 ==========
+  ipcMain.handle('mcp:list', () => ({ servers: loadMcpServers(mcpConfigPath), filePath: mcpConfigPath }))
+  ipcMain.handle('mcp:save', (_event, entry: McpServerEntry) => {
+    const servers = loadMcpServers(mcpConfigPath)
+    const editingId = entry?.id
+    if (typeof editingId !== 'string' || !editingId) throw new Error('缺少服务 id')
+    const error = validateMcpServerEntry(entry, servers, editingId)
+    if (error) throw new Error(error)
+    const existing = servers.find((s) => s.id === editingId)
+    const next = existing
+      ? servers.map((s) =>
+          s.id === editingId
+            ? // 内置：参数锁定，仅允许切换 enabled；自定义：完整替换
+              s.builtin
+              ? { ...s, enabled: Boolean(entry.enabled) }
+              : { ...s, ...entry, builtin: false, enabled: Boolean(entry.enabled ?? s.enabled) }
+            : s
+        )
+      : [...servers, { ...entry, builtin: false, enabled: entry.enabled !== false }]
+    saveMcpServers(mcpConfigPath, next)
+    return loadMcpServers(mcpConfigPath)
+  })
+  ipcMain.handle('mcp:delete', (_event, id: string) => {
+    if (BUILTIN_MCP_IDS.has(id)) throw new Error('内置服务不允许删除')
+    saveMcpServers(
+      mcpConfigPath,
+      loadMcpServers(mcpConfigPath).filter((s) => s.id !== id)
+    )
+    return loadMcpServers(mcpConfigPath)
+  })
+  ipcMain.handle('mcp:test', (_event, id: string) => testMcpConnectionById(id))
+  // === Skill 管理（dataDir/skills）：文件夹 + zip 导入，删除 ==================
+  ipcMain.handle('skill:list', () => listSkills(skillsRoot))
+  ipcMain.handle('skill:import-zip', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow!, {
+      properties: ['openFile'],
+      filters: [{ name: 'Skill ZIP', extensions: ['zip'] }]
+    })
+    const zipPath = canceled ? undefined : filePaths[0]
+    if (!zipPath) return undefined
+    return importSkillZip(skillsRoot, zipPath)
+  })
+  ipcMain.handle('skill:import-folder', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow!, {
+      properties: ['openDirectory']
+    })
+    const folderPath = canceled ? undefined : filePaths[0]
+    if (!folderPath) return undefined
+    return importSkillFolder(skillsRoot, folderPath)
+  })
+  ipcMain.handle('skill:delete', (_event, name: string) => {
+    if (typeof name !== 'string' || !name) throw new Error('缺少技能名')
+    deleteSkill(skillsRoot, name)
+    return listSkills(skillsRoot)
+  })
   // === Memory 系统(仓库级 / 用户级 / 对话级 + repowiki 文档) ==================
   ipcMain.handle(
     'memory:list',

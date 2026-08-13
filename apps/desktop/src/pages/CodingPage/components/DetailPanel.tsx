@@ -13,6 +13,7 @@ import {
 import type { TaskCard, TaskRepository } from '@task-pipeline/core'
 import type { TaskDetail, ChangedFile } from '../../../api'
 import { ChatMcpSelector, type McpServiceId } from '../../ChatPage/components/ChatMcpSelector'
+import { ChatSkillSelector } from '../../ChatPage/components/ChatSkillSelector'
 import { useChatModels } from '../../../hooks/useChatModels'
 import { isModelAvailable, pickSystemDefaultModel } from '../../../utils/chat-models'
 import { inReviewStates } from '../../../utils/status'
@@ -58,6 +59,9 @@ type Props = {
   /** 任务详情 Composer 选中的 MCP 服务列表（会话内有效，不持久化）。 */
   mcpService: McpServiceId[]
   onMcpServiceChange(services: McpServiceId[]): void
+  /** 任务详情 Composer 选中的 Skill 名列表（会话内有效，不持久化）。 */
+  skills: string[]
+  onSkillsChange(skills: string[]): void
   onFocusedChange(value: boolean): void
   onClose(): void
   onOpenVSCode(): void
@@ -98,6 +102,8 @@ export function DetailPanel({
   focused,
   mcpService,
   onMcpServiceChange,
+  skills,
+  onSkillsChange,
   onFocusedChange,
   onClose,
   onOpenVSCode,
@@ -393,7 +399,10 @@ export function DetailPanel({
                 !inReviewStates.has(task.state))
             }
             leftSlot={
-              <ChatMcpSelector selected={mcpService} onChange={onMcpServiceChange} disabled={running || sending} />
+              <>
+                <ChatMcpSelector selected={mcpService} onChange={onMcpServiceChange} disabled={running || sending} />
+                <ChatSkillSelector selected={skills} onChange={onSkillsChange} disabled={running || sending} />
+              </>
             }
           />
         </div>

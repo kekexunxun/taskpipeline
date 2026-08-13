@@ -96,6 +96,7 @@ const callbacks = {
   onPrompt: vi.fn(),
   onSend: vi.fn(),
   onMcpServiceChange: vi.fn(),
+  onSkillsChange: vi.fn(),
   onOpenUrl: vi.fn()
 }
 
@@ -114,6 +115,7 @@ describe('DetailPanel tabs', () => {
         merging={false}
         focused={false}
         mcpService={[]}
+        skills={[]}
         {...callbacks}
       />
     )
@@ -151,6 +153,7 @@ describe('DetailPanel tabs', () => {
         merging={false}
         focused={false}
         mcpService={[]}
+        skills={[]}
         {...callbacks}
       />
     )
@@ -176,6 +179,7 @@ describe('DetailPanel tabs', () => {
         merging={false}
         focused={false}
         mcpService={[]}
+        skills={[]}
         {...callbacks}
         onApprovePlan={onApprovePlan}
         onRevisePlan={onRevisePlan}

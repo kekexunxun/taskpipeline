@@ -27,6 +27,8 @@ export default function CodingPage() {
   const [removingTaskIds, setRemovingTaskIds] = useState<Set<string>>(() => new Set())
   /** 任务详情 Composer 选中的 MCP 服务列表（会话内有效，不持久化）。 */
   const [detailMcpService, setDetailMcpService] = useState<McpServiceId[]>([])
+  /** 任务详情 Composer 选中的 Skill 名列表（会话内有效，不持久化）。 */
+  const [detailSkills, setDetailSkills] = useState<string[]>([])
 
   // URL ↔ state 同步
   useEffect(() => {
@@ -130,6 +132,8 @@ export default function CodingPage() {
             focused={detailFocused}
             mcpService={detailMcpService}
             onMcpServiceChange={setDetailMcpService}
+            skills={detailSkills}
+            onSkillsChange={setDetailSkills}
             onFocusedChange={setDetailFocused}
             onClose={onCloseDetail}
             onOpenVSCode={() => {

@@ -269,6 +269,7 @@ export class ChatService {
       effective.model,
       {
         ...(effective.mcpService?.length ? { mcpServices: effective.mcpService } : {}),
+        ...(effective.skills?.length ? { skills: effective.skills } : {}),
         ...(effective.agentId ? { agentId: effective.agentId } : {})
       }
     )
@@ -313,8 +314,9 @@ export class ChatService {
         driverId: effective.driverId,
         // 运行时模型参数随对话落盘：切回对话时恢复，换模型时由前端清空后不再携带。
         ...(effective.modelParams ? { modelParams: effective.modelParams } : {}),
-        // 选中的 MCP 服务 / Agent 随对话落盘：切换对话后前端恢复选择态，发送时注入 driver。
+        // 选中的 MCP 服务 / Skill / Agent 随对话落盘：切换对话后前端恢复选择态，发送时注入 driver。
         ...(effective.mcpService?.length ? { mcpService: effective.mcpService } : {}),
+        ...(effective.skills?.length ? { skills: effective.skills } : {}),
         ...(effective.agentId ? { agentId: effective.agentId } : {}),
         updatedAt: now
       })
@@ -357,7 +359,8 @@ export class ChatService {
           cwd: conversation.workingDirectory,
           ...(turnTraceId ? { traceId: turnTraceId } : {}),
           ...(toolSource ? { toolSource } : {}),
-          ...(effective.mcpService?.length ? { mcpServices: effective.mcpService } : {})
+          ...(effective.mcpService?.length ? { mcpServices: effective.mcpService } : {}),
+          ...(effective.skills?.length ? { skills: effective.skills } : {})
         })) {
           if (abort.signal.aborted) break
           // 累积 parts
