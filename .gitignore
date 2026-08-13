@@ -12,3 +12,5 @@ apps/desktop/main.js
 *.db
 *.db-*
 .DS_Store
+.reasonix/
+reasonix.toml
