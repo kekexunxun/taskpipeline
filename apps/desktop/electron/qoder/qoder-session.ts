@@ -129,6 +129,8 @@ export type QoderSessionOptions = {
   /** 透传给 SDK 的 hooks(任务板块的 PermissionRequest HITL 等)。 */
   hooks?: SdkQueryOptions['hooks']
   allowedTools?: SdkQueryOptions['allowedTools']
+  /** 工具调用 HITL：透传给 SDK 的 canUseTool(对话板块由 driver 注入，缺省不注入)。 */
+  canUseTool?: SdkQueryOptions['canUseTool']
   systemPrompt?: SdkQueryOptions['systemPrompt']
   mcpServers?: SdkMcpServers
   allowedMcpServerNames?: SdkQueryOptions['allowedMcpServerNames']
@@ -193,6 +195,7 @@ export class QoderSession {
         ...(options.settings ? { settings: options.settings } : {}),
         ...(options.hooks ? { hooks: options.hooks } : {}),
         ...(options.allowedTools && options.allowedTools.length ? { allowedTools: options.allowedTools } : {}),
+        ...(options.canUseTool ? { canUseTool: options.canUseTool } : {}),
         ...(options.systemPrompt ? { systemPrompt: options.systemPrompt } : {}),
         ...(options.mcpServers ? { mcpServers: options.mcpServers } : {}),
         ...(options.allowedMcpServerNames && options.allowedMcpServerNames.length

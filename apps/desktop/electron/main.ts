@@ -95,7 +95,7 @@ import {
   parseImplementationDecision
 } from './task-readiness.js'
 import { QoderTaskAgentDriver, stripQoderModelPrefix } from './task-agent/qoder-task-agent.js'
-import { describeToolAction, isDangerousTool } from './task-agent/dangerous-tools.js'
+import { describeToolAction, isDangerousTool, isWriteTool } from './task-agent/dangerous-tools.js'
 import { closeQoderQuerySafely, recordQoderMessage } from './task-agent/log.js'
 import { parseTestCaseGeneration } from './task-agent/parsers/test-case-parser.js'
 import { AgentService, type OperationKind } from './agents/agent-service.js'
@@ -692,7 +692,37 @@ const chatMcpResolver = createMcpServiceResolver({
 })
 const chatDriverRegistry = new ChatDriverRegistry()
 chatDriverRegistry.register(
-  new QoderChatDriver(() => protectedValue('qoderToken'), getQoderStatus, tracePipeline, chatMcpResolver)
+  new QoderChatDriver(
+    () => protectedValue('qoderToken'),
+    getQoderStatus,
+    tracePipeline,
+    chatMcpResolver,
+    // 工具调用 HITL：Qoder CLI 需要用户决策时弹 UI 确认(不自动 allow，用户显式同意才执行)。
+    // - MCP 工具(mcp__*，如 jira/gitlab/confluence)：仅写操作(create/update/delete/move 等)弹窗确认，
+    //   读操作(get/search/list 等)直接放行 —— 用户勾选的外部服务访问中，只有修改类操作需要把关；
+    // - 内置工具沿用任务板块策略：仅删除/移动等危险操作弹窗，其余放行(避免对话频繁打断)。
+    async (toolName, toolInput, { signal, conversationId, title, displayName, description }) => {
+      const needsConfirm = toolName.startsWith('mcp__') ? isWriteTool(toolName) : isDangerousTool(toolName, toolInput)
+      if (!needsConfirm) return 'allow'
+      // 弹窗文案截断：避免 Write/Edit 等工具把整段文件内容塞进确认框（敏感内容不落地 UI）。
+      const detail = describeToolAction(toolName, toolInput)
+      const trimmed = detail.length > 500 ? `${detail.slice(0, 500)}…(已截断)` : detail
+      // description 是 SDK 提供的工具用途说明(如"创建 Jira Issue")，放正文首行；具体入参随后。
+      const descLine = description ? (description.length > 300 ? `${description.slice(0, 300)}…` : description) : ''
+      const lines = [descLine, conversationId ? `对话 ${conversationId}` : '', trimmed].filter(Boolean)
+      const ok =
+        (await requestUi<boolean>(
+          'confirm',
+          {
+            title: `允许执行 ${prettyToolName(displayName ?? title ?? toolName)}?`,
+            message: lines.join('\n\n'),
+            conversationId
+          },
+          { timeout: 10 * 60_000, signal } // 会话中止/超时默认拒绝（安全兜底）
+        )) ?? false
+      return ok ? 'allow' : 'deny'
+    }
+  )
 )
 chatDriverRegistry.register(
   new OpenAIChatDriver(
@@ -2066,6 +2096,17 @@ function emitPi(event: unknown): void {
       emitPi({ type: 'agent_error', message: error instanceof Error ? error.message : String(error) })
     )
   }
+}
+
+/**
+ * 工具名美化：`mcp__jira__create_issue` → `Jira: create_issue`。
+ * 弹窗标题可读性(原始 mcp__ 前缀 + 下划线太机器味)。非 mcp__ 名原样返回。
+ */
+function prettyToolName(name: string): string {
+  const match = /^mcp__([^_]+)__(.+)$/.exec(name)
+  if (!match) return name
+  const server = (match[1] ?? '').charAt(0).toUpperCase() + (match[1] ?? '').slice(1)
+  return `${server}: ${match[2] ?? ''}`
 }
 
 function requestUi<T>(

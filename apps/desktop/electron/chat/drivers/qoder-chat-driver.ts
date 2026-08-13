@@ -21,7 +21,9 @@ import type { z } from 'zod'
 import {
   createSdkMcpServer,
   tool as qoderTool,
+  type CanUseToolOptions,
   type McpServerConfig,
+  type PermissionResult,
   type SdkMcpToolDefinition
 } from '@qoder-ai/qoder-agent-sdk'
 import type { ChatModelInfo, ChatStreamChunk, DriverPart, StoredMessage, StoredMessageRecord } from '../chat-types.js'
@@ -49,6 +51,17 @@ type QoderStatus = {
 type QoderTokenProvider = () => string | undefined
 
 type QoderStatusProvider = () => Promise<QoderStatus>
+
+/**
+ * 工具调用 HITL 回调(对话板块)。
+ * Qoder CLI 需要用户决策时调用:返回 'allow' 放行 / 'deny' 拒绝(带消息)。
+ * 缺省不注入时,SDK 遇 `can_use_tool` 控制请求会直接抛错 —— 见 qoder-session 透传。
+ */
+export type QoderToolPermissionHandler = (
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  options: { signal: AbortSignal; conversationId: string; title?: string; displayName?: string; description?: string }
+) => Promise<'allow' | 'deny'>
 
 /**
  * Qoder driver 自己的 raw 形态(给存储层用):
@@ -144,7 +157,9 @@ export class QoderChatDriver implements ChatDriver {
     /** 埋点管线：对话路径 span 采集（可选，缺省不采集）。 */
     private readonly tracePipeline?: TracePipeline,
     /** 用户勾选的 MCP 服务 → stdio 配置（缺省 = 不注入外部 MCP）。 */
-    private readonly mcpProfileResolver?: McpServiceProfileResolver
+    private readonly mcpProfileResolver?: McpServiceProfileResolver,
+    /** 工具调用 HITL：需要用户决策时回调（缺省 = 不注入，SDK 遇 can_use_tool 会抛错）。 */
+    private readonly onToolPermission?: QoderToolPermissionHandler
   ) {
     if (!tokenProvider) throw new Error('QoderChatDriver requires a token provider')
     if (!statusProvider) throw new Error('QoderChatDriver requires a status provider')
@@ -352,6 +367,29 @@ export class QoderChatDriver implements ChatDriver {
         ? {
             mcpServers,
             allowedMcpServerNames: serverNames
+          }
+        : {}),
+      // 工具调用 HITL：SDK 的 can_use_tool 控制请求 → 上层弹窗让用户决策(allow 由用户显式确认，不自动放行)。
+      ...(this.onToolPermission
+        ? {
+            canUseTool: async (
+              toolName: string,
+              toolInput: Record<string, unknown>,
+              sdkOpts: CanUseToolOptions
+            ): Promise<PermissionResult> => {
+              // SDK 侧已中止(超时/会话关闭/用户停止):弹窗前直接拒绝,避免确认框挂到 10 分钟超时。
+              if (sdkOpts.signal.aborted) return { behavior: 'deny', message: '工具调用已中止', interrupt: false }
+              const decision = await this.onToolPermission!(toolName, toolInput, {
+                signal: sdkOpts.signal,
+                conversationId: input.conversationId,
+                ...(sdkOpts.title ? { title: sdkOpts.title } : {}),
+                ...(sdkOpts.displayName ? { displayName: sdkOpts.displayName } : {}),
+                ...(sdkOpts.description ? { description: sdkOpts.description } : {})
+              })
+              return decision === 'deny'
+                ? { behavior: 'deny', message: '用户拒绝了此操作，请改用其他方案', interrupt: false }
+                : { behavior: 'allow' }
+            }
           }
         : {})
     }

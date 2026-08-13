@@ -1139,4 +1139,112 @@ describe('QoderChatDriver MCP 服务注入', () => {
     expect(options.mcpServers).toBeUndefined()
     expect(options.allowedMcpServerNames).toBeUndefined()
   })
+
+  it('注入 onToolPermission 时透传 canUseTool 到 SDK(allow/deny 双向)', async () => {
+    const decisions: Array<{ toolName: string; input: Record<string, unknown>; conversationId: string }> = []
+    const handler: Parameters<typeof QoderChatDriver>[4] = async (toolName, toolInput, { conversationId }) => {
+      decisions.push({ toolName, toolInput, conversationId })
+      return toolName === 'mcp__jira__jira_get_issue' ? 'allow' : 'deny'
+    }
+    const d = new QoderChatDriver(
+      () => 'test-token',
+      async () => ({
+        enabled: true,
+        connected: true,
+        running: false,
+        models: [{ value: 'claude-sonnet-4.5', displayName: 'Claude', isDefault: true }]
+      }),
+      undefined,
+      undefined,
+      handler
+    )
+    sdkMock.__pushScript({ messages: [textDelta('ok', 'sess-hitl'), resultMessage('ok', 'sess-hitl')] })
+    await collect(
+      d.streamChat({
+        conversationId: 'c-hitl',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        mcpServices: ['jira'],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const options = sdkMock.__getLastQueryOptions()!
+    const canUseTool = options.canUseTool as
+      | ((toolName: string, input: Record<string, unknown>, opts: { signal: AbortSignal }) => Promise<unknown>)
+      | undefined
+    expect(typeof canUseTool).toBe('function')
+    // deny → deny 结果(带消息)
+    const denyResult = await canUseTool!(
+      'mcp__gitlab__gitlab_get_project',
+      { id: 1 },
+      { signal: new AbortController().signal }
+    )
+    expect(denyResult).toMatchObject({ behavior: 'deny', message: expect.any(String) })
+    // allow → allow 结果
+    const allowResult = await canUseTool!(
+      'mcp__jira__jira_get_issue',
+      { url: 'https://jira.example/browse/X-1' },
+      { signal: new AbortController().signal }
+    )
+    expect(allowResult).toEqual({ behavior: 'allow' })
+    // 回调收到 conversationId,用于确认框归属
+    expect(decisions).toHaveLength(2)
+    expect(decisions.every((d) => d.conversationId === 'c-hitl')).toBe(true)
+  })
+
+  it('不注入 onToolPermission 时不产生 canUseTool(SDK 保持原行为)', async () => {
+    sdkMock.__pushScript({ messages: [textDelta('ok', 'sess-nohitl'), resultMessage('ok', 'sess-nohitl')] })
+    await collect(
+      driverWithMcp((id) =>
+        id === 'jira' ? { transport: 'stdio' as const, command: 'uvx', args: ['mcp-atlassian'] } : undefined
+      ).streamChat({
+        conversationId: 'c-nohitl',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        mcpServices: ['jira'],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const options = sdkMock.__getLastQueryOptions()!
+    expect(options.canUseTool).toBeUndefined()
+  })
+
+  it('signal 已中止时 canUseTool 直接 deny 且不触发上层回调', async () => {
+    const handler: Parameters<typeof QoderChatDriver>[4] = vi.fn(async () => 'allow' as const)
+    const d = new QoderChatDriver(
+      () => 'test-token',
+      async () => ({
+        enabled: true,
+        connected: true,
+        running: false,
+        models: [{ value: 'claude-sonnet-4.5', displayName: 'Claude', isDefault: true }]
+      }),
+      undefined,
+      undefined,
+      handler
+    )
+    sdkMock.__pushScript({ messages: [textDelta('ok', 'sess-abort'), resultMessage('ok', 'sess-abort')] })
+    await collect(
+      d.streamChat({
+        conversationId: 'c-abort',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        mcpServices: ['jira'],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const canUseTool = (
+      sdkMock.__getLastQueryOptions()! as {
+        canUseTool: (t: string, i: Record<string, unknown>, o: { signal: AbortSignal }) => Promise<unknown>
+      }
+    ).canUseTool
+    const aborted = new AbortController()
+    aborted.abort()
+    const result = await canUseTool('mcp__jira__jira_get_issue', {}, { signal: aborted.signal })
+    expect(result).toMatchObject({ behavior: 'deny' })
+    expect(handler).not.toHaveBeenCalled()
+  })
 })

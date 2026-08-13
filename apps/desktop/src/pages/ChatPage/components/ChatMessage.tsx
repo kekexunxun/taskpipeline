@@ -56,12 +56,13 @@ function ChatMessageImpl({
   const widthClass = isUser ? 'max-w-[78%]' : 'max-w-[78%]'
   const alignClass = isUser ? 'items-end' : 'items-start'
   // 消息级操作区(shadcn MessageFooter 语义):置于消息内容下方、与消息同侧对齐。
-  // 只有该消息存在可复制的正文文本时才渲染。
-  const copyAction = messageText ? (
-    <div className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
-      <MessageCopyButton text={messageText} aria-label="复制消息" />
-    </div>
-  ) : null
+  // 只有该消息存在可复制的正文文本时才渲染；输出(streaming)期间不展示，避免遮挡正在生成的内容。
+  const copyAction =
+    messageText && !isStreaming ? (
+      <div className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
+        <MessageCopyButton text={messageText} aria-label="复制消息" />
+      </div>
+    ) : null
 
   return (
     <div className={cn('flex w-full', containerClass)} data-role={message.role} data-driver-id={message.driverId}>

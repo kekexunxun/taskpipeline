@@ -9,6 +9,7 @@ import { ChatAgentSelector } from './components/ChatAgentSelector'
 import { ChatDirectoryBadge } from './components/ChatDirectoryBadge'
 import { TaskCreationTool } from './components/TaskCreationTool'
 import { useChat } from './hooks/useChat'
+import { UiRequestDialog } from '@/pages/CodingPage/components/UiRequestDialog'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { api } from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
@@ -26,6 +27,29 @@ function ChatPageInner() {
   const navigate = useNavigate()
   const { showError } = useFeedback()
   const chat = useChat()
+
+  // 工具调用 HITL：Qoder 等 driver 的 can_use_tool 确认请求由主进程以
+  // extension_ui_request 广播（task:event 通道），这里转发给 UiRequestDialog 弹窗。
+  // 与 CodingPage/useTasks.ts 的处理保持一致，缺了它会卡在等用户决策。
+  useEffect(() => {
+    const off = api.onTaskEvent((event: { type?: string; method?: string }) => {
+      if (
+        event?.type === 'extension_ui_request' &&
+        ['confirm', 'select', 'input', 'editor'].includes(event.method ?? '')
+      ) {
+        window.dispatchEvent(new CustomEvent('task:ui-request', { detail: event }))
+      }
+    })
+    return off
+  }, [])
+
+  // 会话结束/中止时清空残留的确认弹窗队列（主进程已按取消处理）。
+  // 对齐 CodingPage/useTasks.ts 的 task:ui-clear 广播，否则旧弹窗滞留 UI 并阻塞后续请求。
+  useEffect(() => {
+    const clear = () => window.dispatchEvent(new CustomEvent('task:ui-clear'))
+    if (!chat.streaming) clear()
+    return () => undefined
+  }, [chat.streaming])
 
   // URL ↔ state 同步
   useEffect(() => {
@@ -162,6 +186,8 @@ function ChatPageInner() {
           />
         </div>
       </section>
+      {/* 工具调用 HITL 确认框：can_use_tool 请求的 UI（任务板块同款组件） */}
+      <UiRequestDialog />
     </div>
   )
 }
