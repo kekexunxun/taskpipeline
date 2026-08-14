@@ -6,15 +6,17 @@ import { math } from '@streamdown/math'
 import { mermaid } from '@streamdown/mermaid'
 import type { UIMessage } from 'ai'
 import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, CopyIcon } from 'lucide-react'
+import type { BundledLanguage } from 'shiki'
 import type { ComponentProps, HTMLAttributes, ReactElement, ReactNode } from 'react'
 import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import type { Components } from 'streamdown'
+import type { Components, CustomRendererProps } from 'streamdown'
 import { Streamdown } from 'streamdown'
+import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
+import { CodeBlockContent } from '@/components/ai-elements/code-block'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ButtonGroup, ButtonGroupText } from '@/components/ui/button-group'
 import { Button } from '@/components/ui/button'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
   from: UIMessage['role']
@@ -314,44 +316,24 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown>
 const streamdownPlugins = { cjk, code, math, mermaid }
 
 /**
- * Streamdown 自定义代码块 —— Bash 终端风格 + 复制按钮。
+ * Streamdown CustomRenderer —— 终端卡片风格代码块。
  *
- * 通过覆盖 Streamdown 的 `pre` 元素实现，保留 shiki 语法高亮子节点，
- * 外层用终端卡片容器包裹，头部展示语言标签与复制按钮。
+ * 通过 `plugins.renderers` 注册，覆盖所有常见语言。
+ * 直接接收 `{ code, language, isIncomplete }` 无需操作 DOM。
  */
-function StreamdownCodeBlock({
-  children,
-  ...props
-}: {
-  children?: ReactNode
-  className?: string
-  [key: string]: unknown
-}) {
-  const preRef = useRef<HTMLPreElement>(null)
+function StreamdownCodeRenderer({ code, language, isIncomplete }: CustomRendererProps) {
   const [copied, setCopied] = useState(false)
   const [open, setOpen] = useState(false)
   const timerRef = useRef<number>(0)
 
-  // 语言检测：优先从 className (language-xxx) 提取，其次从 data-language
-  const language =
-    typeof props.className === 'string'
-      ? (props.className.match(/language-(\w+)/) || [])[1] || ''
-      : typeof props['data-language'] === 'string'
-        ? props['data-language']
-        : ''
-
-  const handleCopy = useCallback(
-    async (e: React.MouseEvent) => {
-      e.stopPropagation()
-      if (copied) return
-      const text = preRef.current?.textContent ?? ''
-      if (!text || !navigator.clipboard) return
-      await navigator.clipboard.writeText(text)
-      setCopied(true)
-      timerRef.current = window.setTimeout(() => setCopied(false), 2000)
-    },
-    [copied]
-  )
+  const handleCopy = useCallback(async () => {
+    if (copied) return
+    if (!code || !navigator.clipboard) return
+    await navigator.clipboard.writeText(code)
+    setCopied(true)
+    toast.success('复制成功')
+    timerRef.current = window.setTimeout(() => setCopied(false), 2000)
+  }, [code, copied])
 
   useEffect(
     () => () => {
@@ -363,50 +345,54 @@ function StreamdownCodeBlock({
   const CopyIconEl = copied ? CheckIcon : CopyIcon
 
   return (
-    <Collapsible
-      open={open}
-      onOpenChange={setOpen}
-      className="my-2 overflow-hidden rounded-md border border-border/40 bg-muted/20"
-    >
-      <CollapsibleTrigger
+    <div className="my-2 rounded-md border border-border/40 bg-muted/20">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') setOpen((v) => !v)
+        }}
         className={cn(
-          'group flex w-full items-center justify-between bg-muted/30 px-3 py-1 transition-colors hover:bg-muted/40',
+          'group flex w-full cursor-pointer items-center justify-between bg-muted/30 px-3 py-1 transition-colors hover:bg-muted/40',
           open && 'border-b border-border/40'
         )}
       >
-        <span className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground/60">
+        <span className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
           <ChevronRightIcon
             size={12}
-            className={cn('text-muted-foreground/40 transition-transform', open && 'rotate-90')}
+            className={cn('text-muted-foreground transition-transform', open && 'rotate-90')}
           />
           {language || 'text'}
+          {isIncomplete && <span className="text-amber-500">…</span>}
         </span>
         <button
           type="button"
-          onClick={handleCopy}
+          onClick={(e) => {
+            e.stopPropagation()
+            handleCopy()
+          }}
           disabled={copied}
           className={cn(
             'flex items-center rounded px-1 py-0.5 transition-colors',
             copied
-              ? 'cursor-default text-emerald-500/80'
-              : 'text-muted-foreground/50 hover:bg-muted/50 hover:text-muted-foreground'
+              ? 'cursor-default text-emerald-500'
+              : 'text-muted-foreground/50 hover:bg-muted hover:text-muted-foreground'
           )}
         >
           <CopyIconEl size={12} />
         </button>
-      </CollapsibleTrigger>
-      <CollapsibleContent className="overflow-hidden">
-        <pre
-          ref={preRef}
-          className="m-0 max-h-[400px] overflow-x-auto p-3 font-mono text-xs leading-relaxed text-foreground"
-          {...props}
-        >
-          {children}
-        </pre>
-      </CollapsibleContent>
-    </Collapsible>
+      </div>
+      {open && (
+        <div className="custom-code-block max-h-[400px] overflow-auto">
+          <CodeBlockContent code={code} language={language as BundledLanguage} />
+        </div>
+      )}
+    </div>
   )
 }
+
+const codeRenderers = [{ component: StreamdownCodeRenderer, language: code.getSupportedLanguages() }]
 
 /**
  * Streamdown 自定义表格 —— 直接渲染，无 Artifacts 包裹。
@@ -422,7 +408,6 @@ function StreamdownTable({ children, ...props }: { children?: ReactNode; classNa
 }
 
 const streamdownComponents: Components = {
-  pre: StreamdownCodeBlock as unknown as Components['pre'],
   table: StreamdownTable as unknown as Components['table']
 }
 
@@ -430,7 +415,7 @@ export const MessageResponse = memo(
   ({ className, ...props }: MessageResponseProps) => (
     <Streamdown
       className={cn('size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0', className)}
-      plugins={streamdownPlugins}
+      plugins={{ ...streamdownPlugins, renderers: codeRenderers }}
       components={streamdownComponents}
       controls={false}
       {...props}
