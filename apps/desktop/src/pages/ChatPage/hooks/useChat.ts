@@ -27,6 +27,9 @@ export type { ChatApprovalRequest } from '@/components/ToolApprovalCard'
 
 const transport = new ElectronChatTransport()
 
+/** 流看门狗超时：超过此时间未收到任何 chunk 则认为流已死（主进程崩溃 / IPC 断连），自动清理残留状态。 */
+const STREAM_WATCHDOG_MS = 60_000
+
 export type ChatStatus = 'idle' | 'submitted' | 'streaming' | 'error'
 
 /**
@@ -104,6 +107,8 @@ export function useChat() {
   }, [pendingApprovals])
   /** 活跃流表(key = chatId,同一对话同时只允许一个流)。 */
   const activeStreams = useRef<Map<string, ActiveStream>>(new Map())
+  /** 流看门狗:每个流一个 timer,收到事件时重置;超时(主进程崩溃/IPC 断连)则清理残留流状态。 */
+  const streamWatchdogs = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const { modelGroups } = useChatModels()
   const [model, setModel] = useState<string>()
   const [driverId, setDriverId] = useState<ChatDriverId | undefined>()
@@ -258,6 +263,11 @@ export function useChat() {
       // 只终止该对话的流,不影响其它并行对话。
       activeStreams.current.get(id)?.abort()
       activeStreams.current.delete(id)
+      const removeWatchdog = streamWatchdogs.current.get(id)
+      if (removeWatchdog) {
+        clearTimeout(removeWatchdog)
+        streamWatchdogs.current.delete(id)
+      }
       setStreamingChatIds((current) => {
         const next = new Set(current)
         next.delete(id)
@@ -306,7 +316,14 @@ export function useChat() {
   const stop = useCallback(() => {
     // 只停当前对话的流。
     const id = activeIdRef.current
-    if (id) activeStreams.current.get(id)?.abort()
+    if (id) {
+      activeStreams.current.get(id)?.abort()
+      const stopWatchdog = streamWatchdogs.current.get(id)
+      if (stopWatchdog) {
+        clearTimeout(stopWatchdog)
+        streamWatchdogs.current.delete(id)
+      }
+    }
   }, [])
 
   /**
@@ -471,6 +488,27 @@ export function useChat() {
         systemPrompt: selectedAgentRef.current?.systemPrompt,
         onEvent: (event) => {
           const chunk = event.chunk
+          // 看门狗：每次收到事件重置计时器，防止主进程崩溃/IPC 断连后残留流状态。
+          const existingTimer = streamWatchdogs.current.get(chatId)
+          if (existingTimer) clearTimeout(existingTimer)
+          streamWatchdogs.current.set(
+            chatId,
+            setTimeout(() => {
+              if (activeStreams.current.get(chatId)?.streamId === streamId) {
+                activeStreams.current.get(chatId)?.abort()
+                activeStreams.current.delete(chatId)
+                streamWatchdogs.current.delete(chatId)
+                setStreamingChatIds((current) => {
+                  const next = new Set(current)
+                  next.delete(chatId)
+                  return next
+                })
+                setHintsByChat((current) => (current[chatId] ? { ...current, [chatId]: undefined } : current))
+                flushApprovals(chatId)
+                void refreshMetas()
+              }
+            }, STREAM_WATCHDOG_MS)
+          )
           if (!chunk) return
           applyChunk(chatId, assistantId, chunk)
         },
@@ -516,6 +554,12 @@ export function useChat() {
 
       // 流结束(成功 / 失败 / 主动停止)时,清理该对话的流状态并刷新 metas。
       void session.closed.then(async () => {
+        // 清理看门狗：流已正常结束，不再需要超时检测。
+        const watchdog = streamWatchdogs.current.get(chatId)
+        if (watchdog) {
+          clearTimeout(watchdog)
+          streamWatchdogs.current.delete(chatId)
+        }
         if (activeStreams.current.get(chatId)?.streamId !== streamId) return
         activeStreams.current.delete(chatId)
         setStreamingChatIds((current) => {

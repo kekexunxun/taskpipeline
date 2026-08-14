@@ -112,8 +112,8 @@ function ChatPageInner() {
         onCreateInDirectory={(dir) => void createProject(dir)}
         onDelete={(id) => void chat.remove(id)}
       />
-      <section className="grid min-w-0 grid-rows-[52px_minmax(0,1fr)_auto] overflow-hidden">
-        <header className="flex items-center justify-between gap-3 border-b px-5">
+      <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+        <header className="flex shrink-0 items-center justify-between gap-3 border-b px-5 py-3">
           <div className="min-w-0">
             <h1 className="truncate text-sm font-semibold tracking-tight">{chat.conversation?.title ?? '新建对话'}</h1>
             <p className="mt-1 truncate text-xs text-muted-foreground">{headerSubtitle}</p>
