@@ -123,6 +123,18 @@ function ChatPageInner() {
         activeId={chat.activeId}
         streamingChatIds={chat.streamingChatIds}
         onSelect={(id) => navigate(`/chat/${id}`)}
+        onCreate={() =>
+          void (async () => {
+            const id = await chat.create()
+            if (id) navigate(`/chat/${id}`)
+          })()
+        }
+        onCreateInDirectory={(directory) =>
+          void (async () => {
+            const id = await chat.create(directory)
+            if (id) navigate(`/chat/${id}`)
+          })()
+        }
         onDelete={(id) => void chat.remove(id)}
       />
       <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">

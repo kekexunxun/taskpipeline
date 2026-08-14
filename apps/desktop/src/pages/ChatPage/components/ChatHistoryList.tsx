@@ -1,7 +1,8 @@
-import { FolderIcon, FolderOpenIcon } from 'lucide-react'
+import { FolderIcon, FolderOpenIcon, PlusIcon } from 'lucide-react'
 import { useState } from 'react'
 import { ChatHistoryItem } from './ChatHistoryItem'
 import type { ChatConversationMeta, ChatProject } from '@/api'
+import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
 
@@ -58,6 +59,8 @@ export function ChatHistoryList({
   activeId,
   streamingChatIds,
   onSelect,
+  onCreate,
+  onCreateInDirectory,
   onDelete
 }: {
   metas: ChatConversationMeta[]
@@ -67,6 +70,10 @@ export function ChatHistoryList({
   /** 正在生成的对话集合(并行流),用于侧边栏生成状态指示。 */
   streamingChatIds?: ReadonlySet<string>
   onSelect(id: string): void
+  /** 新建普通对话。 */
+  onCreate(): void
+  /** 在指定工作目录下新建会话。 */
+  onCreateInDirectory(directory: string): void
   onDelete(id: string): void
 }) {
   const groups = groupMetas(metas, projects)
@@ -123,11 +130,37 @@ export function ChatHistoryList({
                           {baseName(group.directory)}
                         </span>
                         <span className="shrink-0 text-[10px] text-muted-foreground">{group.items.length}</span>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="h-5 w-5 text-muted-foreground/70 opacity-0 group-hover/header:opacity-100"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onCreateInDirectory(group.directory!)
+                          }}
+                          title={`在此目录新建对话\n${group.directory}`}
+                          aria-label={`在 ${baseName(group.directory)} 新建对话`}
+                        >
+                          <PlusIcon size={11} />
+                        </Button>
                       </>
                     ) : (
                       <>
                         <span className="text-xs font-semibold text-muted-foreground">普通对话</span>
                         <span className="ml-auto text-[10px] text-muted-foreground/70">{group.items.length}</span>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="h-5 w-5 text-muted-foreground/70 opacity-0 group-hover/header:opacity-100"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onCreate()
+                          }}
+                          title="新建普通对话"
+                          aria-label="新建普通对话"
+                        >
+                          <PlusIcon size={11} />
+                        </Button>
                       </>
                     )}
                   </button>

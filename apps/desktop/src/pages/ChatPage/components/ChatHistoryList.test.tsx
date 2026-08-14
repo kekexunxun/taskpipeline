@@ -5,6 +5,8 @@ import type { ChatConversationMeta } from '@/api'
 
 const noop = {
   onSelect: vi.fn(),
+  onCreate: vi.fn(),
+  onCreateInDirectory: vi.fn(),
   onDelete: vi.fn()
 }
 
