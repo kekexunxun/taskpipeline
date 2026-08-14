@@ -121,7 +121,7 @@ describe('ChatService (driver-based)', () => {
       }
     } as unknown as BrowserWindow
     const service = new ChatService(fakeStore(), dataDir, registry, () => win)
-    const conv = service.createChat('qoder', 'qoder:test')
+    const conv = await service.createChat('qoder', 'qoder:test')
     await service.startChatStream({
       streamId: 'stream-1',
       chatId: conv.id,
@@ -131,7 +131,7 @@ describe('ChatService (driver-based)', () => {
     })
     // 第一个 done 来自 driver,第二个 done 来自 ChatService 的 finally(状态汇总)
     expect(sent.map((c) => c.type)).toEqual(['start', 'part', 'done', 'done'])
-    const reloaded = service.getChat(conv.id)
+    const reloaded = await service.getChat(conv.id)
     expect(reloaded?.messages).toHaveLength(2)
     expect(reloaded?.messages[0]?.role).toBe('user')
     expect(reloaded?.messages[1]?.role).toBe('assistant')
@@ -178,7 +178,7 @@ describe('ChatService (driver-based)', () => {
     } as unknown as BrowserWindow
     // memoryContext 是构造器第 6 个参数（resolveTaskBackend 之后）。
     const service = new ChatService(fakeStore(), dataDir, registry, () => win, undefined, memoryContext)
-    const conv = service.createChat('qoder', 'qoder:test')
+    const conv = await service.createChat('qoder', 'qoder:test')
     await service.startChatStream({
       streamId: 'stream-1',
       chatId: conv.id,
@@ -245,7 +245,7 @@ describe('ChatService (driver-based)', () => {
       }
     } as unknown as BrowserWindow
     const service = new ChatService(fakeStore(), dataDir, registry, () => win, undefined, memoryContext)
-    const conv = service.createChat('qoder', 'qoder:test')
+    const conv = await service.createChat('qoder', 'qoder:test')
     await service.startChatStream({
       streamId: 'stream-1',
       chatId: conv.id,
@@ -325,7 +325,7 @@ describe('ChatService (driver-based)', () => {
       undefined,
       traceManager
     )
-    const conv = service.createChat('qoder', 'qoder:test')
+    const conv = await service.createChat('qoder', 'qoder:test')
     await service.startChatStream({
       streamId: 'stream-t',
       chatId: conv.id,
@@ -363,7 +363,7 @@ describe('ChatService (driver-based)', () => {
       }
     } as unknown as BrowserWindow
     const service = new ChatService(fakeStore(), dataDir, registry, () => win)
-    const conv = service.createChat('openai', 'gpt-4o')
+    const conv = await service.createChat('openai', 'gpt-4o')
     await service.startChatStream({
       streamId: 'stream-err',
       chatId: conv.id,
@@ -374,7 +374,7 @@ describe('ChatService (driver-based)', () => {
     const errorChunks = sent.filter((c): c is Extract<ChatStreamChunk, { type: 'error' }> => c.type === 'error')
     expect(errorChunks.map((c) => c.message)).toEqual(['401 Invalid API key'])
     // 落盘 record 带上 errorMessage,历史消息重新加载后仍能显示错误详情
-    const reloaded = service.getChat(conv.id)
+    const reloaded = await service.getChat(conv.id)
     const assistant = reloaded?.messages.find((m) => m.role === 'assistant')
     expect(assistant?.errorMessage).toBe('401 Invalid API key')
   })
@@ -420,7 +420,7 @@ describe('ChatService (driver-based)', () => {
     } as unknown as BrowserWindow
     const service = new ChatService(fakeStore(), dataDir, registry, () => win)
 
-    const conv = service.createChat('qoder', 'qoder:test')
+    const conv = await service.createChat('qoder', 'qoder:test')
     await service.startChatStream({
       streamId: 'stream-a',
       chatId: conv.id,
@@ -436,7 +436,7 @@ describe('ChatService (driver-based)', () => {
       model: 'openai:default',
       message: { id: 'u2', text: 'second', createdAt: new Date().toISOString() }
     })
-    const reloaded = service.getChat(conv.id)
+    const reloaded = await service.getChat(conv.id)
     expect(reloaded?.messages).toHaveLength(4)
     expect(reloaded?.messages[0]?.driverId).toBe('qoder')
     expect(reloaded?.messages[1]?.driverId).toBe('qoder')
@@ -475,7 +475,7 @@ describe('ChatService (driver-based)', () => {
     registry.register(driver)
     const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow
     const service = new ChatService(fakeStore(), dataDir, registry, () => win)
-    const conv = service.createChat('qoder', 'qoder:test')
+    const conv = await service.createChat('qoder', 'qoder:test')
     await service.startChatStream({
       streamId: 'stream-1',
       chatId: conv.id,
@@ -485,7 +485,7 @@ describe('ChatService (driver-based)', () => {
     })
     // raw 不会持久化 metadata,但 ChatService 通过 storage.replaceMessages + appendMessage
     // 实现了 taskCreation 在内存中可被消费(这里只验证 raw parts + service 流程)
-    const reloaded = service.getChat(conv.id)
+    const reloaded = await service.getChat(conv.id)
     expect(reloaded?.messages).toHaveLength(2)
     expect(reloaded?.messages[1]?.parts[0]?.type).toBe('text')
   })
@@ -493,7 +493,7 @@ describe('ChatService (driver-based)', () => {
   it('rejects when no driver is registered (no usable model)', async () => {
     const registry = new ChatDriverRegistry()
     const service = new ChatService(fakeStore(), dataDir, registry, () => undefined)
-    const conv = service.createChat()
+    const conv = await service.createChat()
     await expect(
       service.startChatStream({
         streamId: 'stream-x',
@@ -517,7 +517,7 @@ describe('ChatService (driver-based)', () => {
     const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow
     const service = new ChatService(fakeStore(), dataDir, registry, () => win)
     // 对话存的是已下线的旧模型
-    const conv = service.createChat('qoder', 'qoder:retired')
+    const conv = await service.createChat('qoder', 'qoder:retired')
     await service.startChatStream({
       streamId: 'stream-fb',
       chatId: conv.id,
@@ -527,7 +527,7 @@ describe('ChatService (driver-based)', () => {
     })
     // driver 实际收到的是组内默认模型；本轮落盘记录的也是实际使用的模型
     expect(driver.received[0]?.model).toBe('qoder:current')
-    expect(service.getChat(conv.id)?.conversation.model).toBe('qoder:current')
+    expect((await service.getChat(conv.id))?.conversation.model).toBe('qoder:current')
   })
 
   it('falls back across drivers to the system default when the requested driver has no models', async () => {
@@ -544,7 +544,7 @@ describe('ChatService (driver-based)', () => {
     registry.register(openai)
     const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow
     const service = new ChatService(fakeStore(), dataDir, registry, () => win)
-    const conv = service.createChat('qoder', 'qoder:test')
+    const conv = await service.createChat('qoder', 'qoder:test')
     await service.startChatStream({
       streamId: 'stream-x',
       chatId: conv.id,
@@ -580,11 +580,11 @@ describe('ChatService (driver-based)', () => {
   it('persists workingDirectory when creating a project chat and reloads it', async () => {
     const registry = new ChatDriverRegistry()
     const service = new ChatService(fakeStore(), dataDir, registry, () => undefined)
-    const conv = service.createChat('qoder', 'qoder:test', '/some/project')
+    const conv = await service.createChat('qoder', 'qoder:test', '/some/project')
     expect(conv.workingDirectory).toBe('/some/project')
     // 读回:meta + conversation 都应带目录
-    expect(service.listChats()[0]?.workingDirectory).toBe('/some/project')
-    expect(service.getChat(conv.id)?.conversation.workingDirectory).toBe('/some/project')
+    expect((await service.listChats())[0]?.workingDirectory).toBe('/some/project')
+    expect((await service.getChat(conv.id))?.conversation.workingDirectory).toBe('/some/project')
   })
 
   it('passes the conversation workingDirectory as cwd to the driver on stream', async () => {
@@ -598,7 +598,7 @@ describe('ChatService (driver-based)', () => {
     registry.register(driver)
     const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow
     const service = new ChatService(fakeStore(), dataDir, registry, () => win)
-    const conv = service.createChat('qoder', 'qoder:test', '/project/a')
+    const conv = await service.createChat('qoder', 'qoder:test', '/project/a')
     await service.startChatStream({
       streamId: 'stream-1',
       chatId: conv.id,
@@ -620,7 +620,7 @@ describe('ChatService (driver-based)', () => {
     registry.register(driver)
     const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow
     const service = new ChatService(fakeStore(), dataDir, registry, () => win)
-    const conv = service.createChat('qoder', 'qoder:test')
+    const conv = await service.createChat('qoder', 'qoder:test')
     await service.startChatStream({
       streamId: 'stream-1',
       chatId: conv.id,
@@ -634,38 +634,38 @@ describe('ChatService (driver-based)', () => {
   it('binds and unbinds workingDirectory via setChatWorkingDirectory', async () => {
     const registry = new ChatDriverRegistry()
     const service = new ChatService(fakeStore(), dataDir, registry, () => undefined)
-    const conv = service.createChat('qoder', 'qoder:test')
-    const bound = service.setChatWorkingDirectory(conv.id, '/bound/dir')
+    const conv = await service.createChat('qoder', 'qoder:test')
+    const bound = await service.setChatWorkingDirectory(conv.id, '/bound/dir')
     expect(bound?.workingDirectory).toBe('/bound/dir')
-    expect(service.getChat(conv.id)?.conversation.workingDirectory).toBe('/bound/dir')
+    expect((await service.getChat(conv.id))?.conversation.workingDirectory).toBe('/bound/dir')
     // 解绑:回到普通对话
-    const unbound = service.setChatWorkingDirectory(conv.id, undefined)
+    const unbound = await service.setChatWorkingDirectory(conv.id, undefined)
     expect(unbound?.workingDirectory).toBeUndefined()
-    expect(service.getChat(conv.id)?.conversation.workingDirectory).toBeUndefined()
+    expect((await service.getChat(conv.id))?.conversation.workingDirectory).toBeUndefined()
   })
 
   it('does not reuse a directory-bound empty chat when creating a plain chat', async () => {
     const registry = new ChatDriverRegistry()
     const service = new ChatService(fakeStore(), dataDir, registry, () => undefined)
-    const project = service.createChat('qoder', 'qoder:test', '/some/project')
+    const project = await service.createChat('qoder', 'qoder:test', '/some/project')
     // 同为空对话,但带目录 —— 普通 createChat 不应复用
-    const plain = service.createChat('qoder', 'qoder:test')
+    const plain = await service.createChat('qoder', 'qoder:test')
     expect(plain.id).not.toBe(project.id)
     expect(plain.workingDirectory).toBeUndefined()
-    expect(service.listChats()).toHaveLength(2)
+    expect(await service.listChats()).toHaveLength(2)
   })
 
   it('reuses the empty chat of the same directory instead of piling up project chats', async () => {
     const registry = new ChatDriverRegistry()
     const service = new ChatService(fakeStore(), dataDir, registry, () => undefined)
-    const first = service.createChat('qoder', 'qoder:test', '/project/a')
+    const first = await service.createChat('qoder', 'qoder:test', '/project/a')
     // 同一目录下再点「+」:复用已有的空项目对话,不无限新增
-    const second = service.createChat('qoder', 'qoder:test', '/project/a')
+    const second = await service.createChat('qoder', 'qoder:test', '/project/a')
     expect(second.id).toBe(first.id)
     // 不同目录互不复用
-    const other = service.createChat('qoder', 'qoder:test', '/project/b')
+    const other = await service.createChat('qoder', 'qoder:test', '/project/b')
     expect(other.id).not.toBe(first.id)
-    expect(service.listChats()).toHaveLength(2)
+    expect(await service.listChats()).toHaveLength(2)
   })
 
   it('persists mcpService/agentId into conversation meta and passes mcpServices to the driver', async () => {
@@ -679,7 +679,7 @@ describe('ChatService (driver-based)', () => {
     registry.register(driver)
     const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow
     const service = new ChatService(fakeStore(), dataDir, registry, () => win)
-    const conv = service.createChat('qoder', 'qoder:test')
+    const conv = await service.createChat('qoder', 'qoder:test')
     await service.startChatStream({
       streamId: 'stream-mcp',
       chatId: conv.id,
@@ -692,7 +692,7 @@ describe('ChatService (driver-based)', () => {
     // MCP 选择透传给 driver（真正注入工具）
     expect(driver.received[0]?.mcpServices).toEqual(['gitlab', 'jira'])
     // MCP / Agent 选择态随对话落盘，切换对话后可恢复
-    const reloaded = service.getChat(conv.id)
+    const reloaded = await service.getChat(conv.id)
     expect(reloaded?.conversation.mcpService).toEqual(['gitlab', 'jira'])
     expect(reloaded?.conversation.agentId).toBe('agent-42')
   })
@@ -719,7 +719,7 @@ describe('ChatService (driver-based)', () => {
     registry.register(gated)
     const win = { webContents: { send: () => undefined } } as unknown as BrowserWindow
     const service = new ChatService(fakeStore(), dataDir, registry, () => win)
-    const conv = service.createChat('qoder', 'qoder:test')
+    const conv = await service.createChat('qoder', 'qoder:test')
     const streamPromise = service.startChatStream({
       streamId: 'stream-1',
       chatId: conv.id,
@@ -729,8 +729,8 @@ describe('ChatService (driver-based)', () => {
     })
     // 等流进入 activeStreams
     await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(service.setChatWorkingDirectory(conv.id, '/while-streaming')).toBeUndefined()
-    expect(service.getChat(conv.id)?.conversation.workingDirectory).toBeUndefined()
+    expect(await service.setChatWorkingDirectory(conv.id, '/while-streaming')).toBeUndefined()
+    expect((await service.getChat(conv.id))?.conversation.workingDirectory).toBeUndefined()
     release()
     await streamPromise
   })

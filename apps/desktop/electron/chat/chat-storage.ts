@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ChatConversation, ChatConversationMeta, ChatProject, StoredMessageRecord } from './chat-types.js'
@@ -30,73 +30,159 @@ function conversationPath(root: string, id: string) {
   return join(chatsDir(root), `chat-${id}.json`)
 }
 
-function atomicWrite(file: string, value: unknown): void {
+/**
+ * 原子写入（异步版）：先写临时文件再 rename,崩溃/断电不产生半写文件。
+ */
+async function atomicWrite(file: string, value: unknown): Promise<void> {
   const temp = `${file}.${randomUUID()}.tmp`
-  writeFileSync(temp, JSON.stringify(value, null, 2))
-  renameSync(temp, file)
+  await writeFile(temp, JSON.stringify(value, null, 2), 'utf8')
+  await rename(temp, file)
 }
 
-function parseFile<T>(file: string): T | undefined {
-  if (!existsSync(file)) return undefined
+async function parseFile<T>(file: string): Promise<T | undefined> {
   try {
-    return JSON.parse(readFileSync(file, 'utf8')) as T
+    const text = await readFile(file, 'utf8')
+    return JSON.parse(text) as T
   } catch {
     return undefined
   }
 }
 
 /**
- * 聊天存储 — driver 透传版。
+ * 聊天存储 — driver 透传版（异步 I/O + 内存缓存）。
  *
  * 设计：
- *  - 存储层完全不解析 `messages` 内部结构:每条消息就是 `{ id, role, createdAt, driverId, raw }` 二元组;
+ *  - 所有磁盘操作均为 async,不阻塞主进程事件循环;
+ *  - index(会话列表 + 项目列表)在内存中缓存,首次访问时懒加载,写操作同步更新缓存;
+ *  - 会话文件按 chatId 独立读写,多对话并行互不阻塞;
+ *  - 写操作通过 per-file promise chain 串行化,防止并发写导致数据丢失;
  *  - `raw` 字段是 driver 自己的 JSON 形态,Qoder 存 SDK 事件、OpenAI 存 ModelMessage 列表等等;
  *  - driver 加载历史时,通过 `driver.deserializeMessage(record)` 把 `raw` 反序列化为 `parts`;
  *  - 旧 v2 文件 (目录 `chats-v2`) 不会再被读取,直接忽略。
  */
 export class ChatStorage {
+  /** 内存中的 index 缓存(会话 meta 列表 + 项目列表),避免每次 listMetas 都读磁盘。 */
+  private indexCache: ChatIndex | undefined
+  /** index 是否已从磁盘尝试加载过(区分"未加载"与"磁盘上确实没有")。 */
+  private indexLoaded = false
+  /** 目录是否已确保存在。 */
+  private dirEnsured = false
+  /** 确保目录的 promise(去重,避免并发调用重复 mkdir)。 */
+  private dirEnsurePromise: Promise<void> | undefined
+
+  /**
+   * 写操作串行化队列:per-file promise chain。
+   * 同一文件的写操作按入队顺序执行,不同文件互不阻塞(真正并行)。
+   */
+  private readonly writeQueues = new Map<string, Promise<void>>()
+
   constructor(private readonly dataDir: string) {}
 
-  private ensureDir(): void {
-    mkdirSync(chatsDir(this.dataDir), { recursive: true })
+  /**
+   * 确保存储目录存在(异步,幂等,并发调用只执行一次 mkdir)。
+   */
+  private async ensureDir(): Promise<void> {
+    if (this.dirEnsured) return
+    if (!this.dirEnsurePromise) {
+      this.dirEnsurePromise = mkdir(chatsDir(this.dataDir), { recursive: true }).then(() => {
+        this.dirEnsured = true
+      })
+    }
+    await this.dirEnsurePromise
   }
 
-  listMetas(): ChatConversationMeta[] {
-    this.ensureDir()
-    const index = parseFile<ChatIndex>(indexPath(this.dataDir))
-    if (index?.version !== STORAGE_VERSION || !Array.isArray(index.conversations)) return []
-    return [...index.conversations].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  /**
+   * 加载 index(懒加载,只读一次磁盘)。
+   */
+  private async loadIndex(): Promise<ChatIndex | undefined> {
+    if (this.indexLoaded) return this.indexCache
+    await this.ensureDir()
+    const index = await parseFile<ChatIndex>(indexPath(this.dataDir))
+    if (index?.version === STORAGE_VERSION) {
+      this.indexCache = index
+    }
+    this.indexLoaded = true
+    return this.indexCache
+  }
+
+  /**
+   * 把 index 写入磁盘并同步更新内存缓存。
+   * 通过 writeQueues 串行化,防止并发写覆盖。
+   */
+  private enqueueIndexWrite(index: ChatIndex): Promise<void> {
+    this.indexCache = index
+    this.indexLoaded = true
+    const prev = this.writeQueues.get('index') ?? Promise.resolve()
+    const next = prev.then(
+      () => atomicWrite(indexPath(this.dataDir), index),
+      () => atomicWrite(indexPath(this.dataDir), index)
+    )
+    this.writeQueues.set('index', next)
+    return next
+  }
+
+  /**
+   * 把会话文件写入磁盘。
+   * 通过 writeQueues 按 chatId 串行化,不同 chatId 真正并行。
+   */
+  private enqueueConversationWrite(id: string, file: ChatFile): Promise<void> {
+    const path = conversationPath(this.dataDir, id)
+    const prev = this.writeQueues.get(path) ?? Promise.resolve()
+    const next = prev.then(
+      () => atomicWrite(path, file),
+      () => atomicWrite(path, file)
+    )
+    this.writeQueues.set(path, next)
+    return next
+  }
+
+  /**
+   * 获取缓存中的会话 meta 列表(不读磁盘,缓存未加载时先懒加载)。
+   */
+  private getCachedMetas(): ChatConversationMeta[] {
+    if (!this.indexCache || !Array.isArray(this.indexCache.conversations)) return []
+    return [...this.indexCache.conversations].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  }
+
+  /**
+   * 获取缓存中的项目列表(不读磁盘)。
+   */
+  private getCachedProjects(): ChatProject[] {
+    if (!this.indexCache || !Array.isArray(this.indexCache.projects)) return []
+    return [...this.indexCache.projects].sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
+  }
+
+  async listMetas(): Promise<ChatConversationMeta[]> {
+    await this.loadIndex()
+    return this.getCachedMetas()
   }
 
   /**
    * 列出所有项目(工作目录),按最近活动时间倒序。
    * 项目与会话解耦:目录下所有会话被删除后项目仍保留,UI 显示「没有对话」。
    */
-  listProjects(): ChatProject[] {
-    this.ensureDir()
-    const index = parseFile<ChatIndex>(indexPath(this.dataDir))
-    if (index?.version !== STORAGE_VERSION || !Array.isArray(index.projects)) return []
-    return [...index.projects].sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
+  async listProjects(): Promise<ChatProject[]> {
+    await this.loadIndex()
+    return this.getCachedProjects()
   }
 
-  getConversation(id: string): ChatConversation | undefined {
-    this.ensureDir()
-    const file = parseFile<ChatFile>(conversationPath(this.dataDir, id))
+  async getConversation(id: string): Promise<ChatConversation | undefined> {
+    await this.ensureDir()
+    const file = await parseFile<ChatFile>(conversationPath(this.dataDir, id))
     if (file?.version !== STORAGE_VERSION || file.conversation?.id !== id || !Array.isArray(file.conversation.messages))
       return undefined
     return file.conversation
   }
 
-  saveConversation(conversation: ChatConversation): void {
-    this.ensureDir()
+  async saveConversation(conversation: ChatConversation): Promise<void> {
+    await this.ensureDir()
     const normalized: ChatConversation = { ...conversation, messageCount: conversation.messages.length }
-    atomicWrite(conversationPath(this.dataDir, conversation.id), {
-      version: STORAGE_VERSION,
-      conversation: normalized
-    } satisfies ChatFile)
+    const file: ChatFile = { version: STORAGE_VERSION, conversation: normalized }
+    // 会话文件写入(按 chatId 串行化,不同对话真正并行)。
+    await this.enqueueConversationWrite(normalized.id, file)
     // 绑定了工作目录 = 项目对话,顺手记录/刷新项目实体(删除会话时不删项目,见 deleteConversation)。
-    if (normalized.workingDirectory) this.upsertProject(normalized.workingDirectory, normalized.updatedAt)
-    this.upsertMeta((conv) => {
+    if (normalized.workingDirectory) await this.upsertProject(normalized.workingDirectory, normalized.updatedAt)
+    await this.upsertMeta((conv) => {
       const { messages: _messages, ...meta } = conv
       return meta
     }, normalized)
@@ -105,12 +191,12 @@ export class ChatStorage {
   /**
    * 追加单条消息(给"刚发完流,持久化"用)。会读出现有会话 + 替换 messages。
    */
-  appendMessage(
+  async appendMessage(
     id: string,
     message: StoredMessageRecord,
     patch: Partial<ChatConversationMeta> = {}
-  ): ChatConversation | undefined {
-    const current = this.getConversation(id)
+  ): Promise<ChatConversation | undefined> {
+    const current = await this.getConversation(id)
     if (!current) return undefined
     const next: ChatConversation = {
       ...current,
@@ -119,19 +205,19 @@ export class ChatStorage {
       messageCount: current.messages.length + 1,
       updatedAt: patch.updatedAt ?? new Date().toISOString()
     }
-    this.saveConversation(next)
+    await this.saveConversation(next)
     return next
   }
 
   /**
    * 整体替换会话里的 messages(给"先持久化 user message + 之后持久化 assistant message"用)。
    */
-  replaceMessages(
+  async replaceMessages(
     id: string,
     messages: StoredMessageRecord[],
     patch: Partial<ChatConversationMeta> = {}
-  ): ChatConversation | undefined {
-    const current = this.getConversation(id)
+  ): Promise<ChatConversation | undefined> {
+    const current = await this.getConversation(id)
     if (!current) return undefined
     const next: ChatConversation = {
       ...current,
@@ -140,15 +226,15 @@ export class ChatStorage {
       messageCount: messages.length,
       updatedAt: patch.updatedAt ?? new Date().toISOString()
     }
-    this.saveConversation(next)
+    await this.saveConversation(next)
     return next
   }
 
   /**
    * 更新会话 meta 的若干字段(项目对话绑定/解绑工作目录用),不动 messages。
    */
-  updateMeta(id: string, patch: Partial<ChatConversationMeta>): ChatConversation | undefined {
-    const current = this.getConversation(id)
+  async updateMeta(id: string, patch: Partial<ChatConversationMeta>): Promise<ChatConversation | undefined> {
+    const current = await this.getConversation(id)
     if (!current) return undefined
     const next: ChatConversation = {
       ...current,
@@ -156,54 +242,67 @@ export class ChatStorage {
       messageCount: current.messages.length,
       updatedAt: patch.updatedAt ?? new Date().toISOString()
     }
-    this.saveConversation(next)
+    await this.saveConversation(next)
     return next
   }
 
-  deleteConversation(id: string): void {
-    this.ensureDir()
+  async deleteConversation(id: string): Promise<void> {
+    await this.ensureDir()
     const file = conversationPath(this.dataDir, id)
-    if (existsSync(file)) unlinkSync(file)
-    this.writeIndex(this.listMetas().filter((item) => item.id !== id))
+    try {
+      await unlink(file)
+    } catch {
+      /* 文件不存在也无所谓 */
+    }
+    await this.loadIndex()
+    const filtered = this.getCachedMetas().filter((item) => item.id !== id)
+    await this.writeIndex(filtered)
   }
 
   /** 记录/刷新项目实体(目录已存在则只更新 lastActiveAt)。 */
-  private upsertProject(directory: string, lastActiveAt: string): void {
-    const projects = this.listProjects()
+  private async upsertProject(directory: string, lastActiveAt: string): Promise<void> {
+    await this.loadIndex()
+    const projects = this.getCachedProjects()
     const existing = projects.find((item) => item.directory === directory)
     if (existing) existing.lastActiveAt = lastActiveAt
     else projects.push({ directory, lastActiveAt })
-    this.writeProjects(projects)
+    await this.writeProjects(projects)
   }
 
-  private writeProjects(projects: ChatProject[]): void {
-    const index = parseFile<ChatIndex>(indexPath(this.dataDir))
-    atomicWrite(indexPath(this.dataDir), {
+  private async writeProjects(projects: ChatProject[]): Promise<void> {
+    await this.loadIndex()
+    const index: ChatIndex = {
       version: STORAGE_VERSION,
       conversations:
-        index?.version === STORAGE_VERSION && Array.isArray(index.conversations) ? index.conversations : [],
+        this.indexCache?.version === STORAGE_VERSION && Array.isArray(this.indexCache.conversations)
+          ? this.indexCache.conversations
+          : [],
       projects
-    } satisfies ChatIndex)
+    }
+    await this.enqueueIndexWrite(index)
   }
 
-  private upsertMeta(
+  private async upsertMeta(
     select: (conversation: ChatConversation) => ChatConversationMeta,
     conversation: ChatConversation
-  ): void {
+  ): Promise<void> {
+    await this.loadIndex()
     const meta = select(conversation)
-    const list = this.listMetas()
+    const list = this.getCachedMetas()
     const index = list.findIndex((item) => item.id === meta.id)
     if (index >= 0) list[index] = meta
     else list.push(meta)
-    this.writeIndex(list)
+    await this.writeIndex(list)
   }
 
-  private writeIndex(conversations: ChatConversationMeta[]): void {
-    atomicWrite(indexPath(this.dataDir), {
+  private async writeIndex(conversations: ChatConversationMeta[]): Promise<void> {
+    await this.loadIndex()
+    const index: ChatIndex = {
       version: STORAGE_VERSION,
       conversations,
       projects: this.trimProjects(conversations)
-    } satisfies ChatIndex)
+    }
+    await this.enqueueIndexWrite(index)
   }
 
   /**
@@ -214,12 +313,12 @@ export class ChatStorage {
     const activeDirs = new Set(conversations.map((item) => item.workingDirectory).filter((dir): dir is string => !!dir))
     const kept = new Set<string>()
     let empties = 0
-    for (const project of this.listProjects().sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))) {
+    for (const project of this.getCachedProjects().sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))) {
       if (activeDirs.has(project.directory) || empties < MAX_EMPTY_PROJECTS) {
         kept.add(project.directory)
         if (!activeDirs.has(project.directory)) empties += 1
       }
     }
-    return this.listProjects().filter((item) => kept.has(item.directory))
+    return this.getCachedProjects().filter((item) => kept.has(item.directory))
   }
 }

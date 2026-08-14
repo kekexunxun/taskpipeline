@@ -2953,19 +2953,19 @@ function registerIpc(): void {
     }
   )
   // === Chat 对话(Codex 样式) =================================================
-  ipcMain.handle('chats:list', () => chatService.listChats())
-  ipcMain.handle('chats:list-projects', () => chatService.listProjects())
-  ipcMain.handle('chats:get', (_event, id: string) => chatService.getChat(id))
+  ipcMain.handle('chats:list', async () => chatService.listChats())
+  ipcMain.handle('chats:list-projects', async () => chatService.listProjects())
+  ipcMain.handle('chats:get', async (_event, id: string) => chatService.getChat(id))
   ipcMain.handle(
     'chats:create',
-    (_event, input?: { driverId?: ChatDriverId; model?: string; workingDirectory?: string }) =>
+    async (_event, input?: { driverId?: ChatDriverId; model?: string; workingDirectory?: string }) =>
       chatService.createChat(input?.driverId, input?.model, input?.workingDirectory)
   )
-  ipcMain.handle('chats:delete', (_event, id: string) => {
-    chatService.deleteChat(id)
+  ipcMain.handle('chats:delete', async (_event, id: string) => {
+    await chatService.deleteChat(id)
     memoryService.deleteConversationMemories(id)
   })
-  ipcMain.handle('chats:set-directory', (_event, id: string, workingDirectory?: string) =>
+  ipcMain.handle('chats:set-directory', async (_event, id: string, workingDirectory?: string) =>
     chatService.setChatWorkingDirectory(id, workingDirectory)
   )
   ipcMain.handle('chats:list-models', async () => {

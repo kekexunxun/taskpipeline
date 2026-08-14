@@ -10,8 +10,10 @@ import type { ChatDriver } from './drivers/chat-driver.js'
 import type {
   AbortChatStreamInput,
   ChatConversation,
+  ChatConversationMeta,
   ChatMessageMetadata,
   ChatModelGroup,
+  ChatProject,
   ChatStreamEvent,
   ChatStreamChunk,
   ChatDriverId,
@@ -103,12 +105,12 @@ export class ChatService {
     this.storage = new ChatStorage(dataDir)
   }
 
-  listChats() {
+  async listChats(): Promise<ChatConversationMeta[]> {
     return this.storage.listMetas()
   }
 
   /** 列出所有项目(工作目录),与具体会话解耦 —— 目录下会话删光后项目仍保留。 */
-  listProjects() {
+  async listProjects(): Promise<ChatProject[]> {
     return this.storage.listProjects()
   }
 
@@ -116,8 +118,8 @@ export class ChatService {
    * 加载会话并把每条 message 按 `driverId` 反序列化为 `StoredMessage`(带 parts)。
    * `ChatConversation.messages` 本身是 record 列表(无 parts),这里补齐 parts 给 UI 用。
    */
-  getChat(id: string): { conversation: ChatConversation; messages: StoredMessage[] } | undefined {
-    const conversation = this.storage.getConversation(id)
+  async getChat(id: string): Promise<{ conversation: ChatConversation; messages: StoredMessage[] } | undefined> {
+    const conversation = await this.storage.getConversation(id)
     if (!conversation) return undefined
     const messages = conversation.messages.map((record) => this.deserializeRecord(record))
     return { conversation, messages }
@@ -174,14 +176,13 @@ export class ChatService {
     return { driver, model: systemDefault.model }
   }
 
-  createChat(driverId?: ChatDriverId, model?: string, workingDirectory?: string): ChatConversation {
+  async createChat(driverId?: ChatDriverId, model?: string, workingDirectory?: string): Promise<ChatConversation> {
     // 统一复用规则:普通对话(无目录)复用无目录空对话,项目对话复用同目录空对话 ——
     // 避免反复点「+」无限新增空会话。匹配条件是 workingDirectory 全等。
-    const existing = this.storage
-      .listMetas()
-      .find((item) => item.messageCount === 0 && item.workingDirectory === workingDirectory)
+    const metas = await this.storage.listMetas()
+    const existing = metas.find((item) => item.messageCount === 0 && item.workingDirectory === workingDirectory)
     if (existing) {
-      const conversation = this.storage.getConversation(existing.id)
+      const conversation = await this.storage.getConversation(existing.id)
       if (conversation) return conversation
     }
     const now = new Date().toISOString()
@@ -196,25 +197,25 @@ export class ChatService {
       workingDirectory,
       messages: []
     }
-    this.storage.saveConversation(conversation)
+    await this.storage.saveConversation(conversation)
     return conversation
   }
 
-  deleteChat(id: string): void {
+  async deleteChat(id: string): Promise<void> {
     this.activeStreams.get(id)?.abort.abort()
     // 关闭该对话对应的常驻 Qoder 会话(qodercli 进程),避免随应用生命周期悬挂。
-    const conversation = this.storage.getConversation(id)
+    const conversation = await this.storage.getConversation(id)
     if (conversation?.driverId) {
       this.driverRegistry.tryGet(conversation.driverId)?.closeSession?.(id)
     }
-    this.storage.deleteConversation(id)
+    await this.storage.deleteConversation(id)
   }
 
   /**
    * 绑定/解绑对话的工作目录(项目对话)。
    * 传 undefined 即解绑,回到普通对话;正在流式时返回 undefined。
    */
-  setChatWorkingDirectory(id: string, workingDirectory?: string): ChatConversation | undefined {
+  async setChatWorkingDirectory(id: string, workingDirectory?: string): Promise<ChatConversation | undefined> {
     if (this.activeStreams.has(id)) return undefined
     return this.storage.updateMeta(id, { workingDirectory })
   }
@@ -249,7 +250,7 @@ export class ChatService {
   }
 
   async startChatStream(input: StartChatStreamInput): Promise<void> {
-    const conversation = this.storage.getConversation(input.chatId)
+    const conversation = await this.storage.getConversation(input.chatId)
     if (!conversation) throw new Error('对话不存在')
     // 失效模型 fallback:存储/请求里的 model 可能已不存在(profile 删除 / Qoder 模型下线),
     // 解析出本轮真正可用的 driver + model(可能换 driver);不做前置改写,仅本轮按实际使用值落盘。
@@ -315,7 +316,7 @@ export class ChatService {
     try {
       const isFirstUserMessage = !conversation.messages.some((m) => m.role === 'user')
       const title = isFirstUserMessage ? titleOf(input.message.text) : conversation.title
-      this.storage.replaceMessages(input.chatId, messages, {
+      await this.storage.replaceMessages(input.chatId, messages, {
         title,
         model: effective.model,
         driverId: effective.driverId,
@@ -410,7 +411,7 @@ export class ChatService {
       // 整轮成功后才记「记忆已注入」：失败/中止（error/aborted/空响应）不消耗资格，重试仍会重新提取。
       if (status === 'done' && memoryInjectedThisTurn && !conversation.memoryInjected) {
         try {
-          this.storage.updateMeta(input.chatId, { memoryInjected: true })
+          await this.storage.updateMeta(input.chatId, { memoryInjected: true })
         } catch {
           /* 标记写入失败不影响本轮 */
         }
@@ -428,7 +429,7 @@ export class ChatService {
           // 错误详情不依赖 driver 的序列化实现(各 driver 挑字段返回,可能丢弃多余 input),
           // 统一在编排层合并进 record,保证历史消息重新加载后仍能展示接口异常。
           const assistantRecord = errorMessage ? { ...serialized, errorMessage } : serialized
-          this.storage.appendMessage(input.chatId, assistantRecord, {
+          await this.storage.appendMessage(input.chatId, assistantRecord, {
             model: effective.model,
             driverId: effective.driverId
           })
@@ -444,7 +445,7 @@ export class ChatService {
         this.finish(effective)
         if (this.activeStreams.get(input.chatId)?.streamId === input.streamId) this.activeStreams.delete(input.chatId)
         if (status === 'done' && parts.length) {
-          const conversation = this.storage.getConversation(input.chatId)
+          const conversation = await this.storage.getConversation(input.chatId)
           if (conversation) {
             // 记忆整理是回合的一部分：await 它完成后再 endTurn，确保整理 LLM 调用
             // 挂在同一 trace 下；consolidate 异常也 endTurn（兜底关闭）。
