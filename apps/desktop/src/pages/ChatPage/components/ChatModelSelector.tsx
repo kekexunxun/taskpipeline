@@ -34,6 +34,26 @@ function vendorNameOf(model: { vendor?: string }): string | undefined {
   return MODEL_VENDORS.find((v) => v.id === model.vendor)?.name
 }
 
+/** 按厂商分块（顺序 = MODEL_VENDORS 注册表；缺失/未知 vendor 归入「其它兼容端点」）。 */
+function groupModelsByVendor(
+  models: ChatModelInfo[]
+): Array<{ vendor: string; label: string; items: ChatModelInfo[] }> {
+  const order = MODEL_VENDORS.map((v) => v.id)
+  const buckets = new Map<string, ChatModelInfo[]>()
+  for (const model of models) {
+    const vendor = model.vendor && (order as string[]).includes(model.vendor) ? model.vendor : 'openai-compatible'
+    if (!buckets.has(vendor)) buckets.set(vendor, [])
+    buckets.get(vendor)!.push(model)
+  }
+  return order
+    .filter((vendor) => (buckets.get(vendor)?.length ?? 0) > 0)
+    .map((vendor) => ({
+      vendor,
+      label: MODEL_VENDORS.find((v) => v.id === vendor)?.name ?? vendor,
+      items: buckets.get(vendor)!
+    }))
+}
+
 /**
  * 浮层内参数调节区（schema 驱动，按 capabilities 渲染）。
  * 交互事件就地拦截，避免触发 CommandItem 的 onSelect（选中后关闭下拉）。
@@ -273,6 +293,39 @@ export function ChatModelSelector({
     if (model.value !== value) onChange(model.value)
     onChangeParams?.(next)
   }
+  // 单个模型条目（含 anchor + hover 事件 wrapper），openai 组按厂商分块时复用。
+  const renderModel = (model: ChatModelInfo) => {
+    const isAuto = Boolean(autoInfo && model.value === autoInfo.value)
+    const isActive = model.value === value || isAuto
+    const vendorName = vendorNameOf(model)
+    const item = (
+      <ModelSelectorItem
+        value={vendorName ? `${vendorName} ${model.displayName}` : model.displayName}
+        onSelect={() => {
+          onChange(model.value)
+          setOpen(false)
+        }}
+      >
+        <ModelSelectorName>{model.displayName}</ModelSelectorName>
+        <ModelBadges model={model} />
+        {model.isDefault && (
+          <span className="rounded bg-muted px-1 text-[10px] font-medium text-muted-foreground">默认</span>
+        )}
+        {isAuto && <span className="rounded bg-primary/10 px-1 text-[10px] font-medium text-primary">自动</span>}
+        <CheckIcon size={11} className={cn('ml-auto text-foreground', isActive ? 'opacity-100' : 'opacity-0')} />
+      </ModelSelectorItem>
+    )
+    return (
+      <div
+        key={model.value}
+        data-model-value={model.value}
+        onMouseEnter={() => handleEnter(model.value)}
+        onMouseLeave={handleLeave}
+      >
+        {item}
+      </div>
+    )
+  }
 
   return (
     <>
@@ -318,11 +371,14 @@ export function ChatModelSelector({
             {groups.map((group) => (
               <ModelSelectorGroup
                 key={group.driverId}
+                // 仅 Qoder 组保留组标题；OpenAI 兼容组内部已按厂商分块，不再重复组标题
                 heading={
-                  <span className="inline-flex items-center gap-1">
-                    {group.driverId === 'qoder' ? <SparklesIcon size={10} /> : <CpuIcon size={10} />}
-                    {group.displayName}
-                  </span>
+                  group.driverId === 'qoder' ? (
+                    <span className="inline-flex items-center gap-1">
+                      <SparklesIcon size={10} />
+                      {group.displayName}
+                    </span>
+                  ) : undefined
                 }
               >
                 {group.driverId === 'qoder' && group.quotaExhausted && (
@@ -330,51 +386,17 @@ export function ChatModelSelector({
                     Qoder 额度不足，当前仅 lite 免费模型可用
                   </div>
                 )}
-                {group.models.map((model) => {
-                  const isAuto = Boolean(autoInfo && model.value === autoInfo.value)
-                  const isActive = model.value === value || isAuto
-                  const vendorName = vendorNameOf(model)
-                  const item = (
-                    <ModelSelectorItem
-                      value={vendorName ? `${vendorName} ${model.displayName}` : model.displayName}
-                      onSelect={() => {
-                        onChange(model.value)
-                        setOpen(false)
-                      }}
-                    >
-                      <ModelSelectorName className="flex items-center">
-                        {vendorName && (
-                          <span className="mr-1 text-[10px] font-normal text-muted-foreground">[{vendorName}]</span>
-                        )}
-                        {model.displayName}
-                      </ModelSelectorName>
-                      <ModelBadges model={model} />
-                      {model.isDefault && (
-                        <span className="rounded bg-muted px-1 text-[10px] font-medium text-muted-foreground">
-                          默认
-                        </span>
-                      )}
-                      {isAuto && (
-                        <span className="rounded bg-primary/10 px-1 text-[10px] font-medium text-primary">自动</span>
-                      )}
-                      <CheckIcon
-                        size={11}
-                        className={cn('ml-auto text-foreground', isActive ? 'opacity-100' : 'opacity-0')}
-                      />
-                    </ModelSelectorItem>
-                  )
-                  // 所有条目统一挂 anchor（data-model-value）供浮层定位；hover 事件在 wrapper 上。
-                  return (
-                    <div
-                      key={model.value}
-                      data-model-value={model.value}
-                      onMouseEnter={() => handleEnter(model.value)}
-                      onMouseLeave={handleLeave}
-                    >
-                      {item}
-                    </div>
-                  )
-                })}
+                {group.driverId === 'qoder'
+                  ? group.models.map((model) => renderModel(model))
+                  : // OpenAI 兼容组按厂商分块展示
+                    groupModelsByVendor(group.models).map((block) => (
+                      <div key={block.vendor}>
+                        <div className="flex items-center gap-1 px-2 pt-2 pb-0.5 text-[10px] font-semibold text-muted-foreground">
+                          {block.label}
+                        </div>
+                        {block.items.map((model) => renderModel(model))}
+                      </div>
+                    ))}
               </ModelSelectorGroup>
             ))}
           </ModelSelectorList>

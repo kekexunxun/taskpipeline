@@ -77,9 +77,11 @@ describe('ChatModelSelector hover params popover', () => {
     render(<ChatModelSelector groups={groups} onChange={onChange} onChangeParams={onChangeParams} />)
     fireEvent.click(screen.getByRole('button', { name: '选择模型' }))
     await new Promise((resolve) => setTimeout(resolve, 100))
+    // 厂商分块标题显示厂商名，条目只显示用户定义名
+    expect(screen.queryByText('百炼 Token Plan')).not.toBeNull()
     const item = listItemByText('我的百炼')
-    expect(item.textContent).toContain('百炼 Token Plan')
     expect(item.textContent).toContain('我的百炼')
+    expect(item.textContent).not.toContain('百炼 Token Plan')
     // 搜索也能命中厂商名
     fireEvent.change(screen.getByPlaceholderText('搜索模型…'), { target: { value: '百炼' } })
     expect(screen.queryByText('我的百炼')).not.toBeNull()

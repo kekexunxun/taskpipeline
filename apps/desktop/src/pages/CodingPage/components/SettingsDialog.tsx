@@ -12,7 +12,8 @@ import {
   RefreshCwIcon,
   SearchIcon,
   Trash2Icon,
-  UploadIcon
+  UploadIcon,
+  InfoIcon
 } from 'lucide-react'
 import type { AgentProfile, Memory, MemoryScope, RepositoryProfile } from '@task-pipeline/core'
 import { RepositoryDialog, TestButton, type RepoDraft } from './RepositoryDialog'
@@ -22,7 +23,7 @@ import { OpenAIProfileDialog, type OpenAIProfile } from './OpenAIProfileDialog'
 import { McpSettingsTab } from './McpSettingsTab'
 import { SkillSettingsTab } from './SkillSettingsTab'
 import { ModelBadges } from '@/components/ModelBadges'
-import { detectVendor, type ModelVendor } from '@/utils/model-vendors'
+import { detectVendor, MODEL_VENDORS, type ModelVendor } from '@/utils/model-vendors'
 import { api, type CapabilityKey, type MemorySearchResult, type SystemDefaultModel } from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
 import { useAgents } from '@/hooks/useAgents'
@@ -49,6 +50,7 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { Field, FieldGroup } from '@/components/ui/field'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Input } from '@/components/ui/input'
 import { SecretInput } from '@/components/ui/secret-input'
 import { Switch } from '@/components/ui/switch'
@@ -86,6 +88,25 @@ type OpenAIDraft = {
   isDefault: boolean
   /** 用户显式声明的参数能力；缺省 = driver 按 vendor 自动推断。 */
   capabilities?: CapabilityKey[]
+}
+/** 按厂商分块（顺序 = MODEL_VENDORS 注册表；缺失/未知 vendor 归入「其它兼容端点」）。 */
+function groupProfilesByVendor(
+  profiles: OpenAIDraft[]
+): Array<{ vendor: ModelVendor; label: string; items: OpenAIDraft[] }> {
+  const order = MODEL_VENDORS.map((v) => v.id)
+  const buckets = new Map<ModelVendor, OpenAIDraft[]>()
+  for (const profile of profiles) {
+    const vendor = profile.vendor && order.includes(profile.vendor) ? profile.vendor : 'openai-compatible'
+    if (!buckets.has(vendor)) buckets.set(vendor, [])
+    buckets.get(vendor)!.push(profile)
+  }
+  return order
+    .filter((vendor) => (buckets.get(vendor)?.length ?? 0) > 0)
+    .map((vendor) => ({
+      vendor,
+      label: MODEL_VENDORS.find((v) => v.id === vendor)?.name ?? vendor,
+      items: buckets.get(vendor)!
+    }))
 }
 const defaults: Settings = {
   defaultModel: 'claude-sonnet-4.5',
@@ -990,7 +1011,7 @@ export function SettingsDialog({
     : undefined
 
   return (
-    <>
+    <TooltipProvider>
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent
           onPointerDownOutside={(event) => event.preventDefault()}
@@ -1516,71 +1537,86 @@ export function SettingsDialog({
                     </FieldGroup>
                   </Section>
                   <Section
-                    title="OpenAI-Compatible"
+                    title="自定义模型"
                     description="连接兼容 OpenAI API 格式的模型服务，可配置多个并指定组内默认 profile（Qoder 不可用时系统默认跟随它）。"
                   >
-                    <FieldGroup className="gap-2">
-                      {openAIProfiles.length > 0 ? (
-                        openAIProfiles.map((profile) => (
-                          <div
-                            key={profile.id}
-                            className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5"
-                          >
-                            <div className="flex min-w-0 items-center gap-2.5">
-                              <div className="grid size-8 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
-                                <ExternalLinkIcon size={14} />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-1.5">
-                                  <h4 className="truncate text-xs font-semibold text-foreground">
-                                    {profile.displayName || profile.model}
-                                  </h4>
-                                  <Badge variant="muted" className="text-[9px]">
-                                    已配置
-                                  </Badge>
-                                  {profile.isDefault && <Badge className="text-[9px]">默认</Badge>}
-                                </div>
-                                <p
-                                  className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground"
-                                  title={profile.baseUrl}
-                                >
-                                  {profile.model} · {profile.baseUrl}
-                                </p>
-                              </div>
-                            </div>
-                            <div className="flex shrink-0 items-center gap-1.5">
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                onClick={() => setOpenAIDialog({ open: true, mode: 'edit', editing: profile })}
-                              >
-                                <PencilIcon size={11} />
-                                编辑
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="text-muted-foreground hover:text-destructive"
-                                onClick={() => void deleteOpenAIProfile(profile.id)}
-                              >
-                                <Trash2Icon size={11} />
-                              </Button>
-                            </div>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
-                          尚未配置 OpenAI-Compatible 模型，点击下方新增。
-                        </div>
-                      )}
+                    <FieldGroup className="gap-2.5">
                       <Button
                         size="sm"
                         variant={openAIProfiles.length > 0 ? 'secondary' : 'default'}
                         onClick={() => setOpenAIDialog({ open: true, mode: 'create' })}
+                        className="w-fit"
                       >
                         <PlusIcon size={11} />
-                        新增 OpenAI-Compatible
+                        新增自定义模型
                       </Button>
+                      {openAIProfiles.length === 0 ? (
+                        <div className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
+                          尚未配置自定义模型，点击上方新增。
+                        </div>
+                      ) : (
+                        groupProfilesByVendor(openAIProfiles).map((block) => (
+                          <div key={block.vendor} className="space-y-1.5">
+                            <div className="flex items-center gap-1 px-0.5">
+                              <span className="text-[11px] font-semibold text-foreground/80">{block.label}</span>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span className="cursor-help">
+                                    <InfoIcon size={11} className="text-muted-foreground" />
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent side="top" align="start" className="max-w-72 whitespace-pre-line">
+                                  {block.items.map((p) => `${p.displayName || p.model}: ${p.baseUrl}`).join('\n')}
+                                </TooltipContent>
+                              </Tooltip>
+                            </div>
+                            {block.items.map((profile) => (
+                              <div
+                                key={profile.id}
+                                className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5"
+                              >
+                                <div className="flex min-w-0 items-center gap-2.5">
+                                  <div className="grid size-8 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
+                                    <ExternalLinkIcon size={14} />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-1.5">
+                                      <h4 className="truncate text-xs font-semibold text-foreground">
+                                        {profile.displayName || profile.model}
+                                      </h4>
+                                      <Badge variant="muted" className="text-[9px]">
+                                        已配置
+                                      </Badge>
+                                      {profile.isDefault && <Badge className="text-[9px]">默认</Badge>}
+                                    </div>
+                                    <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                                      {profile.model}
+                                    </p>
+                                  </div>
+                                </div>
+                                <div className="flex shrink-0 items-center gap-1.5">
+                                  <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={() => setOpenAIDialog({ open: true, mode: 'edit', editing: profile })}
+                                  >
+                                    <PencilIcon size={11} />
+                                    编辑
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="text-muted-foreground hover:text-destructive"
+                                    onClick={() => void deleteOpenAIProfile(profile.id)}
+                                  >
+                                    <Trash2Icon size={11} />
+                                  </Button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ))
+                      )}
                     </FieldGroup>
                   </Section>
                 </TabsContent>
@@ -1704,6 +1740,6 @@ export function SettingsDialog({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </>
+    </TooltipProvider>
   )
 }

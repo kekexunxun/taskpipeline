@@ -51,7 +51,7 @@ export const MODEL_VENDORS: ReadonlyArray<{
       }
     ]
   },
-  { id: 'openai-compatible', name: '其它兼容端点', defaultBaseUrl: '' }
+  { id: 'openai-compatible', name: 'OpenAI-Compatible', defaultBaseUrl: '' }
 ]
 
 export function detectVendor(baseUrl: string | undefined): ModelVendor {

@@ -31,7 +31,7 @@ export const MODEL_VENDORS: ReadonlyArray<{ id: ModelVendor; name: string; defau
     name: '百炼 Token Plan',
     defaultBaseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1'
   },
-  { id: 'openai-compatible', name: '其它兼容端点', defaultBaseUrl: '' }
+  { id: 'openai-compatible', name: 'OpenAI-Compatible', defaultBaseUrl: '' }
 ]
 
 /**
