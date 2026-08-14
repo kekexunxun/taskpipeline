@@ -92,6 +92,12 @@ export type ChatStagePhase = 'keyword' | 'chat' | 'memory'
 export class ChatService {
   private readonly storage: ChatStorage
   private readonly activeStreams = new Map<string, ActiveStream>()
+  /** 活跃流的完整生命周期 Promise（含 finally 持久化），供退出时 await 确保落盘。 */
+  private readonly activeStreamLifecycles = new Map<string, Promise<void>>()
+  /** 应用正在退出：阻止新流启动，abortAllActiveStreams 期间为 true。 */
+  private isQuitting = false
+  /** 流式期间增量持久化定时间隔 ID（finally 中清除）。 */
+  private streamPersistInterval: ReturnType<typeof setInterval> | undefined
 
   constructor(
     private readonly store: TaskStore,
@@ -234,6 +240,18 @@ export class ChatService {
   }
 
   /**
+   * 中止所有活跃流并等待其 finally 块（含 assistant 消息持久化）完成。
+   * 给 `before-quit` 用：确保关闭程序时已接收到的回复内容不丢失。
+   */
+  async abortAllActiveStreams(timeoutMs = 5000): Promise<void> {
+    this.isQuitting = true
+    for (const active of this.activeStreams.values()) active.abort.abort()
+    const lifecycles = Array.from(this.activeStreamLifecycles.values())
+    if (lifecycles.length === 0) return
+    await Promise.race([Promise.allSettled(lifecycles), new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))])
+  }
+
+  /**
    * 阶段容器包裹（与任务路径 agent.run 阶段同构）：fn 执行期间产生的 span 自动挂入
    * keyword/chat/memory 阶段容器，Trace 页据此按阶段分组。trace 不活跃或管理器缺
    * 阶段能力时直通执行；阶段内异常标记容器 error 后原样上抛（不吞错）。
@@ -258,6 +276,7 @@ export class ChatService {
   }
 
   async startChatStream(input: StartChatStreamInput): Promise<void> {
+    if (this.isQuitting) throw new Error('应用正在退出')
     const conversation = await this.storage.getConversation(input.chatId)
     if (!conversation) throw new Error('对话不存在')
     // 失效模型 fallback:存储/请求里的 model 可能已不存在(profile 删除 / Qoder 模型下线),
@@ -270,6 +289,12 @@ export class ChatService {
     if (prior) prior.abort.abort()
     const abort = new AbortController()
     this.activeStreams.set(input.chatId, { streamId: input.streamId, abort })
+    // 追踪流的完整生命周期（含 finally 持久化），供 abortAllActiveStreams 等待落盘完成。
+    let resolveLifecycle!: () => void
+    const lifecyclePromise = new Promise<void>((resolve) => {
+      resolveLifecycle = resolve
+    })
+    this.activeStreamLifecycles.set(input.chatId, lifecyclePromise)
 
     const now = input.message.createdAt
     // 对话回合 trace：对话级（一个对话 = 一个 Trace，跨回合重开续接，显示多条「对话生成」记录）。
@@ -376,6 +401,9 @@ export class ChatService {
         messageMetadata: { createdAt: now, model: effective.model, agentMode: input.mode ?? 'chat' }
       })
 
+      // 流式期间每 3 秒把已累积的 parts 覆盖写入磁盘，崩溃/强杀最多丢 3 秒内容。
+      this.startPartialPersist(input.chatId, assistantId, parts, now, effective)
+
       // chat 阶段容器：主对话生成（driver 流式期间的 llm/tool/subtask span 挂入阶段）。
       await this.withStage(Boolean(turnTraceId), input.chatId, turnKey, 'chat', async () => {
         for await (const chunk of driver.streamChat({
@@ -416,6 +444,11 @@ export class ChatService {
         this.dispatch(effective, { type: 'error', message })
       }
     } finally {
+      // 清除增量持久化定时器：后续由 finally 的 appendMessage 统一落盘。
+      if (this.streamPersistInterval) {
+        clearInterval(this.streamPersistInterval)
+        this.streamPersistInterval = undefined
+      }
       // 整轮成功后才记「记忆已注入」：失败/中止（error/aborted/空响应）不消耗资格，重试仍会重新提取。
       if (status === 'done' && memoryInjectedThisTurn && !conversation.memoryInjected) {
         try {
@@ -483,6 +516,10 @@ export class ChatService {
           this.traceManager?.endTurn(input.chatId, turnKey)
         }
       }
+      // 生命周期收尾：assistant 消息持久化 + 资源清理全部完成后 resolve，
+      // abortAllActiveStreams 据此等待落盘结束再允许退出。
+      this.activeStreamLifecycles.delete(input.chatId)
+      resolveLifecycle()
     }
   }
 
@@ -518,6 +555,40 @@ export class ChatService {
       driverId: input.driverId,
       done: true
     } satisfies ChatStreamEvent)
+  }
+
+  /**
+   * 启动流式期间增量持久化：每 3 秒把当前已累积的 parts 覆盖写入磁盘。
+   * 不重置——固定间隔，`saveConversation` 全量替换，无重复风险。
+   */
+  private startPartialPersist(
+    chatId: string,
+    assistantId: string,
+    parts: DriverPart[],
+    createdAt: string,
+    effective: Pick<StartChatStreamInput, 'driverId' | 'model'>
+  ): void {
+    this.streamPersistInterval = setInterval(() => {
+      if (parts.length === 0) return
+      void (async () => {
+        try {
+          const driver = this.driverRegistry.tryGet(effective.driverId as ChatDriverId)
+          if (!driver) return
+          const serialized = driver.serializeAssistantMessage({ id: assistantId, parts, createdAt })
+          const current = await this.storage.getConversation(chatId)
+          if (!current) return
+          const next: ChatConversation = {
+            ...current,
+            messages: [...current.messages.filter((m) => m.id !== assistantId), serialized],
+            messageCount: current.messages.filter((m) => m.id !== assistantId).length + 1,
+            updatedAt: new Date().toISOString()
+          }
+          await this.storage.saveConversation(next)
+        } catch (error) {
+          console.warn('[chat] partial persist failed:', error)
+        }
+      })()
+    }, 3000)
   }
 
   /** 释放所有 driver 的资源(给 main.ts 退出时用)。 */

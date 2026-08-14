@@ -3140,7 +3140,25 @@ app.on('activate', () => {
     mainWindow.focus()
   }
 })
-app.on('before-quit', () => {
+let isQuitting = false
+app.on('before-quit', (event) => {
+  if (!isQuitting) {
+    isQuitting = true
+    event.preventDefault()
+    void (async () => {
+      // 中止所有活跃聊天流并等待 assistant 消息持久化完成，
+      // 确保关闭程序时已接收到的回复内容不丢失。
+      try {
+        await chatService.abortAllActiveStreams()
+      } catch {
+        /* ignore */
+      }
+      void stopPi()
+      store.close()
+      app.quit()
+    })()
+    return
+  }
   void stopPi()
   store.close()
 })
