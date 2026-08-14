@@ -5,9 +5,11 @@ import {
   ChevronDownIcon,
   Code2Icon,
   FileDiffIcon,
+  Loader2Icon,
   MessageSquareTextIcon,
   ShieldIcon,
   TerminalIcon,
+  UserRoundIcon,
   XIcon
 } from 'lucide-react'
 import type { AgentEvent } from '@task-pipeline/core'
@@ -38,6 +40,8 @@ import {
   type TimelineBlock,
   type ToolCallPair
 } from '@/components/SubTaskGroup'
+
+import type { ChatApprovalRequest } from '@/components/ToolApprovalCard'
 
 export type TimelineItem =
   | AgentEvent
@@ -275,7 +279,15 @@ function toolRowFromPair(pair: ToolCallPair<TimelineItem>, live?: boolean): Reac
   )
 }
 
-export function Timeline({ items, live }: { items: TimelineItem[]; live?: boolean }) {
+export function Timeline({
+  items,
+  live,
+  approvals
+}: {
+  items: TimelineItem[]
+  live?: boolean
+  approvals?: ChatApprovalRequest[]
+}) {
   const endRef = useRef<HTMLDivElement>(null)
   const normalized = useMemo(() => normalizeTimelineItems(items), [items])
   const lastItem = normalized.at(-1)
@@ -501,6 +513,19 @@ export function Timeline({ items, live }: { items: TimelineItem[]; live?: boolea
         }
         return renderGroup(block, index)
       })}
+      {live && approvals && approvals.length > 0 && (
+        <div className="flex items-center gap-2 px-1 py-2 text-xs text-muted-foreground">
+          <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+          <UserRoundIcon className="size-3.5 shrink-0" />
+          <span>等待用户输入...</span>
+        </div>
+      )}
+      {live && (!approvals || approvals.length === 0) && (
+        <div className="flex items-center gap-2 px-1 py-2 text-xs text-muted-foreground">
+          <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+          <span>正在处理...</span>
+        </div>
+      )}
       <div ref={endRef} />
     </div>
   )

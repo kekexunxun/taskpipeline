@@ -362,7 +362,7 @@ export function SubTaskGroup({
     //   <div className="grid size-6 place-items-center rounded-full border bg-muted text-muted-foreground">
     //     <GitBranchIcon size={12} />
     //   </div>
-    <article className={cn('mb-4 grid w-full gap-2', className)}>
+    <article className={cn('mb-0 grid w-full gap-2', className)}>
       {/* <div className="grid size-6 place-items-center rounded-full border bg-muted text-muted-foreground">
         <GitBranchIcon size={12} />
       </div> */}
@@ -370,16 +370,16 @@ export function SubTaskGroup({
         <Collapsible open={open} onOpenChange={setOpen}>
           <CollapsibleTrigger
             data-subtask-id={taskId}
-            className="-mx-1.5 flex w-full items-center justify-between gap-3 rounded-md px-1.5 py-0.5 text-left text-xs transition-colors hover:bg-muted/40"
+            className="-mx-1.5 flex items-center justify-between gap-3 rounded-md px-1.5 py-0.5 text-left text-xs transition-colors hover:bg-muted/40"
           >
             <span className="flex min-w-0 flex-1 items-center gap-1.5">
+              {/* 截断由 header 内容自行控制(description/summary 加 truncate),避免徽章被整体截断 */}
+              <span className="min-w-0 flex-1">{header}</span>
               {open ? (
                 <ChevronDownIcon size={12} className="shrink-0 text-muted-foreground" />
               ) : (
                 <ChevronRightIcon size={12} className="shrink-0 text-muted-foreground" />
               )}
-              {/* 截断由 header 内容自行控制(description/summary 加 truncate),避免徽章被整体截断 */}
-              <span className="min-w-0 flex-1">{header}</span>
             </span>
             {createdAt && <time className="shrink-0 text-xs text-muted-foreground">{formatTime(createdAt)}</time>}
           </CollapsibleTrigger>
@@ -397,13 +397,27 @@ export function SubTaskHeader({
   description,
   // taskType,
   subagentType,
+  childCount,
   status
 }: {
   description?: string
   taskType?: string
   subagentType?: string
+  /** 可见子操作数量,提供后展示「已处理 n个操作」取代 description + subagentType。 */
+  childCount?: number
   status: SubTaskStatus
 }) {
+  // 有 childCount 时展示操作统计,取代 description + type 徽章
+  if (childCount !== undefined) {
+    return (
+      <span className="inline-flex w-full min-w-0 items-center gap-1.5">
+        <span className="min-w-0 truncate text-xs text-muted-foreground">
+          已处理 <span className="font-medium text-foreground/80">{childCount}</span> 个操作
+        </span>
+        <StatusBadge status={status} />
+      </span>
+    )
+  }
   return (
     <span className="inline-flex w-full min-w-0 items-center gap-1.5">
       <span className="min-w-0 truncate text-xs font-medium text-foreground/80">{description || '子任务'}</span>

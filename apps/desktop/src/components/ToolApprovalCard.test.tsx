@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { ToolApprovalCard, type ChatApprovalRequest } from './ToolApprovalCard'
 
-describe('ToolApprovalCard（HITL 内联确认卡片，对话/任务板块共用）', () => {
+describe('ToolApprovalCard（HITL Dialog 确认框，对话/任务板块共用）', () => {
   const approval: ChatApprovalRequest = {
     id: 'a1',
     method: 'confirm',
@@ -14,10 +14,11 @@ describe('ToolApprovalCard（HITL 内联确认卡片，对话/任务板块共用
   it('展示标题与描述', () => {
     render(<ToolApprovalCard approval={approval} onRespond={vi.fn()} />)
     expect(screen.getByText('允许执行 Bash?')).toBeInTheDocument()
-    expect(screen.getByText('rm -rf build')).toBeInTheDocument()
+    // message 在 DialogDescription 和 pre 详情区都会渲染
+    expect(screen.getAllByText('rm -rf build').length).toBeGreaterThan(0)
   })
 
-  it('允许/拒绝按钮回调 correct 参数', () => {
+  it('允许/拒绝按钮回调正确参数', () => {
     const onRespond = vi.fn()
     render(<ToolApprovalCard approval={approval} onRespond={onRespond} />)
     fireEvent.click(screen.getByRole('button', { name: '允许' }))
@@ -32,7 +33,6 @@ describe('ToolApprovalCard（HITL 内联确认卡片，对话/任务板块共用
       const onRespond = vi.fn()
       render(<ToolApprovalCard approval={{ ...approval, timeout: 5_000 }} onRespond={onRespond} />)
       expect(onRespond).not.toHaveBeenCalled()
-      // advanceTimersByTime 同步触发 setTimeout 回调（fake timers 下不能用 waitFor）。
       vi.advanceTimersByTime(5_000)
       expect(onRespond).toHaveBeenCalledWith(false)
     } finally {
@@ -40,7 +40,7 @@ describe('ToolApprovalCard（HITL 内联确认卡片，对话/任务板块共用
     }
   })
 
-  it('无 timeout 时不自动触发响应', async () => {
+  it('无 timeout 时不自动触发响应', () => {
     vi.useFakeTimers()
     try {
       const onRespond = vi.fn()

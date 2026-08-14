@@ -607,6 +607,44 @@ textarea:focus-visible {
 .streamdown {
   color: inherit;
 }
+
+/* 覆盖 Streamdown 默认代码块容器样式，让自定义 pre 组件完全接管视觉呈现 */
+.streamdown [data-streamdown='code-block'] {
+  margin: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  content-visibility: visible;
+  contain-intrinsic-size: none;
+}
+.streamdown [data-streamdown='code-block-header'] {
+  display: none;
+}
+.streamdown [data-streamdown='code-block-actions'] {
+  display: none;
+}
+.streamdown [data-streamdown='code-block-body'] {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+
+/* 覆盖 Streamdown 默认表格包装器，让自定义 table 组件直接渲染 */
+.streamdown [data-streamdown='table-wrapper'] {
+  margin: 0;
+  border: none;
+}
+.streamdown table th {
+  font-weight: 500;
+  text-align: left;
+  background: hsl(var(--muted) / 0.3);
+}
+.streamdown table th,
+.streamdown table td {
+  padding: 0.25rem 0.5rem;
+  border: 1px solid hsl(var(--border) / 0.4);
+}
+
 .streamdown > [data-streamdown='caret'] {
   display: inline-block;
   width: 6px;

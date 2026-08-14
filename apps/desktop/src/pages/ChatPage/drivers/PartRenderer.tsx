@@ -1,7 +1,16 @@
 import { Fragment, useMemo, type ReactNode } from 'react'
+import { WrenchIcon } from 'lucide-react'
 import { TextPart } from './parts/TextPart'
 import { ThinkingPart } from './parts/ThinkingPart'
 import { QoderSessionPart } from './parts/QoderSessionPart'
+import {
+  WriteToolBlock,
+  EditToolBlock,
+  ReadToolBlock,
+  GrepToolBlock,
+  BashToolBlock,
+  McpToolBlock
+} from './parts/ToolBlocks'
 import type { DriverPart } from '@/api'
 import {
   SubTaskGroup,
@@ -187,6 +196,28 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
       const pair = toolPairs.get(part.toolCallId)
       const result = resultPayloadOf(pair?.resultItem)
       const status = determineToolStatus(pair, result?.isError === true, !!isStreaming)
+      // 按工具名路由到专用渲染器
+      if (part.name === 'Write') {
+        return <WriteToolBlock key={key} input={part.input} output={result?.output} status={status} />
+      }
+      if (part.name === 'Edit') {
+        return <EditToolBlock key={key} input={part.input} output={result?.output} status={status} />
+      }
+      if (part.name === 'Read') {
+        return <ReadToolBlock key={key} input={part.input} output={result?.output} status={status} />
+      }
+      if (part.name === 'Grep') {
+        return <GrepToolBlock key={key} input={part.input} output={result?.output} status={status} />
+      }
+      if (part.name === 'Bash') {
+        return <BashToolBlock key={key} input={part.input} output={result?.output} status={status} />
+      }
+      if (part.name === 'Glob') {
+        return null
+      }
+      if (part.name.startsWith('mcp__')) {
+        return <McpToolBlock key={key} name={part.name} input={part.input} output={result?.output} status={status} />
+      }
       return (
         <ToolCallRow
           key={key}
@@ -199,14 +230,16 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
       )
     }
     if (part.type === 'qoder.tool-result' || part.type === 'openai.tool-result') {
-      // 孤儿兜底:对应 tool-use 不存在(乱序历史)才单独展示;已配对的内容已并入 tool-use 行。
+      // 孤儿兜底:对应 tool-use 不存在(乱序历史/HITL 超时拒绝)才单独展示;
+      // 已配对的内容已并入 tool-use 行。用 Bash 卡片风格展示,确保拒绝信息可见。
       if (hasToolUse(toolPairs, part.toolCallId)) return null
       return (
-        <ToolCallRow
+        <BashToolBlock
           key={key}
-          name="工具结果"
+          input={{ description: '工具执行' }}
           output={part.output}
           status={'isError' in part && part.isError ? 'error' : 'done'}
+          icon={WrenchIcon}
         />
       )
     }
@@ -256,14 +289,7 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
           <SubTaskGroup
             key={`g-${block.taskId}-${index}`}
             taskId={block.taskId}
-            header={
-              <SubTaskHeader
-                description={startPart?.description}
-                taskType={startPart?.taskType}
-                subagentType={startPart?.subagentType}
-                status={status}
-              />
-            }
+            header={<SubTaskHeader childCount={visibleChildren.length} status={status} />}
           >
             <SubTaskProgressSummary aggregate={aggregate} running={status === 'running'} />
             {visibleChildren.map((part, i) => renderSinglePart(part, `${block.taskId}-${i}`))}

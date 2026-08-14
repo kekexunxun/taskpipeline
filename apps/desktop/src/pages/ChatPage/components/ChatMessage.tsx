@@ -56,7 +56,7 @@ function ChatMessageImpl({
   const containerClass = isUser ? 'justify-end' : 'justify-start'
   // 助手消息占满可用宽度(正文/折叠块不再按内容收缩,避免"收起窄、展开宽"的跳动);
   // 用户消息保留气泡式 max-width。
-  const widthClass = isUser ? 'max-w-[78%]' : 'max-w-[78%]'
+  const widthClass = isUser ? 'w-[78%]' : 'w-[78%]'
   const alignClass = isUser ? 'items-end' : 'items-start'
   // 消息级操作区(shadcn MessageFooter 语义):置于消息内容下方、与消息同侧对齐。
   // 只有该消息存在可复制的正文文本时才渲染；输出(streaming)期间不展示，避免遮挡正在生成的内容。

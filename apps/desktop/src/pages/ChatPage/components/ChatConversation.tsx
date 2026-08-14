@@ -1,3 +1,4 @@
+import { Loader2Icon, UserRoundIcon } from 'lucide-react'
 import type { ChatApprovalRequest } from '../hooks/useChat'
 import { ChatMessageView } from './ChatMessage'
 import { ToolApprovalCard } from '@/components/ToolApprovalCard'
@@ -23,7 +24,7 @@ export function ChatConversation({
 }) {
   const lastIndex = messages.length - 1
   return (
-    <Conversation className="thin-scrollbar min-h-0 flex-1 overflow-y-auto">
+    <Conversation className="min-h-0 flex-1 overflow-hidden">
       <ConversationContent className="mx-auto w-full max-w-3xl gap-5 px-5 py-5">
         {messages.map((message, index) => (
           <ChatMessageView
@@ -41,6 +42,19 @@ export function ChatConversation({
             onRespond={(confirmed) => onRespondApproval?.(approval.id, confirmed)}
           />
         ))}
+        {streaming && approvals && approvals.length > 0 && (
+          <div className="flex items-center gap-2 px-1 py-2 text-xs text-muted-foreground">
+            <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+            <UserRoundIcon className="size-3.5 shrink-0" />
+            <span>等待用户输入...</span>
+          </div>
+        )}
+        {streaming && (!approvals || approvals.length === 0) && (
+          <div className="flex items-center gap-2 px-1 py-2 text-xs text-muted-foreground">
+            <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+            <span>正在处理...</span>
+          </div>
+        )}
       </ConversationContent>
       <ConversationScrollButton />
     </Conversation>

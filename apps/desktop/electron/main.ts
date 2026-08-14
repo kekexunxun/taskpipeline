@@ -573,11 +573,11 @@ async function deliveryApprover(
   const approval = store.addApproval({ taskId: task.id, kind, context })
   // 消息带任务标题与仓库信息，避免并行任务时混淆确认归属。
   const ok =
-    (await requestUi<boolean>(
-      'confirm',
-      { title: `确认${label}：${task.title}`, message: `${task.title}\n\n${context}`, taskId: task.id },
-      { timeout: 10 * 60_000 } // 超时默认拒绝（安全兜底），用户仍可手动重试提交
-    )) ?? false
+    (await requestUi<boolean>('confirm', {
+      title: `确认${label}：${task.title}`,
+      message: `${task.title}\n\n${context}`,
+      taskId: task.id
+    })) ?? false
   store.resolveApproval(approval.id, ok ? 'approved' : 'rejected')
   addTaskEvent({
     taskId: task.id,
@@ -767,7 +767,7 @@ chatDriverRegistry.register(
             message: lines.join('\n\n'),
             conversationId
           },
-          { timeout: 10 * 60_000, signal } // 会话中止/超时默认拒绝（安全兜底）
+          { signal }
         )) ?? false
       return ok ? 'allow' : 'deny'
     },
@@ -1093,7 +1093,7 @@ function createQoderTaskAgent(): QoderTaskAgentDriver {
         (await requestUi<boolean>(
           'confirm',
           { title: `允许执行 ${toolName}?`, message: `${task?.title ?? ''}\n\n${detail}`, taskId },
-          { timeout: 10 * 60_000, signal } // 会话中止/超时默认拒绝（安全兜底）
+          { signal }
         )) ?? false
       store.resolveApproval(approval.id, ok ? 'approved' : 'rejected')
       return ok ? 'allow' : 'deny'
@@ -1586,10 +1586,8 @@ function requestUi<T>(
 ): Promise<T | undefined> {
   const id = randomUUID()
   return new Promise((resolve) => {
-    let timer: ReturnType<typeof setTimeout> | undefined
     let abortListener: () => void = () => undefined
     const finish = (response: Record<string, unknown>) => {
-      if (timer) clearTimeout(timer)
       if (options?.signal) options.signal.removeEventListener('abort', abortListener)
       pendingUi.delete(id)
       if (response.cancelled) resolve(undefined)
@@ -1597,8 +1595,8 @@ function requestUi<T>(
       else resolve(response.value as T | undefined)
     }
     pendingUi.set(id, finish)
-    emitPi({ type: 'extension_ui_request', id, method, ...payload, timeout: options?.timeout })
-    if (options?.timeout) timer = setTimeout(() => finish({ cancelled: true }), options.timeout)
+    // 不再向 UI 发送 timeout —— HITL 确认不超时，用户可无限期等待后操作
+    emitPi({ type: 'extension_ui_request', id, method, ...payload })
     abortListener = () => finish({ cancelled: true })
     options?.signal?.addEventListener('abort', abortListener, { once: true })
   })

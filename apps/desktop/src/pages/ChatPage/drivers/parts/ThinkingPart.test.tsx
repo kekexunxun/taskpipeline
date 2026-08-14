@@ -13,7 +13,7 @@ const thinkingPart = {
 /**
  * Radix Collapsible 会把 [data-state] 写到根节点上(open/closed);
  * trigger 按钮上也带 data-state,用它来观察折叠态最稳。
- * label 会随流式状态切换(思考中… / 思考过程),两种都接受。
+ * label 格式为"思考中 - n秒" / "思考过程 - n秒"。
  */
 function getCollapsibleState(): 'open' | 'closed' | null {
   const trigger = screen.getByRole('button', { name: /思考/ })
@@ -21,18 +21,18 @@ function getCollapsibleState(): 'open' | 'closed' | null {
 }
 
 describe('ThinkingPart', () => {
-  it('流式时默认展开,label 显示"思考中…"', () => {
+  it('流式时默认展开,label 显示"思考中 - n秒"', () => {
     render(<ThinkingPart part={thinkingPart} isStreaming />)
-    expect(screen.getByText('思考中…')).toBeInTheDocument()
+    expect(screen.getByText(/思考中 - \d+秒/)).toBeInTheDocument()
     expect(getCollapsibleState()).toBe('open')
   })
 
-  it('非流式时默认收起,label 切换为"思考过程",用户可手动展开', async () => {
+  it('非流式时默认收起,label 切换为"思考过程 - n秒",用户可手动展开', async () => {
     const user = userEvent.setup()
     render(<ThinkingPart part={thinkingPart} />)
-    // 流结束 → 思考已完成,文案从"思考中…"切到"思考过程"
-    expect(screen.getByText('思考过程')).toBeInTheDocument()
-    expect(screen.queryByText('思考中…')).not.toBeInTheDocument()
+    // 流结束 → 思考已完成,文案从"思考中"切到"思考过程"
+    expect(screen.getByText(/思考过程 - \d+秒/)).toBeInTheDocument()
+    expect(screen.queryByText(/思考中/)).not.toBeInTheDocument()
     expect(getCollapsibleState()).toBe('closed')
     await user.click(screen.getByRole('button', { name: /思考过程/ }))
     expect(getCollapsibleState()).toBe('open')
@@ -48,6 +48,7 @@ describe('ThinkingPart', () => {
     rerender(<ThinkingPart part={thinkingPart} isStreaming />)
     expect(getCollapsibleState()).toBe('closed')
   })
+
   it('用户收起后再点击能重新展开', async () => {
     const user = userEvent.setup()
     render(<ThinkingPart part={thinkingPart} isStreaming />)
