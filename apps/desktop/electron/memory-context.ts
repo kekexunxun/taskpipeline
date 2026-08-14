@@ -28,6 +28,7 @@ interface MemoryContextDeps {
     listTaskRepositories(taskId: string): TaskRepository[]
     listEvents(taskId: string): Array<{ kind: string; title: string; detail?: string }>
     getSetting(key: string): string | undefined
+    listRepositoryProfiles(): Array<{ id: string; localPath: string }>
   }
   memoryService: {
     search(input: {
@@ -347,20 +348,39 @@ export async function consolidateChatMemory(input: {
       .join('\n\n')
     if (!text.trim()) return
     if (!driver) return
+    // 项目对话（有 workingDirectory）：匹配 repository_profiles 的 localPath，
+    // 允许 'repo' scope 并传入 repositoryIds，让工程约定类记忆正确归入仓库级而非用户级。
+    const repositoryIds = resolveRepositoryIdsFromWorkingDirectory(input.conversation.workingDirectory)
+    const allowedScopes: Array<'user' | 'repo' | 'conversation'> = repositoryIds.length
+      ? ['repo', 'user', 'conversation']
+      : ['user', 'conversation']
     const extracted = await extractMemories({
       driver: driver as never,
       driverId: input.driverId,
       model: input.model,
       text,
       context: 'chat',
-      allowedScopes: ['user', 'conversation'],
+      allowedScopes,
       signal: input.signal,
       // join 当前对话回合：记忆整理 LLM 调用与主对话同树。
       traceId: input.traceId
     })
     if (!extracted.length) return
-    d().memoryService.consolidateMemories(extracted, [], input.conversation.id)
+    d().memoryService.consolidateMemories(extracted, repositoryIds, input.conversation.id)
   } catch (error) {
     console.warn('[memory] chat consolidate failed:', error)
   }
+}
+
+/**
+ * 根据对话的 workingDirectory 匹配 repository_profiles 的 localPath，
+ * 返回对应的 repositoryId 数组。路径匹配采用前缀匹配（支持 worktree / 子目录场景）。
+ */
+function resolveRepositoryIdsFromWorkingDirectory(workingDirectory: string | undefined): string[] {
+  if (!workingDirectory) return []
+  const profiles = d().store.listRepositoryProfiles()
+  const matched = profiles.filter(
+    (profile) => workingDirectory === profile.localPath || workingDirectory.startsWith(profile.localPath + '/')
+  )
+  return matched.map((profile) => profile.id)
 }

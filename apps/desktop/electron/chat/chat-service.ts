@@ -26,7 +26,11 @@ import type { TaskCreationBackend } from './task-backends/index.js'
 
 type ActiveStream = { streamId: string; abort: AbortController }
 type TaskBackendFactory = () => TaskCreationBackend | undefined
-type MemoryContextProvider = (input: { conversationId: string; query: string }) => Promise<string | undefined>
+type MemoryContextProvider = (input: {
+  conversationId: string
+  query: string
+  workingDirectory?: string
+}) => Promise<string | undefined>
 type ConversationConsolidator = (input: {
   conversation: ChatConversation
   signal: AbortSignal
@@ -332,7 +336,11 @@ export class ChatService {
         ? await this.withStage(Boolean(turnTraceId), input.chatId, turnKey, 'keyword', async () => {
             if (!this.memoryContext) return undefined
             this.dispatch(effective, { type: 'status', text: '正在提取关键词并检索记忆上下文…' })
-            const ctx = await this.memoryContext?.({ conversationId: input.chatId, query: input.message.text })
+            const ctx = await this.memoryContext?.({
+              conversationId: input.chatId,
+              query: input.message.text,
+              workingDirectory: conversation.workingDirectory
+            })
             memoryInjectedThisTurn = true
             this.dispatch(effective, { type: 'status', text: '记忆上下文已就绪' })
             return ctx

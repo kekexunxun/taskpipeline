@@ -12,6 +12,49 @@ export type ExtractedMemoryDraft = {
 const MAX_TRANSCRIPT_CHARS = 12_000
 
 function extractionPrompt(allowedScopes: ExtractedMemoryDraft['scope'][]): string {
+  const hasRepo = allowedScopes.includes('repo')
+  const hasUser = allowedScopes.includes('user')
+  const hasConversation = allowedScopes.includes('conversation')
+
+  const scopeDescriptions: string[] = [
+    `允许的作用域(scope)只能是:${allowedScopes.map((scope) => `"${scope}"`).join('、')}`,
+    '',
+    '作用域判定规则（按优先级从高到低）:',
+    '1. 先判断内容是否与特定项目/仓库相关（涉及具体技术栈、框架、目录结构、构建配置、',
+    '   API 设计、编码规范、部署方式等）—— 如果是，归为 "repo"。',
+    '2. 只有当内容纯粹描述用户个人的通用偏好、习惯、沟通方式，与任何具体项目无关时，',
+    '   才归为 "user"。',
+    '3. 仅属于本次对话的临时结论、待办事项，不具长期价值时，归为 "conversation"。',
+    '',
+    '常见误判示例（这些应该是 "repo" 而不是 "user"）:',
+    '- "项目使用 React + TypeScript" → repo（技术栈）',
+    '- "API 采用 RESTful 风格，分页用 cursor" → repo（架构约定）',
+    '- "测试框架用 Vitest，覆盖率要求 80%" → repo（工程规范）',
+    '- "数据库用 PostgreSQL，ORM 用 Drizzle" → repo（技术选型）',
+    '',
+    '这些才是 "user":',
+    '- "用户偏好中文沟通" → user',
+    '- "用户喜欢简洁的代码风格" → user',
+    '- "用户习惯先写测试再写实现" → user',
+    ''
+  ]
+
+  if (hasRepo) {
+    scopeDescriptions.push(
+      '- "repo": 特定项目的工程约定、架构决策、技术栈、编码规范、踩坑经验、任务总结 —— ',
+      '  内容必须与某个具体项目相关，换到别的项目就不适用了'
+    )
+  }
+  if (hasUser) {
+    scopeDescriptions.push(
+      '- "user": 用户个人的通用偏好、习惯、工作方式、沟通风格 —— ',
+      '  内容必须与具体项目无关，在任何项目场景下都成立'
+    )
+  }
+  if (hasConversation) {
+    scopeDescriptions.push('- "conversation": 本次对话的临时结论、阶段性决定或后续待办')
+  }
+
   return [
     '你是记忆整理助手。请从下面的记录中提炼出值得长期保存的记忆。',
     '',
@@ -21,13 +64,10 @@ function extractionPrompt(allowedScopes: ExtractedMemoryDraft['scope'][]): strin
     '- 本次对话/任务中达成的明确结论、关键决定或后续待办',
     '忽略:寒暄、过程性对话、一次性操作、与项目无关的内容。数量宁少勿多,避免重复。',
     '',
-    `允许的作用域(scope)只能是:${allowedScopes.map((scope) => `"${scope}"`).join('、')}`,
-    allowedScopes.includes('repo') ? '- "repo":工程约定、项目信息、任务总结等值得沉淀到仓库的内容' : '',
-    allowedScopes.includes('user') ? '- "user":用户偏好、习惯、工作方式' : '',
-    allowedScopes.includes('conversation') ? '- "conversation":本次对话的临时结论或待办' : '',
+    ...scopeDescriptions,
     '',
     '只输出一个 JSON 对象,不要输出任何其他内容或 Markdown 代码块:',
-    '{"memories":[{"scope":"user","title":"简短标题(不超过20字)","content":"一句话到三句话的完整描述","tags":["标签"]}]}'
+    '{"memories":[{"scope":"repo","title":"简短标题(不超过20字)","content":"一句话到三句话的完整描述","tags":["标签"]}]}'
   ]
     .filter(Boolean)
     .join('\n')

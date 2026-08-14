@@ -934,11 +934,19 @@ const chatService = new ChatService(
     if (resolveDefaultBackend() === 'jira') return new JiraTaskCreationBackend(atlassianFactory)
     return undefined
   },
-  async ({ conversationId, query }) => {
+  async ({ conversationId, query, workingDirectory }) => {
     // 关键词提取 join 当前对话回合（若在回合内），避免产生独立 trace。
     const turnTraceId = chatTraceManager.traceIdForChat(conversationId)
+    // 项目对话：按 workingDirectory 匹配 repository_profiles，检索仓库级记忆。
+    const repositoryIds = workingDirectory
+      ? store
+          .listRepositoryProfiles()
+          .filter((repo) => workingDirectory === repo.localPath || workingDirectory.startsWith(repo.localPath + '/'))
+          .map((repo) => repo.id)
+      : []
     const result = await memoryService.search({
       userId: memoryService.ensureUserId(),
+      repositoryIds: repositoryIds.length ? repositoryIds : undefined,
       conversationId,
       query,
       keywordRewriter: (q) => keywordRewriterWithTrace(q, turnTraceId)

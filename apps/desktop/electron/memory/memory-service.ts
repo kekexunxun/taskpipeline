@@ -25,7 +25,7 @@ export function renderMemoryContext(memories: MemorySearchHit[], wikiDocs: RepoW
       `## 仓库 Wiki 文档(repowiki)\n${wikiDocs.map((doc) => `- ${doc.path}: ${doc.content.slice(0, 300)}`).join('\n')}`
     )
   if (!sections.length) return undefined
-  const text = `以下是与当前任务相关的长期记忆与仓库文档。应优先遵循其中的工程约定；若与用户最新指令冲突,以用户指令为准。\n\n${sections.join('\n\n')}`
+  const text = `以下是与当前任务相关的长期记忆与仓库文档。应优先遵循其中的工程约定；若与用户最新指令冲突,以用户指令为准。\n\n${sections.join('\n\n')}\n\n请使用中文回复用户。`
   return text.length > CONTEXT_LIMIT ? `${text.slice(0, CONTEXT_LIMIT)}\n…(记忆过长已截断)` : text
 }
 
