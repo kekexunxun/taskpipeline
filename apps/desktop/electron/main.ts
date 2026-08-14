@@ -3169,8 +3169,12 @@ async function testMcpConnectionById(
         const description = typeof t?.description === 'string' ? t.description.trim() || undefined : undefined
         return { name, description }
       })
-      .filter((x): x is { name: string; description?: string } => x !== null)
-    return { ok: true, tools: infos, message: `已连接，发现 ${tools.length} 个工具` }
+      .filter((x): x is Exclude<typeof x, null> => x !== null)
+    return {
+      ok: true,
+      tools: infos as Array<{ name: string; description?: string }>,
+      message: `已连接，发现 ${tools.length} 个工具`
+    }
   } catch (error) {
     return { ok: false, tools: [], message: error instanceof Error ? error.message : String(error) }
   } finally {
