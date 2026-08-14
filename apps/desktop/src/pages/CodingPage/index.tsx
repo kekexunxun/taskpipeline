@@ -124,6 +124,8 @@ export default function CodingPage() {
             card={tasks.tasks.find((t) => t.id === tasks.selectedId)}
             detail={tasks.detail}
             liveEvents={tasks.liveEvents}
+            approvals={tasks.approvals}
+            onRespondApproval={(id, confirmed) => void tasks.respondApproval(id, confirmed)}
             prompt={tasks.prompt}
             running={tasks.running}
             sending={tasks.sending}

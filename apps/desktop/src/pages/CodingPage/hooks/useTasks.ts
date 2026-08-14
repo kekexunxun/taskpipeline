@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentEvent, Task, TaskCard } from '@task-pipeline/core'
 import { api, type TaskDetail } from '../../../api'
 import { useFeedback } from '../../../hooks/useGlobalFeedback'
+import type { ChatApprovalRequest } from '@/components/ToolApprovalCard'
 
 export type TimelineItem =
   | AgentEvent
@@ -23,6 +24,8 @@ export type CodingPageState = {
   running: boolean
   sending: boolean
   search: string
+  /** 当前选中任务待确认的 HITL 请求（内联卡片渲染源）。 */
+  approvals: ChatApprovalRequest[]
   setSelectedId(id: string | undefined): void
   setSearch(value: string): void
   setPrompt(value: string): void
@@ -30,6 +33,10 @@ export type CodingPageState = {
   loadDetail(id: string): Promise<void>
   send(): Promise<void>
   run(action: () => Promise<unknown>): Promise<void>
+  /** 推送一个 HITL 确认请求（按 taskId 归属，缺省挂当前选中任务）。 */
+  pushApproval(taskId: string | undefined, request: ChatApprovalRequest): void
+  /** 响应确认请求（允许/拒绝），并从对应任务队列移除。 */
+  respondApproval(id: string, confirmed: boolean): Promise<void>
 }
 
 export function useTasks(): CodingPageState {
@@ -42,6 +49,13 @@ export function useTasks(): CodingPageState {
   const [running, setRunning] = useState(false)
   const [sending, setSending] = useState(false)
   const [search, setSearch] = useState('')
+  /** taskId → 待用户确认的 HITL 请求（内联卡片；任务并行时各归其位）。 */
+  const [pendingApprovals, setPendingApprovals] = useState<Record<string, ChatApprovalRequest[]>>({})
+  /** pendingApprovals 的同步 ref（flushApprovals 在 updater 外读取最新值，避免副作用入 updater）。 */
+  const pendingApprovalsRef = useRef<Record<string, ChatApprovalRequest[]>>({})
+  useEffect(() => {
+    pendingApprovalsRef.current = pendingApprovals
+  }, [pendingApprovals])
 
   const liveMessageId = useRef<string | undefined>(undefined)
   const planningRef = useRef(false)
@@ -79,6 +93,45 @@ export function useTasks(): CodingPageState {
     [showSuccess]
   )
 
+  const pushApproval = useCallback((taskId: string | undefined, request: ChatApprovalRequest) => {
+    const id = taskId ?? pendingTaskIdRef.current
+    if (!id) return
+    setPendingApprovals((current) => ({ ...current, [id]: [...(current[id] ?? []), request] }))
+  }, [])
+
+  const respondApproval = useCallback(async (id: string, confirmed: boolean) => {
+    // 乐观移除：先清卡片再响应（IPC 失败时主进程超时兜底默认拒绝，卡片不残留误导）。
+    setPendingApprovals((current) => {
+      let changed = false
+      const next: Record<string, ChatApprovalRequest[]> = {}
+      for (const [taskId, list] of Object.entries(current)) {
+        const filtered = list.filter((approval) => approval.id !== id)
+        if (filtered.length !== list.length) changed = true
+        if (filtered.length) next[taskId] = filtered
+      }
+      return changed ? next : current
+    })
+    try {
+      await api.respondTaskUi({ id, confirmed })
+    } catch {
+      /* 主进程超时/会话关闭后响应为 no-op，忽略 */
+    }
+  }, [])
+
+  /** 任务会话结束时未确认的请求默认拒绝（安全兜底，替代原全局模态清除语义）。 */
+  const flushApprovals = useCallback((taskId: string) => {
+    const list = pendingApprovalsRef.current[taskId]
+    if (!list || list.length === 0) return
+    // 副作用在 updater 外：StrictMode 双执行 updater 也不会重复发响应（主进程端幂等）。
+    for (const approval of list) void api.respondTaskUi({ id: approval.id, confirmed: false })
+    setPendingApprovals((current) => {
+      if (!current[taskId]?.length) return current
+      const next = { ...current }
+      delete next[taskId]
+      return next
+    })
+  }, [])
+
   const refresh = useCallback(async () => {
     try {
       const list = await api.listTasks()
@@ -114,9 +167,14 @@ export function useTasks(): CodingPageState {
   useEffect(() => {
     let changeTimer: number | undefined
     const off = api.onTaskEvent((event) => {
-      if (event.type === 'extension_ui_request' && ['confirm', 'select', 'input', 'editor'].includes(event.method)) {
-        // UI request 由 UiRequestDialog 统一处理，事件通过 customEvent 广播
-        window.dispatchEvent(new CustomEvent('task:ui-request', { detail: event }))
+      if (event.type === 'extension_ui_request') {
+        if (event.method === 'confirm') {
+          // confirm 内联到任务执行流（按 taskId 归属，并行任务各自展示确认卡片）
+          pushApproval(event.taskId, event)
+        } else if (['select', 'input', 'editor'].includes(event.method)) {
+          // 其余方法（信任项目配置等）保留 UiRequestDialog 模态兜底
+          window.dispatchEvent(new CustomEvent('task:ui-request', { detail: event }))
+        }
       }
       if (event.type === 'agent_start') {
         setSending(false)
@@ -138,7 +196,9 @@ export function useTasks(): CodingPageState {
         setSending(false)
         setRunning(false)
         liveMessageId.current = undefined
-        // 任务会话结束：清空排队中的执行器确认请求（主进程已按取消处理）。
+        // 任务会话结束：该任务未确认的 HITL 请求默认拒绝（内联卡片清理）。
+        if (typeof event.taskId === 'string') flushApprovals(event.taskId)
+        // 保留 task:ui-clear：UiRequestDialog 的 select/input/editor 兜底队列仍靠它清空。
         window.dispatchEvent(new CustomEvent('task:ui-clear'))
         if (event.phase === 'planning' || planningRef.current) setLiveEvents([])
         planningRef.current = false
@@ -173,7 +233,7 @@ export function useTasks(): CodingPageState {
       window.clearTimeout(changeTimer)
       off()
     }
-  }, [selectedId, refresh, acceptDetail])
+  }, [selectedId, refresh, acceptDetail, flushApprovals, pushApproval])
 
   // 切换任务时清空 liveEvents 并加载详情（不清空 detail，避免闪烁）
   useEffect(() => {
@@ -235,13 +295,16 @@ export function useTasks(): CodingPageState {
     running,
     sending,
     search,
+    approvals: selectedId ? (pendingApprovals[selectedId] ?? []) : [],
     setSelectedId,
     setSearch,
     setPrompt,
     refresh,
     loadDetail,
     send,
-    run
+    run,
+    pushApproval,
+    respondApproval
   }
 }
 

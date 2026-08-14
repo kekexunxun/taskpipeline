@@ -56,6 +56,7 @@ export function ChatHistoryList({
   metas,
   projects,
   activeId,
+  streamingChatIds,
   onSelect,
   onCreate,
   onCreateInDirectory,
@@ -65,6 +66,8 @@ export function ChatHistoryList({
   /** 项目(工作目录)实体列表,与具体会话解耦。 */
   projects: ChatProject[]
   activeId?: string
+  /** 正在生成的对话集合(并行流),用于侧边栏生成状态指示。 */
+  streamingChatIds?: ReadonlySet<string>
   onSelect(id: string): void
   /** 新建普通对话。 */
   onCreate(): void
@@ -158,6 +161,7 @@ export function ChatHistoryList({
                         meta={meta}
                         active={meta.id === activeId}
                         showDirectory={false}
+                        streaming={streamingChatIds?.has(meta.id)}
                         onClick={() => onSelect(meta.id)}
                         onDelete={() => onDelete(meta.id)}
                       />

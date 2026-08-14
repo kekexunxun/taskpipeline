@@ -31,6 +31,7 @@ import { EditPlanDialog } from './EditPlanDialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { ToolApprovalCard, type ChatApprovalRequest } from '@/components/ToolApprovalCard'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -50,6 +51,9 @@ type Props = {
   card?: TaskCard
   detail?: TaskDetail
   liveEvents: TimelineItem[]
+  /** 当前任务待确认的 HITL 请求（内联卡片，渲染在 activity 执行流底部）。 */
+  approvals?: ChatApprovalRequest[]
+  onRespondApproval?(id: string, confirmed: boolean): void
   prompt: string
   running: boolean
   sending: boolean
@@ -94,6 +98,8 @@ export function DetailPanel({
   card,
   detail,
   liveEvents,
+  approvals,
+  onRespondApproval,
   prompt,
   running,
   sending,
@@ -287,6 +293,19 @@ export function DetailPanel({
           )}
         </TabsContent>
       </Tabs>
+      {/* 工具调用 HITL 内联确认卡片：渲染在面板底部、所有 Tab 可见（任务运行中触发，归属当前任务）。
+      固定不随消息滚动，避免停在 plan/files 等 Tab 时确认不可见导致任务挂起。 */}
+      {approvals?.length ? (
+        <div className="shrink-0 space-y-2 border-t bg-background/95 px-3 py-2.5">
+          {approvals.map((approval) => (
+            <ToolApprovalCard
+              key={approval.id}
+              approval={approval}
+              onRespond={(confirmed) => onRespondApproval?.(approval.id, confirmed)}
+            />
+          ))}
+        </div>
+      ) : null}
       {task.state === 'awaiting_plan_approval' && activeTab === 'plan' && (
         <div className="shrink-0 border-t bg-background/95 px-3 pt-1.5 pb-2">
           <div className="mx-auto w-full max-w-4xl">

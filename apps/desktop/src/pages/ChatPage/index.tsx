@@ -9,6 +9,7 @@ import { ChatSkillSelector } from './components/ChatSkillSelector'
 import { ChatAgentSelector } from './components/ChatAgentSelector'
 import { ChatDirectoryBadge } from './components/ChatDirectoryBadge'
 import { TaskCreationTool } from './components/TaskCreationTool'
+import type { ChatApprovalRequest } from './hooks/useChat'
 import { useChat } from './hooks/useChat'
 import { UiRequestDialog } from '@/pages/CodingPage/components/UiRequestDialog'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
@@ -28,29 +29,25 @@ function ChatPageInner() {
   const navigate = useNavigate()
   const { showError } = useFeedback()
   const chat = useChat()
+  const { pushApproval } = chat
 
   // 工具调用 HITL：Qoder 等 driver 的 can_use_tool 确认请求由主进程以
-  // extension_ui_request 广播（task:event 通道），这里转发给 UiRequestDialog 弹窗。
-  // 与 CodingPage/useTasks.ts 的处理保持一致，缺了它会卡在等用户决策。
+  // extension_ui_request 广播（task:event 通道）。
+  // - confirm：内联到对话流（ChatToolApprovalCard），按 conversationId 归属，并行对话各自展示；
+  // - select/input/editor：对话板块不会产生，保留 UiRequestDialog 作为兜底。
   useEffect(() => {
-    const off = api.onTaskEvent((event: { type?: string; method?: string }) => {
-      if (
-        event?.type === 'extension_ui_request' &&
-        ['confirm', 'select', 'input', 'editor'].includes(event.method ?? '')
-      ) {
-        window.dispatchEvent(new CustomEvent('task:ui-request', { detail: event }))
+    const off = api.onTaskEvent(
+      (event: { type?: string; method?: string; conversationId?: string } & ChatApprovalRequest) => {
+        if (event?.type !== 'extension_ui_request') return
+        if (event.method === 'confirm') {
+          pushApproval(event.conversationId, event)
+        } else if (['select', 'input', 'editor'].includes(event.method ?? '')) {
+          window.dispatchEvent(new CustomEvent('task:ui-request', { detail: event }))
+        }
       }
-    })
+    )
     return off
-  }, [])
-
-  // 会话结束/中止时清空残留的确认弹窗队列（主进程已按取消处理）。
-  // 对齐 CodingPage/useTasks.ts 的 task:ui-clear 广播，否则旧弹窗滞留 UI 并阻塞后续请求。
-  useEffect(() => {
-    const clear = () => window.dispatchEvent(new CustomEvent('task:ui-clear'))
-    if (!chat.streaming) clear()
-    return () => undefined
-  }, [chat.streaming])
+  }, [pushApproval])
 
   // URL ↔ state 同步
   useEffect(() => {
@@ -109,6 +106,7 @@ function ChatPageInner() {
         metas={chat.metas}
         projects={chat.projects}
         activeId={chat.activeId}
+        streamingChatIds={chat.streamingChatIds}
         onSelect={(id) => navigate(`/chat/${id}`)}
         onCreate={() => void create()}
         onCreateInDirectory={(dir) => void createProject(dir)}
@@ -137,6 +135,8 @@ function ChatPageInner() {
           messages={chat.messages}
           streaming={chat.streaming}
           hint={chat.hint}
+          approvals={chat.approvals}
+          onRespondApproval={(id, confirmed) => void chat.respondApproval(id, confirmed)}
           onExecuteJira={async (taskKey) => {
             try {
               const task = await api.importJiraTask(taskKey)
@@ -189,7 +189,8 @@ function ChatPageInner() {
           />
         </div>
       </section>
-      {/* 工具调用 HITL 确认框：can_use_tool 请求的 UI（任务板块同款组件） */}
+      {/* 工具调用 HITL：confirm 已内联到对话流（ChatConversation 卡片），
+      UiRequestDialog 仅兜底 select/input/editor（对话板块不产生）与任务板块共用。 */}
       <UiRequestDialog />
     </div>
   )

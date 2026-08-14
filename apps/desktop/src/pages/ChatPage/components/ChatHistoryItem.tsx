@@ -1,4 +1,4 @@
-import { MessageSquareIcon, Trash2Icon } from 'lucide-react'
+import { Loader2Icon, MessageSquareIcon, Trash2Icon } from 'lucide-react'
 import type { ChatConversationMeta } from '@/api'
 import {
   AlertDialog,
@@ -19,6 +19,7 @@ export function ChatHistoryItem({
   meta,
   active,
   showDirectory = true,
+  streaming,
   onClick,
   onDelete
 }: {
@@ -26,6 +27,8 @@ export function ChatHistoryItem({
   active: boolean
   /** 是否在条目内显示目录名(分组场景下组头已显示,传 false 避免重复)。 */
   showDirectory?: boolean
+  /** 该对话正在生成中（并行流指示）。 */
+  streaming?: boolean
   onClick(): void
   onDelete(): void
 }) {
@@ -37,10 +40,17 @@ export function ChatHistoryItem({
       )}
     >
       <button className="flex w-full min-w-0 items-start gap-2 pr-6 text-left" onClick={onClick}>
-        <MessageSquareIcon
-          className={cn('mt-0.5 shrink-0 text-muted-foreground', active && 'text-foreground')}
-          size={13}
-        />
+        {streaming ? (
+          <Loader2Icon
+            className={cn('mt-0.5 size-3.5 shrink-0 animate-spin text-amber-400', active && 'text-amber-500')}
+            size={14}
+          />
+        ) : (
+          <MessageSquareIcon
+            className={cn('mt-0.5 shrink-0 text-muted-foreground', active && 'text-foreground')}
+            size={13}
+          />
+        )}
         <span className="min-w-0 flex-1">
           <span className="block max-w-[16em] truncate text-xs font-medium">{meta.title || '新对话'}</span>
           <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
