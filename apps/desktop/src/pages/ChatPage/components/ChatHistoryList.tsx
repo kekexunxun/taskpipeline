@@ -1,7 +1,7 @@
-import { FolderIcon, FolderPlusIcon, MessagesSquareIcon, PlusIcon } from 'lucide-react'
+import { FolderIcon, FolderOpenIcon } from 'lucide-react'
+import { useState } from 'react'
 import { ChatHistoryItem } from './ChatHistoryItem'
 import type { ChatConversationMeta, ChatProject } from '@/api'
-import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
 
@@ -58,8 +58,6 @@ export function ChatHistoryList({
   activeId,
   streamingChatIds,
   onSelect,
-  onCreate,
-  onCreateInDirectory,
   onDelete
 }: {
   metas: ChatConversationMeta[]
@@ -69,36 +67,34 @@ export function ChatHistoryList({
   /** 正在生成的对话集合(并行流),用于侧边栏生成状态指示。 */
   streamingChatIds?: ReadonlySet<string>
   onSelect(id: string): void
-  /** 新建普通对话。 */
-  onCreate(): void
-  /** 在指定工作目录(项目)下新建会话;undefined = 弹目录选择器。 */
-  onCreateInDirectory(directory?: string): void
   onDelete(id: string): void
 }) {
   const groups = groupMetas(metas, projects)
+  /** 记录已收起(折叠)的分组 key,默认全部展开。 */
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+
+  const toggleCollapse = (key: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) {
+        next.delete(key)
+      } else {
+        next.add(key)
+      }
+      return next
+    })
+  }
 
   return (
-    <aside className="grid min-h-0 w-72 grid-rows-[auto_auto_minmax(0,1fr)] border-r bg-card/50">
+    <aside className="grid min-h-0 w-72 grid-rows-[auto_minmax(0,1fr)] border-r bg-card/50">
       <div className="flex h-14 items-end justify-between gap-2 px-4 pt-3 pb-2">
         <div className="leading-tight">
           <h2 className="text-base font-semibold tracking-tight">对话</h2>
           <p className="text-xs text-muted-foreground">{metas.length} 个本地会话</p>
         </div>
       </div>
-      <div className="px-3 pb-3">
-        <Button
-          size="sm"
-          variant="secondary"
-          className="h-7 w-full gap-1 px-2"
-          onClick={() => onCreateInDirectory(undefined)}
-          title="选择一个本地目录作为项目,在该目录下新建对话"
-        >
-          <FolderPlusIcon size={12} strokeWidth={2} />
-          项目对话
-        </Button>
-      </div>
       <ScrollArea className="min-h-0">
-        <div className="space-y-3 px-2 pb-4">
+        <div className="w-0 min-w-full space-y-2 px-2 pb-4">
           {groups.length === 0 ? (
             <div className="px-2 py-8 text-center text-xs leading-5 text-muted-foreground">
               还没有对话
@@ -107,65 +103,48 @@ export function ChatHistoryList({
             </div>
           ) : (
             groups.map((group) => {
-              const header = group.directory ? (
-                <div className="group flex w-full items-center gap-1.5 rounded px-2 py-1">
-                  <FolderIcon size={11} className="shrink-0 text-amber-400/80" />
-                  <span className="min-w-0 flex-1 truncate text-[11px] font-semibold" title={group.directory}>
-                    {baseName(group.directory)}
-                  </span>
-                  <span className="shrink-0 text-[10px] text-muted-foreground">{group.items.length}</span>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    className="h-5 w-5 text-muted-foreground/70"
-                    onClick={() => onCreateInDirectory(group.directory!)}
-                    title={`在此目录新建对话\n${group.directory}`}
-                    aria-label={`在 ${baseName(group.directory)} 新建对话`}
-                  >
-                    <PlusIcon size={11} />
-                  </Button>
-                </div>
-              ) : (
-                <div className="group flex w-full items-center gap-1.5 px-2 py-1">
-                  <MessagesSquareIcon size={11} className="shrink-0 text-muted-foreground/70" />
-                  <span className="text-[11px] font-semibold text-muted-foreground">普通对话</span>
-                  <span className="ml-auto text-[10px] text-muted-foreground/70">{group.items.length}</span>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    className="h-5 w-5 text-muted-foreground/70"
-                    onClick={onCreate}
-                    title="新建普通对话"
-                    aria-label="新建普通对话"
-                  >
-                    <PlusIcon size={11} />
-                  </Button>
-                </div>
-              )
+              const groupKey = group.directory ?? '__plain__'
+              const isCollapsed = collapsed.has(groupKey)
               return (
-                <div
-                  key={group.directory ?? '__plain__'}
-                  className={cn('space-y-1', !group.directory && 'border-t pt-2')}
-                >
-                  {header}
-                  {group.items.length === 0 ? (
-                    <div className="px-2 py-1.5 text-[10px] leading-4 text-muted-foreground/70">
-                      没有对话
-                      <br />
-                      点右侧 + 在此目录新建
+                <div key={groupKey} className={cn('min-w-0', !group.directory && 'border-t pt-2')}>
+                  {/* 分组头 — 点击可折叠/展开 */}
+                  <button
+                    className="group/header flex w-full items-center gap-1.5 rounded px-2 py-1 text-left transition-colors hover:bg-accent/40"
+                    onClick={() => toggleCollapse(groupKey)}
+                  >
+                    {isCollapsed ? (
+                      <FolderIcon size={12} className="shrink-0 text-muted-foreground/60" />
+                    ) : (
+                      <FolderOpenIcon size={12} className="shrink-0 text-muted-foreground/60" />
+                    )}
+                    {group.directory ? (
+                      <>
+                        <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={group.directory}>
+                          {baseName(group.directory)}
+                        </span>
+                        <span className="shrink-0 text-[10px] text-muted-foreground">{group.items.length}</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-xs font-semibold text-muted-foreground">普通对话</span>
+                        <span className="ml-auto text-[10px] text-muted-foreground/70">{group.items.length}</span>
+                      </>
+                    )}
+                  </button>
+                  {/* 折叠时隐藏子项 */}
+                  {!isCollapsed && group.items.length > 0 && (
+                    <div className="mt-0.5 space-y-0.5">
+                      {group.items.map((meta) => (
+                        <ChatHistoryItem
+                          key={meta.id}
+                          meta={meta}
+                          active={meta.id === activeId}
+                          streaming={streamingChatIds?.has(meta.id)}
+                          onClick={() => onSelect(meta.id)}
+                          onDelete={() => onDelete(meta.id)}
+                        />
+                      ))}
                     </div>
-                  ) : (
-                    group.items.map((meta) => (
-                      <ChatHistoryItem
-                        key={meta.id}
-                        meta={meta}
-                        active={meta.id === activeId}
-                        showDirectory={false}
-                        streaming={streamingChatIds?.has(meta.id)}
-                        onClick={() => onSelect(meta.id)}
-                        onDelete={() => onDelete(meta.id)}
-                      />
-                    ))
                   )}
                 </div>
               )

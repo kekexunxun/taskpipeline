@@ -1,4 +1,4 @@
-import { Loader2Icon, MessageSquareIcon, Trash2Icon } from 'lucide-react'
+import { MoreVerticalIcon, Trash2Icon } from 'lucide-react'
 import type { ChatConversationMeta } from '@/api'
 import {
   AlertDialog,
@@ -12,21 +12,19 @@ import {
   AlertDialogTrigger
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { cn } from '@/lib/utils'
 import { formatRelative } from '@/utils/format'
 
 export function ChatHistoryItem({
   meta,
   active,
-  showDirectory = true,
   streaming,
   onClick,
   onDelete
 }: {
   meta: ChatConversationMeta
   active: boolean
-  /** 是否在条目内显示目录名(分组场景下组头已显示,传 false 避免重复)。 */
-  showDirectory?: boolean
   /** 该对话正在生成中（并行流指示）。 */
   streaming?: boolean
   onClick(): void
@@ -35,47 +33,46 @@ export function ChatHistoryItem({
   return (
     <div
       className={cn(
-        'group relative rounded-md border border-transparent px-2.5 py-2 transition-colors hover:bg-accent/60',
-        active && 'border-border bg-accent'
+        'group flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent/50',
+        active && 'bg-accent'
       )}
     >
-      <button className="flex w-full min-w-0 items-start gap-2 pr-6 text-left" onClick={onClick}>
-        {streaming ? (
-          <Loader2Icon
-            className={cn('mt-0.5 size-3.5 shrink-0 animate-spin text-amber-400', active && 'text-amber-500')}
-            size={14}
-          />
-        ) : (
-          <MessageSquareIcon
-            className={cn('mt-0.5 shrink-0 text-muted-foreground', active && 'text-foreground')}
-            size={13}
-          />
-        )}
-        <span className="min-w-0 flex-1">
-          <span className="block max-w-[16em] truncate text-xs font-medium">{meta.title || '新对话'}</span>
-          <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
-            {meta.workingDirectory && showDirectory ? (
-              <>
-                <span className="text-amber-400/80">{meta.workingDirectory.split(/[\\/]/).filter(Boolean).pop()}</span>
-                {' · '}
-              </>
-            ) : null}
-            {formatRelative(meta.updatedAt)} · {meta.messageCount} 条
-          </span>
+      <button className="flex min-w-0 flex-1 items-center gap-2" onClick={onClick}>
+        <span
+          className={cn(
+            'min-w-0 flex-1 truncate pl-[18px] text-left text-xs',
+            active ? 'font-medium' : 'text-foreground/80',
+            streaming && 'text-amber-500'
+          )}
+        >
+          {meta.title || '新对话'}
         </span>
+        <span className="shrink-0 text-[10px] text-muted-foreground/70">{formatRelative(meta.updatedAt)}</span>
       </button>
       <AlertDialog>
-        <AlertDialogTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label={`删除对话 ${meta.title}`}
-            className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 focus:opacity-100"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <Trash2Icon size={12} />
-          </Button>
-        </AlertDialogTrigger>
+        <div className="shrink-0">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="h-5 w-5 opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100"
+                onClick={(event) => event.stopPropagation()}
+                aria-label={`对话操作 ${meta.title}`}
+              >
+                <MoreVerticalIcon size={12} />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-[6rem]">
+              <AlertDialogTrigger asChild>
+                <DropdownMenuItem className="text-destructive focus:text-destructive">
+                  <Trash2Icon size={14} />
+                  删除
+                </DropdownMenuItem>
+              </AlertDialogTrigger>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>删除对话？</AlertDialogTitle>

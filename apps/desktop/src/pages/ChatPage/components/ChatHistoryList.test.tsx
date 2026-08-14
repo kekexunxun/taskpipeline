@@ -5,8 +5,6 @@ import type { ChatConversationMeta } from '@/api'
 
 const noop = {
   onSelect: vi.fn(),
-  onCreate: vi.fn(),
-  onCreateInDirectory: vi.fn(),
   onDelete: vi.fn()
 }
 
@@ -22,7 +20,7 @@ function meta(overrides: Partial<ChatConversationMeta>): ChatConversationMeta {
 }
 
 describe('ChatHistoryList', () => {
-  it('keeps an empty project group after its conversations are deleted', () => {
+  it('keeps an empty project group header after its conversations are deleted', () => {
     // 目录下所有会话已删除:metas 为空,但项目实体仍在
     render(
       <ChatHistoryList
@@ -31,9 +29,9 @@ describe('ChatHistoryList', () => {
         {...noop}
       />
     )
-    // 项目组头仍显示(目录名),并提示「没有对话」
+    // 项目组头仍显示(目录名)和数量 0
     expect(screen.getByText('x')).toBeInTheDocument()
-    expect(screen.getByText(/没有对话/)).toBeInTheDocument()
+    expect(screen.getByText('0')).toBeInTheDocument()
   })
 
   it('shows the conversation count and items for a project with chats', () => {
@@ -45,7 +43,7 @@ describe('ChatHistoryList', () => {
       />
     )
     expect(screen.getByText('发布检查')).toBeInTheDocument()
-    expect(screen.queryByText('没有对话')).not.toBeInTheDocument()
+    expect(screen.getByText('1')).toBeInTheDocument()
   })
 
   it('orders project groups by latest activity, empty projects by lastActiveAt', () => {
@@ -60,10 +58,19 @@ describe('ChatHistoryList', () => {
         {...noop}
       />
     )
-    const headers = screen.getAllByRole('button', { name: /在 .* 新建对话/ })
     // 组头按最近活动倒序:空项目(2月) > 有会话项目(1月10日) > 空项目(12月)
-    expect(headers[0]?.getAttribute('aria-label')).toContain('empty-recent')
-    expect(headers[1]?.getAttribute('aria-label')).toContain('old')
-    expect(headers[2]?.getAttribute('aria-label')).toContain('empty-old')
+    // 通过获取所有分组头按钮的文本来验证排序
+    const headers = screen
+      .getAllByRole('button')
+      .filter(
+        (btn) =>
+          btn.querySelector('span')?.textContent === 'empty-recent' ||
+          btn.querySelector('span')?.textContent === 'old' ||
+          btn.querySelector('span')?.textContent === 'empty-old'
+      )
+    expect(headers.length).toBe(3)
+    expect(headers[0]?.textContent).toContain('empty-recent')
+    expect(headers[1]?.textContent).toContain('old')
+    expect(headers[2]?.textContent).toContain('empty-old')
   })
 })

@@ -249,6 +249,9 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
         const aggregate = aggregateSubTaskProgress(samples)
         const absorbed = absorbedOutputByTaskId.get(block.taskId)
         const visibleChildren = childParts.filter((p) => !isSubtaskControlPart(p))
+        // 停止对话时,Agent 可能已启动(subtask-start)但未产出任何内容;
+        // 没有可见子项且没有吸收输出时不展示该 Agent 卡片。
+        if (visibleChildren.length === 0 && !absorbed) return null
         return (
           <SubTaskGroup
             key={`g-${block.taskId}-${index}`}

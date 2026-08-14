@@ -132,8 +132,8 @@ export class ChatService {
     const groups: ChatModelGroup[] = []
     for (let i = 0; i < drivers.length; i++) {
       const result = results[i]
-      if (result.status === 'fulfilled' && result.value.length) {
-        groups.push({ driverId: drivers[i].id, displayName: drivers[i].displayName, models: result.value })
+      if (result && result.status === 'fulfilled' && result.value.length) {
+        groups.push({ driverId: drivers[i]!.id, displayName: drivers[i]!.displayName, models: result.value })
       }
     }
     return groups
