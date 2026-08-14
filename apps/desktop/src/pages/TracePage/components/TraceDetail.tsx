@@ -20,12 +20,14 @@ export function TraceDetail({
   spans,
   loading,
   summary,
+  resolveTitle,
   onBack
 }: {
   traceId: string
   spans: AgentSpan[]
   loading: boolean
   summary?: TraceSummary
+  resolveTitle(summary: TraceSummary): string
   onBack(): void
 }) {
   const [selected, setSelected] = useState<AgentSpan | null>(null)
@@ -64,7 +66,7 @@ export function TraceDetail({
         </Button>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-semibold">{summary?.title ?? traceId}</span>
+            <span className="truncate text-sm font-semibold">{summary ? resolveTitle(summary) : traceId}</span>
             {summary && (
               <>
                 <Badge variant={summary.status === 'running' ? 'outline' : 'muted'} className="px-1.5 py-0 text-[10px]">

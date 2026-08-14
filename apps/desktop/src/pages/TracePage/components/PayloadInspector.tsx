@@ -13,6 +13,26 @@ const TYPE_LABELS: Record<string, string> = {
   'subtask.run': '子任务'
 }
 
+/** 内部实现字段，对用户无展示意义，从「元信息」区过滤掉。 */
+const INTERNAL_META_KEYS = new Set([
+  'source',
+  'toolCallId',
+  'parentToolUseId',
+  'sdkSubtype',
+  'stepIndex',
+  'phase',
+  'traceLabel',
+  'agentName'
+])
+
+function filterMeta(meta: Record<string, unknown>): Record<string, unknown> {
+  const filtered: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(meta)) {
+    if (!INTERNAL_META_KEYS.has(key)) filtered[key] = value
+  }
+  return filtered
+}
+
 function formatJson(value: unknown): string {
   if (value === undefined) return '—'
   try {
@@ -135,9 +155,9 @@ export function PayloadInspector({ span, onClose }: { span: AgentSpan | null; on
           </>
         )}
 
-        {span.meta && Object.keys(span.meta).length > 0 && (
+        {span.meta && Object.keys(filterMeta(span.meta)).length > 0 && (
           <CollapsibleSection title="元信息" defaultOpen={false}>
-            <JsonBlock value={span.meta} />
+            <JsonBlock value={filterMeta(span.meta)} />
           </CollapsibleSection>
         )}
       </div>

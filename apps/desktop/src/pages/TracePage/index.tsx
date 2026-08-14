@@ -87,6 +87,7 @@ export default function TracePage() {
                 agent={agent}
                 query={query}
                 activeId={activeTraceId}
+                resolveTitle={trace.resolveTitle}
                 onSelect={(summary) => navigate(`/trace/${summary.kind}/${summary.traceId}`)}
                 onDelete={handleDelete}
               />
@@ -100,6 +101,7 @@ export default function TracePage() {
               spans={trace.detail}
               loading={trace.detailLoading}
               summary={activeSummary}
+              resolveTitle={trace.resolveTitle}
               onBack={() => navigate('/trace')}
             />
           ) : (

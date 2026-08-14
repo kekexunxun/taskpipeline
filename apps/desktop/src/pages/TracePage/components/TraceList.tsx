@@ -74,6 +74,7 @@ export function TraceList({
   agent,
   query,
   activeId,
+  resolveTitle,
   onSelect,
   onDelete
 }: {
@@ -83,6 +84,7 @@ export function TraceList({
   agent: string
   query: string
   activeId?: string
+  resolveTitle(summary: TraceSummary): string
   onSelect(summary: TraceSummary): void
   onDelete(summary: TraceSummary): void
 }) {
@@ -114,7 +116,9 @@ export function TraceList({
                   ) : (
                     <MessageSquareIcon size={12} className="shrink-0 text-sky-400" />
                   )}
-                  <span className="truncate text-xs font-medium">{summary.title || shortId(summary.traceId)}</span>
+                  <span className="truncate text-xs font-medium">
+                    {resolveTitle(summary) || shortId(summary.traceId)}
+                  </span>
                 </span>
                 <span className="flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground tabular-nums">
                   <meta.Icon size={11} className={cn(meta.className, summary.status === 'running' && 'animate-spin')} />
@@ -157,7 +161,7 @@ export function TraceList({
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  aria-label={`删除 Trace ${summary.title || shortId(summary.traceId)}`}
+                  aria-label={`删除 Trace ${resolveTitle(summary) || shortId(summary.traceId)}`}
                   className="absolute top-1.5 right-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
                   onClick={(event) => event.stopPropagation()}
                 >
@@ -168,7 +172,8 @@ export function TraceList({
                 <AlertDialogHeader>
                   <AlertDialogTitle>删除 Trace？</AlertDialogTitle>
                   <AlertDialogDescription>
-                    将永久删除「{summary.title || shortId(summary.traceId)}」的执行记录（span 数据），此操作无法撤销。
+                    将永久删除「{resolveTitle(summary) || shortId(summary.traceId)}」的执行记录（span
+                    数据），此操作无法撤销。
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
