@@ -123,13 +123,13 @@ export class ChatService {
    * 列出所有 driver 提供的模型,按 driverId 分组。
    */
   async listModels(): Promise<ChatModelGroup[]> {
+    const drivers = this.driverRegistry.list()
+    const results = await Promise.allSettled(drivers.map((driver) => driver.listModels()))
     const groups: ChatModelGroup[] = []
-    for (const driver of this.driverRegistry.list()) {
-      try {
-        const models = await driver.listModels()
-        if (models.length) groups.push({ driverId: driver.id, displayName: driver.displayName, models })
-      } catch {
-        /* driver 列表失败不影响其他 driver */
+    for (let i = 0; i < drivers.length; i++) {
+      const result = results[i]
+      if (result.status === 'fulfilled' && result.value.length) {
+        groups.push({ driverId: drivers[i].id, displayName: drivers[i].displayName, models: result.value })
       }
     }
     return groups

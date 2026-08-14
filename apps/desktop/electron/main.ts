@@ -2444,6 +2444,10 @@ async function getQoderStatus(): Promise<QoderStatus> {
     }
     return { enabled: false, connected: false, running: false, models: [] }
   }
+  // 同 Token 且缓存 < 30s 时直接复用，避免 listModels 等高频调用方每次都拉起探针进程。
+  if (qoderStatusCache && qoderStatusCache.token === token && Date.now() - qoderStatusCache.at < 30_000) {
+    return qoderStatusCache.status
+  }
   if (qoderStatusInflight) return qoderStatusInflight
   qoderStatusInflight = probeQoderStatus().finally(() => {
     qoderStatusInflight = null
@@ -2465,12 +2469,8 @@ async function getQoderStatus(): Promise<QoderStatus> {
   return status
 }
 
-/** 凭据健康检查专用：同 Token 的 30s 内新鲜缓存直接复用（UI 刚探过），否则共享单次探针。 */
+/** 凭据健康检查专用：getQoderStatus 已内置 30s TTL 缓存，直接复用即可。 */
 function getQoderStatusForHealth(): Promise<QoderStatus> {
-  const token = protectedValue('qoderToken')
-  if (qoderStatusCache && qoderStatusCache.token === token && Date.now() - qoderStatusCache.at < 30_000) {
-    return Promise.resolve(qoderStatusCache.status)
-  }
   return getQoderStatus()
 }
 
