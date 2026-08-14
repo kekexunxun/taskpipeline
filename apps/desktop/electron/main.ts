@@ -106,7 +106,7 @@ import {
   parseImplementationDecision
 } from './task-readiness.js'
 import { QoderTaskAgentDriver, stripQoderModelPrefix } from './task-agent/qoder-task-agent.js'
-import { describeToolAction, isDangerousTool, isWriteTool } from './task-agent/dangerous-tools.js'
+import { describeToolAction, isBuiltinWriteTool, isDangerousTool, isWriteTool } from './task-agent/dangerous-tools.js'
 import { closeQoderQuerySafely, recordQoderMessage } from './task-agent/log.js'
 import { parseTestCaseGeneration } from './task-agent/parsers/test-case-parser.js'
 import { AgentService, type OperationKind } from './agents/agent-service.js'
@@ -718,9 +718,12 @@ chatDriverRegistry.register(
     // 工具调用 HITL：Qoder CLI 需要用户决策时弹 UI 确认(不自动 allow，用户显式同意才执行)。
     // - MCP 工具(mcp__*，如 jira/gitlab/confluence)：仅写操作(create/update/delete/move 等)弹窗确认，
     //   读操作(get/search/list 等)直接放行 —— 用户勾选的外部服务访问中，只有修改类操作需要把关；
-    // - 内置工具沿用任务板块策略：仅删除/移动等危险操作弹窗，其余放行(避免对话频繁打断)。
+    // - 内置工具：Bash/Edit/Write/NotebookEdit 一律弹窗确认(执行命令/改文件属于高影响操作)；
+    //   其余(Agent/Read/Glob/Grep/WebFetch 等)仅删除/移动等危险操作弹窗，避免只读操作频繁打断。
     async (toolName, toolInput, { signal, conversationId, title, displayName, description }) => {
-      const needsConfirm = toolName.startsWith('mcp__') ? isWriteTool(toolName) : isDangerousTool(toolName, toolInput)
+      const needsConfirm = toolName.startsWith('mcp__')
+        ? isWriteTool(toolName)
+        : isBuiltinWriteTool(toolName) || isDangerousTool(toolName, toolInput)
       if (!needsConfirm) return 'allow'
       // 弹窗文案截断：避免 Write/Edit 等工具把整段文件内容塞进确认框（敏感内容不落地 UI）。
       const detail = describeToolAction(toolName, toolInput)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { describeToolAction, isDangerousTool, isWriteTool } from './dangerous-tools.js'
+import { describeToolAction, isBuiltinWriteTool, isDangerousTool, isWriteTool } from './dangerous-tools.js'
 
 describe('isDangerousTool（工具调用 HITL 规则：仅删除类确认）', () => {
   it('Bash 只读命令自动放行', () => {
@@ -72,6 +72,33 @@ describe('isDangerousTool（工具调用 HITL 规则：仅删除类确认）', (
     expect(isDangerousTool('Glob', { pattern: '**/*.ts' })).toBe(false)
     expect(isDangerousTool('Grep', { pattern: 'foo' })).toBe(false)
     expect(isDangerousTool('WebFetch', { url: 'https://example.com' })).toBe(false)
+  })
+})
+
+describe('isBuiltinWriteTool（对话板块内置写工具判定：Bash/Edit/Write 一律确认）', () => {
+  it('写类内置工具命中（大小写不敏感）', () => {
+    expect(isBuiltinWriteTool('Bash')).toBe(true)
+    expect(isBuiltinWriteTool('Edit')).toBe(true)
+    expect(isBuiltinWriteTool('Write')).toBe(true)
+    expect(isBuiltinWriteTool('NotebookEdit')).toBe(true)
+    expect(isBuiltinWriteTool('bash')).toBe(true)
+    expect(isBuiltinWriteTool('write')).toBe(true)
+  })
+
+  it('只读 / 低风险内置工具不命中', () => {
+    expect(isBuiltinWriteTool('Read')).toBe(false)
+    expect(isBuiltinWriteTool('Glob')).toBe(false)
+    expect(isBuiltinWriteTool('Grep')).toBe(false)
+    expect(isBuiltinWriteTool('WebFetch')).toBe(false)
+    expect(isBuiltinWriteTool('WebSearch')).toBe(false)
+    expect(isBuiltinWriteTool('Agent')).toBe(false)
+    expect(isBuiltinWriteTool('AskUserQuestion')).toBe(false)
+    expect(isBuiltinWriteTool('TodoWrite')).toBe(false)
+    expect(isBuiltinWriteTool('Skill')).toBe(false)
+  })
+
+  it('MCP 工具名不命中（走 isWriteTool 规则）', () => {
+    expect(isBuiltinWriteTool('mcp__jira__create_issue')).toBe(false)
   })
 })
 

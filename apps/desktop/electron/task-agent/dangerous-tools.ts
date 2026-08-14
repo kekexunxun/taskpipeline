@@ -74,6 +74,21 @@ const READ_VERBS = new Set([
 ])
 
 /**
+ * 内置写工具判定(对话板块工具调用 HITL 用):命中返回 true,表示需要用户确认。
+ *
+ * Qoder CLI 内置工具集中会修改本地状态 / 执行命令的工具:
+ * Bash(任意命令执行)、Edit(修改文件)、Write(新建/覆盖文件)、NotebookEdit(编辑 notebook 单元格)。
+ * 对话板块对这类工具一律弹窗确认(最严格),其余内置工具(Read/Glob/Grep/WebFetch/Agent 等)
+ * 仍走 isDangerousTool 的删除类规则 —— 只读/低风险工具在 CLI 侧通常 policy 直接放行,
+ * 不会走到回调,规则不改变其行为。
+ */
+const BUILTIN_WRITE_TOOLS = new Set(['bash', 'edit', 'write', 'notebookedit'])
+
+export function isBuiltinWriteTool(toolName: string): boolean {
+  return BUILTIN_WRITE_TOOLS.has(toolName.toLowerCase())
+}
+
+/**
  * 写操作判定(工具调用 HITL 用):命中返回 true,表示需要用户确认。
  *
  * 用于 MCP 工具(mcp__server__tool):名字按非字母数字字符拆分 token,
