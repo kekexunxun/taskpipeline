@@ -651,3 +651,8 @@ textarea:focus-visible {
     font-size: var(--text-xs);
   }
 }
+
+/* data-streamdown="inline-code" 字体调小 */
+[data-streamdown='inline-code'] {
+  font-size: var(--text-xs);
+}

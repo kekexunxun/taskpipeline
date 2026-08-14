@@ -19,6 +19,7 @@ import type {
   ChatDriverId,
   ChatUsage,
   DriverPart,
+  HitlMode,
   McpServiceId,
   StartChatStreamInput,
   StoredMessage,
@@ -218,6 +219,13 @@ export class ChatService {
   async setChatWorkingDirectory(id: string, workingDirectory?: string): Promise<ChatConversation | undefined> {
     if (this.activeStreams.has(id)) return undefined
     return this.storage.updateMeta(id, { workingDirectory })
+  }
+
+  /**
+   * 设置对话级 HITL 模式。
+   */
+  async setChatHitlMode(id: string, hitlMode: HitlMode): Promise<ChatConversation | undefined> {
+    return this.storage.updateMeta(id, { hitlMode })
   }
 
   abortChat(input: AbortChatStreamInput): void {

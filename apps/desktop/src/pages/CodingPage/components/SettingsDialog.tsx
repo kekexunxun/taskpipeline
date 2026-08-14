@@ -40,6 +40,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { ButtonGroup } from '@/components/ui/button-group'
 import {
   Dialog,
   DialogClose,
@@ -75,6 +76,8 @@ type Settings = {
   reviewAutoFixMaxRounds: string
   /** 交付确认：commit/push/MR 前是否弹窗确认（默认关闭=自动提交，常规可行）。 */
   deliveryConfirm: string
+  /** 全局默认 HITL 模式：ask=所有写操作需确认, auto=仅危险操作需确认, yolo=全部自动放行。 */
+  hitlMode: 'ask' | 'auto' | 'yolo'
   // modelApiKey 不再在通用设置中展示，由 OpenAI-Compatible 弹窗维护
   modelApiKey?: string
 }
@@ -122,7 +125,8 @@ const defaults: Settings = {
   createTestCasesEnabled: 'false',
   reviewAutoFix: 'false',
   reviewAutoFixMaxRounds: '2',
-  deliveryConfirm: 'false'
+  deliveryConfirm: 'false',
+  hitlMode: 'ask'
 }
 const ordinaryKeys = [
   'defaultModel',
@@ -134,7 +138,8 @@ const ordinaryKeys = [
   'createTestCasesEnabled',
   'reviewAutoFix',
   'reviewAutoFixMaxRounds',
-  'deliveryConfirm'
+  'deliveryConfirm',
+  'hitlMode'
 ] as const
 const secretKeys = ['qoderToken', 'gitlabToken', 'jiraToken', 'confluenceToken', 'modelApiKey'] as const
 const MANAGED_MEMORY_SCOPES: MemoryScope[] = ['user', 'repo']
@@ -659,7 +664,15 @@ export function SettingsDialog({
         [...ordinaryKeys, ...secretKeys].map(async (key) => [key, await api.getSetting(key)] as const)
       )
       const next = { ...defaults }
-      for (const [key, value] of entries) if (value !== undefined) next[key] = value
+      for (const [key, value] of entries) {
+        if (value !== undefined) {
+          if (key === 'hitlMode') {
+            if (value === 'ask' || value === 'auto' || value === 'yolo') next.hitlMode = value
+          } else {
+            ;(next as Record<string, string>)[key] = value
+          }
+        }
+      }
       setSettings(next)
       const repositoryList = await api.listRepositories()
       setRepositories(repositoryList)
@@ -1168,6 +1181,35 @@ export function SettingsDialog({
                         />
                       </div>
                     </div>
+                  </Section>
+                  <Section
+                    title="人工确认模式"
+                    description="控制 AI 执行工具调用时的人工确认策略。新对话和新任务默认使用此设置，可在对话/任务内单独修改。"
+                  >
+                    <SettingField label="全局默认模式">
+                      <ButtonGroup>
+                        {[
+                          { value: 'ask' as const, label: '询问', desc: '所有写操作需确认' },
+                          { value: 'auto' as const, label: '自动', desc: '仅危险操作需确认' },
+                          { value: 'yolo' as const, label: 'YOLO', desc: '自动批准所有操作' }
+                        ].map((option) => (
+                          <Button
+                            key={option.value}
+                            size="sm"
+                            variant={settings.hitlMode === option.value ? 'default' : 'outline'}
+                            onClick={() => {
+                              update('hitlMode', option.value)
+                              void persistSetting('hitlMode', option.value)
+                              void api.setHitlMode(option.value)
+                            }}
+                            className="px-3 text-xs"
+                            title={option.desc}
+                          >
+                            {option.label}
+                          </Button>
+                        ))}
+                      </ButtonGroup>
+                    </SettingField>
                   </Section>
                 </TabsContent>
                 <TabsContent value="gitlab" className="space-y-5">

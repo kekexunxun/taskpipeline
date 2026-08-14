@@ -103,7 +103,8 @@ export class TaskStore {
       'ALTER TABLE repository_profiles ADD COLUMN setup_command TEXT',
       'ALTER TABLE task_repositories ADD COLUMN merge_request_iid INTEGER',
       'ALTER TABLE task_repositories ADD COLUMN merge_request_state TEXT',
-      'ALTER TABLE task_repositories ADD COLUMN merge_request_checked_at TEXT'
+      'ALTER TABLE task_repositories ADD COLUMN merge_request_checked_at TEXT',
+      'ALTER TABLE tasks ADD COLUMN hitl_mode TEXT'
     ]) {
       try {
         this.db.exec(statement)
@@ -159,13 +160,14 @@ export class TaskStore {
       createTestCasesEnabled: input.createTestCasesEnabled,
       agentProfileId: input.agentProfileId,
       testsGenerated: input.testsGenerated,
+      hitlMode: input.hitlMode,
       createdAt: this.now(),
       updatedAt: this.now()
     }
     this.db
       .prepare(
-        `INSERT INTO tasks (id,task_key,source,source_url,title,description,keywords,acceptance_criteria,state,summary,start_mode,plan_content,plan_revision,failure_stage,review_status,commit_message,pi_session_path,qoder_model,qoder_session_id,session_usage,open_code_review_enabled,auto_create_merge_requests,create_test_cases_enabled,tests_generated,agent_profile_id,created_at,updated_at)
-      VALUES (@id,@taskKey,@source,@sourceUrl,@title,@description,@keywords,@acceptanceCriteria,@state,@summary,@startMode,@planContent,@planRevision,@failureStage,@reviewStatus,@commitMessage,@piSessionPath,@qoderModel,@qoderSessionId,@sessionUsage,@openCodeReviewEnabled,@autoCreateMergeRequests,@createTestCasesEnabled,@testsGenerated,@agentProfileId,@createdAt,@updatedAt)`
+        `INSERT INTO tasks (id,task_key,source,source_url,title,description,keywords,acceptance_criteria,state,summary,start_mode,plan_content,plan_revision,failure_stage,review_status,commit_message,pi_session_path,qoder_model,qoder_session_id,session_usage,open_code_review_enabled,auto_create_merge_requests,create_test_cases_enabled,tests_generated,agent_profile_id,hitl_mode,created_at,updated_at)
+      VALUES (@id,@taskKey,@source,@sourceUrl,@title,@description,@keywords,@acceptanceCriteria,@state,@summary,@startMode,@planContent,@planRevision,@failureStage,@reviewStatus,@commitMessage,@piSessionPath,@qoderModel,@qoderSessionId,@sessionUsage,@openCodeReviewEnabled,@autoCreateMergeRequests,@createTestCasesEnabled,@testsGenerated,@agentProfileId,@hitlMode,@createdAt,@updatedAt)`
       )
       .run({
         ...task,
@@ -188,7 +190,7 @@ export class TaskStore {
     const next = { ...current, ...patch, updatedAt: this.now() }
     this.db
       .prepare(
-        `UPDATE tasks SET task_key=@taskKey,source=@source,source_url=@sourceUrl,title=@title,description=@description,keywords=@keywords,acceptance_criteria=@acceptanceCriteria,state=@state,summary=@summary,start_mode=@startMode,plan_content=@planContent,plan_revision=@planRevision,failure_stage=@failureStage,review_status=@reviewStatus,commit_message=@commitMessage,pi_session_path=@piSessionPath,qoder_model=@qoderModel,qoder_session_id=@qoderSessionId,session_usage=@sessionUsage,open_code_review_enabled=@openCodeReviewEnabled,auto_create_merge_requests=@autoCreateMergeRequests,create_test_cases_enabled=@createTestCasesEnabled,tests_generated=@testsGenerated,agent_profile_id=@agentProfileId,updated_at=@updatedAt WHERE id=@id`
+        `UPDATE tasks SET task_key=@taskKey,source=@source,source_url=@sourceUrl,title=@title,description=@description,keywords=@keywords,acceptance_criteria=@acceptanceCriteria,state=@state,summary=@summary,start_mode=@startMode,plan_content=@planContent,plan_revision=@planRevision,failure_stage=@failureStage,review_status=@reviewStatus,commit_message=@commitMessage,pi_session_path=@piSessionPath,qoder_model=@qoderModel,qoder_session_id=@qoderSessionId,session_usage=@sessionUsage,open_code_review_enabled=@openCodeReviewEnabled,auto_create_merge_requests=@autoCreateMergeRequests,create_test_cases_enabled=@createTestCasesEnabled,tests_generated=@testsGenerated,agent_profile_id=@agentProfileId,hitl_mode=@hitlMode,updated_at=@updatedAt WHERE id=@id`
       )
       .run({
         ...next,
@@ -296,6 +298,7 @@ export class TaskStore {
         r.create_test_cases_enabled === '1' ? true : r.create_test_cases_enabled === '0' ? false : undefined,
       testsGenerated: r.tests_generated ? (JSON.parse(String(r.tests_generated)) as Task['testsGenerated']) : undefined,
       agentProfileId: r.agent_profile_id ? String(r.agent_profile_id) : undefined,
+      hitlMode: r.hitl_mode ? (String(r.hitl_mode) as Task['hitlMode']) : undefined,
       createdAt: String(r.created_at),
       updatedAt: String(r.updated_at)
     }

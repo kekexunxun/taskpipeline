@@ -190,6 +190,9 @@ export type ChatModelGroup = {
  */
 export type McpServiceId = string
 
+/** HITL (Human-in-the-Loop) 模式：按对话/任务独立存储。 */
+export type HitlMode = 'ask' | 'auto' | 'yolo'
+
 /** 对话持久化形态。 */
 export type ChatConversationMeta = {
   id: string
@@ -206,6 +209,8 @@ export type ChatConversationMeta = {
   skills?: string[]
   /** 最近一轮选中的 Agent id（随对话落盘，切换对话后恢复选择态）。 */
   agentId?: string
+  /** 对话级 HITL 模式（随对话落盘，切换对话后恢复）。未设置时沿用全局默认 'ask'。 */
+  hitlMode?: HitlMode
   messageCount: number
   /**
    * 绑定的本地工作目录(项目对话)。

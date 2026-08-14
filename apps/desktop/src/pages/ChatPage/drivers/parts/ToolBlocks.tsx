@@ -14,10 +14,12 @@ import {
   FilePlus2Icon,
   Loader2Icon,
   PuzzleIcon,
-  TerminalIcon
+  TerminalIcon,
+  Trash2Icon
 } from 'lucide-react'
 import { useState, type ComponentType } from 'react'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
 /** 序列化工具 output 为可展示字符串。 */
@@ -63,16 +65,19 @@ function parseLineStats(output: unknown): { added?: number; deleted?: number } {
 export function WriteToolBlock({
   input,
   output,
-  status
+  status,
+  onApprove
 }: {
   input?: unknown
   output?: unknown
-  status: 'running' | 'done' | 'error'
+  status: 'running' | 'done' | 'error' | 'pending'
+  onApprove?: (confirmed: boolean) => void
 }) {
   const filePath = getInputField(input, 'file_path') || ''
   const fileName = extractFilename(filePath)
   const { added, deleted } = parseLineStats(output)
   const hasLineStats = added !== undefined || deleted !== undefined
+  const isPending = status === 'pending' && onApprove
 
   return (
     <div
@@ -84,21 +89,41 @@ export function WriteToolBlock({
       <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
         {status === 'running' ? (
           <Loader2Icon size={13} className="shrink-0 animate-spin text-emerald-500" />
+        ) : isPending ? (
+          <FilePlus2Icon size={13} className="shrink-0 text-amber-500" />
         ) : (
           <FilePlus2Icon size={13} className="shrink-0 text-emerald-500" />
         )}
         <span className="truncate font-medium">{fileName || '写入文件'}</span>
       </span>
       <span className="flex shrink-0 items-center gap-2 font-mono text-[11px]">
-        {status === 'running' && <span className="text-muted-foreground">写入中…</span>}
-        {hasLineStats && (
+        {isPending ? (
           <>
-            {added !== undefined && <span className="text-emerald-500">+{added}</span>}
-            {deleted !== undefined && <span className="text-red-400">-{deleted}</span>}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onApprove(false)}
+              className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
+            >
+              取消
+            </Button>
+            <Button size="sm" onClick={() => onApprove(true)} className="h-6 px-2 text-xs">
+              确认
+            </Button>
+          </>
+        ) : (
+          <>
+            {status === 'running' && <span className="text-muted-foreground">写入中…</span>}
+            {hasLineStats && (
+              <>
+                {added !== undefined && <span className="text-emerald-500">+{added}</span>}
+                {deleted !== undefined && <span className="text-red-400">-{deleted}</span>}
+              </>
+            )}
+            {!hasLineStats && status === 'done' && <span className="text-muted-foreground">已写入</span>}
+            {status === 'error' && <span className="text-red-400">失败</span>}
           </>
         )}
-        {!hasLineStats && status === 'done' && <span className="text-muted-foreground">已写入</span>}
-        {status === 'error' && <span className="text-red-400">失败</span>}
       </span>
     </div>
   )
@@ -109,16 +134,19 @@ export function WriteToolBlock({
 export function EditToolBlock({
   input,
   output,
-  status
+  status,
+  onApprove
 }: {
   input?: unknown
   output?: unknown
-  status: 'running' | 'done' | 'error'
+  status: 'running' | 'done' | 'error' | 'pending'
+  onApprove?: (confirmed: boolean) => void
 }) {
   const filePath = getInputField(input, 'file_path') || ''
   const fileName = extractFilename(filePath)
   const { added, deleted } = parseLineStats(output)
   const hasLineStats = added !== undefined || deleted !== undefined
+  const isPending = status === 'pending' && onApprove
 
   return (
     <div
@@ -130,21 +158,41 @@ export function EditToolBlock({
       <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
         {status === 'running' ? (
           <Loader2Icon size={13} className="shrink-0 animate-spin text-blue-500" />
+        ) : isPending ? (
+          <FileEditIcon size={13} className="shrink-0 text-amber-500" />
         ) : (
           <FileEditIcon size={13} className="shrink-0 text-blue-500" />
         )}
         <span className="truncate font-medium">{fileName || '编辑文件'}</span>
       </span>
       <span className="flex shrink-0 items-center gap-2 font-mono text-[11px]">
-        {status === 'running' && <span className="text-muted-foreground">编辑中…</span>}
-        {hasLineStats && (
+        {isPending ? (
           <>
-            {added !== undefined && <span className="text-emerald-500">+{added}</span>}
-            {deleted !== undefined && <span className="text-red-400">-{deleted}</span>}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onApprove(false)}
+              className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
+            >
+              取消
+            </Button>
+            <Button size="sm" onClick={() => onApprove(true)} className="h-6 px-2 text-xs">
+              确认
+            </Button>
+          </>
+        ) : (
+          <>
+            {status === 'running' && <span className="text-muted-foreground">编辑中…</span>}
+            {hasLineStats && (
+              <>
+                {added !== undefined && <span className="text-emerald-500">+{added}</span>}
+                {deleted !== undefined && <span className="text-red-400">-{deleted}</span>}
+              </>
+            )}
+            {!hasLineStats && status === 'done' && <span className="text-muted-foreground">已编辑</span>}
+            {status === 'error' && <span className="text-red-400">失败</span>}
           </>
         )}
-        {!hasLineStats && status === 'done' && <span className="text-muted-foreground">已编辑</span>}
-        {status === 'error' && <span className="text-red-400">失败</span>}
       </span>
     </div>
   )
@@ -375,17 +423,20 @@ export function BashToolBlock({
   input,
   output,
   status,
-  icon: Icon = TerminalIcon
+  icon: Icon = TerminalIcon,
+  onApprove
 }: {
   input?: unknown
   output?: unknown
-  status: 'running' | 'done' | 'error'
+  status: 'running' | 'done' | 'error' | 'pending'
   icon?: ComponentType<{ size?: number; className?: string }>
+  onApprove?: (confirmed: boolean) => void
 }) {
   const [open, setOpen] = useState(false)
   const command = getInputField(input, 'command') || ''
   const description = getInputField(input, 'description')
   const outputText = stringifyOutput(output)
+  const isPending = status === 'pending' && onApprove
 
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="not-prose w-full">
@@ -397,24 +448,54 @@ export function BashToolBlock({
           open && 'rounded-b-none border-b-transparent'
         )}
       >
-        <Icon size={13} className="shrink-0 text-muted-foreground/60" />
+        <Icon size={13} className={cn('shrink-0', isPending ? 'text-amber-500' : 'text-muted-foreground/60')} />
         <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground/80">
           {description || command || '执行命令'}
         </span>
         <span className="shrink-0">
-          {status === 'running' && (
-            <span className="inline-flex items-center gap-1 text-amber-500/80">
-              <Loader2Icon size={11} className="animate-spin" />
-              执行中
+          {isPending ? (
+            <span className="inline-flex items-center gap-1.5">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={(e) => {
+                  e.preventDefault()
+                  onApprove(false)
+                }}
+                className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
+              >
+                取消
+              </Button>
+              <Button
+                size="sm"
+                onClick={(e) => {
+                  e.preventDefault()
+                  onApprove(true)
+                }}
+                className="h-6 px-2 text-xs"
+              >
+                确认
+              </Button>
             </span>
+          ) : (
+            <>
+              {status === 'running' && (
+                <span className="inline-flex items-center gap-1 text-amber-500/80">
+                  <Loader2Icon size={11} className="animate-spin" />
+                  执行中
+                </span>
+              )}
+              {status === 'done' && <span className="text-emerald-500/80">已完成</span>}
+              {status === 'error' && <span className="text-red-400">失败</span>}
+            </>
           )}
-          {status === 'done' && <span className="text-emerald-500/80">已完成</span>}
-          {status === 'error' && <span className="text-red-400">失败</span>}
         </span>
-        <ChevronRightIcon
-          size={12}
-          className={cn('shrink-0 text-muted-foreground/40 transition-transform', open && 'rotate-90')}
-        />
+        {!isPending && (
+          <ChevronRightIcon
+            size={12}
+            className={cn('shrink-0 text-muted-foreground/40 transition-transform', open && 'rotate-90')}
+          />
+        )}
       </CollapsibleTrigger>
       {(command || outputText) && (
         <CollapsibleContent className="overflow-hidden">
@@ -434,5 +515,64 @@ export function BashToolBlock({
         </CollapsibleContent>
       )}
     </Collapsible>
+  )
+}
+
+// === Delete 工具(与 Write/Edit 同风格) ===
+
+export function DeleteToolBlock({
+  input,
+  status,
+  onApprove
+}: {
+  input?: unknown
+  status: 'running' | 'done' | 'error' | 'pending'
+  onApprove?: (confirmed: boolean) => void
+}) {
+  const filePath = getInputField(input, 'file_path') || ''
+  const fileName = extractFilename(filePath)
+  const isPending = status === 'pending' && onApprove
+
+  return (
+    <div
+      className={cn(
+        'not-prose my-1 flex w-full items-center justify-between rounded-md border px-3 py-1.5 text-xs',
+        'border-red-500/20 bg-red-500/5'
+      )}
+    >
+      <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+        {status === 'running' ? (
+          <Loader2Icon size={13} className="shrink-0 animate-spin text-red-500" />
+        ) : isPending ? (
+          <Trash2Icon size={13} className="shrink-0 text-amber-500" />
+        ) : (
+          <Trash2Icon size={13} className="shrink-0 text-red-500" />
+        )}
+        <span className="truncate font-medium">{fileName || '删除文件'}</span>
+      </span>
+      <span className="flex shrink-0 items-center gap-2 font-mono text-[11px]">
+        {isPending ? (
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onApprove(false)}
+              className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
+            >
+              取消
+            </Button>
+            <Button size="sm" onClick={() => onApprove(true)} className="h-6 px-2 text-xs">
+              确认
+            </Button>
+          </>
+        ) : (
+          <>
+            {status === 'running' && <span className="text-muted-foreground">删除中…</span>}
+            {status === 'done' && <span className="text-red-400">已删除</span>}
+            {status === 'error' && <span className="text-red-400">失败</span>}
+          </>
+        )}
+      </span>
+    </div>
   )
 }

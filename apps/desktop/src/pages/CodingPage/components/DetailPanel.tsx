@@ -417,6 +417,8 @@ export function DetailPanel({
                 task.state !== 'draft' &&
                 !inReviewStates.has(task.state))
             }
+            hitlContextType="task"
+            hitlContextId={task.id}
             leftSlot={
               <>
                 <ChatMcpSelector selected={mcpService} onChange={onMcpServiceChange} disabled={running || sending} />

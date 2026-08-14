@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, type ReactNode } from 'react'
 import {
   PromptInput,
   PromptInputFooter,
@@ -7,22 +7,29 @@ import {
   PromptInputTextarea,
   PromptInputTools,
   usePromptInputController
-} from "@/components/ai-elements/prompt-input";
-import { cn } from "@/lib/utils";
+} from '@/components/ai-elements/prompt-input'
+import { HitlModeSwitcher } from '@/components/HitlModeSwitcher'
+import { cn } from '@/lib/utils'
 
 type Props = {
-  value: string;
-  onChange(value: string): void;
-  onSend(value?: string): void;
-  onStop?(): void;
-  disabled?: boolean;
-  streaming?: boolean;
-  submitting?: boolean;
-  placeholder?: string;
-  leftSlot?: ReactNode;
-  rightSlot?: ReactNode;
-  className?: string;
-};
+  value: string
+  onChange(value: string): void
+  onSend(value?: string): void
+  onStop?(): void
+  disabled?: boolean
+  streaming?: boolean
+  submitting?: boolean
+  placeholder?: string
+  leftSlot?: ReactNode
+  rightSlot?: ReactNode
+  className?: string
+  /** 是否显示 HITL 模式切换器，默认 true */
+  showHitlMode?: boolean
+  /** HITL 模式上下文类型（对话或任务） */
+  hitlContextType?: 'conversation' | 'task'
+  /** HITL 模式上下文 ID（对话 ID 或任务 ID） */
+  hitlContextId?: string
+}
 
 function Controlled({
   value,
@@ -35,76 +42,80 @@ function Controlled({
   placeholder,
   leftSlot,
   rightSlot,
-  className
+  className,
+  showHitlMode = true,
+  hitlContextType,
+  hitlContextId
 }: Props) {
-  const controller = usePromptInputController();
+  const controller = usePromptInputController()
 
   // 外部受控 value 变化时同步到内部状态
   useEffect(() => {
-    if (controller.textInput.value !== value) controller.textInput.setInput(value);
-  }, [controller, value]);
+    if (controller.textInput.value !== value) controller.textInput.setInput(value)
+  }, [controller, value])
 
-  const trimmed = value.trim();
-  const busy = streaming || submitting;
-  const canSend = !disabled && !busy && trimmed.length > 0;
-  const showStop = streaming && onStop;
+  const trimmed = value.trim()
+  const busy = streaming || submitting
+  const canSend = !disabled && !busy && trimmed.length > 0
+  const showStop = streaming && onStop
   const defaultPlaceholder = disabled
-    ? "等待执行器就绪"
+    ? '等待执行器就绪'
     : submitting
-    ? "正在提交…"
-    : streaming
-    ? "正在生成回复…"
-    : "输入消息，Enter 发送，Shift+Enter 换行";
+      ? '正在提交…'
+      : streaming
+        ? '正在生成回复…'
+        : '输入消息，Enter 发送，Shift+Enter 换行'
 
   return (
-    <PromptInput
-      className={cn(
-        "w-full rounded-lg border border-border/60 bg-card/60 transition-colors focus-within:border-border/60",
-        (disabled || busy) && "opacity-90",
-        className
+    <div className="flex flex-col gap-1.5">
+      {showHitlMode && (
+        <div className="flex justify-start px-1">
+          <HitlModeSwitcher contextType={hitlContextType} contextId={hitlContextId} />
+        </div>
       )}
-      onSubmit={({ text }) => {
-        const payload = text.trim();
-        if (!payload || disabled || busy) return;
-        onChange("");
-        onSend(payload);
-      }}
-    >
-      <PromptInputTextarea
-        data-testid="chat-composer"
-        className="min-h-10 max-h-52 px-3 py-2 text-xs! leading-5 placeholder:text-muted-foreground"
-        disabled={disabled || busy}
-        placeholder={placeholder ?? defaultPlaceholder}
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={(event) => {
-          if (
-            event.key === "Enter" &&
-            !event.shiftKey &&
-            !event.nativeEvent.isComposing
-          ) {
-            event.preventDefault();
-            if (canSend) {
-              onChange("");
-              onSend(value);
-            }
-          }
-        }}
-      />
-      <PromptInputFooter className="min-h-7 gap-2 px-2 pb-1.5 pt-1">
-        <PromptInputTools className="min-w-0 gap-1 overflow-visible">
-          {leftSlot}
-        </PromptInputTools>
-        {rightSlot ?? (
-          <PromptInputSubmit
-            aria-label={showStop ? "停止执行" : submitting ? "正在提交" : "发送"}
-            disabled={showStop ? false : !canSend}
-            status={showStop ? "streaming" : submitting ? "submitted" : undefined}
-            onStop={onStop}
-          />
+      <PromptInput
+        className={cn(
+          'w-full rounded-lg border border-border/60 bg-card/60 transition-colors focus-within:border-border/60',
+          (disabled || busy) && 'opacity-90',
+          className
         )}
-      </PromptInputFooter>
-    </PromptInput>
-  );
+        onSubmit={({ text }) => {
+          const payload = text.trim()
+          if (!payload || disabled || busy) return
+          onChange('')
+          onSend(payload)
+        }}
+      >
+        <PromptInputTextarea
+          data-testid="chat-composer"
+          className="max-h-52 min-h-10 px-3 py-2 text-xs! leading-5 placeholder:text-muted-foreground"
+          disabled={disabled || busy}
+          placeholder={placeholder ?? defaultPlaceholder}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault()
+              if (canSend) {
+                onChange('')
+                onSend(value)
+              }
+            }
+          }}
+        />
+        <PromptInputFooter className="min-h-7 gap-2 px-2 pt-1 pb-1.5">
+          <PromptInputTools className="min-w-0 gap-1 overflow-visible">{leftSlot}</PromptInputTools>
+          {rightSlot ?? (
+            <PromptInputSubmit
+              aria-label={showStop ? '停止执行' : submitting ? '正在提交' : '发送'}
+              disabled={showStop ? false : !canSend}
+              status={showStop ? 'streaming' : submitting ? 'submitted' : undefined}
+              onStop={onStop}
+            />
+          )}
+        </PromptInputFooter>
+      </PromptInput>
+    </div>
+  )
 }
 
 /**
@@ -127,7 +138,10 @@ export function Composer({
   placeholder,
   leftSlot,
   rightSlot,
-  className
+  className,
+  showHitlMode,
+  hitlContextType,
+  hitlContextId
 }: Props) {
   return (
     <PromptInputProvider initialInput={value}>
@@ -143,7 +157,10 @@ export function Composer({
         leftSlot={leftSlot}
         rightSlot={rightSlot}
         className={className}
+        showHitlMode={showHitlMode}
+        hitlContextType={hitlContextType}
+        hitlContextId={hitlContextId}
       />
     </PromptInputProvider>
-  );
+  )
 }

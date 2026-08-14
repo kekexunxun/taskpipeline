@@ -267,6 +267,34 @@ let activeQoderQuery: Query | undefined
 let activeQoderAbort: AbortController | undefined
 let activePlanningTaskId: string | undefined
 let activePlanText = ''
+/** HITL 模式：ask=所有写操作需确认, auto=仅危险操作需确认, yolo=全部自动放行 */
+type HitlMode = 'ask' | 'auto' | 'yolo'
+/** 全局默认 HITL 模式（新对话/任务的初始值） */
+let globalHitlMode: HitlMode = 'ask'
+// 启动时从设置存储加载全局默认 HITL 模式
+const storedHitlMode = store.getSetting('hitlMode')
+if (storedHitlMode === 'ask' || storedHitlMode === 'auto' || storedHitlMode === 'yolo') {
+  globalHitlMode = storedHitlMode
+}
+/** 对话级 HITL 模式缓存（conversationId → hitlMode），避免异步读取存储 */
+const conversationHitlModeCache = new Map<string, HitlMode>()
+/**
+ * 获取指定上下文的 HITL 模式。
+ * - conversation: 从缓存读取，未设置则回退 globalHitlMode
+ * - task: 从 Task 读取 hitlMode，未设置则回退 globalHitlMode
+ * - 无 context: 直接返回 globalHitlMode
+ */
+function getHitlModeForContext(contextType?: 'conversation' | 'task', contextId?: string): HitlMode {
+  if (!contextType || !contextId) return globalHitlMode
+  if (contextType === 'conversation') {
+    return conversationHitlModeCache.get(contextId) ?? globalHitlMode
+  }
+  if (contextType === 'task') {
+    const task = store.getTask(contextId)
+    return task?.hitlMode ?? globalHitlMode
+  }
+  return globalHitlMode
+}
 /**
  * planning 期间最近一次 assistant 错误消息（pi 在模型流式错误如
  * `Stream ended without finish_reason` 时不抛异常，而是生成 stopReason=error
@@ -743,15 +771,19 @@ chatDriverRegistry.register(
     getQoderStatus,
     tracePipeline,
     chatMcpResolver,
-    // 工具调用 HITL：Qoder CLI 需要用户决策时弹 UI 确认(不自动 allow，用户显式同意才执行)。
-    // - MCP 工具(mcp__*，如 jira/gitlab/confluence)：仅写操作(create/update/delete/move 等)弹窗确认，
-    //   读操作(get/search/list 等)直接放行 —— 用户勾选的外部服务访问中，只有修改类操作需要把关；
-    // - 内置工具：Bash/Edit/Write/NotebookEdit 一律弹窗确认(执行命令/改文件属于高影响操作)；
-    //   其余(Agent/Read/Glob/Grep/WebFetch 等)仅删除/移动等危险操作弹窗，避免只读操作频繁打断。
+    // 工具调用 HITL：根据对话级 hitlMode 决定确认策略。
+    // - ask 模式(默认)：所有写操作弹窗确认（当前行为）；
+    // - auto 模式：仅危险操作（rm -rf / sudo / .env 等）弹窗确认；
+    // - yolo 模式：全部自动放行。
     async (toolName, toolInput, { signal, conversationId, title, displayName, description }) => {
-      const needsConfirm = toolName.startsWith('mcp__')
-        ? isWriteTool(toolName)
-        : isBuiltinWriteTool(toolName) || isDangerousTool(toolName, toolInput)
+      const hitlMode = getHitlModeForContext('conversation', conversationId)
+      if (hitlMode === 'yolo') return 'allow'
+      const needsConfirm =
+        hitlMode === 'auto'
+          ? isDangerousTool(toolName, toolInput)
+          : toolName.startsWith('mcp__')
+            ? isWriteTool(toolName)
+            : isBuiltinWriteTool(toolName) || isDangerousTool(toolName, toolInput)
       if (!needsConfirm) return 'allow'
       // 弹窗文案截断：避免 Write/Edit 等工具把整段文件内容塞进确认框（敏感内容不落地 UI）。
       const detail = describeToolAction(toolName, toolInput)
@@ -765,7 +797,9 @@ chatDriverRegistry.register(
           {
             title: `允许执行 ${prettyToolName(displayName ?? title ?? toolName)}?`,
             message: lines.join('\n\n'),
-            conversationId
+            conversationId,
+            toolName,
+            toolInput: typeof toolInput === 'object' && toolInput !== null ? toolInput : {}
           },
           { signal }
         )) ?? false
@@ -1081,8 +1115,12 @@ function createQoderTaskAgent(): QoderTaskAgentDriver {
       if (activeQoderQuery === q) activeQoderQuery = undefined
       if (activeQoderAbort?.signal === undefined) activeQoderAbort = undefined
     },
-    // 工具调用 HITL：仅删除/重命名/移动等破坏性操作弹确认；其余默认放行（常规可行）。
+    // 工具调用 HITL：根据任务级 hitlMode 决定确认策略。
+    // - ask/auto 模式：仅删除/重命名/移动等破坏性操作弹确认（任务面板原本就只拦截危险操作）；
+    // - yolo 模式：全部自动放行。
     onPermissionRequest: async (taskId, toolName, toolInput, signal) => {
+      const hitlMode = getHitlModeForContext('task', taskId)
+      if (hitlMode === 'yolo') return 'allow'
       if (!isDangerousTool(toolName, toolInput)) return 'allow'
       const detail = describeToolAction(toolName, toolInput)
       const task = store.getTask(taskId)
@@ -1092,7 +1130,13 @@ function createQoderTaskAgent(): QoderTaskAgentDriver {
       const ok =
         (await requestUi<boolean>(
           'confirm',
-          { title: `允许执行 ${toolName}?`, message: `${task?.title ?? ''}\n\n${detail}`, taskId },
+          {
+            title: `允许执行 ${toolName}?`,
+            message: `${task?.title ?? ''}\n\n${detail}`,
+            taskId,
+            toolName,
+            toolInput: typeof toolInput === 'object' && toolInput !== null ? toolInput : {}
+          },
           { signal }
         )) ?? false
       store.resolveApproval(approval.id, ok ? 'approved' : 'rejected')
@@ -2617,6 +2661,27 @@ function registerIpc(): void {
     if (key === 'modelProfiles' || key === 'modelProfile') syncPiModelConfig()
   })
   ipcMain.handle(
+    'hitl:set-mode',
+    (_event, mode: HitlMode, contextType?: 'conversation' | 'task', contextId?: string) => {
+      if (!contextType || !contextId) {
+        // 设置全局默认模式（同时持久化到设置存储）
+        globalHitlMode = mode
+        store.setSetting('hitlMode', mode)
+      } else if (contextType === 'conversation') {
+        // 设置对话级模式（更新缓存 + 持久化到对话）
+        conversationHitlModeCache.set(contextId, mode)
+        // 异步持久化到对话存储
+        void chatService.setChatHitlMode(contextId, mode).catch(() => {})
+      } else if (contextType === 'task') {
+        // 设置任务级模式（持久化到任务）
+        store.updateTask(contextId, { hitlMode: mode })
+      }
+    }
+  )
+  ipcMain.handle('hitl:get-mode', (_event, contextType?: 'conversation' | 'task', contextId?: string) => {
+    return getHitlModeForContext(contextType, contextId)
+  })
+  ipcMain.handle(
     'tasks:start',
     (
       _event,
@@ -2955,7 +3020,14 @@ function registerIpc(): void {
   // === Chat 对话(Codex 样式) =================================================
   ipcMain.handle('chats:list', async () => chatService.listChats())
   ipcMain.handle('chats:list-projects', async () => chatService.listProjects())
-  ipcMain.handle('chats:get', async (_event, id: string) => chatService.getChat(id))
+  ipcMain.handle('chats:get', async (_event, id: string) => {
+    const result = await chatService.getChat(id)
+    // 加载对话时同步 HITL 模式到缓存
+    if (result?.conversation?.hitlMode) {
+      conversationHitlModeCache.set(id, result.conversation.hitlMode)
+    }
+    return result
+  })
   ipcMain.handle(
     'chats:create',
     async (_event, input?: { driverId?: ChatDriverId; model?: string; workingDirectory?: string }) =>

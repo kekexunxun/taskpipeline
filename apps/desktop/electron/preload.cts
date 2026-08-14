@@ -108,5 +108,10 @@ contextBridge.exposeInMainWorld('agentApi', {
   listTrace: () => ipcRenderer.invoke('trace:list'),
   getTrace: (kind: string, traceId: string) => ipcRenderer.invoke('trace:get', kind, traceId),
   dashboardTrace: () => ipcRenderer.invoke('trace:dashboard'),
-  deleteTrace: (kind: string, traceId: string) => ipcRenderer.invoke('trace:delete', kind, traceId)
+  deleteTrace: (kind: string, traceId: string) => ipcRenderer.invoke('trace:delete', kind, traceId),
+  // === HITL 模式切换（支持按对话/任务上下文区分） ===========================================================
+  setHitlMode: (mode: 'ask' | 'auto' | 'yolo', contextType?: 'conversation' | 'task', contextId?: string) =>
+    ipcRenderer.invoke('hitl:set-mode', mode, contextType, contextId),
+  getHitlMode: (contextType?: 'conversation' | 'task', contextId?: string) =>
+    ipcRenderer.invoke('hitl:get-mode', contextType, contextId)
 })

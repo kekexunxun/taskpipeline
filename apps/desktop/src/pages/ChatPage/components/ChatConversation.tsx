@@ -1,6 +1,6 @@
 import { Loader2Icon, UserRoundIcon } from 'lucide-react'
 import type { ChatApprovalRequest } from '../hooks/useChat'
-import { ChatMessageView } from './ChatMessage'
+import { ChatMessageView, MESSAGE_WIDTH_CLASS } from './ChatMessage'
 import { ToolApprovalCard } from '@/components/ToolApprovalCard'
 import type { ChatMessage } from '@/api'
 import { Conversation, ConversationContent, ConversationScrollButton } from '@/components/ai-elements/conversation'
@@ -39,6 +39,7 @@ export function ChatConversation({
           <ToolApprovalCard
             key={approval.id}
             approval={approval}
+            widthClass={MESSAGE_WIDTH_CLASS}
             onRespond={(confirmed) => onRespondApproval?.(approval.id, confirmed)}
           />
         ))}

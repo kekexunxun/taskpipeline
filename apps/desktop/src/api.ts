@@ -576,6 +576,9 @@ export type AgentApi = {
   dashboardTrace(): Promise<TraceDashboardStats>
   /** 删除一条 trace（本地文件移除，不可恢复）。 */
   deleteTrace(kind: string, traceId: string): Promise<void>
+  // HITL 模式切换（支持按对话/任务上下文区分）
+  setHitlMode(mode: 'ask' | 'auto' | 'yolo', contextType?: 'conversation' | 'task', contextId?: string): Promise<void>
+  getHitlMode(contextType?: 'conversation' | 'task', contextId?: string): Promise<'ask' | 'auto' | 'yolo'>
 }
 
 declare global {
@@ -1273,5 +1276,11 @@ export const api: AgentApi = window.agentApi ?? {
   async dashboardTrace() {
     return { todayCount: 0, weekCount: 0, errorCount: 0 }
   },
-  async deleteTrace() {}
+  async deleteTrace() {},
+  async setHitlMode() {
+    // Demo mode: no-op
+  },
+  async getHitlMode() {
+    return 'ask' as const
+  }
 }

@@ -8,6 +8,9 @@ import { Button } from '@/components/ui/button'
 import type { ChatDriverId, ChatMessage } from '@/api'
 import { cn } from '@/lib/utils'
 
+/** 消息气泡宽度 class，与 ToolApprovalCard 共享 */
+export const MESSAGE_WIDTH_CLASS = 'w-[78%]'
+
 /**
  * 顶层消息视图 —— 共享的元信息 (header / user bubble / task creation action) 在这里;
  * 真正按 part 渲染的内容交给 driver 专属的 `*MessageView` 组件。
@@ -56,7 +59,7 @@ function ChatMessageImpl({
   const containerClass = isUser ? 'justify-end' : 'justify-start'
   // 助手消息占满可用宽度(正文/折叠块不再按内容收缩,避免"收起窄、展开宽"的跳动);
   // 用户消息保留气泡式 max-width。
-  const widthClass = isUser ? 'w-[78%]' : 'w-[78%]'
+  const widthClass = MESSAGE_WIDTH_CLASS
   const alignClass = isUser ? 'items-end' : 'items-start'
   // 消息级操作区(shadcn MessageFooter 语义):置于消息内容下方、与消息同侧对齐。
   // 只有该消息存在可复制的正文文本时才渲染；输出(streaming)期间不展示，避免遮挡正在生成的内容。
@@ -69,7 +72,7 @@ function ChatMessageImpl({
 
   return (
     <div className={cn('flex w-full', containerClass)} data-role={message.role} data-driver-id={message.driverId}>
-      <div className={cn('flex min-w-0 flex-col gap-1.5', alignClass, widthClass)}>
+      <div className={cn('flex min-w-0 flex-col gap-1.5 overflow-hidden', alignClass, widthClass)}>
         <div
           className={cn(
             'flex items-center gap-1.5 text-[11px] text-muted-foreground',

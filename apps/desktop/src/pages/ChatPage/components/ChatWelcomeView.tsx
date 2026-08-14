@@ -75,6 +75,7 @@ export function ChatWelcomeView({
             streaming={streaming}
             placeholder="描述你的问题，Enter 发送"
             leftSlot={leftSlot}
+            showHitlMode={false}
           />
         </div>
 

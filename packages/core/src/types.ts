@@ -1,6 +1,9 @@
 export const BOARD_COLUMNS = ['todo', 'in_progress', 'in_review', 'done'] as const
 export type BoardColumn = (typeof BOARD_COLUMNS)[number]
 
+/** HITL (Human-in-the-Loop) 模式：按对话/任务独立存储。 */
+export type HitlMode = 'ask' | 'auto' | 'yolo'
+
 export const TASK_STATES = [
   'draft',
   'confirmed',
@@ -74,6 +77,8 @@ export type Task = {
   testsGenerated?: { files: string[]; commitSha?: string; finishedAt: string }
   /** Phase 4：Review 自动修订已执行的轮数（达到 reviewAutoFixMaxRounds 后停止）。 */
   reviewFixCount?: number
+  /** 任务级 HITL 模式（随任务落盘）。未设置时沿用全局默认 'ask'。 */
+  hitlMode?: HitlMode
   createdAt: string
   updatedAt: string
 }
