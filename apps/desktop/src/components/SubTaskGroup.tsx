@@ -541,6 +541,119 @@ export function isEmptyToolInput(input: unknown): boolean {
 
 export type ToolCallStatus = 'running' | 'done' | 'error'
 
+// === 通用工具调用配对(对话 / 执行面板 / Trace 三界面共用) ====================
+
+/**
+ * 通用工具调用配对:use(输入) + result(输出) 按 callId 合为一条。
+ *
+ * 数据源无关 —— PartRenderer(DriverPart)、Timeline(AgentEvent)、Trace 各自提供
+ * 自己的 accessor 即可复用同一套配对算法与状态判定。
+ *
+ * 后续修改工具行渲染 / 折叠关系只需改此处,不必在各页面同步。
+ */
+export type ToolCallPair<T> = {
+  callId: string
+  /** 工具调用(输入端)。 */
+  inputItem?: T
+  /** 工具结果(输出端)。 */
+  resultItem?: T
+}
+
+/**
+ * 把条目列表按 callId 配对 use + result。
+ *
+ * - `getCallId`: 从条目提取调用 ID(无 ID 的条目跳过,不参与配对)。
+ * - `isResult`: 判定该条目是 result 还是 use(默认 false = use)。
+ *
+ * 返回 `Map<callId, ToolCallPair<T>>`,callId 为空的条目不进入 Map。
+ */
+export function pairToolCalls<T>(
+  items: T[],
+  getCallId: (item: T) => string | undefined,
+  isResult: (item: T) => boolean
+): Map<string, ToolCallPair<T>> {
+  const pairs = new Map<string, ToolCallPair<T>>()
+  for (const item of items) {
+    const callId = getCallId(item)
+    if (!callId) continue
+    let pair = pairs.get(callId)
+    if (!pair) {
+      pair = { callId }
+      pairs.set(callId, pair)
+    }
+    if (isResult(item)) pair.resultItem = item
+    else if (!pair.inputItem) pair.inputItem = item
+  }
+  return pairs
+}
+
+/**
+ * 工具调用状态判定(三界面统一):
+ * - `isError` 为 true → `'error'`
+ * - 无 result 且 isStreaming → `'running'`
+ * - 其它 → `'done'`
+ *
+ * `isError` 由各调用方从自己的数据形态提取(DriverPart 直接读顶层,
+ * AgentEvent 读 payload.isError),此处不做数据源假设。
+ */
+export function determineToolStatus(
+  pair: { resultItem?: unknown } | undefined,
+  isError: boolean,
+  isStreaming: boolean
+): ToolCallStatus {
+  if (isError) return 'error'
+  if (!pair?.resultItem && isStreaming) return 'running'
+  return 'done'
+}
+
+/** 该 callId 是否有配对的 result。 */
+export function hasToolResult<T>(pairs: Map<string, ToolCallPair<T>>, callId: string): boolean {
+  return !!pairs.get(callId)?.resultItem
+}
+
+/** 该 callId 是否有配对的 use(输入)。 */
+export function hasToolUse<T>(pairs: Map<string, ToolCallPair<T>>, callId: string): boolean {
+  return !!pairs.get(callId)?.inputItem
+}
+
+/**
+ * 构建 spawner 吸收上下文(三界面统一):
+ *
+ * 1. 遍历 blocks,从 group header 提取 toolUseId(发起子任务的那条工具调用)。
+ * 2. 建立 callId → taskId 映射(spawnerTaskByCallId)。
+ * 3. 反查工具配对,把被吸收调用的 result 输出收集为 taskId → { output, isError }
+ *    (absorbedOutputByTaskId),供 SubTaskResultBlock 展示。
+ *
+ * - `getHeaderToolUseId`: 从 block header 提取发起调用的 toolUseId。
+ * - `getResultOutput`:   从配对的 resultItem 提取 { output, isError }。
+ */
+export function buildSpawnerContext<THeader, TResultItem>(
+  blocks: Array<{ kind: 'main' } | { kind: 'group'; taskId: string; header: THeader | undefined }>,
+  toolPairs: Map<string, ToolCallPair<TResultItem>>,
+  getHeaderToolUseId: (header: THeader) => string | undefined,
+  getResultOutput: (resultItem: TResultItem) => { output?: unknown; isError?: boolean } | undefined
+): {
+  spawnerTaskByCallId: Map<string, string>
+  absorbedOutputByTaskId: Map<string, { output?: unknown; isError?: boolean }>
+} {
+  const spawnerTaskByCallId = new Map<string, string>()
+  for (const block of blocks) {
+    if (block.kind !== 'group') continue
+    const toolUseId = block.header ? getHeaderToolUseId(block.header) : undefined
+    if (toolUseId) spawnerTaskByCallId.set(toolUseId, block.taskId)
+  }
+
+  const absorbedOutputByTaskId = new Map<string, { output?: unknown; isError?: boolean }>()
+  for (const [callId, taskId] of spawnerTaskByCallId) {
+    const pair = toolPairs.get(callId)
+    const result = pair?.resultItem ? getResultOutput(pair.resultItem) : undefined
+    if (!result) continue
+    absorbedOutputByTaskId.set(taskId, result)
+  }
+
+  return { spawnerTaskByCallId, absorbedOutputByTaskId }
+}
+
 /** 工具行 trigger 内容:chevron + 工具名粗体 + 内联摘要 + 状态图标/时间。 */
 function ToolCallTriggerContent({
   name,

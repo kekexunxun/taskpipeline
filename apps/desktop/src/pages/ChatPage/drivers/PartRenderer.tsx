@@ -10,13 +10,16 @@ import {
   SubTaskResultBlock,
   ToolCallRow,
   aggregateSubTaskProgress,
+  buildSpawnerContext,
+  determineToolStatus,
+  hasToolUse,
   interleaveTimeline,
+  pairToolCalls,
   spawnerToolUseIdOf,
   subtaskStatusOf,
   toolInputSummary,
   type ParentedItem,
-  type SubTaskProgressSample,
-  type ToolCallStatus
+  type SubTaskProgressSample
 } from '@/components/SubTaskGroup'
 
 /**
@@ -138,41 +141,35 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
     return out
   }, [parentedList, mergedParts])
 
-  // 全局工具配对上下文:tool-result 按 callId 索引,tool-use 的 callId 集合用于孤儿判断。
-  const toolCtx = useMemo(() => {
-    const resultByCallId = new Map<string, DriverPart>()
-    const useCallIds = new Set<string>()
-    for (const part of mergedParts) {
-      if (part.type === 'qoder.tool-result' || part.type === 'openai.tool-result')
-        resultByCallId.set(part.toolCallId, part)
-      if (part.type === 'qoder.tool-use' || part.type === 'openai.tool-call') useCallIds.add(part.toolCallId)
-    }
-    return { resultByCallId, useCallIds }
-  }, [mergedParts])
+  // 全局工具配对:use + result 按 toolCallId 配对(共享算法)。
+  const toolPairs = useMemo(
+    () =>
+      pairToolCalls<DriverPart>(
+        mergedParts,
+        (part) => {
+          if (part.type === 'qoder.tool-use' || part.type === 'openai.tool-call') return part.toolCallId
+          if (part.type === 'qoder.tool-result' || part.type === 'openai.tool-result') return part.toolCallId
+          return undefined
+        },
+        (part) => part.type === 'qoder.tool-result' || part.type === 'openai.tool-result'
+      ),
+    [mergedParts]
+  )
 
-  // 主流程里发起子任务的工具调用(subtask-start.toolUseId → taskId)。
-  // 这些调用不再单独渲染成行 —— 子任务折叠卡就是它们的呈现(跟 Qoder 一致)。
-  const spawnerTaskByCallId = useMemo(() => {
-    const map = new Map<string, string>()
-    for (const block of blocks) {
-      if (block.kind !== 'group') continue
-      const headerPart = block.header ? byParented.get(block.header) : undefined
-      const toolUseId = headerPart ? spawnerToolUseIdOf(headerPart) : undefined
-      if (toolUseId) map.set(toolUseId, block.taskId)
-    }
-    return map
-  }, [blocks, byParented])
-
-  // 被吸收调用的结果输出(taskId → output),作为卡片底部「输出」段。
-  const absorbedOutputByTaskId = useMemo(() => {
-    const map = new Map<string, { output?: unknown; isError?: boolean }>()
-    for (const [callId, taskId] of spawnerTaskByCallId) {
-      const result = resultPayloadOf(toolCtx.resultByCallId.get(callId))
-      if (!result) continue
-      map.set(taskId, result)
-    }
-    return map
-  }, [spawnerTaskByCallId, toolCtx])
+  // spawner 吸收上下文:发起子任务的工具调用不单独渲染,结果进子任务卡底部输出段。
+  const { spawnerTaskByCallId, absorbedOutputByTaskId } = useMemo(
+    () =>
+      buildSpawnerContext<ParentedItem, DriverPart>(
+        blocks,
+        toolPairs,
+        (header) => {
+          const part = header ? byParented.get(header) : undefined
+          return part ? spawnerToolUseIdOf(part) : undefined
+        },
+        (resultPart) => resultPayloadOf(resultPart)
+      ),
+    [blocks, toolPairs, byParented]
+  )
 
   /** 单个 part 渲染(subtask-* 控制 part 与被吸收的 spawner 调用返回 null)。 */
   const renderSinglePart = (part: DriverPart, key: string): ReactNode => {
@@ -187,8 +184,9 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
     }
     if (part.type === 'qoder.tool-use' || part.type === 'openai.tool-call') {
       if (spawnerTaskByCallId.has(part.toolCallId)) return null // 吸收进子任务卡
-      const result = resultPayloadOf(toolCtx.resultByCallId.get(part.toolCallId))
-      const status: ToolCallStatus = result?.isError ? 'error' : !result && isStreaming ? 'running' : 'done'
+      const pair = toolPairs.get(part.toolCallId)
+      const result = resultPayloadOf(pair?.resultItem)
+      const status = determineToolStatus(pair, result?.isError === true, !!isStreaming)
       return (
         <ToolCallRow
           key={key}
@@ -202,7 +200,7 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
     }
     if (part.type === 'qoder.tool-result' || part.type === 'openai.tool-result') {
       // 孤儿兜底:对应 tool-use 不存在(乱序历史)才单独展示;已配对的内容已并入 tool-use 行。
-      if (toolCtx.useCallIds.has(part.toolCallId)) return null
+      if (hasToolUse(toolPairs, part.toolCallId)) return null
       return (
         <ToolCallRow
           key={key}

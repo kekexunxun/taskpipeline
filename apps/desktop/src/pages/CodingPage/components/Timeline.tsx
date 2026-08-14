@@ -1,8 +1,7 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import {
   ActivityIcon,
   BotIcon,
-  BrainIcon,
   ChevronDownIcon,
   Code2Icon,
   FileDiffIcon,
@@ -15,8 +14,10 @@ import type { AgentEvent } from '@task-pipeline/core'
 import { cn } from '@/lib/utils'
 import { formatTime } from '@/utils/format'
 import { localizedEventTitle } from '@/utils/status'
+import { MessageResponse } from '@/components/ai-elements/message'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { ThinkingBlock } from '@/components/ThinkingBlock'
 import {
   SubTaskAgentHeader,
   SubTaskGroup,
@@ -25,15 +26,17 @@ import {
   SubTaskResultBlock,
   ToolCallRow,
   aggregateSubTaskProgress,
+  determineToolStatus,
   interleaveTimeline,
   isHiddenTimelineEvent,
+  pairToolCalls,
   subtaskMetaOf,
   subtaskStatusOf,
   toolInputSummary,
   type ParentedItem,
   type SubTaskProgressSample,
   type TimelineBlock,
-  type ToolCallStatus
+  type ToolCallPair
 } from '@/components/SubTaskGroup'
 
 export type TimelineItem =
@@ -151,32 +154,6 @@ function formatJsonInput(value: unknown): string {
   }
 }
 
-/**
- * 模型 thinking 折叠块：thinking 是模型内部推理，不算主流程数据，
- * 默认收起只保留「思考过程」摘要，用户可手动展开查看完整推理。
- */
-function ThinkingBlock({ text }: { text: string }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <Collapsible
-      open={open}
-      onOpenChange={setOpen}
-      className="not-prose mt-1.5 w-full rounded-md border border-border/60 bg-muted/30 text-foreground"
-    >
-      <CollapsibleTrigger className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-xs text-muted-foreground">
-        <span className="inline-flex items-center gap-1.5 text-xs">
-          <BrainIcon size={12} className="text-muted-foreground" />
-          <span className="font-medium">思考过程</span>
-        </span>
-        <ChevronDownIcon size={12} className={cn('transition-transform', open ? 'rotate-180' : 'rotate-0')} />
-      </CollapsibleTrigger>
-      <CollapsibleContent className="border-t border-border/40 px-4 py-3 text-foreground/80">
-        <pre className="m-0 font-sans text-xs leading-6 break-words whitespace-pre-wrap">{text}</pre>
-      </CollapsibleContent>
-    </Collapsible>
-  )
-}
-
 function TimelineEntryBody({ item }: { item: TimelineItem }) {
   const Icon = icons[item.kind]
   const isReview = item.kind === 'review'
@@ -237,11 +214,16 @@ function TimelineEntryBody({ item }: { item: TimelineItem }) {
             </CollapsibleContent>
           </Collapsible>
         )}
-        {item.detail && (
-          <pre className="thin-scrollbar mt-1.5 overflow-x-auto rounded-md border bg-background p-2 font-mono text-xs leading-4 whitespace-pre-wrap text-muted-foreground">
-            {item.detail}
-          </pre>
-        )}
+        {item.detail &&
+          (item.kind === 'message' ? (
+            <div className="mt-1.5 text-xs leading-relaxed">
+              <MessageResponse>{item.detail}</MessageResponse>
+            </div>
+          ) : (
+            <pre className="thin-scrollbar mt-1.5 overflow-x-auto rounded-md border bg-background p-2 font-mono text-xs leading-4 whitespace-pre-wrap text-muted-foreground">
+              {item.detail}
+            </pre>
+          ))}
         {thinking && <ThinkingBlock text={thinking} />}
         {reviewComments.length > 0 && (
           <div className="mt-1.5 space-y-1">
@@ -270,42 +252,17 @@ function TimelineEntryBody({ item }: { item: TimelineItem }) {
   )
 }
 
-/** 同 toolUseId 的 use + result 配对。 */
-type ToolPair = { callId: string; use?: TimelineItem; result?: TimelineItem }
-
-/**
- * 把 kind='tool' 事件按 payload.toolUseId 配对(log.ts 对每个 tool_use / tool_result block
- * 各写一条事件)。无 toolUseId 的老数据不进配对表,由调用方按单行 ToolCallRow 兜底。
- */
-function pairToolItems(items: TimelineItem[]): Map<string, ToolPair> {
-  const pairByCallId = new Map<string, ToolPair>()
-  for (const item of items) {
-    if (item.kind !== 'tool') continue
-    const payload = item.payload as { toolUseId?: string; phase?: string } | undefined
-    const callId = typeof payload?.toolUseId === 'string' ? payload.toolUseId : undefined
-    if (!callId) continue
-    let pair = pairByCallId.get(callId)
-    if (!pair) {
-      pair = { callId }
-      pairByCallId.set(callId, pair)
-    }
-    if (payload?.phase === 'result') pair.result = item
-    else if (!pair.use) pair.use = item
-  }
-  return pairByCallId
-}
-
 /** 一对 use + result → 一行 ToolCallRow(Qoder 风格紧凑行,点击展开输入/输出)。 */
-function toolRowFromPair(pair: ToolPair, live?: boolean): ReactNode {
-  const ref = pair.use ?? pair.result
+function toolRowFromPair(pair: ToolCallPair<TimelineItem>, live?: boolean): ReactNode {
+  const ref = pair.inputItem ?? pair.resultItem
   if (!ref) return null
-  const usePayload = pair.use?.payload as { toolName?: string; input?: unknown } | undefined
-  const resultPayload = pair.result?.payload as { output?: unknown; isError?: boolean } | undefined
+  const usePayload = pair.inputItem?.payload as { toolName?: string; input?: unknown } | undefined
+  const resultPayload = pair.resultItem?.payload as { output?: unknown; isError?: boolean } | undefined
   const name =
-    usePayload?.toolName ?? (pair.result?.payload as { toolName?: string } | undefined)?.toolName ?? ref.title
-  const input = usePayload?.input ?? (pair.use ? pair.use?.detail : undefined)
-  const output = resultPayload ? (resultPayload.output ?? pair.result?.detail) : undefined
-  const status: ToolCallStatus = resultPayload?.isError === true ? 'error' : !pair.result && live ? 'running' : 'done'
+    usePayload?.toolName ?? (pair.resultItem?.payload as { toolName?: string } | undefined)?.toolName ?? ref.title
+  const input = usePayload?.input ?? (pair.inputItem ? pair.inputItem?.detail : undefined)
+  const output = resultPayload ? (resultPayload.output ?? pair.resultItem?.detail) : undefined
+  const status = determineToolStatus(pair, resultPayload?.isError === true, !!live)
   return (
     <ToolCallRow
       name={name}
@@ -368,17 +325,29 @@ export function Timeline({ items, live }: { items: TimelineItem[]; live?: boolea
   const allToolPairs = useMemo(() => {
     const collect = (blocks: TimelineBlock<TimelineItem>[]): TimelineItem[] =>
       blocks.flatMap((block) => (block.kind === 'main' ? [block.item] : [...block.children, ...collect(block.nested)]))
-    return pairToolItems(collect(blocks))
+    return pairToolCalls<TimelineItem>(
+      collect(blocks),
+      (item) => {
+        if (item.kind !== 'tool') return undefined
+        const p = item.payload as { toolUseId?: string } | undefined
+        return typeof p?.toolUseId === 'string' ? p.toolUseId : undefined
+      },
+      (item) => {
+        const p = item.payload as { phase?: string } | undefined
+        return p?.phase === 'result'
+      }
+    )
   }, [blocks])
 
   // 被吸收调用的结果输出(taskId → output),作为卡片底部「输出」段。
+  // spawnerTaskByCallId 走递归遍历(含 nested 阶段卡),这里只复用结果收集逻辑。
   const absorbedOutputByTaskId = useMemo(() => {
     const map = new Map<string, { output?: unknown; isError?: boolean }>()
     for (const [callId, taskId] of spawnerTaskByCallId) {
       const pair = allToolPairs.get(callId)
-      if (!pair?.result) continue
-      const payload = pair.result.payload as { output?: unknown; isError?: boolean } | undefined
-      map.set(taskId, { output: payload?.output ?? pair.result.detail, isError: payload?.isError === true })
+      if (!pair?.resultItem) continue
+      const payload = pair.resultItem.payload as { output?: unknown; isError?: boolean } | undefined
+      map.set(taskId, { output: payload?.output ?? pair.resultItem.detail, isError: payload?.isError === true })
     }
     return map
   }, [spawnerTaskByCallId, allToolPairs])
@@ -395,7 +364,7 @@ export function Timeline({ items, live }: { items: TimelineItem[]; live?: boolea
       if (callId) {
         if (spawnerTaskByCallId.has(callId)) return null // 吸收进子任务卡
         const pair = allToolPairs.get(callId)
-        const anchor = pair ? (pair.use ?? pair.result) : undefined
+        const anchor = pair ? (pair.inputItem ?? pair.resultItem) : undefined
         if (anchor && anchor.id !== item.id) return null // 只在锚点位置渲染一次
         if (pair) return toolRowFromPair(pair, live)
       }
@@ -436,22 +405,33 @@ export function Timeline({ items, live }: { items: TimelineItem[]; live?: boolea
     // header 呈现为 Agent 调用样式(工具名 + 调用摘要,无 "Tools -" 前缀);
     // 老数据关联不上发起调用时回退 SubTaskHeader(纯说明)。
     const spawnerPair = headerMeta?.toolUseId ? allToolPairs.get(headerMeta.toolUseId) : undefined
-    const spawnerAnchor = spawnerPair ? (spawnerPair.use ?? spawnerPair.result) : undefined
+    const spawnerAnchor = spawnerPair ? (spawnerPair.inputItem ?? spawnerPair.resultItem) : undefined
     const spawnerName = spawnerPair
-      ? ((spawnerPair.use?.payload as { toolName?: string } | undefined)?.toolName ??
-        (spawnerPair.result?.payload as { toolName?: string } | undefined)?.toolName ??
+      ? ((spawnerPair.inputItem?.payload as { toolName?: string } | undefined)?.toolName ??
+        (spawnerPair.resultItem?.payload as { toolName?: string } | undefined)?.toolName ??
         spawnerAnchor?.title ??
         'Agent')
       : undefined
-    const spawnerInput = spawnerPair?.use
-      ? ((spawnerPair.use.payload as { input?: unknown } | undefined)?.input ?? spawnerPair.use.detail)
+    const spawnerInput = spawnerPair?.inputItem
+      ? ((spawnerPair.inputItem.payload as { input?: unknown } | undefined)?.input ?? spawnerPair.inputItem.detail)
       : undefined
     // 卡内容区:可见 children(工具行/消息) + nested 子卡,按时间合并排序。
     const visibleChildren = block.children.filter((c) => {
       const subtype = subtaskMetaOf(c).sdkSubtype
       return subtype !== 'task_started' && subtype !== 'task_progress' && subtype !== 'task_notification'
     })
-    const childPairs = pairToolItems(visibleChildren)
+    const childPairs = pairToolCalls<TimelineItem>(
+      visibleChildren,
+      (item) => {
+        if (item.kind !== 'tool') return undefined
+        const p = item.payload as { toolUseId?: string } | undefined
+        return typeof p?.toolUseId === 'string' ? p.toolUseId : undefined
+      },
+      (item) => {
+        const p = item.payload as { phase?: string } | undefined
+        return p?.phase === 'result'
+      }
+    )
     const merged: Array<{ time: number; node: ReactNode }> = visibleChildren.map((child) => ({
       time: Date.parse(child.createdAt) || 0,
       node: <Fragment key={child.id}>{renderSubTaskChild(child, live, spawnerTaskByCallId, childPairs)}</Fragment>
@@ -462,7 +442,7 @@ export function Timeline({ items, live }: { items: TimelineItem[]; live?: boolea
       const nestedSpawner = nestedHeaderMeta?.toolUseId
         ? (childPairs.get(nestedHeaderMeta.toolUseId) ?? allToolPairs.get(nestedHeaderMeta.toolUseId))
         : undefined
-      const anchorItem = nestedSpawner?.use ?? nestedSpawner?.result ?? nested.header
+      const anchorItem = nestedSpawner?.inputItem ?? nestedSpawner?.resultItem ?? nested.header
       merged.push({
         time: (anchorItem ? Date.parse(anchorItem.createdAt) : 0) || 0,
         node: (
@@ -553,7 +533,7 @@ function renderSubTaskChild(
   child: TimelineItem,
   live: boolean | undefined,
   spawnerByCallId: Map<string, string>,
-  pairByCallId: Map<string, ToolPair>
+  pairByCallId: Map<string, ToolCallPair<TimelineItem>>
 ): ReactNode {
   if (child.kind === 'tool') {
     const payload = child.payload as { toolUseId?: string } | undefined
@@ -561,7 +541,7 @@ function renderSubTaskChild(
     if (callId && spawnerByCallId.has(callId)) return null // 吸收进嵌套子 Agent 卡
     const pair = callId ? pairByCallId.get(callId) : undefined
     if (pair) {
-      const anchor = pair.use ?? pair.result
+      const anchor = pair.inputItem ?? pair.resultItem
       if (anchor && anchor.id !== child.id) return null
       return toolRowFromPair(pair, live)
     }
