@@ -1,4 +1,4 @@
-import { FolderIcon, PlusIcon, XIcon } from 'lucide-react'
+import { ChevronDownIcon, FolderIcon, PlusIcon, XIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -34,9 +34,10 @@ export function ChatProjectSwitcher({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs text-muted-foreground" disabled={disabled}>
+        <Button variant="secondary" size="sm" className="h-7 gap-1.5 text-xs text-muted-foreground" disabled={disabled}>
           <FolderIcon size={12} className="shrink-0" />
-          <span className="max-w-32 truncate">{selectedName ?? '选择项目目录'}</span>
+          <span className="max-w-64 truncate">{selectedName ?? '选择项目目录'}</span>
+          <ChevronDownIcon size={12} className="shrink-0" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-64">
