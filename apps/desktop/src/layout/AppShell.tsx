@@ -47,7 +47,7 @@ function ShellInner({
             fallback={<div className="grid h-full place-items-center text-xs text-muted-foreground">加载中…</div>}
           >
             <Routes>
-              <Route path="/" element={<Navigate to="/coding" replace />} />
+              <Route path="/" element={<Navigate to="/chat" replace />} />
               <Route path="/chat" element={<ChatPage />} />
               <Route path="/chat/:conversationId" element={<ChatPage />} />
               <Route path="/coding" element={<CodingPage />} />
