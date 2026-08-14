@@ -1,4 +1,4 @@
-import { MoreVerticalIcon, Trash2Icon } from 'lucide-react'
+import { Loader2Icon, MoreVerticalIcon, Trash2Icon } from 'lucide-react'
 import type { ChatConversationMeta } from '@/api'
 import {
   AlertDialog,
@@ -38,9 +38,11 @@ export function ChatHistoryItem({
       )}
     >
       <button className="flex min-w-0 flex-1 items-center gap-2" onClick={onClick}>
+        {streaming && <Loader2Icon size={12} className="shrink-0 animate-spin text-amber-500" />}
         <span
           className={cn(
-            'min-w-0 flex-1 truncate pl-[18px] text-left text-xs',
+            'min-w-0 flex-1 truncate text-left text-xs',
+            !streaming && 'pl-[18px]',
             active ? 'font-medium' : 'text-foreground/80',
             streaming && 'text-amber-500'
           )}

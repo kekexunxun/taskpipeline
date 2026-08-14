@@ -7,7 +7,8 @@ const noop = {
   onSelect: vi.fn(),
   onCreate: vi.fn(),
   onCreateInDirectory: vi.fn(),
-  onDelete: vi.fn()
+  onDelete: vi.fn(),
+  onDeleteDirectory: vi.fn()
 }
 
 function meta(overrides: Partial<ChatConversationMeta>): ChatConversationMeta {

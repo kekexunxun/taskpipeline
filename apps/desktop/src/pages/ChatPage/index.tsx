@@ -136,6 +136,14 @@ function ChatPageInner() {
           })()
         }
         onDelete={(id) => void chat.remove(id)}
+        onDeleteDirectory={(directory) =>
+          void (async () => {
+            const ids = chat.metas.filter((m) => m.workingDirectory === directory).map((m) => m.id)
+            for (const id of ids) {
+              await chat.remove(id)
+            }
+          })()
+        }
       />
       <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">
         {isEmpty ? (
@@ -226,6 +234,8 @@ function ChatPageInner() {
                       : undefined
                 }
                 streaming={chat.streaming}
+                hitlContextType="conversation"
+                hitlContextId={chat.activeId}
                 leftSlot={
                   <>
                     <ChatModelSelector

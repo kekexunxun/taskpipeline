@@ -1,7 +1,18 @@
-import { FolderIcon, FolderOpenIcon, PlusIcon } from 'lucide-react'
+import { FolderIcon, FolderOpenIcon, PlusIcon, Trash2Icon } from 'lucide-react'
 import { useState } from 'react'
 import { ChatHistoryItem } from './ChatHistoryItem'
 import type { ChatConversationMeta, ChatProject } from '@/api'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
@@ -61,7 +72,8 @@ export function ChatHistoryList({
   onSelect,
   onCreate,
   onCreateInDirectory,
-  onDelete
+  onDelete,
+  onDeleteDirectory
 }: {
   metas: ChatConversationMeta[]
   /** 项目(工作目录)实体列表,与具体会话解耦。 */
@@ -75,6 +87,8 @@ export function ChatHistoryList({
   /** 在指定工作目录下新建会话。 */
   onCreateInDirectory(directory: string): void
   onDelete(id: string): void
+  /** 删除整个文件夹(目录下所有会话)。 */
+  onDeleteDirectory(directory: string): void
 }) {
   const groups = groupMetas(metas, projects)
   /** 记录已收起(折叠)的分组 key,默认全部展开。 */
@@ -115,9 +129,17 @@ export function ChatHistoryList({
               return (
                 <div key={groupKey} className={cn('min-w-0', !group.directory && 'border-t pt-2')}>
                   {/* 分组头 — 点击可折叠/展开 */}
-                  <button
+                  <div
+                    role="button"
+                    tabIndex={0}
                     className="group/header flex w-full items-center gap-1.5 rounded px-2 py-1 text-left transition-colors hover:bg-accent/40"
                     onClick={() => toggleCollapse(groupKey)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        toggleCollapse(groupKey)
+                      }
+                    }}
                   >
                     {isCollapsed ? (
                       <FolderIcon size={12} className="shrink-0 text-muted-foreground/60" />
@@ -130,6 +152,36 @@ export function ChatHistoryList({
                           {baseName(group.directory)}
                         </span>
                         <span className="shrink-0 text-[10px] text-muted-foreground">{group.items.length}</span>
+                        <AlertDialog>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className="h-5 w-5 text-muted-foreground/70 opacity-0 group-hover/header:opacity-100"
+                            onClick={(e) => e.stopPropagation()}
+                            title={`删除此目录及其下所有对话\n${group.directory}`}
+                            aria-label={`删除 ${baseName(group.directory)}`}
+                            asChild
+                          >
+                            <AlertDialogTrigger>
+                              <Trash2Icon size={11} />
+                            </AlertDialogTrigger>
+                          </Button>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>删除文件夹？</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                「{baseName(group.directory)}」下的 {group.items.length}{' '}
+                                个对话及其消息将从本机删除，此操作无法撤销。
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>取消</AlertDialogCancel>
+                              <AlertDialogAction onClick={() => onDeleteDirectory(group.directory!)}>
+                                删除
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
                         <Button
                           variant="ghost"
                           size="icon-sm"
@@ -163,7 +215,7 @@ export function ChatHistoryList({
                         </Button>
                       </>
                     )}
-                  </button>
+                  </div>
                   {/* 折叠时隐藏子项 */}
                   {!isCollapsed && group.items.length > 0 && (
                     <div className="mt-0.5 space-y-0.5">
