@@ -81,23 +81,23 @@ export function WriteToolBlock({
         status === 'error' ? 'border-red-500/20 bg-red-500/5' : 'border-border/40 bg-muted/20'
       )}
     >
-      <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground/70">
+      <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
         {status === 'running' ? (
-          <Loader2Icon size={13} className="shrink-0 animate-spin text-emerald-500/70" />
+          <Loader2Icon size={13} className="shrink-0 animate-spin text-emerald-500" />
         ) : (
-          <FilePlus2Icon size={13} className="shrink-0 text-emerald-500/70" />
+          <FilePlus2Icon size={13} className="shrink-0 text-emerald-500" />
         )}
         <span className="truncate font-medium">{fileName || '写入文件'}</span>
       </span>
       <span className="flex shrink-0 items-center gap-2 font-mono text-[11px]">
-        {status === 'running' && <span className="text-muted-foreground/50">写入中…</span>}
+        {status === 'running' && <span className="text-muted-foreground">写入中…</span>}
         {hasLineStats && (
           <>
-            {added !== undefined && <span className="text-emerald-500/80">+{added}</span>}
-            {deleted !== undefined && <span className="text-red-400/80">-{deleted}</span>}
+            {added !== undefined && <span className="text-emerald-500">+{added}</span>}
+            {deleted !== undefined && <span className="text-red-400">-{deleted}</span>}
           </>
         )}
-        {!hasLineStats && status === 'done' && <span className="text-muted-foreground/40">已写入</span>}
+        {!hasLineStats && status === 'done' && <span className="text-muted-foreground">已写入</span>}
         {status === 'error' && <span className="text-red-400">失败</span>}
       </span>
     </div>
@@ -127,23 +127,23 @@ export function EditToolBlock({
         status === 'error' ? 'border-red-500/20 bg-red-500/5' : 'border-border/40 bg-muted/20'
       )}
     >
-      <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground/70">
+      <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
         {status === 'running' ? (
-          <Loader2Icon size={13} className="shrink-0 animate-spin text-blue-500/70" />
+          <Loader2Icon size={13} className="shrink-0 animate-spin text-blue-500" />
         ) : (
-          <FileEditIcon size={13} className="shrink-0 text-blue-500/70" />
+          <FileEditIcon size={13} className="shrink-0 text-blue-500" />
         )}
         <span className="truncate font-medium">{fileName || '编辑文件'}</span>
       </span>
       <span className="flex shrink-0 items-center gap-2 font-mono text-[11px]">
-        {status === 'running' && <span className="text-muted-foreground/50">编辑中…</span>}
+        {status === 'running' && <span className="text-muted-foreground">编辑中…</span>}
         {hasLineStats && (
           <>
-            {added !== undefined && <span className="text-emerald-500/80">+{added}</span>}
-            {deleted !== undefined && <span className="text-red-400/80">-{deleted}</span>}
+            {added !== undefined && <span className="text-emerald-500">+{added}</span>}
+            {deleted !== undefined && <span className="text-red-400">-{deleted}</span>}
           </>
         )}
-        {!hasLineStats && status === 'done' && <span className="text-muted-foreground/40">已编辑</span>}
+        {!hasLineStats && status === 'done' && <span className="text-muted-foreground">已编辑</span>}
         {status === 'error' && <span className="text-red-400">失败</span>}
       </span>
     </div>
@@ -171,7 +171,7 @@ export function ReadToolBlock({
       <CollapsibleTrigger className="group flex w-full items-center gap-1.5 py-0.5 text-xs text-muted-foreground/60 transition-colors hover:text-muted-foreground">
         {status === 'running' ? (
           <>
-            <Loader2Icon size={13} className="shrink-0 animate-spin text-muted-foreground/50" />
+            <Loader2Icon size={13} className="shrink-0 animate-spin text-muted-foreground/90" />
             <span className="text-xs">
               查看中 <span className="text-muted-foreground/80">{fileName || filePath}</span>
             </span>
