@@ -1011,7 +1011,64 @@ const chatService = new ChatService(
     return renderMemoryContext(result.memories, result.wikiDocs)
   },
   consolidateChatMemory,
-  chatTraceManager
+  chatTraceManager,
+  // 工作区上下文解析：检查 workingDirectory 是否属于某个 workspace group，若是则返回工作区描述 + agents.md 内容
+  async (workingDirectory: string | undefined) => {
+    if (!workingDirectory) return undefined
+    try {
+      const groups = await chatService.listGroups()
+      // 查找 workingDirectory 属于哪个 workspace group
+      const workspace = groups.find((g) => g.chatType === 'workspace' && g.directories.includes(workingDirectory))
+      if (!workspace) return undefined
+      // 构建工作区上下文
+      const parts: string[] = []
+      // project_instructions：列出工作区目录
+      const dirList = workspace.directories.map((dir) => `- ${dir}`).join('\n')
+      parts.push(`<project_instructions>
+The absolute path(s) of the user's workspace(s) are: 
+${dirList}
+</project_instructions>`)
+      // user_info：OS、shell、workspace 路径
+      const os = process.platform === 'darwin' ? 'macOS' : process.platform === 'win32' ? 'Windows' : 'Linux'
+      const shell = process.env.SHELL || (process.platform === 'win32' ? 'powershell' : 'bash')
+      parts.push(`<user_info>
+User's OS: ${os}
+User's shell: ${shell}
+</user_info>`)
+      // 读取每个目录的 AGENTS.MD 作为工作规范
+      const agentsEntries: string[] = []
+      for (const dir of workspace.directories) {
+        // 尝试读取 AGENTS.md 或 agents.md
+        let content: string | undefined
+        for (const filename of ['AGENTS.md', 'agents.md']) {
+          const agentsFile = join(dir, filename)
+          if (existsSync(agentsFile)) {
+            try {
+              content = readFileSync(agentsFile, 'utf8')
+              break
+            } catch {
+              // 读取失败继续尝试下一个
+            }
+          }
+        }
+        if (content) {
+          const projectName = basename(dir)
+          agentsEntries.push(`  --- Contents of ${dir}/AGENTS.md (project: ${projectName}) ---\n${content}`)
+        }
+      }
+      if (agentsEntries.length > 0) {
+        parts.push(`<agents_instructions>
+  The following instructions are from the AGENTS.MD.
+  These instructions provide guidance for AI agents working on this project.
+
+${agentsEntries.join('\n\n')}
+</agents_instructions>`)
+      }
+      return parts.join('\n\n')
+    } catch {
+      return undefined
+    }
+  }
 )
 
 // Trace 服务 v2：新 trace 管道查询（Trace 页面数据源）。埋点/写入见 electron/trace/（Bus + 两路适配器）。
@@ -3019,7 +3076,7 @@ function registerIpc(): void {
   )
   // === Chat 对话(Codex 样式) =================================================
   ipcMain.handle('chats:list', async () => chatService.listChats())
-  ipcMain.handle('chats:list-projects', async () => chatService.listProjects())
+  ipcMain.handle('chats:list-groups', async () => chatService.listGroups())
   ipcMain.handle('chats:get', async (_event, id: string) => {
     const result = await chatService.getChat(id)
     // 加载对话时同步 HITL 模式到缓存
@@ -3066,6 +3123,22 @@ function registerIpc(): void {
     if (!mainWindow) return undefined
     const localPath = (await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })).filePaths[0]
     return localPath || undefined
+  })
+  // 多目录选择(工作区创建用)。
+  ipcMain.handle('dialog:choose-directories', async () => {
+    if (!mainWindow) return []
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory', 'multiSelections']
+    })
+    return result.filePaths
+  })
+  // === Chat 分组(工作区 CRUD) ==============================================
+  // workspace 类型分组统一由 chatService 管理，存储在 chats-v4/index.json
+  ipcMain.handle('chat-groups:create-workspace', (_event, name: string, directories: string[]) => {
+    return chatService.createWorkspaceGroup(name, directories)
+  })
+  ipcMain.handle('chat-groups:delete', (_event, id: string) => {
+    return chatService.deleteGroup(id)
   })
 }
 

@@ -65,6 +65,11 @@ export type StreamChatInput = {
    */
   cwd?: string
   /**
+   * 工作区上下文（多目录工作区描述 + agents.md 规范）。
+   * OpenAI driver 用于构建分层系统提示；Qoder driver 不使用此字段。
+   */
+  workspaceContext?: string
+  /**
    * 加入已存在的对话回合 trace（一次用户提问 = 一个 Trace）。
    * 主对话由 ChatService 传入；关键词提取 / 记忆整理等辅助 LLM 调用显式 join，
    * 让一次提问下的多次 LLM 调用串联在同一棵执行树里。缺省时 driver 自建独立 trace。

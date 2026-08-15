@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { ChatComposer } from './ChatComposer'
 import { ChatProjectSwitcher } from './ChatProjectSwitcher'
 import { Button } from '@/components/ui/button'
+import type { ChatGroup } from '@/api'
 
 const EXAMPLE_PROMPTS = [
   '帮我分析当前项目的代码结构和依赖关系',
@@ -17,10 +18,11 @@ export function ChatWelcomeView({
   onStop,
   disabled,
   streaming,
-  projects,
+  groups,
   projectValue,
   onProjectChange,
   onAddProject,
+  onSetupWorkspace,
   leftSlot
 }: {
   composerValue: string
@@ -29,10 +31,11 @@ export function ChatWelcomeView({
   onStop?(): void
   disabled?: boolean
   streaming?: boolean
-  projects: { directory: string; lastActiveAt: string }[]
+  groups: ChatGroup[]
   projectValue?: string
   onProjectChange(directory: string | undefined): void
   onAddProject(): void
+  onSetupWorkspace(): void
   leftSlot?: ReactNode
 }) {
   const handlePromptClick = (prompt: string) => {
@@ -59,10 +62,11 @@ export function ChatWelcomeView({
           <div className="flex items-center gap-2">
             <span className="text-xs">运行于</span>
             <ChatProjectSwitcher
-              projects={projects}
+              groups={groups}
               value={projectValue}
               onChange={onProjectChange}
               onAdd={onAddProject}
+              onSetupWorkspace={onSetupWorkspace}
               disabled={disabled || streaming}
             />
           </div>

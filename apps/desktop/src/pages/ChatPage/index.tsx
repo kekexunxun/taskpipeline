@@ -7,8 +7,8 @@ import { ChatModelSelector } from './components/ChatModelSelector'
 import { ChatMcpSelector } from './components/ChatMcpSelector'
 import { ChatSkillSelector } from './components/ChatSkillSelector'
 import { ChatAgentSelector } from './components/ChatAgentSelector'
-import { ChatDirectoryBadge } from './components/ChatDirectoryBadge'
 import { ChatWelcomeView } from './components/ChatWelcomeView'
+import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
 import { TaskCreationTool } from './components/TaskCreationTool'
 import type { ChatApprovalRequest } from './hooks/useChat'
 import { useChat } from './hooks/useChat'
@@ -38,6 +38,8 @@ function ChatPageInner() {
   const [isTransitioning, setIsTransitioning] = useState(false)
   // 欢迎页的输入草稿（独立于 chat.draft，因为欢迎页没有 activeId）
   const [welcomeDraft, setWelcomeDraft] = useState('')
+  // 工作区创建弹窗
+  const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false)
 
   // 工具调用 HITL：Qoder 等 driver 的 can_use_tool 确认请求由主进程以
   // extension_ui_request 广播（task:event 通道）。
@@ -119,7 +121,7 @@ function ChatPageInner() {
     <div className="grid h-full min-h-0 min-w-0 grid-cols-[288px_minmax(0,1fr)] bg-background">
       <ChatHistoryList
         metas={chat.metas}
-        projects={chat.projects}
+        groups={chat.groups}
         activeId={chat.activeId}
         streamingChatIds={chat.streamingChatIds}
         onSelect={(id) => navigate(`/chat/${id}`)}
@@ -135,15 +137,14 @@ function ChatPageInner() {
             if (id) navigate(`/chat/${id}`)
           })()
         }
+        onShowWelcome={() => {
+          // 已经在欢迎页则不重复跳转
+          if (chat.activeId) {
+            chat.select(undefined)
+            navigate('/chat')
+          }
+        }}
         onDelete={(id) => void chat.remove(id)}
-        onDeleteDirectory={(directory) =>
-          void (async () => {
-            const ids = chat.metas.filter((m) => m.workingDirectory === directory).map((m) => m.id)
-            for (const id of ids) {
-              await chat.remove(id)
-            }
-          })()
-        }
       />
       <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">
         {isEmpty ? (
@@ -154,10 +155,11 @@ function ChatPageInner() {
             onStop={() => void chat.stop()}
             disabled={!hasModel}
             streaming={chat.streaming}
-            projects={chat.projects}
+            groups={chat.groups}
             projectValue={welcomeDirectory}
             onProjectChange={setWelcomeDirectory}
             onAddProject={() => void chooseProjectDirectory()}
+            onSetupWorkspace={() => setWorkspaceDialogOpen(true)}
             leftSlot={
               <>
                 <ChatModelSelector
@@ -190,9 +192,6 @@ function ChatPageInner() {
                 <p className="mt-1 truncate text-xs text-muted-foreground">{headerSubtitle}</p>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
-                {chat.conversation?.workingDirectory && (
-                  <ChatDirectoryBadge workingDirectory={chat.conversation.workingDirectory} />
-                )}
                 {chat.streaming && (
                   <span className="inline-flex items-center gap-1.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-300">
                     <span className="animate-caret-blink inline-block size-1.5 rounded-full bg-current" />
@@ -267,8 +266,18 @@ function ChatPageInner() {
         )}
       </section>
       {/* 工具调用 HITL：confirm 已内联到对话流（ChatConversation 卡片），
-      UiRequestDialog 仅兜底 select/input/editor（对话板块不产生）与任务板块共用。 */}
+      UiRequestDialog 仅兆底 select/input/editor（对话板块不产生）与任务板块共用。 */}
       <UiRequestDialog />
+      {/* 工作区创建弹窗 */}
+      <WorkspaceCreateDialog
+        open={workspaceDialogOpen}
+        onOpenChange={setWorkspaceDialogOpen}
+        onCreated={(group) => {
+          // 创建后刷新 groups 并自动选中新工作区的第一个目录
+          void chat.refreshMetas()
+          setWelcomeDirectory(group.directories[0])
+        }}
+      />
     </div>
   )
 }

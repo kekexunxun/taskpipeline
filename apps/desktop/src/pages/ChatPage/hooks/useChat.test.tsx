@@ -5,7 +5,7 @@ import type { ChatConversation } from '@/api'
 
 /**
  * useChat 多对话并行 + 内联 HITL 核心逻辑测试。
- * mock api：listChats/listProjects/listAgents/listTaskBackends 返回空，createChat/getChat 返回内存对话。
+ * mock api：listChats/listChatGroups/listAgents/listTaskBackends 返回空，createChat/getChat 返回内存对话。
  * 注意：mock 的 useFeedback / useChatModels 必须返回稳定引用（真实实现是 useCallback），
  * 否则挂载 effect 的依赖（showError / modelGroups）每次渲染都变化 → 无限重渲染循环。
  */
@@ -47,7 +47,7 @@ const mockHooks = vi.hoisted(() => {
 vi.mock('@/api', () => ({
   api: {
     listChats: vi.fn(async () => []),
-    listChatProjects: vi.fn(async () => []),
+    listChatGroups: vi.fn(async () => []),
     listAgents: vi.fn(async () => []),
     listTaskBackends: vi.fn(async () => []),
     getChat: mockApi.getChat,

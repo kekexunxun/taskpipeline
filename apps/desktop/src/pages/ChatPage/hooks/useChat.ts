@@ -11,7 +11,7 @@ import {
   type ChatMessage,
   type ChatMessageMetadata,
   type ChatModelGroup,
-  type ChatProject,
+  type ChatGroup,
   type ChatStreamChunk,
   type DriverPart,
   type ModelParams,
@@ -84,7 +84,7 @@ function driverOfModelValue(value: string | undefined, groups: ChatModelGroup[])
 export function useChat() {
   const { showError, showSuccess } = useFeedback()
   const [metas, setMetas] = useState<ChatConversationMeta[]>([])
-  const [projects, setProjects] = useState<ChatProject[]>([])
+  const [groups, setGroups] = useState<ChatGroup[]>([])
   const [activeId, setActiveId] = useState<string>()
   /** activeId 的同步 ref(select/send 竞态与 setDraft 归属判定用,避免异步渲染时序)。 */
   const activeIdRef = useRef<string | undefined>(undefined)
@@ -150,9 +150,9 @@ export function useChat() {
 
   const refreshMetas = useCallback(async () => {
     try {
-      const [nextMetas, nextProjects] = await Promise.all([api.listChats(), api.listChatProjects()])
+      const [nextMetas, nextGroups] = await Promise.all([api.listChats(), api.listChatGroups()])
       setMetas(nextMetas)
-      setProjects(nextProjects)
+      setGroups(nextGroups)
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason))
     }
@@ -605,7 +605,7 @@ export function useChat() {
   return useMemo(
     () => ({
       metas,
-      projects,
+      groups,
       activeId,
       conversation,
       messages,
@@ -640,11 +640,12 @@ export function useChat() {
       send,
       stop,
       pushApproval,
-      respondApproval
+      respondApproval,
+      refreshMetas
     }),
     [
       metas,
-      projects,
+      groups,
       activeId,
       conversation,
       messages,
@@ -677,7 +678,8 @@ export function useChat() {
       send,
       stop,
       pushApproval,
-      respondApproval
+      respondApproval,
+      refreshMetas
     ]
   )
 }

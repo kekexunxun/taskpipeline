@@ -13,7 +13,7 @@ import type {
   ChatConversationMeta,
   ChatMessageMetadata,
   ChatModelGroup,
-  ChatProject,
+  ChatGroup,
   ChatStreamEvent,
   ChatStreamChunk,
   ChatDriverId,
@@ -42,6 +42,11 @@ type ConversationConsolidator = (input: {
   /** 所属对话回合 traceId（记忆整理 LLM 调用 join 用）。 */
   traceId?: string
 }) => Promise<void>
+/**
+ * 工作区上下文解析器：根据当前 workingDirectory 返回工作区描述文本。
+ * 用于注入系统提示，告知 LLM 当前工作区的多目录结构和 agents.md 规范。
+ */
+type WorkspaceContextResolver = (workingDirectory: string | undefined) => Promise<string | undefined>
 
 /**
  * 对话回合 trace 管理器（对话级：一个对话 = 一个 Trace，回合间重开续接）。
@@ -107,7 +112,8 @@ export class ChatService {
     private readonly resolveTaskBackend?: TaskBackendFactory,
     private readonly memoryContext?: MemoryContextProvider,
     private readonly consolidateConversation?: ConversationConsolidator,
-    private readonly traceManager?: ChatTraceManager
+    private readonly traceManager?: ChatTraceManager,
+    private readonly resolveWorkspaceContext?: WorkspaceContextResolver
   ) {
     this.storage = new ChatStorage(dataDir)
   }
@@ -116,9 +122,19 @@ export class ChatService {
     return this.storage.listMetas()
   }
 
-  /** 列出所有项目(工作目录),与具体会话解耦 —— 目录下会话删光后项目仍保留。 */
-  async listProjects(): Promise<ChatProject[]> {
-    return this.storage.listProjects()
+  /** 列出所有分组(目录 + 工作区),与具体会话解耦 —— 目录下会话删光后分组仍保留。 */
+  async listGroups(): Promise<ChatGroup[]> {
+    return this.storage.listGroups()
+  }
+
+  /** 创建 workspace 类型分组(用户显式创建多目录工作区)。 */
+  async createWorkspaceGroup(name: string, directories: string[]): Promise<ChatGroup> {
+    return this.storage.createGroup(name, directories)
+  }
+
+  /** 删除分组(用户显式删除 workspace)。 */
+  async deleteGroup(id: string): Promise<void> {
+    return this.storage.deleteGroup(id)
   }
 
   /**
@@ -380,19 +396,32 @@ export class ChatService {
             return ctx
           })
         : undefined
-      const historyRecords = memoryContext
-        ? [
-            ...messages.slice(0, -1),
-            {
-              id: randomUUID(),
-              role: 'system',
-              createdAt: now,
-              driverId: effective.driverId,
-              raw: { kind: 'system', text: memoryContext }
-            } as StoredMessageRecord,
-            userRecord
-          ]
-        : messages
+      // 解析工作区上下文（多目录工作区描述 + agents.md 规范）
+      // OpenAI driver 用此构建分层系统提示；Qoder driver 通过 system 消息注入
+      const workspaceContext = await this.resolveWorkspaceContext?.(conversation.workingDirectory)
+      // 构建历史消息：注入工作区上下文和记忆上下文作为 system 消息
+      // OpenAI driver 会从 history 中提取 system 消息，融入其分层系统提示
+      const systemMessages: StoredMessageRecord[] = []
+      if (workspaceContext) {
+        systemMessages.push({
+          id: randomUUID(),
+          role: 'system',
+          createdAt: now,
+          driverId: effective.driverId,
+          raw: { kind: 'system', text: workspaceContext }
+        } as StoredMessageRecord)
+      }
+      if (memoryContext) {
+        systemMessages.push({
+          id: randomUUID(),
+          role: 'system',
+          createdAt: now,
+          driverId: effective.driverId,
+          raw: { kind: 'system', text: memoryContext }
+        } as StoredMessageRecord)
+      }
+      const historyRecords =
+        systemMessages.length > 0 ? [...messages.slice(0, -1), ...systemMessages, userRecord] : messages
       const history = historyRecords.map((record) => this.deserializeRecord(record))
 
       this.dispatch(effective, {
@@ -417,7 +446,8 @@ export class ChatService {
           ...(turnTraceId ? { traceId: turnTraceId } : {}),
           ...(toolSource ? { toolSource } : {}),
           ...(effective.mcpService?.length ? { mcpServices: effective.mcpService } : {}),
-          ...(effective.skills?.length ? { skills: effective.skills } : {})
+          ...(effective.skills?.length ? { skills: effective.skills } : {}),
+          ...(workspaceContext ? { workspaceContext } : {})
         })) {
           if (abort.signal.aborted) break
           // 累积 parts

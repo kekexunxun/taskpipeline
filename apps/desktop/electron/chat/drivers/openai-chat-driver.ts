@@ -449,17 +449,31 @@ export class OpenAIChatDriver implements ChatDriver {
       }
       if (Object.keys(bridged).length) mergedTools = { ...(mergedTools ?? {}), ...bridged }
     }
-    // ai-sdk 7 起 system 内容必须走 `system` 选项,messages 里不允许 system 角色:
-    // 合并「工作目录 + 历史 system + 任务工具 systemPrompt」三段,统一从选项传入。
+    // ai-sdk 7 起 system 内容必须走 `system` 选项,messages 里不允许 system 角色。
+    // 构建单一分层系统提示，按顺序包含所有上下文信息。
     const { messages, systemText } = historyToModelMessages(input.history)
-    const system = [
-      input.cwd ? `当前工作目录: ${input.cwd}` : '',
-      systemText,
-      taskSource ? taskSource.systemPrompt() : '',
-      input.skills?.length && this.resolveSkillContent ? this.resolveSkillContent(input.skills) : ''
-    ]
-      .filter(Boolean)
-      .join('\n\n')
+    const sections: string[] = []
+    // 1. 系统基础指令
+    if (taskSource?.systemPrompt()) {
+      sections.push(taskSource.systemPrompt())
+    }
+    // 2. 工作区上下文（含 <project_instructions>、<user_info>、<agents_instructions>）
+    if (input.workspaceContext) {
+      sections.push(input.workspaceContext)
+    }
+    // 3. 记忆上下文
+    if (systemText) {
+      sections.push(`<user_memories>\n${systemText}\n</user_memories>`)
+    }
+    // 4. Skills 等动态信息
+    if (input.skills?.length && this.resolveSkillContent) {
+      const skillContent = this.resolveSkillContent(input.skills)
+      if (skillContent) {
+        sections.push(`<system-reminder>\n${skillContent}\n</system-reminder>`)
+      }
+    }
+    // 拼接为单一系统提示
+    const system = sections.join('\n\n')
     // 当前用户消息已由编排层（ChatService）写入 history（history 末尾即本条提问）：
     // 直接 push 会造成 prompt 里两条一模一样的 user 消息，这里只在确实缺失时才追加。
     const last = messages.at(-1)

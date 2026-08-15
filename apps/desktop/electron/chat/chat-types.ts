@@ -232,14 +232,21 @@ export type ChatConversationMeta = {
 export type ChatConversation = ChatConversationMeta & { messages: StoredMessageRecord[] }
 
 /**
- * 项目(工作目录)实体 — 与具体会话解耦,独立持久化。
- * 只要在该目录下创建过项目对话,目录就会记为项目;即使目录下所有会话都被删除,
- * 项目仍保留在列表中,显示「没有对话」,方便用户原地新建对话。
+ * 统一分组实体 — 替代原 ChatProject + 独立 chat-workspaces.json。
+ * chatType='directory': 对话绑定工作目录时自动创建;
+ * chatType='workspace': 用户通过创建对话框显式创建(多目录逻辑分组)。
+ * 与具体会话解耦: 目录下所有会话被删除后分组仍保留, 显示「没有对话」。
  */
-export type ChatProject = {
-  directory: string
-  /** 最近一次活动时间(创建/绑定目录/最后删除会话时刷新),用于列表排序与空项目淘汰。 */
-  lastActiveAt: string
+export type ChatGroup = {
+  id: string
+  chatType: 'directory' | 'workspace'
+  /** workspace 有值(用户命名), directory 无值(前端取 baseName(directory))。 */
+  name?: string
+  /** workspace 可多个目录, directory 只有一个。 */
+  directories: string[]
+  createdAt: string
+  /** 取组内最新对话 updatedAt, 动态更新; 空组取自身创建/操作时间。 */
+  updatedAt: string
 }
 
 /** 流式启动 / 终止入参。 */

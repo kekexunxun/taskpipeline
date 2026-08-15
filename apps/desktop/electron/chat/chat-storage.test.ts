@@ -37,8 +37,8 @@ function conversation(id = 'chat-1'): ChatConversation {
   }
 }
 
-describe('ChatStorage v3', () => {
-  it('writes conversation and index atomically in chats-v3', async () => {
+describe('ChatStorage v4', () => {
+  it('writes conversation and index atomically in chats-v4', async () => {
     const root = temporaryRoot()
     const storage = new ChatStorage(root)
     await storage.saveConversation(conversation())
@@ -47,8 +47,8 @@ describe('ChatStorage v3', () => {
     const stored = await storage.getConversation('chat-1')
     expect(stored?.messages[0]).toMatchObject({ role: 'user', driverId: 'openai' })
     expect((stored?.messages[0]?.raw as { kind?: string; text?: string })?.text).toBe('hello')
-    expect(existsSync(join(root, 'chats-v3', 'index.json'))).toBe(true)
-    expect(readFileSync(join(root, 'chats-v3', 'index.json'), 'utf8')).toContain('"version": 3')
+    expect(existsSync(join(root, 'chats-v4', 'index.json'))).toBe(true)
+    expect(readFileSync(join(root, 'chats-v4', 'index.json'), 'utf8')).toContain('"version": 4')
   })
 
   it('ignores legacy v2 chats and malformed v3 files', async () => {
@@ -62,8 +62,8 @@ describe('ChatStorage v3', () => {
     const storage = new ChatStorage(root)
     expect(await storage.listMetas()).toEqual([])
     // v3 损坏文件 — 跳过
-    mkdirSync(join(root, 'chats-v3'), { recursive: true })
-    writeFileSync(join(root, 'chats-v3', 'index.json'), 'not-json')
+    mkdirSync(join(root, 'chats-v4'), { recursive: true })
+    writeFileSync(join(root, 'chats-v4', 'index.json'), 'not-json')
     // 需要新的 storage 实例来测试懒加载（上一个已经标记为 loaded）
     const storage2 = new ChatStorage(root)
     expect(await storage2.listMetas()).toEqual([])
@@ -81,36 +81,42 @@ describe('ChatStorage v3', () => {
     expect(await storage.getConversation('two')).toBeDefined()
   })
 
-  it('records a project when a directory-bound conversation is saved', async () => {
+  it('records a group when a directory-bound conversation is saved', async () => {
     const root = temporaryRoot()
     const storage = new ChatStorage(root)
     const bound = { ...conversation('c'), workingDirectory: '/project/x' }
     await storage.saveConversation(bound)
-    expect(await storage.listProjects()).toEqual([{ directory: '/project/x', lastActiveAt: bound.updatedAt }])
-    // 更新绑定目录后 lastActiveAt 刷新
+    const groups = await storage.listGroups()
+    expect(groups).toHaveLength(1)
+    expect(groups[0]?.chatType).toBe('directory')
+    expect(groups[0]?.directories).toEqual(['/project/x'])
+    expect(groups[0]?.updatedAt).toBe(bound.updatedAt)
+    // 更新绑定目录后 updatedAt 刷新
     await storage.saveConversation({ ...bound, updatedAt: '2026-02-01T00:00:00.000Z' })
-    const projects = await storage.listProjects()
-    expect(projects[0]?.lastActiveAt).toBe('2026-02-01T00:00:00.000Z')
-    // 普通对话不产生项目
+    const groups2 = await storage.listGroups()
+    expect(groups2[0]?.updatedAt).toBe('2026-02-01T00:00:00.000Z')
+    // 普通对话不产生 group
     await storage.saveConversation(conversation('plain'))
-    expect(await storage.listProjects()).toHaveLength(1)
+    expect(await storage.listGroups()).toHaveLength(1)
   })
 
-  it('keeps the project after all its conversations are deleted', async () => {
+  it('keeps the group after all its conversations are deleted', async () => {
     const root = temporaryRoot()
     const storage = new ChatStorage(root)
     const bound = { ...conversation('c'), workingDirectory: '/project/x' }
     await storage.saveConversation(bound)
     await storage.deleteConversation('c')
     expect(await storage.getConversation('c')).toBeUndefined()
-    // 项目保留:目录下会话删光后列表仍能看到该项目
-    expect(await storage.listProjects()).toEqual([{ directory: '/project/x', lastActiveAt: bound.updatedAt }])
+    // group 保留:目录下会话删光后列表仍能看到该 group
+    const groups = await storage.listGroups()
+    expect(groups).toHaveLength(1)
+    expect(groups[0]?.directories).toEqual(['/project/x'])
   })
 
-  it('trims empty projects beyond the cap but keeps active ones', async () => {
+  it('trims empty groups beyond the cap but keeps active ones', async () => {
     const root = temporaryRoot()
     const storage = new ChatStorage(root)
-    // 创建 21 个目录绑定的会话,再全部删除 → 只剩最近 20 个空项目
+    // 创建 21 个目录绑定的会话,再全部删除 → 只剩最近 20 个空 group
     for (let i = 0; i < 21; i += 1) {
       await storage.saveConversation({
         ...conversation(`p-${i}`),
@@ -119,13 +125,13 @@ describe('ChatStorage v3', () => {
       })
     }
     for (let i = 0; i < 21; i += 1) await storage.deleteConversation(`p-${i}`)
-    const projects = await storage.listProjects()
-    expect(projects).toHaveLength(20)
-    expect(projects[0]?.directory).toBe('/project/20') // 最近的留下
-    expect(projects.some((item) => item.directory === '/project/0')).toBe(false) // 最旧的被淘汰
-    // 仍有关联会话的项目无条件保留(不受上限影响)
+    const groups = await storage.listGroups()
+    expect(groups).toHaveLength(20)
+    expect(groups[0]?.directories[0]).toBe('/project/20') // 最近的留下
+    expect(groups.some((item) => item.directories[0] === '/project/0')).toBe(false) // 最旧的被淘汰
+    // 仍有关联会话的 group 无条件保留(不受上限影响)
     await storage.saveConversation({ ...conversation('keep'), workingDirectory: '/project/0' })
-    expect((await storage.listProjects()).some((item) => item.directory === '/project/0')).toBe(true)
+    expect((await storage.listGroups()).some((item) => item.directories[0] === '/project/0')).toBe(true)
   })
 
   it('appends a message to an existing conversation', async () => {

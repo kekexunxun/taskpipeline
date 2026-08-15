@@ -1,26 +1,38 @@
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { ChatConversation, ChatConversationMeta, ChatProject, StoredMessageRecord } from './chat-types.js'
+import type { ChatConversation, ChatConversationMeta, ChatGroup, StoredMessageRecord } from './chat-types.js'
 
 /**
  * 存储版本。
  *
  * - v2: 旧 ai-sdk 统一结构 (`ChatMessage` 带 `parts: UIMessage.parts`);
- * - v3: driver 透传 (`StoredMessageRecord` 带 `driverId + raw`),完全解耦 ai-sdk。
+ * - v3: driver 透传 (`StoredMessageRecord` 带 `driverId + raw`),完全解耦 ai-sdk;
+ * - v4: 统一 groups — 原 projects + chat-workspaces.json 合并为 ChatGroup[],
+ *       chatType 区分 'directory'(自动) 与 'workspace'(用户创建)。
  *
- * 重构后旧 v2 文件不再被读 (项目未上线,数据可丢),目录名也换成 `chats-v3` 避免混淆。
+ * 重构后旧 v2/v3 文件不再被读 (项目未上线,数据可丢),目录名换成 `chats-v4` 避免混淆。
  */
-const STORAGE_VERSION = 3
+const STORAGE_VERSION = 4
 const INDEX_FILE = 'index.json'
 
-/** 无会话关联的"空项目"最多保留多少个(按 lastActiveAt 倒序淘汰,防无限增长)。 */
-const MAX_EMPTY_PROJECTS = 20
+/** 无会话关联的"空 directory 组"最多保留多少个(按 updatedAt 倒序淘汰,防无限增长)。workspace 组全部保留。 */
+const MAX_EMPTY_GROUPS = 20
 
-type ChatIndex = { version: 3; conversations: ChatConversationMeta[]; projects?: ChatProject[] }
-type ChatFile = { version: 3; conversation: ChatConversation }
+/** v3 index 形态(迁移用)。 */
+type LegacyV3Index = {
+  version: 3
+  conversations: ChatConversationMeta[]
+  projects?: Array<{ directory: string; lastActiveAt: string }>
+}
+
+type ChatIndex = { version: 4; conversations: ChatConversationMeta[]; groups?: ChatGroup[] }
+type ChatFile = { version: 4; conversation: ChatConversation }
 
 function chatsDir(root: string) {
+  return join(root, 'chats-v4')
+}
+function legacyChatsDir(root: string) {
   return join(root, 'chats-v3')
 }
 function indexPath(root: string) {
@@ -53,15 +65,15 @@ async function parseFile<T>(file: string): Promise<T | undefined> {
  *
  * 设计：
  *  - 所有磁盘操作均为 async,不阻塞主进程事件循环;
- *  - index(会话列表 + 项目列表)在内存中缓存,首次访问时懒加载,写操作同步更新缓存;
+ *  - index(会话列表 + 分组列表)在内存中缓存,首次访问时懒加载,写操作同步更新缓存;
  *  - 会话文件按 chatId 独立读写,多对话并行互不阻塞;
  *  - 写操作通过 per-file promise chain 串行化,防止并发写导致数据丢失;
  *  - `raw` 字段是 driver 自己的 JSON 形态,Qoder 存 SDK 事件、OpenAI 存 ModelMessage 列表等等;
  *  - driver 加载历史时,通过 `driver.deserializeMessage(record)` 把 `raw` 反序列化为 `parts`;
- *  - 旧 v2 文件 (目录 `chats-v2`) 不会再被读取,直接忽略。
+ *  - 旧 v2/v3 文件不再读取,直接忽略。
  */
 export class ChatStorage {
-  /** 内存中的 index 缓存(会话 meta 列表 + 项目列表),避免每次 listMetas 都读磁盘。 */
+  /** 内存中的 index 缓存(会话 meta 列表 + 分组列表),避免每次 listMetas 都读磁盘。 */
   private indexCache: ChatIndex | undefined
   /** index 是否已从磁盘尝试加载过(区分"未加载"与"磁盘上确实没有")。 */
   private indexLoaded = false
@@ -93,16 +105,78 @@ export class ChatStorage {
 
   /**
    * 加载 index(懒加载,只读一次磁盘)。
+   * 包含 v3 → v4 迁移:如果 v4 不存在但 v3 存在,读取 v3 数据并转换。
    */
   private async loadIndex(): Promise<ChatIndex | undefined> {
     if (this.indexLoaded) return this.indexCache
     await this.ensureDir()
+    // 先尝试读 v4
     const index = await parseFile<ChatIndex>(indexPath(this.dataDir))
     if (index?.version === STORAGE_VERSION) {
       this.indexCache = index
+      this.indexLoaded = true
+      return this.indexCache
+    }
+    // v4 不存在 → 尝试从 v3 迁移
+    const migrated = await this.migrateFromV3()
+    if (migrated) {
+      this.indexCache = migrated
+      this.indexLoaded = true
+      // 写入 v4
+      await this.enqueueIndexWrite(migrated)
+      return this.indexCache
     }
     this.indexLoaded = true
     return this.indexCache
+  }
+
+  /**
+   * v3 → v4 迁移:读取旧 index + chat-workspaces.json,转换为 v4 格式。
+   * 项目未上线,迁移失败直接返回 undefined(丢弃旧数据)。
+   */
+  private async migrateFromV3(): Promise<ChatIndex | undefined> {
+    const legacyDir = legacyChatsDir(this.dataDir)
+    const legacyIndex = await parseFile<LegacyV3Index>(join(legacyDir, INDEX_FILE))
+    if (!legacyIndex || legacyIndex.version !== 3) return undefined
+
+    const conversations = Array.isArray(legacyIndex.conversations) ? legacyIndex.conversations : []
+    const groups: ChatGroup[] = []
+
+    // 原 projects → directory groups
+    if (Array.isArray(legacyIndex.projects)) {
+      for (const project of legacyIndex.projects) {
+        groups.push({
+          id: randomUUID(),
+          chatType: 'directory',
+          directories: [project.directory],
+          createdAt: project.lastActiveAt,
+          updatedAt: project.lastActiveAt
+        })
+      }
+    }
+
+    // 原 chat-workspaces.json → workspace groups
+    try {
+      const wsText = await readFile(join(legacyDir, '..', 'chat-workspaces.json'), 'utf8')
+      const workspaces: Array<{ id: string; name: string; directories: string[]; createdAt: string }> =
+        JSON.parse(wsText)
+      if (Array.isArray(workspaces)) {
+        for (const ws of workspaces) {
+          groups.push({
+            id: ws.id ?? randomUUID(),
+            chatType: 'workspace',
+            name: ws.name,
+            directories: ws.directories ?? [],
+            createdAt: ws.createdAt ?? new Date().toISOString(),
+            updatedAt: ws.createdAt ?? new Date().toISOString()
+          })
+        }
+      }
+    } catch {
+      // chat-workspaces.json 不存在或解析失败,跳过
+    }
+
+    return { version: 4, conversations, groups }
   }
 
   /**
@@ -145,11 +219,11 @@ export class ChatStorage {
   }
 
   /**
-   * 获取缓存中的项目列表(不读磁盘)。
+   * 获取缓存中的分组列表(不读磁盘)。
    */
-  private getCachedProjects(): ChatProject[] {
-    if (!this.indexCache || !Array.isArray(this.indexCache.projects)) return []
-    return [...this.indexCache.projects].sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
+  private getCachedGroups(): ChatGroup[] {
+    if (!this.indexCache || !Array.isArray(this.indexCache.groups)) return []
+    return [...this.indexCache.groups].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   }
 
   async listMetas(): Promise<ChatConversationMeta[]> {
@@ -158,12 +232,12 @@ export class ChatStorage {
   }
 
   /**
-   * 列出所有项目(工作目录),按最近活动时间倒序。
-   * 项目与会话解耦:目录下所有会话被删除后项目仍保留,UI 显示「没有对话」。
+   * 列出所有分组(目录 + 工作区),按最近活动时间倒序。
+   * 分组与会话解耦:目录下所有会话被删除后分组仍保留,UI 显示「没有对话」。
    */
-  async listProjects(): Promise<ChatProject[]> {
+  async listGroups(): Promise<ChatGroup[]> {
     await this.loadIndex()
-    return this.getCachedProjects()
+    return this.getCachedGroups()
   }
 
   async getConversation(id: string): Promise<ChatConversation | undefined> {
@@ -180,8 +254,10 @@ export class ChatStorage {
     const file: ChatFile = { version: STORAGE_VERSION, conversation: normalized }
     // 会话文件写入(按 chatId 串行化,不同对话真正并行)。
     await this.enqueueConversationWrite(normalized.id, file)
-    // 绑定了工作目录 = 项目对话,顺手记录/刷新项目实体(删除会话时不删项目,见 deleteConversation)。
-    if (normalized.workingDirectory) await this.upsertProject(normalized.workingDirectory, normalized.updatedAt)
+    // 绑定了工作目录 = 项目对话,更新对应 group
+    if (normalized.workingDirectory) {
+      await this.upsertGroupForDirectory(normalized.workingDirectory, normalized.updatedAt)
+    }
     await this.upsertMeta((conv) => {
       const { messages: _messages, ...meta } = conv
       return meta
@@ -259,17 +335,73 @@ export class ChatStorage {
     await this.writeIndex(filtered)
   }
 
-  /** 记录/刷新项目实体(目录已存在则只更新 lastActiveAt)。 */
-  private async upsertProject(directory: string, lastActiveAt: string): Promise<void> {
+  // === Group 管理 ============================================================
+
+  /**
+   * 对话保存时自动创建/刷新 directory 类型 group。
+   * 如果 workingDirectory 属于已有 workspace group 的 directories,则刷新该 workspace group。
+   */
+  private async upsertGroupForDirectory(directory: string, updatedAt: string): Promise<void> {
     await this.loadIndex()
-    const projects = this.getCachedProjects()
-    const existing = projects.find((item) => item.directory === directory)
-    if (existing) existing.lastActiveAt = lastActiveAt
-    else projects.push({ directory, lastActiveAt })
-    await this.writeProjects(projects)
+    const groups = this.getCachedGroups()
+
+    // 先检查是否属于已有 workspace group
+    const wsGroup = groups.find((g) => g.chatType === 'workspace' && g.directories.includes(directory))
+    if (wsGroup) {
+      wsGroup.updatedAt = updatedAt
+      await this.writeGroups(groups)
+      return
+    }
+
+    // 否则创建/刷新 directory group
+    const existing = groups.find(
+      (g) => g.chatType === 'directory' && g.directories.length === 1 && g.directories[0] === directory
+    )
+    if (existing) {
+      existing.updatedAt = updatedAt
+    } else {
+      groups.push({
+        id: randomUUID(),
+        chatType: 'directory',
+        directories: [directory],
+        createdAt: updatedAt,
+        updatedAt
+      })
+    }
+    await this.writeGroups(groups)
   }
 
-  private async writeProjects(projects: ChatProject[]): Promise<void> {
+  /**
+   * 创建 workspace 类型 group(用户显式创建)。
+   */
+  async createGroup(name: string, directories: string[]): Promise<ChatGroup> {
+    await this.loadIndex()
+    const groups = this.getCachedGroups()
+    const now = new Date().toISOString()
+    const group: ChatGroup = {
+      id: randomUUID(),
+      chatType: 'workspace',
+      name,
+      directories,
+      createdAt: now,
+      updatedAt: now
+    }
+    groups.push(group)
+    await this.writeGroups(groups)
+    return group
+  }
+
+  /**
+   * 删除 group(用户显式删除 workspace;directory group 一般不手动删除,靠 trim 淘汰)。
+   */
+  async deleteGroup(id: string): Promise<void> {
+    await this.loadIndex()
+    const groups = this.getCachedGroups().filter((g) => g.id !== id)
+    await this.writeGroups(groups)
+  }
+
+  /** 写入 groups 到 index(保留现有 conversations)。 */
+  private async writeGroups(groups: ChatGroup[]): Promise<void> {
     await this.loadIndex()
     const index: ChatIndex = {
       version: STORAGE_VERSION,
@@ -277,7 +409,7 @@ export class ChatStorage {
         this.indexCache?.version === STORAGE_VERSION && Array.isArray(this.indexCache.conversations)
           ? this.indexCache.conversations
           : [],
-      projects
+      groups
     }
     await this.enqueueIndexWrite(index)
   }
@@ -300,25 +432,35 @@ export class ChatStorage {
     const index: ChatIndex = {
       version: STORAGE_VERSION,
       conversations,
-      projects: this.trimProjects(conversations)
+      groups: this.trimGroups(conversations)
     }
     await this.enqueueIndexWrite(index)
   }
 
   /**
-   * 项目裁剪:仍有关联会话的项目无条件保留;无会话的"空项目"按 lastActiveAt
-   * 倒序只保留最近 MAX_EMPTY_PROJECTS 个,避免随手测试的目录无限堆积。
+   * 分组裁剪:仍有关联会话的分组无条件保留;无会话的"空 directory 组"按 updatedAt
+   * 倒序只保留最近 MAX_EMPTY_GROUPS 个,避免随手测试的目录无限堆积。
+   * workspace 组全部保留(用户显式创建)。
    */
-  private trimProjects(conversations: ChatConversationMeta[]): ChatProject[] {
+  private trimGroups(conversations: ChatConversationMeta[]): ChatGroup[] {
     const activeDirs = new Set(conversations.map((item) => item.workingDirectory).filter((dir): dir is string => !!dir))
     const kept = new Set<string>()
     let empties = 0
-    for (const project of this.getCachedProjects().sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))) {
-      if (activeDirs.has(project.directory) || empties < MAX_EMPTY_PROJECTS) {
-        kept.add(project.directory)
-        if (!activeDirs.has(project.directory)) empties += 1
+    for (const group of this.getCachedGroups().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
+      // workspace 组无条件保留
+      if (group.chatType === 'workspace') {
+        kept.add(group.id)
+        continue
+      }
+      // directory 组:检查是否仍有关联会话
+      const dir = group.directories[0]
+      if (dir && activeDirs.has(dir)) {
+        kept.add(group.id)
+      } else if (empties < MAX_EMPTY_GROUPS) {
+        kept.add(group.id)
+        empties += 1
       }
     }
-    return this.getCachedProjects().filter((item) => kept.has(item.directory))
+    return this.getCachedGroups().filter((g) => kept.has(g.id))
   }
 }

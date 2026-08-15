@@ -278,12 +278,20 @@ export type ChatConversationMeta = {
 export type ChatConversation = ChatConversationMeta & { messages: StoredMessageRecord[] }
 
 /**
- * 项目(工作目录)实体 — 与具体会话解耦。目录下所有会话被删除后项目仍保留,
- * 列表显示「没有对话」,方便原地新建对话。
+ * 统一分组实体 — 替代原 ChatProject + ChatWorkspace。
+ * chatType='directory': 对话绑定工作目录时自动创建;
+ * chatType='workspace': 用户通过创建对话框显式创建(多目录逻辑分组)。
  */
-export type ChatProject = {
-  directory: string
-  lastActiveAt: string
+export type ChatGroup = {
+  id: string
+  chatType: 'directory' | 'workspace'
+  /** workspace 有值(用户命名), directory 无值(前端取 baseName(directory))。 */
+  name?: string
+  /** workspace 可多个目录, directory 只有一个。 */
+  directories: string[]
+  createdAt: string
+  /** 取组内最新对话 updatedAt, 动态更新。 */
+  updatedAt: string
 }
 
 export type ChatModelInfo = {
@@ -471,8 +479,16 @@ export type AgentApi = {
   saveRepository(profile: RepositoryProfile): Promise<void>
   deleteRepository(id: string): Promise<void>
   chooseRepositoryFolder(): Promise<RepositoryFolder | undefined>
-  /** 纯目录选择(不校验 git),用于项目对话绑定工作目录。 */
+  /** 纯目录选择(不校验 git ),用于项目对话绑定工作目录。 */
   chooseDirectory(): Promise<string | undefined>
+  /** 多目录选择(工作区创建用)。 */
+  chooseDirectories(): Promise<string[]>
+  /** 列出所有分组(目录 + 工作区)。 */
+  listChatGroups(): Promise<ChatGroup[]>
+  /** 创建工作区(workspace 类型分组)。 */
+  createChatWorkspace(name: string, directories: string[]): Promise<ChatGroup>
+  /** 删除分组。 */
+  deleteChatGroup(id: string): Promise<void>
   attachRepository(taskId: string, repositoryId: string): Promise<TaskRepository>
   detachRepository(taskId: string, repositoryId: string): Promise<void>
   updateTaskRepositoryCommands(
@@ -556,8 +572,8 @@ export type AgentApi = {
   generateAgentContent(input: AgentGenerationInput): Promise<AgentGenerationResult>
   // chat
   listChats(): Promise<ChatConversationMeta[]>
-  /** 列出所有项目(工作目录),与具体会话解耦 —— 目录下会话删光后项目仍保留。 */
-  listChatProjects(): Promise<ChatProject[]>
+  /** 列出所有分组(目录 + 工作区),与具体会话解耦 —— 目录下会话删光后分组仍保留。 */
+  listChatGroups(): Promise<ChatGroup[]>
   getChat(id: string): Promise<{ conversation: ChatConversation; messages: ChatMessage[] } | undefined>
   createChat(input?: { driverId?: ChatDriverId; model?: string; workingDirectory?: string }): Promise<ChatConversation>
   deleteChat(id: string): Promise<void>
@@ -790,8 +806,8 @@ const demoTaskRepositories = new Map<string, TaskRepository[]>(
 // 浏览器回退（vite 不带 Electron 启动时使用）的 mock 实现：任务走 demo 数据，
 // Chat 走纯内存 store —— 仅供 UI 演示，不会写本地文件。
 const memoryChats = new Map<string, ChatConversation>()
-/** 项目实体(目录 → lastActiveAt):与会话解耦,删除会话后项目仍保留。 */
-const memoryProjects = new Map<string, string>()
+/** 分组实体(mock 用):与会话解耦,删除会话后分组仍保留。 */
+const memoryGroups = new Map<string, ChatGroup>()
 const memoryListeners = new Set<(event: ChatStreamEvent) => void>()
 const memoryStreamTimers = new Map<string, number>()
 const defaultModelGroups: ChatModelGroup[] = [
@@ -936,6 +952,16 @@ export const api: AgentApi = window.agentApi ?? {
   async chooseDirectory() {
     return undefined
   },
+  async chooseDirectories() {
+    return []
+  },
+  async listChatGroups() {
+    return [...memoryGroups.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  },
+  async createChatWorkspace(_name: string, _directories: string[]) {
+    throw new Error('Electron is required')
+  },
+  async deleteChatGroup(_id: string) {},
   async attachRepository(taskId, repositoryId) {
     const profile = demoRepositories.find((item) => item.id === repositoryId)
     if (!profile) throw new Error('Repository not found')
@@ -1124,11 +1150,6 @@ export const api: AgentApi = window.agentApi ?? {
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     )
   },
-  async listChatProjects() {
-    return [...memoryProjects.entries()]
-      .map(([directory, lastActiveAt]) => ({ directory, lastActiveAt }))
-      .sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
-  },
   async getChat(id) {
     const conversation = memoryChats.get(id)
     if (!conversation) return undefined
@@ -1157,7 +1178,16 @@ export const api: AgentApi = window.agentApi ?? {
       messages: []
     }
     memoryChats.set(id, conv)
-    if (conv.workingDirectory) memoryProjects.set(conv.workingDirectory, createdAt)
+    if (conv.workingDirectory) {
+      const now2 = nowIso()
+      memoryGroups.set(`dir-${conv.workingDirectory}`, {
+        id: `dir-${conv.workingDirectory}`,
+        chatType: 'directory',
+        directories: [conv.workingDirectory],
+        createdAt: now2,
+        updatedAt: now2
+      })
+    }
     return conv
   },
   async deleteChat(id) {
@@ -1169,7 +1199,15 @@ export const api: AgentApi = window.agentApi ?? {
     if (!conv) return undefined
     conv.workingDirectory = workingDirectory
     conv.updatedAt = nowIso()
-    if (workingDirectory) memoryProjects.set(workingDirectory, conv.updatedAt)
+    if (workingDirectory) {
+      memoryGroups.set(`dir-${workingDirectory}`, {
+        id: `dir-${workingDirectory}`,
+        chatType: 'directory',
+        directories: [workingDirectory],
+        createdAt: conv.updatedAt,
+        updatedAt: conv.updatedAt
+      })
+    }
     return conv
   },
   async listChatModels() {

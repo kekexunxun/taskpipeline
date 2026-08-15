@@ -88,7 +88,7 @@ contextBridge.exposeInMainWorld('agentApi', {
   generateAgentContent: (input: unknown) => ipcRenderer.invoke('agents:generate-content', input),
   // === Chat 对话(Codex 样式) ==================================================
   listChats: () => ipcRenderer.invoke('chats:list'),
-  listChatProjects: () => ipcRenderer.invoke('chats:list-projects'),
+  listChatGroups: () => ipcRenderer.invoke('chats:list-groups'),
   getChat: (id: string) => ipcRenderer.invoke('chats:get', id),
   createChat: (model?: string) => ipcRenderer.invoke('chats:create', model),
   deleteChat: (id: string) => ipcRenderer.invoke('chats:delete', id),
@@ -99,6 +99,11 @@ contextBridge.exposeInMainWorld('agentApi', {
   startChatStream: (input: unknown) => ipcRenderer.invoke('chats:start-stream', input),
   abortChat: (input: unknown) => ipcRenderer.invoke('chats:abort', input),
   chooseDirectory: () => ipcRenderer.invoke('dialog:choose-directory'),
+  chooseDirectories: () => ipcRenderer.invoke('dialog:choose-directories'),
+  // === Chat 分组(工作区 CRUD) ==================================================
+  createChatWorkspace: (name: string, directories: string[]) =>
+    ipcRenderer.invoke('chat-groups:create-workspace', name, directories),
+  deleteChatGroup: (id: string) => ipcRenderer.invoke('chat-groups:delete', id),
   onChatStreamEvent: (callback: (event: unknown) => void) => {
     const listener = (_: unknown, event: unknown) => callback(event)
     ipcRenderer.on('chat:stream-event', listener)

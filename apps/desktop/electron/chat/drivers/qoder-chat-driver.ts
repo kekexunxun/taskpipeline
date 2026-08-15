@@ -278,8 +278,8 @@ export class QoderChatDriver implements ChatDriver {
       }
       // 辅助调用（关键词提取/记忆整理）传入 traceLabel 作 llm span 语义名。
       traceBuilder = new QoderTraceBuilder(this.tracePipeline, traceId, 'chat', 'qoder', model, input.traceLabel)
-      // 本回合发送给模型的用户输入：作首个 llm span 的 input（SDK 不一定回显 user 文本消息，
-      // 尤其一次性辅助会话——关键词提取/记忆整理的 span 此前因此看不到 Prompt）。
+      // 本回合用户输入：SDK 不一定回显 user 文本消息，尤其一次性辅助会话——
+      // 关键词提取/记忆整理的 span 此前因此看不到 Prompt。
       traceBuilder.setTurnInput(input.userInput.text)
       this.traceBuilders.set(builderKey, traceBuilder)
     }
@@ -344,6 +344,16 @@ export class QoderChatDriver implements ChatDriver {
       }
     }
     const serverNames = Object.keys(mcpServers)
+    // 构建系统提示：任务指令 + 工作区上下文（project_instructions + agents_instructions）
+    // Qoder SDK 内部管理会话历史，不会处理 history 中的 system 消息，需显式注入。
+    const systemParts: string[] = []
+    if (taskSource?.systemPrompt()) {
+      systemParts.push(taskSource.systemPrompt())
+    }
+    if (input.workspaceContext) {
+      systemParts.push(input.workspaceContext)
+    }
+    const systemPrompt = systemParts.length > 0 ? systemParts.join('\n\n') : undefined
     return {
       token,
       cwd: input.cwd ?? process.cwd(),
@@ -361,9 +371,9 @@ export class QoderChatDriver implements ChatDriver {
           /* 忽略:trace 采集失败不能影响对话 */
         }
       },
+      ...(systemPrompt ? { systemPrompt } : {}),
       ...(taskSource && mcpSetup
         ? {
-            systemPrompt: taskSource.systemPrompt(),
             allowedTools: mcpSetup.toolNames,
             maxTurns: 10
           }
