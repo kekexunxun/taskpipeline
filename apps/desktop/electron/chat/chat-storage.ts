@@ -299,11 +299,14 @@ export class ChatStorage {
   ): Promise<ChatConversation | undefined> {
     const current = await this.getConversation(id)
     if (!current) return undefined
+    // 按 id 去重：防止与 startPartialPersist 的竞态导致同一条消息被写入两次
+    // （partial persist 的 async 回调可能在 appendMessage 之前已读取了旧磁盘快照）。
+    const deduped = current.messages.filter((m) => m.id !== message.id)
     const next: ChatConversation = {
       ...current,
       ...patch,
-      messages: [...current.messages, message],
-      messageCount: current.messages.length + 1,
+      messages: [...deduped, message],
+      messageCount: deduped.length + 1,
       updatedAt: patch.updatedAt ?? new Date().toISOString()
     }
     await this.saveConversation(next)
