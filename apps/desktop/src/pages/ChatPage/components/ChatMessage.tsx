@@ -39,14 +39,36 @@ function ChatMessageImpl({
     [message.metadata?.createdAt, message.createdAt]
   )
   // 消息级复制:拼接全部 text part(助手正文 / 用户气泡都是 text part),不含思考过程与工具调用。
-  const messageText = useMemo(
-    () =>
-      message.parts
-        .filter((part): part is Extract<typeof part, { type: 'text' }> => part.type === 'text')
-        .map((part) => part.text)
-        .join('\n'),
-    [message.parts]
-  )
+  // 对齐 PartRenderer 的合并逻辑:相邻且同 parentTaskId 的 text part 直接拼接(无分隔符),
+  // 被非 text part 隔开的段落之间用双换行分隔,保证复制结果与展示一致。
+  const messageText = useMemo(() => {
+    const segments: string[] = []
+    let current = ''
+    let currentParent: string | null | undefined = undefined
+    for (const part of message.parts) {
+      if (part.type !== 'text') {
+        // 非 text part 打断连续性,把已累积的段落推入 segments
+        if (current) {
+          segments.push(current)
+          current = ''
+        }
+        currentParent = undefined
+        continue
+      }
+      const parent = part.parentTaskId ?? null
+      if (current && parent !== currentParent) {
+        // parentTaskId 变了,也算不同段落
+        segments.push(current)
+        current = part.text
+      } else {
+        // 相邻同 parent 的 text delta:直接拼接(与 PartRenderer 合并行为一致)
+        current += part.text
+      }
+      currentParent = parent
+    }
+    if (current) segments.push(current)
+    return segments.join('\n\n')
+  }, [message.parts])
   const metaStatus = message.metadata?.status
   const isAborted = metaStatus === 'aborted'
   // 双通道:流期间异常挂在 metadata(不持久化),历史消息读落盘的 errorMessage。

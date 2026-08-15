@@ -115,7 +115,7 @@ describe('ChatMessageView error display', () => {
 })
 
 describe('ChatMessageView copy action', () => {
-  it('copies the joined text parts when the copy button is clicked', async () => {
+  it('copies adjacent text parts concatenated (no separator) to match display', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })
     const message: ChatMessage = {
@@ -132,7 +132,31 @@ describe('ChatMessageView copy action', () => {
     }
     render(<ChatMessageView message={message} />)
     fireEvent.click(screen.getByRole('button', { name: '复制消息' }))
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith('第一段\n第二段'))
+    // 相邻 text part 直接拼接,与 PartRenderer 合并行为一致
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('第一段第二段'))
+  })
+
+  it('copies text parts separated by tool parts with double newline', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const message: ChatMessage = {
+      id: 'assistant-copy-separated',
+      role: 'assistant',
+      driverId: 'qoder',
+      createdAt: new Date().toISOString(),
+      raw: { kind: 'assistant', parts: [] },
+      metadata: { createdAt: new Date().toISOString(), status: 'done' },
+      parts: [
+        { driverId: 'qoder', type: 'text', text: '工具前的文字' },
+        { driverId: 'qoder', type: 'qoder.tool-use', toolCallId: 'tc-1', name: 'Read', input: {} },
+        { driverId: 'qoder', type: 'qoder.tool-result', toolCallId: 'tc-1', output: 'file content' },
+        { driverId: 'qoder', type: 'text', text: '工具后的文字' }
+      ]
+    }
+    render(<ChatMessageView message={message} />)
+    fireEvent.click(screen.getByRole('button', { name: '复制消息' }))
+    // 被 tool part 隔开的段落用双换行分隔
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('工具前的文字\n\n工具后的文字'))
   })
 
   it('does not render a copy button when the message has no text parts', () => {
