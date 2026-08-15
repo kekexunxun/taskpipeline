@@ -177,7 +177,7 @@ export function ChatHistoryList({
                               <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={cg.name}>
                                 {cg.name}
                               </span>
-                              <span className="shrink-0 text-[10px] text-muted-foreground">{group.items.length}</span>
+                              {/* <span className="shrink-0 text-[10px] text-muted-foreground">{group.items.length}</span> */}
                               <Button
                                 variant="ghost"
                                 size="icon-sm"
@@ -218,7 +218,7 @@ export function ChatHistoryList({
                               >
                                 {baseName(cg.directories[0]!)}
                               </span>
-                              <span className="shrink-0 text-[10px] text-muted-foreground">{group.items.length}</span>
+                              {/* <span className="shrink-0 text-[10px] text-muted-foreground">{group.items.length}</span> */}
                               <Button
                                 variant="ghost"
                                 size="icon-sm"
@@ -250,8 +250,10 @@ export function ChatHistoryList({
                         </>
                       ) : (
                         <>
-                          <span className="text-xs font-semibold text-muted-foreground">普通对话</span>
-                          <span className="ml-auto text-[10px] text-muted-foreground/70">{group.items.length}</span>
+                          <span className="min-w-0 flex-1 truncate text-xs font-semibold text-muted-foreground">
+                            普通对话
+                          </span>
+                          {/* <span className="ml-auto text-[10px] text-muted-foreground/70">{group.items.length}</span> */}
                           <Button
                             variant="ghost"
                             size="icon-sm"
