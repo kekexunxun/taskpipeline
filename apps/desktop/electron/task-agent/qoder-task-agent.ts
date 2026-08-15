@@ -162,7 +162,7 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
   /** 阶段产物按 (taskId, phase) 隔离:driver 是进程级单例,不同任务可并发。 */
   private readonly buffers = new Map<string, PhaseBuffers>()
   /** 回合上下文按 taskId 隔离(onMessage 钩子读 recordText 用;不同任务可并发,不能用单字段)。 */
-  private readonly turnCtxByTaskId = new Map<string, { recordText: boolean }>()
+  private readonly turnCtxByTaskId = new Map<string, { recordText: boolean; phase: TaskAgentPhase }>()
   /** 已开启任务 trace 的 taskId（一次任务执行 = 一个 Trace，只 begin 一次）。 */
   private readonly traceStarted = new Set<string>()
   /** taskId → Qoder span 转换器。 */
@@ -473,6 +473,7 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
         if (ctx) {
           recordQoderMessage(this.deps.store, task.id, message, {
             recordText: ctx.recordText,
+            pipelinePhase: ctx.phase,
             addTaskEvent: this.deps.addTaskEvent,
             emitPi: this.deps.emitPi
           })
@@ -513,7 +514,7 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     // 避免发出 agent_start 后 agent_end 永远不来导致事件不配对。
     signal?.throwIfAborted()
 
-    this.turnCtxByTaskId.set(task.id, { recordText })
+    this.turnCtxByTaskId.set(task.id, { recordText, phase })
     this.emit({ type: 'agent_start', phase })
     // 任务 trace：惰性开启（一次任务 = 一个 Trace）+ 阶段 agent.run span。
     // 阶段实例按时间追加：首跑与恢复/续接/auto-fix 重跑各自产生一个阶段 span（同 phase 多实例），

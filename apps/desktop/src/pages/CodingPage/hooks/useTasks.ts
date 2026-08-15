@@ -1,25 +1,219 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AgentEvent, Task, TaskCard } from '@task-pipeline/core'
-import { api, type TaskDetail } from '../../../api'
+import { api, type DriverPart, type TaskDetail } from '../../../api'
 import { useFeedback } from '../../../hooks/useGlobalFeedback'
+import { isPlanningEvent } from '../components/planningEvent'
 import type { ChatApprovalRequest } from '@/components/ToolApprovalCard'
+import { subtaskMetaOf, isHiddenTimelineEvent } from '@/components/SubTaskGroup'
 
-export type TimelineItem =
-  | AgentEvent
-  | {
-      id: string
-      taskId: string
-      kind: AgentEvent['kind']
-      title: string
-      detail?: string
-      createdAt: string
+/**
+ * 把 AgentEvent[] 一次性转为 DriverPart[] —— 供 PartRenderer 直接渲染。
+ * 内部私有函数，不对外暴露。
+ */
+function eventsToDriverParts(events: AgentEvent[]): DriverPart[] {
+  const sorted = [...events].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
+  const parts: DriverPart[] = []
+
+  // 预扫描：找出有 pipelineStage 但没有 task_started 的子任务组，
+  // 为它们合成 subtask-start part，让 PartRenderer 能显示 pipeline 阶段名。
+  const hasTaskStarted = new Set<string>()
+  const pipelineStageByGroup = new Map<string, string>()
+  for (const event of sorted) {
+    const meta = subtaskMetaOf(event)
+    const parentTaskId = event.parentTaskId ?? meta.parentTaskId
+    const payload =
+      event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+        ? (event.payload as Record<string, unknown>)
+        : undefined
+    if (meta.sdkSubtype === 'task_started' && parentTaskId) {
+      hasTaskStarted.add(parentTaskId)
     }
+    if (parentTaskId && !hasTaskStarted.has(parentTaskId)) {
+      const stage = (payload?.pipelineStage ?? meta.description) as string | undefined
+      if (stage && !pipelineStageByGroup.has(parentTaskId)) {
+        pipelineStageByGroup.set(parentTaskId, stage)
+      }
+    }
+  }
+  // 为缺少 task_started 但有 pipelineStage 的子任务组合成 subtask-start
+  for (const [groupId, stage] of pipelineStageByGroup) {
+    if (!hasTaskStarted.has(groupId)) {
+      parts.push({
+        driverId: 'qoder',
+        type: 'qoder.subtask-start',
+        taskId: groupId,
+        parentTaskId: groupId,
+        description: stage
+      })
+    }
+  }
+
+  for (const event of sorted) {
+    if (isHiddenTimelineEvent(event.title)) continue
+    if (isPlanningEvent(event)) continue
+    const meta = subtaskMetaOf(event)
+    const parentTaskId = event.parentTaskId ?? meta.parentTaskId
+    const payload =
+      event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+        ? (event.payload as Record<string, unknown>)
+        : undefined
+    // 用户跟进消息（send() 注入的 title='你'）
+    if (event.title === '你') {
+      if (event.detail) parts.push({ driverId: 'qoder', type: 'text', text: event.detail })
+      continue
+    }
+    // 子任务控制事件
+    if (meta.sdkSubtype === 'task_started') {
+      parts.push({
+        driverId: 'qoder',
+        type: 'qoder.subtask-start',
+        taskId: event.subtaskId ?? meta.subtaskId ?? event.taskId,
+        parentTaskId: parentTaskId ?? event.subtaskId ?? meta.subtaskId ?? '',
+        taskType: meta.taskType,
+        subagentType: meta.subagentType,
+        description: meta.description,
+        toolUseId: meta.toolUseId,
+        stageId: meta.stageId
+      })
+      continue
+    }
+    if (meta.sdkSubtype === 'task_progress') {
+      parts.push({
+        driverId: 'qoder',
+        type: 'qoder.subtask-progress',
+        taskId: event.subtaskId ?? meta.subtaskId ?? event.taskId,
+        parentTaskId: parentTaskId ?? event.subtaskId ?? meta.subtaskId ?? '',
+        description: meta.description,
+        lastToolName: meta.lastToolName,
+        usage: meta.usage
+      })
+      continue
+    }
+    if (meta.sdkSubtype === 'task_notification') {
+      parts.push({
+        driverId: 'qoder',
+        type: 'qoder.subtask-end',
+        taskId: event.subtaskId ?? meta.subtaskId ?? event.taskId,
+        parentTaskId: parentTaskId ?? event.subtaskId ?? meta.subtaskId ?? '',
+        status: meta.status ?? 'unknown',
+        summary: meta.description,
+        usage: meta.usage
+      })
+      continue
+    }
+    // 工具事件
+    if (event.kind === 'tool') {
+      const phase = payload?.phase as string | undefined
+      const toolUseId = payload?.toolUseId as string | undefined
+      const toolName = payload?.toolName as string | undefined
+      if (phase === 'use') {
+        if (!toolUseId) {
+          // 无 toolUseId 的老数据:降级为 text
+          if (event.detail) parts.push({ driverId: 'qoder', type: 'text', text: event.detail, parentTaskId })
+          continue
+        }
+        parts.push({
+          driverId: 'qoder',
+          type: 'qoder.tool-use',
+          toolCallId: toolUseId,
+          name: toolName ?? event.title,
+          input: payload?.input ?? event.detail,
+          parentTaskId
+        })
+      } else if (phase === 'result') {
+        if (!toolUseId) {
+          if (event.detail) parts.push({ driverId: 'qoder', type: 'text', text: event.detail, parentTaskId })
+          continue
+        }
+        parts.push({
+          driverId: 'qoder',
+          type: 'qoder.tool-result',
+          toolCallId: toolUseId,
+          output: payload?.output ?? event.detail,
+          isError: payload?.isError === true,
+          parentTaskId
+        })
+      } else {
+        // 无 phase 的老数据:detail 当文本
+        if (event.detail) parts.push({ driverId: 'qoder', type: 'text', text: event.detail, parentTaskId })
+      }
+      continue
+    }
+    // 消息事件
+    if (event.kind === 'message') {
+      // thinking 独立 part
+      const thinking = payload?.thinking as string | undefined
+      if (thinking) {
+        parts.push({ driverId: 'qoder', type: 'qoder.thinking', text: thinking, parentTaskId })
+      }
+      // 消息正文
+      if (event.detail) {
+        parts.push({ driverId: 'qoder', type: 'text', text: event.detail, parentTaskId })
+      }
+      continue
+    }
+    // review / error / 其它:格式化文本
+    if (event.kind === 'review') {
+      const comments = payload?.comments as Array<{ severity?: string; path?: string; message?: string }> | undefined
+      const text = comments
+        ? comments.map((c) => `[${c.severity ?? 'info'}] ${c.path ?? ''}: ${c.message ?? ''}`).join('\n')
+        : (event.detail ?? event.title)
+      if (text) parts.push({ driverId: 'qoder', type: 'text', text, parentTaskId })
+      continue
+    }
+    if (event.kind === 'error') {
+      const text = [event.title, event.detail].filter(Boolean).join(': ')
+      if (text) parts.push({ driverId: 'qoder', type: 'text', text, parentTaskId })
+      continue
+    }
+    // 兜底:有 detail 就作文本
+    if (event.detail) {
+      parts.push({ driverId: 'qoder', type: 'text', text: event.detail, parentTaskId })
+    }
+  }
+
+  // 后处理：基于时间范围推断子任务间的嵌套关系。
+  // 后端注入的 stageId 统一指向主任务 taskId，所有子任务组都尝试嵌套进同一个主任务组（平级）。
+  // 这里用时间范围覆盖来细化：如果子任务 B 的 subtask-start 落在子任务 A 的活跃时间窗口内，
+  // 说明 B 是 A 的内部子任务，B.stageId 应指向 A 而非主任务。
+  const subtaskStarts = parts
+    .map((p, i) => (p.type === 'qoder.subtask-start' ? { part: p, index: i } : null))
+    .filter((x): x is { part: Extract<DriverPart, { type: 'qoder.subtask-start' }>; index: number } => x !== null)
+  if (subtaskStarts.length > 1) {
+    // 每个子任务的时间窗口：[subtask-start 的 index, 下一个 subtask-start 的 index - 1 或末尾]
+    const rangeByTaskId = new Map<string, { start: number; end: number }>()
+    for (let i = 0; i < subtaskStarts.length; i++) {
+      const { part, index } = subtaskStarts[i]!
+      const end = i + 1 < subtaskStarts.length ? subtaskStarts[i + 1]!.index - 1 : parts.length - 1
+      rangeByTaskId.set(part.taskId, { start: index, end })
+    }
+    // 对每个 subtask-start，找包含它的最内层父子任务
+    for (const { part, index } of subtaskStarts) {
+      let bestParent: { taskId: string; range: { start: number; end: number } } | undefined
+      for (const [taskId, range] of rangeByTaskId) {
+        if (taskId === part.taskId) continue
+        // part 的 index 落在 [range.start, range.end] 内，且不是自己
+        if (index >= range.start && index <= range.end) {
+          if (!bestParent || range.end - range.start < bestParent.range.end - bestParent.range.start) {
+            bestParent = { taskId, range }
+          }
+        }
+      }
+      if (bestParent) {
+        part.stageId = bestParent.taskId
+      }
+    }
+  }
+
+  return parts
+}
 
 export type CodingPageState = {
   tasks: TaskCard[]
   selectedId?: string
   detail?: TaskDetail
-  liveEvents: TimelineItem[]
+  /** 合并后的 DriverPart[]（历史 events + 流式 live parts），直接喂给 PartRenderer。 */
+  parts: DriverPart[]
   prompt: string
   running: boolean
   sending: boolean
@@ -44,7 +238,8 @@ export function useTasks(): CodingPageState {
   const [tasks, setTasks] = useState<TaskCard[]>([])
   const [selectedId, setSelectedId] = useState<string>()
   const [detail, setDetail] = useState<TaskDetail>()
-  const [liveEvents, setLiveEvents] = useState<TimelineItem[]>([])
+  /** 流式 live parts（运行时追加，切换任务/结束时清空）。 */
+  const [liveParts, setLiveParts] = useState<DriverPart[]>([])
   const [prompt, setPrompt] = useState('')
   const [running, setRunning] = useState(false)
   const [sending, setSending] = useState(false)
@@ -57,7 +252,6 @@ export function useTasks(): CodingPageState {
     pendingApprovalsRef.current = pendingApprovals
   }, [pendingApprovals])
 
-  const liveMessageId = useRef<string | undefined>(undefined)
   const planningRef = useRef(false)
   const notifiedPlanRef = useRef<string | undefined>(undefined)
   const pendingTaskIdRef = useRef<string | undefined>(undefined)
@@ -180,7 +374,6 @@ export function useTasks(): CodingPageState {
         setSending(false)
         setRunning(true)
         planningRef.current = event.phase === 'planning'
-        liveMessageId.current = crypto.randomUUID()
       }
       if (event.type === 'task_changed' || event.type === 'trace_span') {
         const taskId = selectedId
@@ -195,38 +388,36 @@ export function useTasks(): CodingPageState {
       if (['agent_end', 'agent_error', 'process_exit'].includes(event.type)) {
         setSending(false)
         setRunning(false)
-        liveMessageId.current = undefined
         // 任务会话结束：该任务未确认的 HITL 请求默认拒绝（内联卡片清理）。
         if (typeof event.taskId === 'string') flushApprovals(event.taskId)
         // 保留 task:ui-clear：UiRequestDialog 的 select/input/editor 兜底队列仍靠它清空。
         window.dispatchEvent(new CustomEvent('task:ui-clear'))
-        if (event.phase === 'planning' || planningRef.current) setLiveEvents([])
+        if (event.phase === 'planning' || planningRef.current) setLiveParts([])
         planningRef.current = false
         void refresh()
         if (selectedId) void api.getTask(selectedId).then(acceptDetail)
       }
-      if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
+      if (event.type === 'message_update') {
         if (event.phase === 'planning' || planningRef.current) return
-        const id = (liveMessageId.current ??= crypto.randomUUID())
-        setLiveEvents((items) => {
-          const last = items[items.length - 1]
-          if (last?.id === id)
-            return [
-              ...items.slice(0, -1),
-              { ...last, detail: `${last.detail ?? ''}${event.assistantMessageEvent.delta}` }
-            ]
-          return [
-            ...items,
-            {
-              id,
-              taskId: selectedId ?? '',
-              kind: 'message',
-              title: 'AI',
-              detail: event.assistantMessageEvent.delta,
-              createdAt: new Date().toISOString()
+        const update = event.assistantMessageEvent as { type?: string; delta?: string; thinking?: string } | undefined
+        if (update?.type === 'text_delta' && update.delta) {
+          setLiveParts((parts) => {
+            const last = parts[parts.length - 1]
+            // 合并相邻同类型 text part（流式 text_delta 按 token 粒度推送）
+            if (last && last.type === 'text' && last.driverId === 'qoder') {
+              return [...parts.slice(0, -1), { ...last, text: `${last.text}${update.delta}` } as DriverPart]
             }
-          ]
-        })
+            return [...parts, { driverId: 'qoder', type: 'text', text: update.delta } as DriverPart]
+          })
+        } else if (update?.type === 'thinking_delta' && update.thinking) {
+          setLiveParts((parts) => {
+            const last = parts[parts.length - 1]
+            if (last && last.type === 'qoder.thinking' && last.driverId === 'qoder') {
+              return [...parts.slice(0, -1), { ...last, text: `${last.text}${update.thinking}` } as DriverPart]
+            }
+            return [...parts, { driverId: 'qoder', type: 'qoder.thinking', text: update.thinking } as DriverPart]
+          })
+        }
       }
     })
     return () => {
@@ -235,9 +426,9 @@ export function useTasks(): CodingPageState {
     }
   }, [selectedId, refresh, acceptDetail, flushApprovals, pushApproval])
 
-  // 切换任务时清空 liveEvents 并加载详情（不清空 detail，避免闪烁）
+  // 切换任务时清空 liveParts 并加载详情（不清空 detail，避免闪烁）
   useEffect(() => {
-    setLiveEvents([])
+    setLiveParts([])
     setSending(false)
     if (selectedId) {
       pendingTaskIdRef.current = selectedId
@@ -268,17 +459,7 @@ export function useTasks(): CodingPageState {
     const text = prompt
     setPrompt('')
     setSending(true)
-    setLiveEvents((items) => [
-      ...items,
-      {
-        id: crypto.randomUUID(),
-        taskId: selected.id,
-        kind: 'message',
-        title: '你',
-        detail: text,
-        createdAt: new Date().toISOString()
-      }
-    ])
+    setLiveParts((parts) => [...parts, { driverId: 'qoder', type: 'text', text } as DriverPart])
     try {
       await run(() => api.sendTaskMessage(selected.id, text))
     } finally {
@@ -290,7 +471,10 @@ export function useTasks(): CodingPageState {
     tasks,
     selectedId,
     detail,
-    liveEvents,
+    parts: useMemo(() => {
+      const stored = eventsToDriverParts([...(detail?.events ?? []), ...(detail?.openAiEvents ?? [])] as AgentEvent[])
+      return [...stored, ...liveParts]
+    }, [detail?.events, detail?.openAiEvents, liveParts]),
     prompt,
     running,
     sending,

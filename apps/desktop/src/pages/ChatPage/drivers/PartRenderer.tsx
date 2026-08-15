@@ -28,7 +28,8 @@ import {
   subtaskStatusOf,
   toolInputSummary,
   type ParentedItem,
-  type SubTaskProgressSample
+  type SubTaskProgressSample,
+  type SubTaskStatus
 } from '@/components/SubTaskGroup'
 
 /**
@@ -42,7 +43,7 @@ import {
  */
 function parentedPartOf(part: DriverPart): ParentedItem {
   if (part.type === 'qoder.subtask-start') {
-    return { parentTaskId: part.parentTaskId, taskId: part.taskId, sdkSubtype: 'task_started' }
+    return { parentTaskId: part.parentTaskId, taskId: part.taskId, sdkSubtype: 'task_started', stageId: part.stageId }
   }
   if (part.type === 'qoder.subtask-progress') {
     return { parentTaskId: part.parentTaskId, taskId: part.taskId, sdkSubtype: 'task_progress' }
@@ -93,12 +94,12 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
   // 合并相邻的同类型流式增量 part:
   //  - qoder.thinking:SDK 按 thinking_delta 拆分,每条渲染一个折叠块会刷屏(8+ 个空标题块);
   //  - text:SDK 按 text_delta 拆分,每条渲染一个独立 markdown 块会让正文分段、代码块/列表断裂。
-  // 合并后只保留一个「思考过程」折叠块、一个完整正文段。
+  // 合并后只保留一个「深度思考」折叠块、一个完整正文段。
   const mergedParts = useMemo(() => {
     const out: DriverPart[] = []
     for (const part of parts) {
       const last = out[out.length - 1]
-      // qoder.thinking / openai.thinking 都是流式增量拆分,合并成单个「思考过程」折叠块,
+      // qoder.thinking / openai.thinking 都是流式增量拆分,合并成单个「深度思考」折叠块,
       // 避免流式渲染时刷屏(8+ 个空标题块)。
       // 两者的 delta 都是 token 粒度(qoder 的 thinking_delta 与 openai 的 reasoning-delta
       // 一样逐词推送),一律直接拼接;若用 \n 分隔会把每个词拆成独立一行,思考文案被拆碎。
@@ -250,53 +251,88 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
     return null
   }
 
-  return (
-    <>
-      {blocks.map((block, index) => {
-        if (block.kind === 'main') {
-          const part = byParented.get(block.item)
-          if (!part) return null
-          return <Fragment key={`m-${index}`}>{renderSinglePart(part, `p-${index}`)}</Fragment>
+  // 收集所有顶层 + 嵌套 subtask-start 的顺序，用于判断各组独立状态：
+  // 管道阶段是顺序执行的，如果后面有组启动了，前面的组即使没有 subtask-end 也算完成。
+  const allGroupStarts: { block: (typeof blocks)[number] }[] = []
+  function collectGroups(blks: typeof blocks) {
+    for (const b of blks) {
+      if (b.kind === 'group') {
+        allGroupStarts.push({ block: b })
+        if (b.nested?.length) collectGroups(b.nested)
+      }
+    }
+  }
+  collectGroups(blocks)
+
+  const renderBlock = (block: (typeof blocks)[number], index: number): ReactNode => {
+    if (block.kind === 'main') {
+      const part = byParented.get(block.item)
+      if (!part) return null
+      return <Fragment key={`m-${index}`}>{renderSinglePart(part, `p-${index}`)}</Fragment>
+    }
+    const headerPart = block.header ? byParented.get(block.header) : undefined
+    const startPart = headerPart?.type === 'qoder.subtask-start' ? headerPart : undefined
+    const childParts = block.children.map((p) => byParented.get(p)).filter((p): p is DriverPart => Boolean(p))
+    // 找收尾(子任务最后一个 subtask-end)→ 决定 header 状态徽章
+    const endPart = childParts.find(
+      (p): p is Extract<DriverPart, { type: 'qoder.subtask-end' }> => p.type === 'qoder.subtask-end'
+    )
+    // 各组独立状态：有 subtask-end 取真实状态；否则看是否有后续组已启动（管道顺序执行）
+    let status: SubTaskStatus
+    if (endPart) {
+      status = subtaskStatusOf({ payload: { status: endPart.status } })
+    } else if (!isStreaming) {
+      status = 'completed'
+    } else {
+      // 任务执行中：如果后面有组启动了 subtask-start，本组已完成；否则本组是当前活跃组
+      const myIdx = allGroupStarts.findIndex((g) => g.block === block)
+      const laterStarted = allGroupStarts.slice(myIdx + 1).some((g) => {
+        if (g.block.kind !== 'group') return false
+        const hp = g.block.header ? byParented.get(g.block.header) : undefined
+        return hp?.type === 'qoder.subtask-start'
+      })
+      status = laterStarted ? 'completed' : 'running'
+    }
+    const samples: SubTaskProgressSample[] = childParts
+      .filter((p): p is Extract<DriverPart, { type: 'qoder.subtask-progress' }> => p.type === 'qoder.subtask-progress')
+      .map((p) => ({
+        lastToolName: p.lastToolName,
+        description: p.description,
+        usage: p.usage as SubTaskProgressSample['usage']
+      }))
+    const aggregate = aggregateSubTaskProgress(samples)
+    const absorbed = absorbedOutputByTaskId.get(block.taskId)
+    // 嵌套子组的 header 会被提升为独立的子任务卡，不应计入本组可见操作数
+    const nestedTaskIds = new Set(block.nested?.filter((n) => n.kind === 'group').map((n) => n.taskId) ?? [])
+    const visibleChildren = childParts.filter(
+      (p) => !isSubtaskControlPart(p) && !(p.type === 'qoder.subtask-start' && nestedTaskIds.has(p.taskId))
+    )
+    // 停止对话时,Agent 可能已启动(subtask-start)但未产出任何内容;
+    // 没有可见子项且没有吸收输出时不展示该 Agent 卡片。
+    if (visibleChildren.length === 0 && !absorbed && (!block.nested || block.nested.length === 0)) return null
+
+    return (
+      <SubTaskGroup
+        key={`g-${block.taskId}-${index}`}
+        taskId={block.taskId}
+        status={status}
+        header={
+          <SubTaskHeader
+            description={startPart?.description}
+            taskType={startPart?.taskType}
+            subagentType={startPart?.subagentType}
+            childCount={visibleChildren.length}
+            status={status}
+          />
         }
-        const headerPart = block.header ? byParented.get(block.header) : undefined
-        const startPart = headerPart?.type === 'qoder.subtask-start' ? headerPart : undefined
-        const childParts = block.children.map((p) => byParented.get(p)).filter((p): p is DriverPart => Boolean(p))
-        // 找收尾(子任务最后一个 subtask-end)→ 决定 header 状态徽章
-        const endPart = childParts.find(
-          (p): p is Extract<DriverPart, { type: 'qoder.subtask-end' }> => p.type === 'qoder.subtask-end'
-        )
-        const status = endPart
-          ? subtaskStatusOf({ payload: { status: endPart.status } })
-          : startPart
-            ? 'running'
-            : 'unknown'
-        const samples: SubTaskProgressSample[] = childParts
-          .filter(
-            (p): p is Extract<DriverPart, { type: 'qoder.subtask-progress' }> => p.type === 'qoder.subtask-progress'
-          )
-          .map((p) => ({
-            lastToolName: p.lastToolName,
-            description: p.description,
-            usage: p.usage as SubTaskProgressSample['usage']
-          }))
-        const aggregate = aggregateSubTaskProgress(samples)
-        const absorbed = absorbedOutputByTaskId.get(block.taskId)
-        const visibleChildren = childParts.filter((p) => !isSubtaskControlPart(p))
-        // 停止对话时,Agent 可能已启动(subtask-start)但未产出任何内容;
-        // 没有可见子项且没有吸收输出时不展示该 Agent 卡片。
-        if (visibleChildren.length === 0 && !absorbed) return null
-        return (
-          <SubTaskGroup
-            key={`g-${block.taskId}-${index}`}
-            taskId={block.taskId}
-            header={<SubTaskHeader childCount={visibleChildren.length} status={status} />}
-          >
-            <SubTaskProgressSummary aggregate={aggregate} running={status === 'running'} />
-            {visibleChildren.map((part, i) => renderSinglePart(part, `${block.taskId}-${i}`))}
-            <SubTaskResultBlock output={absorbed?.output} isError={absorbed?.isError} />
-          </SubTaskGroup>
-        )
-      })}
-    </>
-  )
+      >
+        <SubTaskProgressSummary aggregate={aggregate} running={status === 'running'} />
+        {visibleChildren.map((part, i) => renderSinglePart(part, `${block.taskId}-${i}`))}
+        {block.nested?.map((nested, ni) => renderBlock(nested, ni))}
+        <SubTaskResultBlock output={absorbed?.output} isError={absorbed?.isError} />
+      </SubTaskGroup>
+    )
+  }
+
+  return <>{blocks.map((block, index) => renderBlock(block, index))}</>
 }

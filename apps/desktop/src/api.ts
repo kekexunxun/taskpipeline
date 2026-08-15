@@ -164,6 +164,7 @@ export type DriverPart =
       subagentType?: string
       description?: string
       toolUseId?: string
+      stageId?: string
     }
   | {
       driverId: 'qoder'

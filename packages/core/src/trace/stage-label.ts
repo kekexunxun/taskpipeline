@@ -29,17 +29,17 @@ export function agentStageLabel(span: Pick<AgentSpan, 'type' | 'meta'>): string 
     case 'chat':
       return '对话生成'
     case 'planning':
-      return 'Plan'
+      return '计划生成'
     case 'implementation':
       if (trigger === 'resume') return '执行（续接）'
       if (trigger === 'followup') return '执行（追加指令）'
-      return round >= 1 ? `ReExec #${round}` : 'Exec'
+      return round >= 1 ? `重新执行 #${round}` : '代码实现'
     case 'review':
-      return 'CodeReview'
+      return '代码审查'
     case 'test_generation':
-      return 'TestCase'
+      return '测试生成'
     case 'finish':
-      return 'Finish'
+      return '完成'
     case 'memory':
       return '记忆整理'
     default:

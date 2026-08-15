@@ -1,7 +1,6 @@
 import { useMemo } from 'react'
 import { LoaderCircleIcon, MessageSquareTextIcon } from 'lucide-react'
-import type { Task } from '@task-pipeline/core'
-import { normalizeTimelineItems, type TimelineItem } from './Timeline'
+import type { AgentEvent, Task } from '@task-pipeline/core'
 import { readablePlanContent } from './planContent'
 import { MessageResponse } from '@/components/ai-elements/message'
 import { cn } from '@/lib/utils'
@@ -18,10 +17,13 @@ export function PlanSection({
 }: {
   task: Task
   compact?: boolean
-  events?: TimelineItem[]
+  events?: AgentEvent[]
 }) {
   const planFeedback = useMemo(
-    () => normalizeTimelineItems(events).filter((item) => item.title.trim() === '计划调整意见'),
+    () =>
+      [...events]
+        .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
+        .filter((item) => item.title.trim() === '计划调整意见'),
     [events]
   )
   const revision = task.planRevision ?? 0

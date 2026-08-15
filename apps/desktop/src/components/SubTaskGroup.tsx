@@ -16,7 +16,7 @@
  *   渲染时由调用方决定是否把 progress 聚合到 header 还是逐条展示。
  */
 
-import { useState, type ReactNode } from 'react'
+import { useState, useEffect, type ReactNode } from 'react'
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -178,8 +178,14 @@ export function interleaveTimeline<T extends ParentedItem>(items: T[]): Timeline
   const nestedByStage = new Map<string, Tagged[]>()
   const topLevel: Tagged[] = []
   for (const t of tagged) {
-    const stageId = t.block.kind === 'group' ? t.block.header?.stageId : undefined
-    if (stageId && stageOfGroup.has(stageId)) {
+    if (t.block.kind !== 'group') {
+      topLevel.push(t)
+      continue
+    }
+    const stageId = t.block.header?.stageId
+    // 防自指：group 的 stageId 指向自己的 taskId 时（例如主任务组的 header 恰好也带 stageId = mainTaskId），
+    // 留在顶层而非嵌套进自己。
+    if (stageId && stageId !== t.block.taskId && stageOfGroup.has(stageId)) {
       const list = nestedByStage.get(stageId)
       if (list) list.push(t)
       else nestedByStage.set(stageId, [t])
@@ -241,12 +247,17 @@ export function subtaskMetaOf(record: { title?: string; detail?: string; payload
     if (typeof payload.toolUseId === 'string' && payload.toolUseId) meta.toolUseId = payload.toolUseId
     if (payload.usage) meta.usage = payload.usage
     if (typeof payload.lastToolName === 'string' && payload.lastToolName) meta.lastToolName = payload.lastToolName
-    // description 兑底:SDK 任务消息上的进度摘要可能叫 description 也可能叫 summary,同步识别以免丢内容。
-    const payloadText =
-      (typeof payload.description === 'string' && payload.description) ||
-      (typeof payload.summary === 'string' && payload.summary) ||
-      undefined
-    if (payloadText) meta.description = payloadText
+    // pipeline 阶段名优先：driver 注入的阶段名是规范显示名，SDK description 仅作兆底
+    if (typeof payload.pipelineStage === 'string' && payload.pipelineStage) {
+      meta.description = payload.pipelineStage
+    } else {
+      // description 兑底:SDK 任务消息上的进度摘要可能叫 description 也可能叫 summary,同步识别以免丢内容。
+      const payloadText =
+        (typeof payload.description === 'string' && payload.description) ||
+        (typeof payload.summary === 'string' && payload.summary) ||
+        undefined
+      if (payloadText) meta.description = payloadText
+    }
   }
   // 历史数据兑底:log.ts 早期版本把 task_* 整包 JSON 存在 detail 里、payload 留空。
   if (!meta.parentTaskId && !meta.sdkSubtype && record.title?.startsWith('Qoder task_')) {
@@ -282,7 +293,7 @@ export function subtaskMetaOf(record: { title?: string; detail?: string; payload
 }
 
 /** 子任务收尾状态对应的视觉: status 字段(completed/failed/stopped) + 颜色。 */
-type SubTaskStatus = 'completed' | 'failed' | 'stopped' | 'running' | 'unknown'
+export type SubTaskStatus = 'completed' | 'failed' | 'stopped' | 'running' | 'unknown'
 
 /** 从收尾条目(task_notification)提取 status。 */
 export function subtaskStatusOf(entry: { payload?: unknown } | undefined): SubTaskStatus {
@@ -346,6 +357,7 @@ export function SubTaskGroup({
   header,
   createdAt,
   defaultOpen = false,
+  status,
   children,
   className
 }: {
@@ -353,10 +365,17 @@ export function SubTaskGroup({
   header: ReactNode
   createdAt?: string
   defaultOpen?: boolean
+  /** 传入状态后，执行中自动展开、完成后自动收缩 */
+  status?: SubTaskStatus
   children: ReactNode
   className?: string
 }) {
-  const [open, setOpen] = useState(defaultOpen)
+  const [open, setOpen] = useState(defaultOpen || status === 'running')
+  // 状态变化时自动调整展开/收缩：执行中 → 展开，完成/失败 → 收缩
+  useEffect(() => {
+    if (!status || status === 'unknown') return
+    setOpen(status === 'running')
+  }, [status])
   return (
     // <article className={cn('mb-4 grid grid-cols-[26px_minmax(0,1fr)] gap-2', className)}>
     //   <div className="grid size-6 place-items-center rounded-full border bg-muted text-muted-foreground">
@@ -395,7 +414,7 @@ export function SubTaskGroup({
 /** 子任务 header 视觉块,给 trace 详情页和 timeline 共用。 */
 export function SubTaskHeader({
   description,
-  // taskType,
+  taskType,
   subagentType,
   childCount,
   status
@@ -403,33 +422,24 @@ export function SubTaskHeader({
   description?: string
   taskType?: string
   subagentType?: string
-  /** 可见子操作数量,提供后展示「已处理 n个操作」取代 description + subagentType。 */
+  /** 可见子操作数量,提供后在 description 后追加「已处理 n个操作」。 */
   childCount?: number
   status: SubTaskStatus
 }) {
-  // 有 childCount 时展示操作统计,取代 description + type 徽章
-  if (childCount !== undefined) {
-    return (
-      <span className="inline-flex w-full min-w-0 items-center gap-1.5">
-        <span className="min-w-0 truncate text-xs text-muted-foreground">
-          已处理 <span className="font-medium text-foreground/80">{childCount}</span> 个操作
-        </span>
-        <StatusBadge status={status} />
-      </span>
-    )
-  }
+  console.log('SubTaskHeader', { description, taskType, subagentType, childCount, status })
+
   return (
     <span className="inline-flex w-full min-w-0 items-center gap-1.5">
       <span className="min-w-0 truncate text-xs font-medium text-foreground/80">{description || '子任务'}</span>
-      {/* {taskType && (
-        <Badge variant="outline" className="shrink-0 px-1 py-0 font-mono text-[10px]">
-          {taskType}
-        </Badge>
-      )} */}
       {subagentType && (
         <Badge variant="outline" className="shrink-0 px-1 py-0 font-mono text-[10px]">
           {subagentType}
         </Badge>
+      )}
+      {childCount !== undefined && (
+        <span className="shrink-0 text-xs text-muted-foreground">
+          已处理 <span className="font-medium text-foreground/80">{childCount}</span> 个操作
+        </span>
       )}
       <StatusBadge status={status} />
     </span>

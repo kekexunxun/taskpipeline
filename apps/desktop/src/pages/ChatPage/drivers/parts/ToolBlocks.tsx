@@ -364,6 +364,8 @@ export function McpToolBlock({
   // mcp__server__toolname → server:toolname
   const displayName = name.replace(/^mcp__/, '').replace('__', ':') || name
 
+  // TODO 部分MCP工具是Qoder是用来查找本地文件的，后面逐步调整为对应的展示格式
+
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="not-prose w-full">
       <CollapsibleTrigger
@@ -397,7 +399,7 @@ export function McpToolBlock({
             {inputJson && (
               <div className="mb-2">
                 <div className="mb-1 text-[10px]! font-medium text-muted-foreground/50">参数</div>
-                <pre className="m-0 font-mono text-xs leading-4 break-words whitespace-pre-wrap text-muted-foreground/60">
+                <pre className="m-0 font-mono text-[10px] leading-4 break-words whitespace-pre-wrap text-muted-foreground/60">
                   {inputJson}
                 </pre>
               </div>
@@ -405,7 +407,7 @@ export function McpToolBlock({
             {outputText && (
               <div>
                 <div className="mb-1 text-[10px]! font-medium text-muted-foreground/50">结果</div>
-                <pre className="m-0 font-mono text-xs leading-4 break-words whitespace-pre-wrap text-muted-foreground/60">
+                <pre className="m-0 font-mono text-[10px] leading-4 break-words whitespace-pre-wrap text-muted-foreground/60">
                   {outputText}
                 </pre>
               </div>
@@ -501,13 +503,13 @@ export function BashToolBlock({
         <CollapsibleContent className="overflow-hidden">
           <div className="max-h-[200px] overflow-y-auto rounded-b-md border border-t-0 border-border/40 bg-muted/10 px-4 py-2">
             {command && (
-              <div className="mb-4 font-mono text-xs leading-4 text-muted-foreground">
+              <div className="mb-4 font-mono text-[10px] leading-4 text-muted-foreground">
                 <span className="select-none">$ </span>
                 {command}
               </div>
             )}
             {outputText && (
-              <pre className="m-0 font-mono text-xs leading-4 break-words whitespace-pre-wrap text-muted-foreground/60">
+              <pre className="m-0 font-mono text-[10px] leading-4 break-words whitespace-pre-wrap text-muted-foreground/60">
                 {outputText}
               </pre>
             )}

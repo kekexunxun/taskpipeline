@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils'
  * 折叠式 thinking / reasoning 块(对话 / 执行面板 / Trace 三界面共用)。
  *
  * 设计:
- * - 收起态显示"思考中 - n秒" / "思考过程 - n秒",紧凑不占空间
+ * - 收起态显示"思考中 - n秒" / "深度思考 - n秒",紧凑不占空间
  * - 鼠标悬停时右侧出现箭头指示可展开
  * - 展开后内容区文字浅色、低透明度,限高可滚动
  * - 默认折叠,用户手动操作后以用户选择为准
@@ -94,7 +94,7 @@ export function ThinkingBlock({
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const isThinkingActive = isStreaming && !frozenRef.current
-  const label = isThinkingActive ? `思考中 - ${duration}秒` : `思考过程 - ${duration}秒`
+  const label = isThinkingActive ? `思考中 - ${duration}秒` : `深度思考 - ${duration}秒`
 
   const handleOpenChange = useCallback((next: boolean) => setUserOpen(next), [])
 

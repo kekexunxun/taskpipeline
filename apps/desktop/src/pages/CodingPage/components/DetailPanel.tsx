@@ -11,7 +11,7 @@ import {
   SquareTerminalIcon
 } from 'lucide-react'
 import type { TaskCard, TaskRepository } from '@task-pipeline/core'
-import type { TaskDetail, ChangedFile } from '../../../api'
+import type { DriverPart, TaskDetail, ChangedFile } from '../../../api'
 import { ChatMcpSelector, type McpServiceId } from '../../ChatPage/components/ChatMcpSelector'
 import { ChatSkillSelector } from '../../ChatPage/components/ChatSkillSelector'
 import { useChatModels } from '../../../hooks/useChatModels'
@@ -23,8 +23,7 @@ import { ChangedFilesSection } from './ChangedFilesSection'
 import { MergeRequestsSection } from './MergeRequestsSection'
 import { ApprovalsSection } from './ApprovalsSection'
 import { DetailActions } from './DetailActions'
-import { Timeline, type TimelineItem } from './Timeline'
-import { isPlanningEvent } from './planningEvent'
+import { TaskConversationView } from './TaskConversationView'
 import { TaskComposer } from './Composer'
 import { PlanSection } from './PlanSection'
 import { EditPlanDialog } from './EditPlanDialog'
@@ -50,7 +49,8 @@ const detailTabClass =
 type Props = {
   card?: TaskCard
   detail?: TaskDetail
-  liveEvents: TimelineItem[]
+  /** 合并后的 DriverPart[]（历史 events + 流式 live parts），直接喂给 PartRenderer。 */
+  parts: DriverPart[]
   /** 当前任务待确认的 HITL 请求（内联卡片，渲染在 activity 执行流底部）。 */
   approvals?: ChatApprovalRequest[]
   onRespondApproval?(id: string, confirmed: boolean): void
@@ -97,7 +97,7 @@ type Props = {
 export function DetailPanel({
   card,
   detail,
-  liveEvents,
+  parts,
   approvals,
   onRespondApproval,
   prompt,
@@ -165,14 +165,8 @@ export function DetailPanel({
   const hasPlan = Boolean(
     task?.planContent || (taskState && ['planning', 'awaiting_plan_approval'].includes(taskState))
   )
-  const allEvents = useMemo(() => [...(detail?.events ?? []), ...liveEvents], [detail?.events, liveEvents])
-  // 执行 Tab 数据源：events 表 + openai_events 表（Pi 独立存储、独立渲染）平铺合并，
-  // 与 live 流一起交给 Timeline（内部按 createdAt 排序 + 去重）。
-  const executionEvents = useMemo(() => {
-    return [...(detail?.events ?? []), ...(detail?.openAiEvents ?? []), ...liveEvents].filter(
-      (item) => !isPlanningEvent(item)
-    )
-  }, [detail?.events, detail?.openAiEvents, liveEvents])
+  // PlanSection 数据源:只取历史 events（计划反馈不会出现在 live 流中）。
+  const planEvents = detail?.events ?? []
   useEffect(() => {
     setActiveTab(hasPlan ? 'plan' : 'activity')
   }, [taskId, hasPlan])
@@ -267,11 +261,11 @@ export function DetailPanel({
         </TabsList>
         {hasPlan && (
           <TabsContent value="plan" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
-            <PlanSection task={task} compact={!focused} events={allEvents} />
+            <PlanSection task={task} compact={!focused} events={planEvents} />
           </TabsContent>
         )}
         <TabsContent value="activity" className="thin-scrollbar mt-0 min-h-0 flex-1 overflow-y-auto">
-          <Timeline items={executionEvents} live={running} />
+          <TaskConversationView parts={parts} live={running} />
         </TabsContent>
         <TabsContent value="files" className="thin-scrollbar mt-0 min-h-0 flex-1 overflow-y-auto">
           {showChangedFiles ? (

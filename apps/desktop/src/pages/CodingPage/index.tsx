@@ -123,7 +123,7 @@ export default function CodingPage() {
           <DetailPanel
             card={tasks.tasks.find((t) => t.id === tasks.selectedId)}
             detail={tasks.detail}
-            liveEvents={tasks.liveEvents}
+            parts={tasks.parts}
             approvals={tasks.approvals}
             onRespondApproval={(id, confirmed) => void tasks.respondApproval(id, confirmed)}
             prompt={tasks.prompt}

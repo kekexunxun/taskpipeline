@@ -132,6 +132,7 @@ export class ChatStorage {
 
   /**
    * v3 → v4 迁移:读取旧 index + chat-workspaces.json,转换为 v4 格式。
+   * 同时把 v3 对话文件复制到 v4 目录(仅更新 version 字段,结构不变)。
    * 项目未上线,迁移失败直接返回 undefined(丢弃旧数据)。
    */
   private async migrateFromV3(): Promise<ChatIndex | undefined> {
@@ -176,7 +177,31 @@ export class ChatStorage {
       // chat-workspaces.json 不存在或解析失败,跳过
     }
 
+    // 把 v3 对话文件复制到 v4 目录(仅更新 version 字段)
+    // 异步执行,不阻塞 index 迁移返回
+    void this.copyV3ChatFiles(conversations.map((c) => c.id))
+
     return { version: 4, conversations, groups }
+  }
+
+  /**
+   * 批量把 v3 对话文件复制到 v4 目录。单个文件失败不影响其它文件。
+   */
+  private async copyV3ChatFiles(ids: string[]): Promise<void> {
+    await this.ensureDir()
+    const legacyDir = legacyChatsDir(this.dataDir)
+    for (const id of ids) {
+      try {
+        const legacyFile = join(legacyDir, `chat-${id}.json`)
+        const legacy = await parseFile<{ version: number; conversation: ChatConversation }>(legacyFile)
+        if (!legacy?.conversation || legacy.conversation.id !== id) continue
+        if (!Array.isArray(legacy.conversation.messages)) continue
+        const v4File: ChatFile = { version: STORAGE_VERSION, conversation: legacy.conversation }
+        await this.enqueueConversationWrite(id, v4File)
+      } catch {
+        // 单个文件复制失败不影响其它文件
+      }
+    }
   }
 
   /**

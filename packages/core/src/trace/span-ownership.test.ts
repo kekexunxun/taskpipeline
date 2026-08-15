@@ -158,16 +158,16 @@ describe('agentStageLabel（阶段显示名）', () => {
 
   it('各 phase 映射为阶段语义名', () => {
     expect(agentStageLabel(stage({ phase: 'keyword' }))).toBe('关键词提取并注入')
-    expect(agentStageLabel(stage({ phase: 'planning' }))).toBe('Plan')
-    expect(agentStageLabel(stage({ phase: 'implementation' }))).toBe('Exec')
-    expect(agentStageLabel(stage({ phase: 'review' }))).toBe('CodeReview')
-    expect(agentStageLabel(stage({ phase: 'test_generation' }))).toBe('TestCase')
-    expect(agentStageLabel(stage({ phase: 'finish' }))).toBe('Finish')
+    expect(agentStageLabel(stage({ phase: 'planning' }))).toBe('计划生成')
+    expect(agentStageLabel(stage({ phase: 'implementation' }))).toBe('代码实现')
+    expect(agentStageLabel(stage({ phase: 'review' }))).toBe('代码审查')
+    expect(agentStageLabel(stage({ phase: 'test_generation' }))).toBe('测试生成')
+    expect(agentStageLabel(stage({ phase: 'finish' }))).toBe('完成')
     expect(agentStageLabel(stage({ phase: 'memory' }))).toBe('记忆整理')
   })
 
-  it('implementation：round ≥ 1 → ReExec #n；trigger 标记恢复/续接', () => {
-    expect(agentStageLabel(stage({ phase: 'implementation', round: 2 }))).toBe('ReExec #2')
+  it('implementation：round ≥ 1 → 重新执行 #n；trigger 标记恢复/续接', () => {
+    expect(agentStageLabel(stage({ phase: 'implementation', round: 2 }))).toBe('重新执行 #2')
     expect(agentStageLabel(stage({ phase: 'implementation', trigger: 'resume' }))).toBe('执行（续接）')
     expect(agentStageLabel(stage({ phase: 'implementation', trigger: 'followup' }))).toBe('执行（追加指令）')
   })

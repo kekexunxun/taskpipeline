@@ -119,6 +119,34 @@ const recordQoderSubtaskCtx: {
 }
 
 /**
+ * driver pipeline phase → 子任务卡显示名兑底。
+ * SDK task_started 不带 description 时，前端用此名作为子任务卡标题。
+ * 与 trace/stage-label.ts 的 agentStageLabel 映射保持一致。
+ */
+function pipelinePhaseLabel(phase: string): string {
+  switch (phase) {
+    case 'keyword':
+      return '关键词提取并注入'
+    case 'chat':
+      return '对话生成'
+    case 'planning':
+      return '计划生成'
+    case 'implementation':
+      return '代码实现'
+    case 'review':
+      return '代码审查'
+    case 'test_generation':
+      return '测试生成'
+    case 'finish':
+      return '完成'
+    case 'memory':
+      return '记忆整理'
+    default:
+      return phase
+  }
+}
+
+/**
  * 记录一条 SDKMessage:更新 sessionUsage + 写任务事件 + emit qoder_event。
  * 拆出来是因为 plan / implementation / test_generation 三个阶段都共用,避免在 driver 内重复。
  *
@@ -132,6 +160,8 @@ export function recordQoderMessage(
   message: SDKMessage,
   options: {
     recordText: boolean
+    /** 当前 driver  pipeline 阶段，注入到子任务事件 payload 供渲染层显示。 */
+    pipelinePhase?: string
     addTaskEvent: (event: {
       taskId: string
       kind: 'message' | 'status' | 'error' | 'tool' | 'diff'
@@ -327,10 +357,23 @@ export function recordQoderMessage(
   // 的 subtask-* part 保持一致;这样 groupByParentTask 能依据 `parentTaskId` 把它们归到
   // 同一子任务 group,task_started 被识别为 group header。其它消息仍走
   // `parent_tool_use_id` 反查路径。
-  const subtaskPayload: { parentTaskId?: string; subtaskId?: string; sdkSubtype?: string } = {
+  const subtaskPayload: {
+    parentTaskId?: string
+    subtaskId?: string
+    sdkSubtype?: string
+    pipelineStage?: string
+    stageId?: string
+  } = {
     ...(resolvedParentTaskId && !subtaskId ? { parentTaskId: resolvedParentTaskId } : {}),
     ...(subtaskId ? { subtaskId } : {}),
-    ...(sdkSubtype ? { sdkSubtype } : {})
+    ...(sdkSubtype ? { sdkSubtype } : {}),
+    // pipeline 阶段名注入：子任务组内所有事件都携带，前端任意事件做 group header 时都能显示子任务卡标题
+    ...(options.pipelinePhase && (subtaskId || resolvedParentTaskId)
+      ? { pipelineStage: pipelinePhaseLabel(options.pipelinePhase) }
+      : {}),
+    // 阶段归属注入：子任务控制事件携带所属主任务 taskId，前端 interleaveTimeline 据此把子任务组
+    // 嵌套进主任务阶段卡（而非与主流程平级）
+    ...(subtaskId ? { stageId: taskId } : {})
   }
   if (subtaskId) subtaskPayload.parentTaskId = subtaskId
   const hasSubtaskMeta = Object.keys(subtaskPayload).length > 0

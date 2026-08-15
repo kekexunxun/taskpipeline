@@ -323,7 +323,7 @@ const streamdownPlugins = { cjk, code, math, mermaid }
  */
 function StreamdownCodeRenderer({ code, language, isIncomplete }: CustomRendererProps) {
   const [copied, setCopied] = useState(false)
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(true)
   const timerRef = useRef<number>(0)
 
   const handleCopy = useCallback(async () => {

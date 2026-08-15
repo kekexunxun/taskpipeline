@@ -15,7 +15,7 @@ vi.mock('./DetailActions', () => ({ DetailActions: () => null }))
 vi.mock('./UsageSection', () => ({ UsageSection: () => <div>usage</div> }))
 vi.mock('./ChangedFilesSection', () => ({ ChangedFilesSection: () => <div>files</div> }))
 vi.mock('./MergeRequestsSection', () => ({ MergeRequestsSection: () => <div>delivery</div> }))
-vi.mock('./Timeline', () => ({ Timeline: () => <div>timeline</div> }))
+vi.mock('./TaskConversationView', () => ({ TaskConversationView: () => <div>conversation</div> }))
 vi.mock('./PlanSection', () => ({ PlanSection: () => <div>plan content</div> }))
 vi.mock('./Composer', () => ({
   TaskComposer: ({
@@ -107,7 +107,7 @@ describe('DetailPanel tabs', () => {
       <DetailPanel
         card={card}
         detail={detail}
-        liveEvents={[]}
+        parts={[]}
         prompt=""
         running={false}
         sending={false}
@@ -145,7 +145,7 @@ describe('DetailPanel tabs', () => {
           task: waitingCard,
           changedFiles: [{ repositoryId: 'repo-1', repositoryName: 'repo', path: 'src/index.ts', status: 'M' }]
         }}
-        liveEvents={[]}
+        parts={[]}
         prompt=""
         running={false}
         sending={false}
@@ -171,7 +171,7 @@ describe('DetailPanel tabs', () => {
       <DetailPanel
         card={waitingCard}
         detail={{ ...detail, task: waitingCard }}
-        liveEvents={[]}
+        parts={[]}
         prompt=""
         running={false}
         sending={false}
@@ -200,33 +200,8 @@ describe('DetailPanel tabs', () => {
 
 describe('isPlanningEvent', () => {
   it('keeps plan lifecycle and revision events out of the execution timeline', () => {
-    expect(
-      isPlanningEvent({
-        id: '1',
-        taskId: 'task-1',
-        kind: 'status',
-        title: '状态更新为 planning',
-        createdAt: '2026-08-04T00:00:00.000Z'
-      })
-    ).toBe(true)
-    expect(
-      isPlanningEvent({
-        id: '2',
-        taskId: 'task-1',
-        kind: 'message',
-        title: '计划调整意见',
-        detail: '补充测试',
-        createdAt: '2026-08-04T00:01:00.000Z'
-      })
-    ).toBe(true)
-    expect(
-      isPlanningEvent({
-        id: '3',
-        taskId: 'task-1',
-        kind: 'status',
-        title: '状态更新为 implementing',
-        createdAt: '2026-08-04T00:02:00.000Z'
-      })
-    ).toBe(false)
+    expect(isPlanningEvent({ title: '状态更新为 planning' })).toBe(true)
+    expect(isPlanningEvent({ title: '计划调整意见' })).toBe(true)
+    expect(isPlanningEvent({ title: '状态更新为 implementing' })).toBe(false)
   })
 })
