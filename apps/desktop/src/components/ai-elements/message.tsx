@@ -345,7 +345,7 @@ function StreamdownCodeRenderer({ code, language, isIncomplete }: CustomRenderer
   const CopyIconEl = copied ? CheckIcon : CopyIcon
 
   return (
-    <div className="my-2 rounded-md border border-border/40 bg-muted/20">
+    <div className="my-2 overflow-hidden rounded-md border border-border/40 bg-muted/20">
       <div
         role="button"
         tabIndex={0}
@@ -391,11 +391,6 @@ function StreamdownCodeRenderer({ code, language, isIncomplete }: CustomRenderer
     </div>
   )
 }
-
-const codeRenderers = [
-  { component: StreamdownCodeRenderer, language: code.getSupportedLanguages() },
-  { component: StreamdownCodeRenderer, language: 'text' }
-]
 
 /**
  * Streamdown 自定义表格 —— 直接渲染，无 Artifacts 包裹。
@@ -450,7 +445,7 @@ export const MessageResponse = memo(
   ({ className, ...props }: MessageResponseProps) => (
     <Streamdown
       className={cn('size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0', className)}
-      plugins={{ ...streamdownPlugins, renderers: codeRenderers }}
+      plugins={streamdownPlugins}
       components={streamdownComponents}
       controls={false}
       {...props}

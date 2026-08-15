@@ -18,7 +18,7 @@ export function TextPart({
 }) {
   // 整个对话区统一使用 text-xs (12px) — 与思考/工具区字号对齐,长文本更易扫读。
   return (
-    <div className={cn(isAnimating && 'animate-pulse', 'text-xs leading-relaxed')}>
+    <div className={cn(isAnimating && 'animate-pulse', 'w-full text-xs leading-relaxed')}>
       <MessageResponse>{part.text}</MessageResponse>
     </div>
   )

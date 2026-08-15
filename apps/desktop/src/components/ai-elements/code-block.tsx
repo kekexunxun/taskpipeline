@@ -310,26 +310,32 @@ export const CodeBlockContent = ({
   language: BundledLanguage
   showLineNumbers?: boolean
 }) => {
+  // Strip trailing newline to avoid an extra empty <span className="block" /> line
+  const displayCode = code.endsWith('\n') ? code.slice(0, -1) : code
+
   // Memoized raw tokens for immediate display
-  const rawTokens = useMemo(() => createRawTokens(code), [code])
+  const rawTokens = useMemo(() => createRawTokens(displayCode), [displayCode])
 
   // Synchronous cache lookup — avoids setState in effect for cached results
-  const syncTokens = useMemo(() => highlightCode(code, language) ?? rawTokens, [code, language, rawTokens])
+  const syncTokens = useMemo(
+    () => highlightCode(displayCode, language) ?? rawTokens,
+    [displayCode, language, rawTokens]
+  )
 
   // Async highlighting result (populated after shiki loads)
   const [asyncTokens, setAsyncTokens] = useState<TokenizedCode | null>(null)
-  const asyncKeyRef = useRef({ code, language })
+  const asyncKeyRef = useRef({ code: displayCode, language })
 
   // Invalidate stale async tokens synchronously during render
-  if (asyncKeyRef.current.code !== code || asyncKeyRef.current.language !== language) {
-    asyncKeyRef.current = { code, language }
+  if (asyncKeyRef.current.code !== displayCode || asyncKeyRef.current.language !== language) {
+    asyncKeyRef.current = { code: displayCode, language }
     setAsyncTokens(null)
   }
 
   useEffect(() => {
     let cancelled = false
 
-    highlightCode(code, language, (result) => {
+    highlightCode(displayCode, language, (result) => {
       if (!cancelled) {
         setAsyncTokens(result)
       }
@@ -338,7 +344,7 @@ export const CodeBlockContent = ({
     return () => {
       cancelled = true
     }
-  }, [code, language])
+  }, [displayCode, language])
 
   const tokenized = asyncTokens ?? syncTokens
 
