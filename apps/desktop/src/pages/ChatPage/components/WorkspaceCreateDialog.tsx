@@ -140,7 +140,7 @@ export function WorkspaceCreateDialog({
               )}
             </div>
             {/* 添加文件夹按钮 */}
-            <Button variant="outline" size="sm" className="w-full gap-1.5 text-xs" onClick={handleAddDirectories}>
+            <Button variant="outline" size="sm" className="h-7 w-full gap-1.5 text-xs" onClick={handleAddDirectories}>
               <PlusIcon size={12} />
               添加文件夹
             </Button>

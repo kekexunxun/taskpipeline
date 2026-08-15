@@ -29,7 +29,7 @@ export function ChatProjectSwitcher({
   onSetupWorkspace(): void
   disabled?: boolean
 }) {
-  // 查找当前 value 属于哪个 group
+  // 查找当前 value 所属 group
   const selectedGroup = groups.find((g) => g.directories.includes(value ?? ''))
   const selectedName = selectedGroup
     ? selectedGroup.chatType === 'workspace'
@@ -38,9 +38,6 @@ export function ChatProjectSwitcher({
     : value
       ? baseName(value)
       : undefined
-
-  const workspaceGroups = groups.filter((g) => g.chatType === 'workspace')
-  const directoryGroups = groups.filter((g) => g.chatType === 'directory')
 
   return (
     <DropdownMenu>
@@ -55,49 +52,31 @@ export function ChatProjectSwitcher({
           <ChevronDownIcon size={12} className="shrink-0" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-64">
-        {/* 工作区列表 */}
-        {workspaceGroups.length > 0 && (
-          <>
-            {workspaceGroups.map((group) => (
-              <DropdownMenuItem
-                key={group.id}
-                onClick={() => onChange(group.directories[0])}
-                className={group.directories.includes(value ?? '') ? 'bg-accent' : ''}
-              >
-                <FoldersIcon size={12} className="mr-1.5 shrink-0 text-blue-400/80" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-xs">{group.name}</div>
-                  <div className="truncate text-[10px] text-muted-foreground">{group.directories.length} 个目录</div>
-                </div>
-              </DropdownMenuItem>
-            ))}
-            <DropdownMenuSeparator />
-          </>
-        )}
-        {/* 目录分组列表 */}
-        {directoryGroups.length === 0 && !value ? (
-          <div className="px-2 py-3 text-center text-xs text-muted-foreground">暂无项目目录</div>
-        ) : (
-          directoryGroups.map((group) => {
-            const dir = group.directories[0]!
+      <DropdownMenuContent align="start" className="w-56">
+        <div className="max-h-52 scrollbar-thin overflow-y-auto">
+          {groups.map((group) => {
+            const isWorkspace = group.chatType === 'workspace'
+            const label = isWorkspace ? group.name : baseName(group.directories[0]!)
+            const isActive = group.directories.includes(value ?? '')
             return (
               <DropdownMenuItem
                 key={group.id}
-                onClick={() => onChange(dir)}
-                className={value === dir ? 'bg-accent' : ''}
+                onClick={() => onChange(group.directories[0])}
+                className={isActive ? 'bg-accent' : ''}
               >
-                <FolderIcon size={12} className="mr-1.5 shrink-0 text-amber-400/80" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-xs">{baseName(dir)}</div>
-                  <div className="truncate text-[10px] text-muted-foreground" title={dir}>
-                    {dir}
-                  </div>
-                </div>
+                {isWorkspace ? (
+                  <FoldersIcon size={12} className="mr-1.5 shrink-0 text-blue-400/80" />
+                ) : (
+                  <FolderIcon size={12} className="mr-1.5 shrink-0 text-amber-400/80" />
+                )}
+                <span className="truncate text-xs">{label}</span>
               </DropdownMenuItem>
             )
-          })
-        )}
+          })}
+          {groups.length === 0 && (
+            <div className="px-2 py-3 text-center text-xs text-muted-foreground">暂无项目目录</div>
+          )}
+        </div>
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={onAdd}>
           <PlusIcon size={12} className="mr-1.5" />
@@ -109,7 +88,7 @@ export function ChatProjectSwitcher({
         </DropdownMenuItem>
         <DropdownMenuItem onClick={() => onChange(undefined)}>
           <XIcon size={12} className="mr-1.5" />
-          <span className="text-xs text-muted-foreground">不绑定项目</span>
+          <span className="text-xs">不绑定项目</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

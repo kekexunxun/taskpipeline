@@ -145,6 +145,7 @@ function ChatPageInner() {
           }
         }}
         onDelete={(id) => void chat.remove(id)}
+        onDeleteGroup={(id) => void chat.removeGroup(id)}
       />
       <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">
         {isEmpty ? (

@@ -67,8 +67,8 @@ export function ChatHistoryItem({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-[6rem]">
               <AlertDialogTrigger asChild>
-                <DropdownMenuItem className="text-destructive focus:text-destructive">
-                  <Trash2Icon size={14} />
+                <DropdownMenuItem className="text-xs! text-destructive focus:text-destructive">
+                  <Trash2Icon size={11} />
                   删除
                 </DropdownMenuItem>
               </AlertDialogTrigger>

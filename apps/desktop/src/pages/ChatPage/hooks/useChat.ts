@@ -313,6 +313,19 @@ export function useChat() {
     [refreshMetas, showError, showSuccess]
   )
 
+  const removeGroup = useCallback(
+    async (id: string) => {
+      try {
+        await api.deleteChatGroup(id)
+        await refreshMetas()
+        showSuccess('分组已删除')
+      } catch (reason) {
+        showError(reason instanceof Error ? reason.message : String(reason))
+      }
+    },
+    [refreshMetas, showError, showSuccess]
+  )
+
   const stop = useCallback(() => {
     // 只停当前对话的流。
     const id = activeIdRef.current
@@ -637,6 +650,7 @@ export function useChat() {
       select,
       create,
       remove,
+      removeGroup,
       send,
       stop,
       pushApproval,
@@ -675,6 +689,7 @@ export function useChat() {
       select,
       create,
       remove,
+      removeGroup,
       send,
       stop,
       pushApproval,

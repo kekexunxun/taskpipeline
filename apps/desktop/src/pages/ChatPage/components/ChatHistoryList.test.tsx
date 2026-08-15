@@ -8,7 +8,8 @@ const noop = {
   onCreate: vi.fn(),
   onCreateInDirectory: vi.fn(),
   onShowWelcome: vi.fn(),
-  onDelete: vi.fn()
+  onDelete: vi.fn(),
+  onDeleteGroup: vi.fn()
 }
 
 function meta(overrides: Partial<ChatConversationMeta>): ChatConversationMeta {

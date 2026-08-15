@@ -172,8 +172,7 @@ button:not(:disabled) {
 /* 默认 focus-visible 仅在表单原子控件上生效；容器组件（如 InputGroup / Dialog）需要时由自身负责。 */
 button:focus-visible,
 [tabindex]:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 2px;
+  outline: none;
 }
 [data-detail-tab]:focus-visible {
   outline: none;
