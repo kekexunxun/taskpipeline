@@ -177,6 +177,8 @@ export class QoderSession {
   private pendingError: unknown
   private readonly inputQueue: SDKUserMessage[] = []
   private readonly inputWaiters: Array<(msg: SDKUserMessage | undefined) => void> = []
+  /** HITL 拒绝的工具调用 ID 集合(canUseTool 返回 deny 时写入,handleToolResult 读取后标记 isError)。 */
+  readonly deniedCallIds = new Set<string>()
 
   constructor(id: string, options: QoderSessionOptions) {
     this.id = id
@@ -495,9 +497,13 @@ export class QoderSession {
         type: 'qoder.tool-result',
         toolCallId,
         output,
-        ...(block.is_error ? { isError: true } : {})
+        ...(block.is_error ? { isError: true } : {}),
+        // HITL 拒绝:canUseTool 返回 deny 时 SDK 不一定设 is_error,由 deniedCallIds 补标。
+        ...(this.deniedCallIds.has(toolCallId) ? { isError: true } : {})
       }
       turn.parts.push(toolResultPart)
+      // 已消费,清理(避免跨回合内存泄漏)。
+      this.deniedCallIds.delete(toolCallId)
       this.pushChunk(turn, { type: 'part', part: toolResultPart })
       if (turn.toolSource && !turn.taskCreated) {
         const described = turn.toolSource.describeResult(output)

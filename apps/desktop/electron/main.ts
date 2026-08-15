@@ -2008,6 +2008,89 @@ async function pauseTask(taskId: string): Promise<void> {
     activeTaskId = undefined
     store.setSetting('activeTaskId', '')
   }
+  // HITL 暂停兜底：中断后 SDK 不一定为等待中的工具调用生成 tool_result，
+  // 前端配对时只有 tool_use 无 tool_result 且非 streaming → 状态 'done' → 误显示「已编辑」。
+  // 扫描事件表，为未配对的 tool_use 补发 error 结果，让前端正确显示「失败」。
+  try {
+    const events = store.listEvents(taskId)
+    const toolUseIds = new Set<string>()
+    const toolResultIds = new Set<string>()
+    const toolNames = new Map<string, string>()
+    for (const event of events) {
+      if (event.kind !== 'tool') continue
+      const payload = event.payload as Record<string, unknown> | undefined
+      const toolUseId = payload?.toolUseId as string | undefined
+      if (!toolUseId) continue
+      if (payload?.phase === 'use') {
+        toolUseIds.add(toolUseId)
+        toolNames.set(toolUseId, (payload?.toolName as string) ?? event.title)
+      } else if (payload?.phase === 'result') {
+        toolResultIds.add(toolUseId)
+      }
+    }
+    for (const toolUseId of toolUseIds) {
+      if (toolResultIds.has(toolUseId)) continue
+      addTaskEvent({
+        taskId,
+        kind: 'tool',
+        title: toolNames.get(toolUseId) ?? 'tool',
+        payload: {
+          toolUseId,
+          toolName: toolNames.get(toolUseId) ?? 'tool',
+          phase: 'result',
+          output: '任务已暂停，工具调用未执行',
+          isError: true
+        }
+      })
+    }
+  } catch {
+    /* 事件扫描失败不影响暂停主流程 */
+  }
+  // HITL 竞态兜底：首次扫描是同步的，但 PermissionRequest hook 是异步的——
+  // 扫描时 hook 可能还在等 UI 响应，deniedCallIds 尚未填充，SDK 已生成的 tool_result
+  // （无 is_error）让扫描误认为「有 result = 成功执行」而跳过。
+  // 延迟 2s 后二次扫描：此时 hook 已返回 deny，deniedCallIds 已填充，
+  // onMessage mutation 也已执行。对被拒绝但 result 未标记 isError 的调用补发 error 事件。
+  void (async () => {
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      const deniedIds = qoderTaskAgent.getDeniedCallIds(taskId)
+      if (deniedIds.size === 0) return
+      const events = store.listEvents(taskId)
+      // 按 toolUseId 收集 result 事件，检查是否已有 isError 标记。
+      const errorResultIds = new Set<string>()
+      const toolNames = new Map<string, string>()
+      for (const event of events) {
+        if (event.kind !== 'tool') continue
+        const payload = event.payload as Record<string, unknown> | undefined
+        const toolUseId = payload?.toolUseId as string | undefined
+        if (!toolUseId) continue
+        if (payload?.phase === 'result' && payload?.isError === true) {
+          errorResultIds.add(toolUseId)
+        }
+        if (payload?.phase === 'use') {
+          toolNames.set(toolUseId, (payload?.toolName as string) ?? event.title)
+        }
+      }
+      for (const id of deniedIds) {
+        if (errorResultIds.has(id)) continue
+        addTaskEvent({
+          taskId,
+          kind: 'tool',
+          title: toolNames.get(id) ?? 'tool',
+          payload: {
+            toolUseId: id,
+            toolName: toolNames.get(id) ?? 'tool',
+            phase: 'result',
+            output: '任务已暂停，工具调用被拒绝',
+            isError: true
+          }
+        })
+      }
+    } catch {
+      /* 延迟扫描失败不影响主流程 */
+    }
+  })()
   addTaskEvent({ taskId, kind: 'status', title: '任务已暂停', detail: '可通过「继续执行」从当前进度续跑' })
 }
 

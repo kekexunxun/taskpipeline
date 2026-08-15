@@ -119,7 +119,9 @@ function partTextOf(part: DriverPart): string | undefined {
 /** Phase 2 HITL:PermissionRequest hook —— 危险工具由上层(main.ts)弹 UI 确认,其余直接 allow。 */
 function buildPermissionHooks(
   onPermissionRequest: NonNullable<QoderTaskAgentDeps['onPermissionRequest']>,
-  taskId: string
+  taskId: string,
+  /** HITL 拒绝标记:deny 时写入 toolUseID,onMessage 据此补标 is_error。 */
+  deniedCallIds: Set<string>
 ): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
   return {
     PermissionRequest: [
@@ -127,7 +129,7 @@ function buildPermissionHooks(
         hooks: [
           async (
             input: Parameters<HookCallback>[0],
-            _toolUseID?: string,
+            toolUseID?: string,
             options?: { signal: AbortSignal }
           ): Promise<HookJSONOutput> => {
             if (input.hook_event_name !== 'PermissionRequest') {
@@ -136,14 +138,17 @@ function buildPermissionHooks(
               }
             }
             const decision = await onPermissionRequest(taskId, input.tool_name, input.tool_input, options?.signal)
-            return decision === 'deny'
-              ? {
-                  hookSpecificOutput: {
-                    hookEventName: 'PermissionRequest',
-                    decision: { behavior: 'deny', message: '用户拒绝了此操作，请改用其他方案', interrupt: false }
-                  }
+            if (decision === 'deny') {
+              // HITL 拒绝标记:记录 toolUseID,onMessage 据此补标 is_error。
+              if (toolUseID) deniedCallIds.add(toolUseID)
+              return {
+                hookSpecificOutput: {
+                  hookEventName: 'PermissionRequest',
+                  decision: { behavior: 'deny', message: '用户拒绝了此操作，请改用其他方案', interrupt: false }
                 }
-              : { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } }
+              }
+            }
+            return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } }
           }
         ]
       }
@@ -173,6 +178,8 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
   private readonly phaseAttempts = new Map<string, number>()
   /** 已做过「关键词提取 + 记忆上下文注入」的任务（每任务只做一次；finishTrace 清理，任务重跑会重置）。 */
   private readonly keywordInjected = new Set<string>()
+  /** taskId → HITL 拒绝的工具调用 ID 集合(hooks deny / canUseTool deny 时写入)。 */
+  private readonly deniedCallIdsByTask = new Map<string, Set<string>>()
 
   constructor(private readonly deps: QoderTaskAgentDeps) {
     if (!deps) throw new Error('QoderTaskAgentDriver requires deps')
@@ -399,6 +406,7 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     for (const key of this.buffers.keys()) {
       if (key.startsWith(`${taskId}:`)) this.buffers.delete(key)
     }
+    this.deniedCallIdsByTask.delete(taskId)
   }
 
   /** 任务终态收尾 trace 采集：关闭 builder 未收尾的 llm/工具/子任务 span，并清理 taskId 相关状态。 */
@@ -414,6 +422,7 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     }
     this.traceStarted.delete(taskId)
     this.keywordInjected.delete(taskId)
+    this.deniedCallIdsByTask.delete(taskId)
     this.traceAgentSpans.delete(taskId)
     for (const key of this.phaseAttempts.keys()) {
       if (key.startsWith(`${taskId}:`)) this.phaseAttempts.delete(key)
@@ -424,6 +433,11 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
   interruptSession(taskId: string): void {
     const session = this.sessions.get(taskId)
     if (session) void session.interrupt()
+  }
+
+  /** 查询指定任务的 HITL 拒绝 ID 集合(暂停兜底用:延迟二次扫描精确覆盖漏标的 isError)。 */
+  getDeniedCallIds(taskId: string): Set<string> {
+    return this.deniedCallIdsByTask.get(taskId) ?? new Set()
   }
 
   dispose(): void {
@@ -454,8 +468,12 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     const token = this.deps.qoderTokenProvider()
     if (!token) throw new Error('请先配置 Qoder Token')
     const logFile = qoderLogFile(this.deps.dataDir, task.id)
+    // HITL 拒绝标记:hooks deny 时写入 toolUseID,onMessage 据此补标 is_error。
+    // 提升到 driver 级别,pauseTask 延迟二次扫描可跨异步时序查询。
+    const deniedCallIds = new Set<string>()
+    this.deniedCallIdsByTask.set(task.id, deniedCallIds)
     const permissionHooks = this.deps.onPermissionRequest
-      ? buildPermissionHooks(this.deps.onPermissionRequest, task.id)
+      ? buildPermissionHooks(this.deps.onPermissionRequest, task.id, deniedCallIds)
       : undefined
     const session = new QoderSession(task.id, {
       token,
@@ -468,6 +486,23 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
       allowedTools: ['Agent'],
       ...(permissionHooks ? { hooks: permissionHooks } : {}),
       onMessage: (message) => {
+        // HITL 拒绝补标:hooks deny 时 SDK 不一定设 is_error,由 deniedCallIds 补标。
+        // 在 recordQoderMessage 之前修改,保证 task event 带 isError: true。
+        const msgContent = (message as unknown as Record<string, any>)?.message?.content
+        if (Array.isArray(msgContent)) {
+          for (const block of msgContent) {
+            if (
+              block &&
+              typeof block === 'object' &&
+              block.type === 'tool_result' &&
+              typeof block.tool_use_id === 'string' &&
+              deniedCallIds.has(block.tool_use_id)
+            ) {
+              block.is_error = true
+              deniedCallIds.delete(block.tool_use_id)
+            }
+          }
+        }
         logQoderMessage(logFile, message)
         const ctx = this.turnCtxByTaskId.get(task.id)
         if (ctx) {
@@ -614,6 +649,68 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
           this.traceAgentSpans.delete(task.id)
           this.deps.tracePipeline.endSpan(task.id, agentSpan)
         }
+      }
+      // HITL 兜底：回合结束（abort / 暂停 / HITL 超时）后，扫描事件表，
+      // 为只有 tool_use 无 tool_result 的调用补发 error 结果。
+      // 避免前端配对时因无 result + 非 streaming → 状态 'done' → 误显示「已编辑」。
+      // 同时检查 deniedCallIds：被 HITL 拒绝的调用即使已有 result 但未标记 isError，
+      // 也补发 error 事件覆盖（onMessage mutation 竞态未命中的兜底）。
+      try {
+        const events = this.deps.store.listEvents(task.id)
+        const toolUseIds = new Set<string>()
+        const toolResultIds = new Set<string>()
+        const errorResultIds = new Set<string>()
+        const toolNames = new Map<string, string>()
+        for (const event of events) {
+          if (event.kind !== 'tool') continue
+          const payload = event.payload as Record<string, unknown> | undefined
+          const toolUseId = payload?.toolUseId as string | undefined
+          if (!toolUseId) continue
+          if (payload?.phase === 'use') {
+            toolUseIds.add(toolUseId)
+            toolNames.set(toolUseId, (payload?.toolName as string) ?? event.title)
+          } else if (payload?.phase === 'result') {
+            toolResultIds.add(toolUseId)
+            if (payload?.isError === true) errorResultIds.add(toolUseId)
+          }
+        }
+        // 1. 无 result 的 tool_use → 补发 error
+        for (const toolUseId of toolUseIds) {
+          if (toolResultIds.has(toolUseId)) continue
+          this.deps.addTaskEvent({
+            taskId: task.id,
+            kind: 'tool',
+            title: toolNames.get(toolUseId) ?? 'tool',
+            payload: {
+              toolUseId,
+              toolName: toolNames.get(toolUseId) ?? 'tool',
+              phase: 'result',
+              output: '工具调用未执行（回合中断）',
+              isError: true
+            }
+          })
+        }
+        // 2. HITL 拒绝但 result 未标记 isError → 补发 error 覆盖
+        const deniedIds = this.deniedCallIdsByTask.get(task.id)
+        if (deniedIds) {
+          for (const id of deniedIds) {
+            if (errorResultIds.has(id)) continue
+            this.deps.addTaskEvent({
+              taskId: task.id,
+              kind: 'tool',
+              title: toolNames.get(id) ?? 'tool',
+              payload: {
+                toolUseId: id,
+                toolName: toolNames.get(id) ?? 'tool',
+                phase: 'result',
+                output: '工具调用被拒绝（HITL 拒绝）',
+                isError: true
+              }
+            })
+          }
+        }
+      } catch {
+        /* 事件扫描失败不影响主流程 */
       }
       this.turnCtxByTaskId.delete(task.id)
       // 阶段结束统一收尾(成功与失败路径一致,保持旧行为):先落 sessionId 再收 agent_session / agent_end。

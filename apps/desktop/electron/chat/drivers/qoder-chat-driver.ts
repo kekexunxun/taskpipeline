@@ -240,10 +240,13 @@ export class QoderChatDriver implements ChatDriver {
       session = undefined
     }
     if (!session) {
+      // 可变引用:buildSessionOptions 先于 session 创建执行,canUseTool 通过 ref 延迟访问 session。
+      const sessionRef: { current: QoderSession | undefined } = { current: undefined }
       session = this.sessions.register(
         input.conversationId,
-        new QoderSession(input.conversationId, this.buildSessionOptions(input, token, traceId))
+        new QoderSession(input.conversationId, this.buildSessionOptions(input, token, traceId, sessionRef))
       )
+      sessionRef.current = session
       this.sessionMcpKeys.set(input.conversationId, mcpKey)
     }
 
@@ -325,7 +328,12 @@ export class QoderChatDriver implements ChatDriver {
     void this.sessions.dispose()
   }
 
-  private buildSessionOptions(input: StreamChatInput, token: string, traceId?: string) {
+  private buildSessionOptions(
+    input: StreamChatInput,
+    token: string,
+    traceId?: string,
+    sessionRef?: { current: QoderSession | undefined }
+  ) {
     const resumeSessionId = extractLastSessionId(input.history)
     const taskSource = input.toolSource
     const mcpSetup = taskSource ? buildTaskCreationMcp(taskSource) : undefined
@@ -404,7 +412,11 @@ export class QoderChatDriver implements ChatDriver {
               sdkOpts: CanUseToolOptions
             ): Promise<PermissionResult> => {
               // SDK 侧已中止(超时/会话关闭/用户停止):弹窗前直接拒绝,避免确认框挂到 10 分钟超时。
-              if (sdkOpts.signal.aborted) return { behavior: 'deny', message: '工具调用已中止', interrupt: false }
+              if (sdkOpts.signal.aborted) {
+                // HITL 拒绝标记:记录 toolUseID,handleToolResult 据此补标 isError。
+                sessionRef?.current?.deniedCallIds.add(sdkOpts.toolUseID)
+                return { behavior: 'deny', message: '工具调用已中止', interrupt: false }
+              }
               const decision = await this.onToolPermission!(toolName, toolInput, {
                 signal: sdkOpts.signal,
                 conversationId: input.conversationId,
@@ -412,9 +424,12 @@ export class QoderChatDriver implements ChatDriver {
                 ...(sdkOpts.displayName ? { displayName: sdkOpts.displayName } : {}),
                 ...(sdkOpts.description ? { description: sdkOpts.description } : {})
               })
-              return decision === 'deny'
-                ? { behavior: 'deny', message: '用户拒绝了此操作，请改用其他方案', interrupt: false }
-                : { behavior: 'allow' }
+              if (decision === 'deny') {
+                // HITL 拒绝标记:记录 toolUseID,handleToolResult 据此补标 isError。
+                sessionRef?.current?.deniedCallIds.add(sdkOpts.toolUseID)
+                return { behavior: 'deny', message: '用户拒绝了此操作，请改用其他方案', interrupt: false }
+              }
+              return { behavior: 'allow' }
             }
           }
         : {})
