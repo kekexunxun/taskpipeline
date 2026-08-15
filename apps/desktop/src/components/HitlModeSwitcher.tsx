@@ -34,7 +34,7 @@ const MODES = [
     icon: ShieldAlert,
     summary: '仅危险操作需确认',
     detail: '普通操作自动执行，删除/覆盖等危险操作仍需确认',
-    activeClass: 'bg-emerald-500/15 text-emerald-400'
+    activeClass: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
   },
   {
     value: 'yolo' as const,
@@ -42,7 +42,7 @@ const MODES = [
     icon: Zap,
     summary: '自动批准所有操作',
     detail: '所有操作自动执行，不再弹出任何确认',
-    activeClass: 'bg-amber-500/15 text-amber-400'
+    activeClass: 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
   }
 ] as const
 
@@ -89,12 +89,12 @@ export function HitlModeSwitcher({
                 <TabsTrigger
                   value={m.value}
                   className={cn(
-                    'gap-1.5 rounded-[5px] px-2.5 py-1 text-xs! font-medium transition-all duration-150',
+                    'gap-1 rounded-[4px] px-2 py-0.5 text-[11px]! font-medium transition-all duration-150',
                     'data-[state=inactive]:text-muted-foreground data-[state=inactive]:hover:text-foreground/70',
                     active && m.activeClass
                   )}
                 >
-                  <Icon className="size-3" />
+                  <Icon className="size-2.5" />
                   {m.label}
                 </TabsTrigger>
               </TooltipTrigger>

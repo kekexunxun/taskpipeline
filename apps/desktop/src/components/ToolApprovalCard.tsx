@@ -44,24 +44,24 @@ export function ToolApprovalCard({
   // 简洁操作条：只显示工具名 + 确认/取消按钮
   return (
     <div
-      className={`flex ${widthClass} items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2`}
+      className={`flex ${widthClass} items-center justify-between gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-2.5 py-1.5 dark:border-amber-500/15 dark:bg-amber-500/[0.03]`}
     >
-      <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-        <ShieldAlertIcon size={14} className="shrink-0 text-amber-500" />
+      <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+        <ShieldAlertIcon size={12} className="shrink-0 text-amber-500" />
         <span className="truncate font-medium">{approval.title ?? '需要确认'}</span>
       </span>
-      <div className="flex shrink-0 items-center gap-1.5">
+      <div className="flex shrink-0 items-center gap-1">
         <Button
           variant="ghost"
           size="sm"
           onClick={() => onRespond(false)}
-          className="h-7 px-2.5 text-xs text-muted-foreground hover:text-destructive"
+          className="h-6 px-2 text-[11px] text-muted-foreground hover:text-destructive"
         >
-          <XIcon size={12} className="mr-1" />
+          <XIcon size={10} className="mr-0.5" />
           拒绝
         </Button>
-        <Button size="sm" onClick={() => onRespond(true)} className="h-7 px-2.5 text-xs">
-          <CheckIcon size={12} className="mr-1" />
+        <Button size="sm" onClick={() => onRespond(true)} className="h-6 px-2 text-[11px]">
+          <CheckIcon size={10} className="mr-0.5" />
           允许
         </Button>
       </div>

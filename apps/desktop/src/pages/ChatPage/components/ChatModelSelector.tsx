@@ -100,7 +100,7 @@ function CapabilityControls({
               <Switch
                 checked={params[capability.key] === true}
                 onCheckedChange={(next) => onChange({ ...params, [capability.key]: next })}
-                className="h-4 w-7 data-[state=checked]:bg-primary [&>span]:size-3 data-[state=checked]:[&>span]:translate-x-3"
+                className="h-4 w-7 data-[state=checked]:bg-input [&>span]:size-3 data-[state=checked]:[&>span]:translate-x-3"
               />
             </div>
           )

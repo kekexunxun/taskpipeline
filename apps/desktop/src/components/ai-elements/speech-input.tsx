@@ -295,7 +295,7 @@ export const SpeechInput = ({
           'relative z-10 rounded-full transition-all duration-300',
           isListening
             ? 'bg-destructive text-white hover:bg-destructive/80 hover:text-white'
-            : 'bg-primary text-primary-foreground hover:bg-primary/80 hover:text-primary-foreground',
+            : 'bg-secondary text-secondary-foreground hover:bg-secondary/80 dark:bg-input dark:text-foreground dark:hover:bg-input/80',
           className
         )}
         disabled={isDisabled}
