@@ -11,6 +11,7 @@ import {
   SunIcon
 } from 'lucide-react'
 import type { CredentialState } from '../api'
+import { UpdateIndicator } from '../components/UpdateIndicator'
 import { useCredentialStatusContext } from '../hooks/useCredentialStatusContext'
 import type { CredentialOverall } from '../hooks/useCredentialStatus'
 import { useTheme } from '@/hooks/useTheme'
@@ -177,6 +178,7 @@ export function TopBar({
         <strong className="font-semibold">TaskPipeline</strong>
       </div>
       <div className="window-no-drag flex items-center gap-1">
+        <UpdateIndicator />
         <CredentialStatusPopover onOpenCredentialSettings={onOpenCredentialSettings} />
         <Tooltip>
           <TooltipTrigger asChild>

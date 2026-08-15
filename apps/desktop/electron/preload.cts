@@ -118,5 +118,15 @@ contextBridge.exposeInMainWorld('agentApi', {
   setHitlMode: (mode: 'ask' | 'auto' | 'yolo', contextType?: 'conversation' | 'task', contextId?: string) =>
     ipcRenderer.invoke('hitl:set-mode', mode, contextType, contextId),
   getHitlMode: (contextType?: 'conversation' | 'task', contextId?: string) =>
-    ipcRenderer.invoke('hitl:get-mode', contextType, contextId)
+    ipcRenderer.invoke('hitl:get-mode', contextType, contextId),
+  // === 自动更新 ============================================================
+  checkForUpdate: () => ipcRenderer.invoke('updater:check'),
+  downloadUpdate: () => ipcRenderer.invoke('updater:download'),
+  installUpdate: () => ipcRenderer.invoke('updater:install'),
+  getUpdateStatus: () => ipcRenderer.invoke('updater:status'),
+  onUpdateStatus: (callback: (status: unknown) => void) => {
+    const listener = (_: unknown, status: unknown) => callback(status)
+    ipcRenderer.on('updater:status', listener)
+    return () => ipcRenderer.removeListener('updater:status', listener)
+  }
 })

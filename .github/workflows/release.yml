@@ -21,7 +21,7 @@ jobs:
           # Intel x64 版 macOS：large 后缀为 Intel runner，
           # qodercli/原生模块会按 runner 架构自动处理，产物为 darwin-x64
           # - os: macos-15-large
-            # script: package:mac
+          # script: package:mac
           # 固定 windows-2022：windows-latest(2025) 镜像缺少 node-gyp 可用的
           # Visual Studio C++ 工具链，会导致 better-sqlite3 重编译失败
           - os: windows-2022
@@ -74,6 +74,7 @@ jobs:
             release/*.dmg
             release/*.zip
             release/*.exe
+            release/*.yml
           if-no-files-found: error
 
   release:
@@ -97,3 +98,4 @@ jobs:
             artifacts/**/*.dmg
             artifacts/**/*.zip
             artifacts/**/*.exe
+            artifacts/**/*.yml

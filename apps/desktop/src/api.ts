@@ -596,7 +596,22 @@ export type AgentApi = {
   // HITL 模式切换（支持按对话/任务上下文区分）
   setHitlMode(mode: 'ask' | 'auto' | 'yolo', contextType?: 'conversation' | 'task', contextId?: string): Promise<void>
   getHitlMode(contextType?: 'conversation' | 'task', contextId?: string): Promise<'ask' | 'auto' | 'yolo'>
+  // 自动更新
+  checkForUpdate(): Promise<void>
+  downloadUpdate(): Promise<void>
+  installUpdate(): Promise<void>
+  getUpdateStatus(): Promise<UpdateStatus>
+  onUpdateStatus(callback: (status: UpdateStatus) => void): () => void
 }
+
+/** 自动更新状态（与主进程 auto-updater.ts 保持一致）。 */
+export type UpdateStatus =
+  | { state: 'checking' }
+  | { state: 'available'; version: string }
+  | { state: 'not-available'; currentVersion: string }
+  | { state: 'downloading'; version: string; progress: number }
+  | { state: 'downloaded'; version: string }
+  | { state: 'error'; message: string }
 
 declare global {
   interface Window {
@@ -1321,5 +1336,20 @@ export const api: AgentApi = window.agentApi ?? {
   },
   async getHitlMode() {
     return 'ask' as const
+  },
+  async checkForUpdate() {
+    // Demo mode: no-op
+  },
+  async downloadUpdate() {
+    // Demo mode: no-op
+  },
+  async installUpdate() {
+    // Demo mode: no-op
+  },
+  async getUpdateStatus() {
+    return { state: 'not-available', currentVersion: 'dev' } as UpdateStatus
+  },
+  onUpdateStatus() {
+    return () => undefined
   }
 }

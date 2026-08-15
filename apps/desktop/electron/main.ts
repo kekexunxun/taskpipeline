@@ -65,6 +65,7 @@ import {
   type Query,
   type UsageInfo
 } from '@qoder-ai/qoder-agent-sdk'
+import { initAutoUpdater, checkForUpdates, downloadUpdate, quitAndInstall, getUpdateStatus } from './auto-updater.js'
 import { TraceService } from './trace/trace-service.js'
 import { TracePipeline } from './trace/bus/trace-pipeline.js'
 import { PiTraceBuilder } from './trace/instrument/pi-trace-builder.js'
@@ -3223,6 +3224,11 @@ function registerIpc(): void {
   ipcMain.handle('chat-groups:delete', (_event, id: string) => {
     return chatService.deleteGroup(id)
   })
+  // === 自动更新 ============================================================
+  ipcMain.handle('updater:check', () => checkForUpdates())
+  ipcMain.handle('updater:download', () => downloadUpdate())
+  ipcMain.handle('updater:install', () => quitAndInstall())
+  ipcMain.handle('updater:status', () => getUpdateStatus())
 }
 
 // 统一应用图标：dev 环境取 build/icon.png 源文件，打包后取 vite 从 public/ 拷贝到 dist/ 的副本，
@@ -3267,6 +3273,7 @@ app.whenReady().then(() => {
     )
   }
   registerIpc()
+  initAutoUpdater()
   void createWindow()
   // 孤儿 trace 收口：崩溃/强杀残留的 events 文件 finalize 为「已结束 + interrupted」。
   sweepInterruptedTraces()
