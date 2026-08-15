@@ -1,4 +1,4 @@
-import { BotIcon, Loader2Icon } from 'lucide-react'
+import { BotIcon, DiamondIcon } from 'lucide-react'
 import { PartRenderer } from '../../ChatPage/drivers/PartRenderer'
 import type { DriverPart } from '@/api'
 
@@ -27,7 +27,7 @@ export function TaskConversationView({ parts, live }: { parts: DriverPart[]; liv
       {/* live 指示器 */}
       {live && (
         <div className="flex items-center gap-2 px-1 py-2 text-xs text-muted-foreground">
-          <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+          <DiamondIcon className="size-3.5 shrink-0 animate-spin" />
           <span>正在处理...</span>
         </div>
       )}

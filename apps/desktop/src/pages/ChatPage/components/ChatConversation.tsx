@@ -1,4 +1,4 @@
-import { Loader2Icon, UserRoundIcon } from 'lucide-react'
+import { DiamondIcon, Loader2Icon, UserRoundIcon } from 'lucide-react'
 import type { ChatApprovalRequest } from '../hooks/useChat'
 import { ChatMessageView, MESSAGE_WIDTH_CLASS } from './ChatMessage'
 import { ToolApprovalCard } from '@/components/ToolApprovalCard'
@@ -52,7 +52,7 @@ export function ChatConversation({
         )}
         {streaming && (!approvals || approvals.length === 0) && (
           <div className="flex items-center gap-2 px-1 py-2 text-xs text-muted-foreground">
-            <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+            <DiamondIcon className="size-3.5 shrink-0 animate-spin" />
             <span>正在处理...</span>
           </div>
         )}
