@@ -126,7 +126,7 @@ function ChatMessageImpl({
             {isStreaming && message.parts.length === 0 ? (
               <div className="group flex items-center gap-1.5 py-0.5 text-xs text-muted-foreground/60">
                 {/* <Loader2Icon size={13} className="shrink-0 animate-spin text-muted-foreground/90" /> */}
-                <span className="text-xs">{hint ?? `${driverLabel(message.driverId)} 正在思考…`}</span>
+                <span className="text-xs">{hint ?? `${driverLabel(message.driverId)} 初始化中…`}</span>
               </div>
             ) : (
               <>
