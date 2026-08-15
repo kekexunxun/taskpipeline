@@ -360,7 +360,10 @@ export class QoderChatDriver implements ChatDriver {
       model: input.model.startsWith('qoder:') ? input.model.slice(6) : input.model,
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
       permissionMode: 'default' as const,
-      controlRequestTimeoutMs: 15_000,
+      // HITL 确认需要用户人工决策，不设超时上限（SDK 条件：<=0 则不启动 setTimeout）。
+      // 安全兜底由前端流看门狗（STREAM_WATCHDOG_MS 无事件 → abort 死流 → flushApprovals 拒绝）
+      // + 用户主动停止按钮承担；应用退出时 pendingUi 统一 resolve cancelled。
+      controlRequestTimeoutMs: 0,
       // 对话 trace：SDKMessage 逐条喂给 span 转换器（采集失败不影响主流程）。
       // 主回合与辅助回合（traceLabel 存在）按各自 key 路由，互不覆盖。
       onMessage: (message: unknown) => {
