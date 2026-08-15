@@ -1,60 +1,111 @@
 import { useEffect, useState } from 'react'
 import { Shield, ShieldAlert, Zap } from 'lucide-react'
 import { api } from '@/api'
-import { Button } from '@/components/ui/button'
-import { ButtonGroup } from '@/components/ui/button-group'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 
 export type HitlMode = 'ask' | 'auto' | 'yolo'
 
 type HitlModeSwitcherProps = {
   className?: string
-  /** 上下文类型：对话或任务 */
+  /** 受控模式：外部传入当前值 */
+  value?: HitlMode
+  /** 受控模式：外部变更回调 */
+  onChange?: (mode: HitlMode) => void
+  /** 上下文类型：对话或任务（非受控模式下使用） */
   contextType?: 'conversation' | 'task'
-  /** 上下文 ID（对话 ID 或任务 ID） */
+  /** 上下文 ID（非受控模式下使用） */
   contextId?: string
 }
 
-const MODES: { value: HitlMode; label: string; icon: typeof Shield; description: string }[] = [
-  { value: 'ask', label: '询问', icon: Shield, description: '所有写操作需确认' },
-  { value: 'auto', label: '自动', icon: ShieldAlert, description: '仅危险操作需确认' },
-  { value: 'yolo', label: 'YOLO', icon: Zap, description: '自动批准所有操作' }
-]
+const MODES = [
+  {
+    value: 'ask' as const,
+    label: '询问',
+    icon: Shield,
+    summary: '所有写操作需确认',
+    detail: '每次执行工具调用前都会弹窗请求确认',
+    activeClass: 'bg-secondary text-foreground'
+  },
+  {
+    value: 'auto' as const,
+    label: '自动',
+    icon: ShieldAlert,
+    summary: '仅危险操作需确认',
+    detail: '普通操作自动执行，删除/覆盖等危险操作仍需确认',
+    activeClass: 'bg-emerald-500/15 text-emerald-400'
+  },
+  {
+    value: 'yolo' as const,
+    label: 'YOLO',
+    icon: Zap,
+    summary: '自动批准所有操作',
+    detail: '所有操作自动执行，不再弹出任何确认',
+    activeClass: 'bg-amber-500/15 text-amber-400'
+  }
+] as const
 
-export function HitlModeSwitcher({ className, contextType, contextId }: HitlModeSwitcherProps) {
-  const [mode, setMode] = useState<HitlMode>('ask')
+export function HitlModeSwitcher({
+  className,
+  value: controlledValue,
+  onChange,
+  contextType,
+  contextId
+}: HitlModeSwitcherProps) {
+  const isControlled = controlledValue !== undefined
+  const [internalMode, setInternalMode] = useState<HitlMode>('ask')
 
   useEffect(() => {
+    if (isControlled) return
     api
       .getHitlMode(contextType, contextId)
-      .then(setMode)
+      .then(setInternalMode)
       .catch(() => {})
-  }, [contextType, contextId])
+  }, [contextType, contextId, isControlled])
 
-  const handleChange = async (newMode: HitlMode) => {
+  const mode = isControlled ? controlledValue : internalMode
+
+  const handleChange = async (newMode: string) => {
     if (newMode === mode) return
-    setMode(newMode)
-    await api.setHitlMode(newMode, contextType, contextId)
+    const next = newMode as HitlMode
+    if (isControlled) {
+      onChange?.(next)
+    } else {
+      setInternalMode(next)
+      await api.setHitlMode(next, contextType, contextId)
+    }
   }
 
   return (
-    <ButtonGroup className={className}>
-      {MODES.map((m) => {
-        const Icon = m.icon
-        const active = mode === m.value
-        return (
-          <Button
-            key={m.value}
-            size="sm"
-            variant={active ? 'default' : 'outline'}
-            onClick={() => void handleChange(m.value)}
-            className="gap-1 px-2 text-[11px]"
-            title={m.description}
-          >
-            <Icon className="size-3" />
-            {m.label}
-          </Button>
-        )
-      })}
-    </ButtonGroup>
+    <Tabs value={mode} onValueChange={handleChange} className={className}>
+      <TabsList className="h-auto gap-0.5 bg-muted/60 p-0.5">
+        {MODES.map((m) => {
+          const Icon = m.icon
+          const active = mode === m.value
+          return (
+            <Tooltip key={m.value}>
+              <TooltipTrigger asChild>
+                <TabsTrigger
+                  value={m.value}
+                  className={cn(
+                    'gap-1.5 rounded-[5px] px-2.5 py-1 text-xs! font-medium transition-all duration-150',
+                    'data-[state=inactive]:text-muted-foreground data-[state=inactive]:hover:text-foreground/70',
+                    active && m.activeClass
+                  )}
+                >
+                  <Icon className="size-3" />
+                  {m.label}
+                </TabsTrigger>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" sideOffset={6} className="max-w-56 text-center">
+                <p className="font-medium">{m.summary}</p>
+                <p className="mt-0.5 text-[11px] opacity-70">{m.detail}</p>
+              </TooltipContent>
+            </Tooltip>
+          )
+        })}
+      </TabsList>
+    </Tabs>
   )
 }

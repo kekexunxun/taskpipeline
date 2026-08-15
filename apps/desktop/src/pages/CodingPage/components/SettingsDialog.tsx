@@ -23,6 +23,7 @@ import { OpenAIProfileDialog, type OpenAIProfile } from './OpenAIProfileDialog'
 import { McpSettingsTab } from './McpSettingsTab'
 import { SkillSettingsTab } from './SkillSettingsTab'
 import { ModelBadges } from '@/components/ModelBadges'
+import { HitlModeSwitcher, type HitlMode } from '@/components/HitlModeSwitcher'
 import { detectVendor, MODEL_VENDORS, type ModelVendor } from '@/utils/model-vendors'
 import { api, type CapabilityKey, type MemorySearchResult, type SystemDefaultModel } from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
@@ -40,7 +41,6 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { ButtonGroup } from '@/components/ui/button-group'
 import {
   Dialog,
   DialogClose,
@@ -1187,28 +1187,14 @@ export function SettingsDialog({
                     description="控制 AI 执行工具调用时的人工确认策略。新对话和新任务默认使用此设置，可在对话/任务内单独修改。"
                   >
                     <SettingField label="全局默认模式">
-                      <ButtonGroup>
-                        {[
-                          { value: 'ask' as const, label: '询问', desc: '所有写操作需确认' },
-                          { value: 'auto' as const, label: '自动', desc: '仅危险操作需确认' },
-                          { value: 'yolo' as const, label: 'YOLO', desc: '自动批准所有操作' }
-                        ].map((option) => (
-                          <Button
-                            key={option.value}
-                            size="sm"
-                            variant={settings.hitlMode === option.value ? 'default' : 'outline'}
-                            onClick={() => {
-                              update('hitlMode', option.value)
-                              void persistSetting('hitlMode', option.value)
-                              void api.setHitlMode(option.value)
-                            }}
-                            className="px-3 text-xs"
-                            title={option.desc}
-                          >
-                            {option.label}
-                          </Button>
-                        ))}
-                      </ButtonGroup>
+                      <HitlModeSwitcher
+                        value={settings.hitlMode}
+                        onChange={(mode: HitlMode) => {
+                          update('hitlMode', mode)
+                          void persistSetting('hitlMode', mode)
+                          void api.setHitlMode(mode)
+                        }}
+                      />
                     </SettingField>
                   </Section>
                 </TabsContent>
