@@ -179,7 +179,7 @@ export function JiraSyncDialog({
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction
-              className="bg-primary text-primary-foreground hover:bg-primary/90"
+              className="bg-secondary text-secondary-foreground hover:bg-secondary/80 dark:bg-input dark:text-foreground dark:hover:bg-input/80"
               onClick={() => {
                 const items = candidates.filter((item) => selected.has(item.taskKey))
                 setPendingOverwrite([])

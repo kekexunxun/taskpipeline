@@ -1,5 +1,7 @@
 import { app, BrowserWindow } from 'electron'
-import { autoUpdater } from 'electron-updater'
+import electronUpdater from 'electron-updater'
+
+const { autoUpdater } = electronUpdater
 
 /**
  * 自动更新状态类型（与渲染进程保持一致）。
