@@ -10,7 +10,7 @@ import type { BundledLanguage } from 'shiki'
 import type { ComponentProps, HTMLAttributes, ReactElement, ReactNode } from 'react'
 import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { Components, CustomRendererProps } from 'streamdown'
-import { Streamdown } from 'streamdown'
+import { Streamdown, useIsCodeFenceIncomplete } from 'streamdown'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { CodeBlockContent } from '@/components/ai-elements/code-block'
@@ -392,7 +392,10 @@ function StreamdownCodeRenderer({ code, language, isIncomplete }: CustomRenderer
   )
 }
 
-const codeRenderers = [{ component: StreamdownCodeRenderer, language: code.getSupportedLanguages() }]
+const codeRenderers = [
+  { component: StreamdownCodeRenderer, language: code.getSupportedLanguages() },
+  { component: StreamdownCodeRenderer, language: 'text' }
+]
 
 /**
  * Streamdown 自定义表格 —— 直接渲染，无 Artifacts 包裹。
@@ -407,8 +410,40 @@ function StreamdownTable({ children, ...props }: { children?: ReactNode; classNa
   )
 }
 
+/**
+ * 覆盖 Streamdown 默认 code 组件：
+ * 通过 props 中的 `data-block` 区分代码块 / 行内代码（与 streamdown 内部逻辑一致）。
+ * 代码块无 language 时，路由到 StreamdownCodeRenderer 以终端卡片风格渲染。
+ * 代码块有 language 时，同样路由到 StreamdownCodeRenderer（已注册全量支持语言）。
+ * 行内代码保持默认渲染。
+ */
+function StreamdownCodeBlock({
+  children,
+  className,
+  ...props
+}: {
+  children?: ReactNode
+  className?: string
+  [key: string]: unknown
+}) {
+  const isBlock = 'data-block' in props
+  const incomplete = useIsCodeFenceIncomplete()
+  if (!isBlock) {
+    return (
+      <code className={className} {...props}>
+        {children}
+      </code>
+    )
+  }
+  const langMatch = className?.match(/language-(\S+)/)
+  const language = langMatch ? langMatch[1] : ''
+  const codeText = typeof children === 'string' ? children : ''
+  return <StreamdownCodeRenderer code={codeText} language={language || 'text'} isIncomplete={incomplete} />
+}
+
 const streamdownComponents: Components = {
-  table: StreamdownTable as unknown as Components['table']
+  table: StreamdownTable as unknown as Components['table'],
+  code: StreamdownCodeBlock as unknown as Components['code']
 }
 
 export const MessageResponse = memo(
