@@ -73,7 +73,7 @@ export function WriteToolBlock({
   status: 'running' | 'done' | 'error' | 'pending'
   onApprove?: (confirmed: boolean) => void
 }) {
-  const filePath = getInputField(input, 'file_path') || ''
+  const filePath = getInputField(input, 'file_path') || getInputField(input, 'path') || ''
   const fileName = extractFilename(filePath)
   const { added, deleted } = parseLineStats(output)
   const hasLineStats = added !== undefined || deleted !== undefined
@@ -142,7 +142,7 @@ export function EditToolBlock({
   status: 'running' | 'done' | 'error' | 'pending'
   onApprove?: (confirmed: boolean) => void
 }) {
-  const filePath = getInputField(input, 'file_path') || ''
+  const filePath = getInputField(input, 'file_path') || getInputField(input, 'path') || ''
   const fileName = extractFilename(filePath)
   const { added, deleted } = parseLineStats(output)
   const hasLineStats = added !== undefined || deleted !== undefined
@@ -210,7 +210,7 @@ export function ReadToolBlock({
   status: 'running' | 'done' | 'error'
 }) {
   const [open, setOpen] = useState(false)
-  const filePath = getInputField(input, 'file_path') || ''
+  const filePath = getInputField(input, 'file_path') || getInputField(input, 'path') || ''
   const fileName = extractFilename(filePath)
   const outputText = stringifyOutput(output)
 
@@ -531,7 +531,7 @@ export function DeleteToolBlock({
   status: 'running' | 'done' | 'error' | 'pending'
   onApprove?: (confirmed: boolean) => void
 }) {
-  const filePath = getInputField(input, 'file_path') || ''
+  const filePath = getInputField(input, 'file_path') || getInputField(input, 'path') || ''
   const fileName = extractFilename(filePath)
   const isPending = status === 'pending' && onApprove
 

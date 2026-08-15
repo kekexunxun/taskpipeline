@@ -414,8 +414,8 @@ export function SubTaskGroup({
 /** 子任务 header 视觉块,给 trace 详情页和 timeline 共用。 */
 export function SubTaskHeader({
   description,
-  taskType,
-  subagentType,
+  // taskType,
+  // subagentType,
   childCount,
   status
 }: {
@@ -426,16 +426,14 @@ export function SubTaskHeader({
   childCount?: number
   status: SubTaskStatus
 }) {
-  console.log('SubTaskHeader', { description, taskType, subagentType, childCount, status })
-
   return (
     <span className="inline-flex w-full min-w-0 items-center gap-1.5">
       <span className="min-w-0 truncate text-xs font-medium text-foreground/80">{description || '子任务'}</span>
-      {subagentType && (
+      {/* {subagentType && (
         <Badge variant="outline" className="shrink-0 px-1 py-0 font-mono text-[10px]">
           {subagentType}
         </Badge>
-      )}
+      )} */}
       {childCount !== undefined && (
         <span className="shrink-0 text-xs text-muted-foreground">
           已处理 <span className="font-medium text-foreground/80">{childCount}</span> 个操作

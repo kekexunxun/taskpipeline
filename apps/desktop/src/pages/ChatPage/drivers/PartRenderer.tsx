@@ -197,23 +197,31 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
       const pair = toolPairs.get(part.toolCallId)
       const result = resultPayloadOf(pair?.resultItem)
       const status = determineToolStatus(pair, result?.isError === true, !!isStreaming)
-      // 按工具名路由到专用渲染器
-      if (part.name === 'Write') {
+      // 按工具名路由到专用渲染器（大小写不敏感：Qoder 用首字母大写 Write/Edit/Read…，
+      // Pi 用小写 write/edit/read…，统一匹配以让两套工具链路走同一套专用渲染器）。
+      const toolNameLower = part.name.toLowerCase()
+      if (toolNameLower === 'write') {
         return <WriteToolBlock key={key} input={part.input} output={result?.output} status={status} />
       }
-      if (part.name === 'Edit') {
+      if (toolNameLower === 'edit') {
         return <EditToolBlock key={key} input={part.input} output={result?.output} status={status} />
       }
-      if (part.name === 'Read') {
+      if (toolNameLower === 'read' || toolNameLower === 'read_file') {
         return <ReadToolBlock key={key} input={part.input} output={result?.output} status={status} />
       }
-      if (part.name === 'Grep') {
+      if (toolNameLower === 'grep') {
         return <GrepToolBlock key={key} input={part.input} output={result?.output} status={status} />
       }
-      if (part.name === 'Bash') {
+      if (toolNameLower === 'bash') {
         return <BashToolBlock key={key} input={part.input} output={result?.output} status={status} />
       }
-      if (part.name === 'Glob') {
+      // 目录列举类工具（Qoder Glob / Pi find+ls+list_dir）不单独展示，统一隐藏
+      if (
+        toolNameLower === 'glob' ||
+        toolNameLower === 'find' ||
+        toolNameLower === 'ls' ||
+        toolNameLower === 'list_dir'
+      ) {
         return null
       }
       if (part.name.startsWith('mcp__')) {

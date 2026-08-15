@@ -102,9 +102,9 @@ function ChatMessageImpl({
         ) : (
           <>
             {isStreaming && message.parts.length === 0 ? (
-              <div className="flex items-center gap-2 rounded-xl border border-border/40 bg-muted/30 px-3.5 py-2.5 text-xs text-muted-foreground">
-                <Loader2Icon className="animate-spin-slow" size={12} />
-                {hint ?? `${driverLabel(message.driverId)} 正在思考…`}
+              <div className="group flex items-center gap-1.5 py-0.5 text-xs text-muted-foreground/60">
+                {/* <Loader2Icon size={13} className="shrink-0 animate-spin text-muted-foreground/90" /> */}
+                <span className="text-xs">{hint ?? `${driverLabel(message.driverId)} 正在思考…`}</span>
               </div>
             ) : (
               <>
