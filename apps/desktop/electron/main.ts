@@ -3305,6 +3305,16 @@ app.on('activate', () => {
   }
 })
 let isQuitting = false
+let storeClosed = false
+function safeCloseStore(): void {
+  if (storeClosed) return
+  storeClosed = true
+  try {
+    store.close()
+  } catch {
+    /* already closed – ignore */
+  }
+}
 app.on('before-quit', (event) => {
   if (!isQuitting) {
     isQuitting = true
@@ -3318,11 +3328,11 @@ app.on('before-quit', (event) => {
         /* ignore */
       }
       void stopPi()
-      store.close()
+      safeCloseStore()
       app.quit()
     })()
     return
   }
   void stopPi()
-  store.close()
+  safeCloseStore()
 })
