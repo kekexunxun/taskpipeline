@@ -7,16 +7,14 @@ import { ButtonGroup } from '@/components/ui/button-group'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorEmpty,
-  ModelSelectorGroup,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorName,
-  ModelSelectorTrigger
-} from '@/components/ai-elements/model-selector'
+  Command,
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList
+} from '@/components/ui/command'
 import { ModelBadges } from '@/components/ModelBadges'
 import { cn } from '@/lib/utils'
 import { MODEL_VENDORS } from '@/utils/model-vendors'
@@ -75,7 +73,7 @@ function CapabilityControls({
           const current = typeof params[capability.key] === 'string' ? (params[capability.key] as string) : undefined
           return (
             <div key={capability.key} className="flex items-center justify-between gap-3">
-              <span className="text-[11px] text-muted-foreground">{label}</span>
+              <span className="text-[11px] whitespace-nowrap text-muted-foreground">{label}</span>
               <ButtonGroup>
                 {capability.options.map((option) => (
                   <Button
@@ -137,15 +135,14 @@ function CapabilityControls({
 }
 
 /**
- * hover 浮层面板：createPortal 到 document.body + 手动 fixed 定位（自控实现，
- * 不依赖 Radix HoverCard 的 portal/anchoring/floating，真实 Dialog 环境下稳定）。
- * 位置锚定 hover 的模型条目（data-model-value），右侧优先、空间不足翻到左侧；
- * 跟随 window 滚动（capture 阶段捕获 CommandList 的滚动）与窗口缩放。
+ * hover 浮层面板：createPortal 到 document.body + 手动 fixed 定位。
+ * CommandDialog 环境下 Radix HoverCard 无法正常工作（focus trap / overlay 冲突），
+ * 因此自控实现：锚定 hover 的模型条目，右侧优先、空间不足翻到左侧。
  */
 function HoverParamsPanel({
   model,
   anchorValue,
-  selected,
+  // selected,
   adjustable,
   params,
   onApply,
@@ -155,7 +152,6 @@ function HoverParamsPanel({
   model: ChatModelInfo
   anchorValue: string
   selected: boolean
-  /** 调用方是否支持修改参数（未传 onChangeParams 时浮层只读展示）。 */
   adjustable: boolean
   params: ModelParams
   onApply(next: ModelParams): void
@@ -192,38 +188,46 @@ function HoverParamsPanel({
   if (!pos) return null
   return createPortal(
     <div
-      className="animate-in fade-in-0 thin-scrollbar fixed z-[9999] flex w-64 flex-col overflow-hidden rounded-lg border bg-card text-card-foreground shadow-lg"
+      className="animate-in fade-in-0 fixed z-[9999] w-60 overflow-hidden rounded-xl border bg-popover text-popover-foreground shadow-xl"
       style={{ left: pos.left, top: pos.top, pointerEvents: 'auto' }}
       onMouseEnter={onEnter}
       onMouseLeave={onLeave}
     >
-      <div className="flex flex-col gap-1.5 border-b px-3 py-2.5">
-        <div className="flex items-center justify-between gap-2">
-          <span className="truncate text-xs font-semibold" title={model.displayName}>
-            {vendorName && <span className="mr-1.5 font-normal text-muted-foreground">[{vendorName}]</span>}
-            {model.displayName}
-          </span>
-          {selected && (
-            <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] leading-none font-medium text-primary">
-              使用中
+      {/* 头部：模型名 + 状态 */}
+      <div className="flex items-start gap-2 px-3 pt-3 pb-2.5">
+        <div className="min-w-0 flex-1">
+          <div className="flex w-auto flex-col gap-1.5">
+            {vendorName && (
+              <span className="w-auto shrink-0 rounded bg-muted px-1 py-px text-[9px] font-medium text-muted-foreground">
+                {vendorName}
+              </span>
+            )}
+            <span className="truncate text-[11px] leading-tight font-semibold" title={model.displayName}>
+              {model.displayName}
             </span>
-          )}
-        </div>
-        <ModelBadges model={model} />
-      </div>
-      {model.capabilities?.length && adjustable ? (
-        <>
-          <div className="border-b px-3 pt-2 pb-0.5 text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
-            参数设置
           </div>
+          <div className="mt-1">
+            <ModelBadges model={model} />
+          </div>
+        </div>
+        {/* {selected && (
+          <span className="mt-0.5 shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[9px] font-medium text-primary">
+            使用中
+          </span>
+        )} */}
+      </div>
+      {/* 参数区 */}
+      {model.capabilities?.length && adjustable ? (
+        <div className="border-t bg-muted/30 px-3 pt-2 pb-2.5">
+          <div className="mb-1.5 text-[9px] font-medium tracking-widest text-muted-foreground/70 uppercase">参数</div>
           <CapabilityControls capabilities={model.capabilities} params={params} onChange={onApply} />
-        </>
+        </div>
       ) : (
-        <div className="flex flex-col items-center justify-center gap-1.5 px-3 py-6 text-center">
-          <SlidersHorizontalIcon size={14} className="text-muted-foreground/60" />
-          <p className="text-[10px] leading-4 text-muted-foreground">
-            {model.capabilities?.length ? '当前场景不支持调整参数' : '该模型无可调参数'}
-          </p>
+        <div className="flex items-center gap-2 border-t bg-muted/30 px-3 py-2.5">
+          <SlidersHorizontalIcon size={12} className="shrink-0 text-muted-foreground/40" />
+          <span className="text-[10px] leading-tight text-muted-foreground/60">
+            {model.capabilities?.length ? '当前场景不支持调整' : '无可调参数'}
+          </span>
         </div>
       )}
     </div>,
@@ -232,21 +236,10 @@ function HoverParamsPanel({
 }
 
 /**
- * 模型选择器：直接基于 ai-elements 的 ModelSelector + Command。
- * 触发按钮采用 11px 紧凑样式（与 ChatComposer 工具栏同高），下拉项紧凑。
+ * 模型选择器：CommandDialog + 自控 hover 浮层。
+ * CommandDialog 负责搜索过滤与键盘导航，hover 浮层展示参数面板。
  *
- * 纯受控：value 为空（含 undefined / 不在 groups 中的旧值）时，按钮展示「系统自动选择」
- * 的结果（如 Qoder 无额度时的 Lite），并在下拉中对该项打勾 + 「自动」徽章标明它来自
- * 自动选择而非用户显式选择；调用方 value 保持不变（仍是 undefined），避免在组件内部
- * 偷偷调用 onChange 造成渲染期副作用与父子状态打架。
- *
- * 参数调节（hover 浮层）：hover 任意模型条目右侧弹出浮层 —— 声明了可调参数能力
- * （capabilities：推理力度 / 思考模式 / 最大输出 Token）且传入 onChangeParams 的模型，
- * 浮层内展示参数控件可就地修改；其余模型浮层给出提示。浮层上修改参数时，若悬停模型
- * 尚未选中则先切换选中（modelParams 按对话持久化、语义归属当前选中模型，切换会清空
- * 旧参数），再把新值经 onChangeParams 上抛。浮层由组件自控实现：条目 hover 事件驱动
- * hoveredValue，HoverParamsPanel 以 createPortal 渲染到 body 并手动 fixed 定位（不依赖
- * Radix HoverCard，真实 Dialog 环境稳定），右侧优先、空间不足翻到左侧。
+ * 纯受控：value 为空时展示「系统自动选择」结果并标记「自动」，不写回 value。
  */
 export function ChatModelSelector({
   groups,
@@ -264,13 +257,11 @@ export function ChatModelSelector({
   disabled?: boolean
 }) {
   const [open, setOpen] = useState(false)
-  // hover 浮层：hoveredValue 驱动，浮层由 HoverParamsPanel 自控定位渲染到 body。
-  // 离开条目/浮层延迟 120ms 关闭，期间移入浮层保持打开。
   const [hoveredValue, setHoveredValue] = useState<string>()
   const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const handleEnter = (value: string) => {
+  const handleEnter = (val: string) => {
     if (closeTimer.current) clearTimeout(closeTimer.current)
-    setHoveredValue(value)
+    setHoveredValue(val)
   }
   const handleLeave = () => {
     if (closeTimer.current) clearTimeout(closeTimer.current)
@@ -287,34 +278,17 @@ export function ChatModelSelector({
   const autoInfo = autoModel ? flat.find((model) => model.value === autoModel.model) : undefined
   const displayName = current?.displayName ?? autoInfo?.displayName ?? value ?? 'Auto'
   const hasModels = flat.length > 0
-  const hoveredModel = hoveredValue ? flat.find((model) => model.value === hoveredValue) : undefined
+  const hoveredModel = hoveredValue ? flat.find((m) => m.value === hoveredValue) : undefined
   // 浮层上修改参数：先切换选中（切换模型会清空旧 params，语义归属选中模型），再写入新值。
   const applyParams = (model: ChatModelInfo, next: ModelParams) => {
     if (model.value !== value) onChange(model.value)
     onChangeParams?.(next)
   }
-  // 单个模型条目（含 anchor + hover 事件 wrapper），openai 组按厂商分块时复用。
+  // 单个模型条目，含 hover 事件 wrapper。
   const renderModel = (model: ChatModelInfo) => {
     const isAuto = Boolean(autoInfo && model.value === autoInfo.value)
     const isActive = model.value === value || isAuto
     const vendorName = vendorNameOf(model)
-    const item = (
-      <ModelSelectorItem
-        value={vendorName ? `${vendorName} ${model.displayName}` : model.displayName}
-        onSelect={() => {
-          onChange(model.value)
-          setOpen(false)
-        }}
-      >
-        <ModelSelectorName>{model.displayName}</ModelSelectorName>
-        <ModelBadges model={model} />
-        {model.isDefault && (
-          <span className="rounded bg-muted px-1 text-[10px] font-medium text-muted-foreground">默认</span>
-        )}
-        {isAuto && <span className="rounded bg-primary/10 px-1 text-[10px] font-medium text-primary">自动</span>}
-        <CheckIcon size={11} className={cn('ml-auto text-foreground', isActive ? 'opacity-100' : 'opacity-0')} />
-      </ModelSelectorItem>
-    )
     return (
       <div
         key={model.value}
@@ -322,56 +296,60 @@ export function ChatModelSelector({
         onMouseEnter={() => handleEnter(model.value)}
         onMouseLeave={handleLeave}
       >
-        {item}
+        <CommandItem
+          value={vendorName ? `${vendorName} ${model.displayName}` : model.displayName}
+          className="py-1.5 text-[11px]"
+          onSelect={() => {
+            onChange(model.value)
+            setOpen(false)
+          }}
+        >
+          <span className="flex-1 truncate text-left">{model.displayName}</span>
+          <ModelBadges model={model} />
+          {model.isDefault && (
+            <span className="rounded bg-muted px-1 text-[10px] font-medium text-muted-foreground">默认</span>
+          )}
+          {isAuto && <span className="rounded bg-primary/10 px-1 text-[10px] font-medium text-primary">自动</span>}
+          <CheckIcon size={11} className={cn('ml-auto text-foreground', isActive ? 'opacity-100' : 'opacity-0')} />
+        </CommandItem>
       </div>
     )
   }
 
   return (
     <>
-      <ModelSelector
-        open={open}
-        onOpenChange={(next) => {
-          setOpen(next)
-          if (!next) setHoveredValue(undefined)
-        }}
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        disabled={disabled || !hasModels}
+        className="h-6 gap-1 px-1.5 font-normal text-muted-foreground hover:text-foreground"
+        aria-label="选择模型"
+        onClick={() => setOpen(true)}
       >
-        <ModelSelectorTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={disabled || !hasModels}
-            className="h-6 gap-1 px-1.5 font-normal text-muted-foreground hover:text-foreground"
-            aria-label="选择模型"
-          >
-            <CpuIcon size={10} className="opacity-70" />
-            <span
-              className="max-w-32 truncate"
-              title={
-                current?.displayName
-                  ? undefined
-                  : autoInfo
-                    ? `未显式选择，系统自动选择：${autoInfo.displayName}`
-                    : undefined
-              }
-            >
-              {displayName}
-            </span>
-            <ChevronDownIcon size={9} className="opacity-70" />
-          </Button>
-        </ModelSelectorTrigger>
-        <ModelSelectorContent
-          title="选择模型"
-          className="w-[min(420px,calc(100vw-40px))] border bg-popover text-sm text-popover-foreground"
+        <CpuIcon size={10} className="opacity-70" />
+        <span
+          className="max-w-32 truncate"
+          title={
+            current?.displayName
+              ? undefined
+              : autoInfo
+                ? `未显式选择，系统自动选择：${autoInfo.displayName}`
+                : undefined
+          }
         >
-          <ModelSelectorInput placeholder="搜索模型…" />
-          <ModelSelectorList>
-            <ModelSelectorEmpty>未找到匹配的模型</ModelSelectorEmpty>
+          {displayName}
+        </span>
+        <ChevronDownIcon size={9} className="opacity-70" />
+      </Button>
+      <CommandDialog open={open} onOpenChange={setOpen}>
+        <Command>
+          <CommandInput className="text-xs!" placeholder="搜索模型…" />
+          <CommandList>
+            <CommandEmpty>未找到匹配的模型</CommandEmpty>
             {groups.map((group) => (
-              <ModelSelectorGroup
+              <CommandGroup
                 key={group.driverId}
-                // 仅 Qoder 组保留组标题；OpenAI 兼容组内部已按厂商分块，不再重复组标题
                 heading={
                   group.driverId === 'qoder' ? (
                     <span className="inline-flex items-center gap-1">
@@ -388,8 +366,7 @@ export function ChatModelSelector({
                 )}
                 {group.driverId === 'qoder'
                   ? group.models.map((model) => renderModel(model))
-                  : // OpenAI 兼容组按厂商分块展示
-                    groupModelsByVendor(group.models).map((block) => (
+                  : groupModelsByVendor(group.models).map((block) => (
                       <div key={block.vendor}>
                         <div className="flex items-center gap-1 px-2 pt-2 pb-0.5 text-[10px] font-semibold text-muted-foreground">
                           {block.label}
@@ -397,11 +374,11 @@ export function ChatModelSelector({
                         {block.items.map((model) => renderModel(model))}
                       </div>
                     ))}
-              </ModelSelectorGroup>
+              </CommandGroup>
             ))}
-          </ModelSelectorList>
-        </ModelSelectorContent>
-      </ModelSelector>
+          </CommandList>
+        </Command>
+      </CommandDialog>
       {hoveredModel && (
         <HoverParamsPanel
           model={hoveredModel}
