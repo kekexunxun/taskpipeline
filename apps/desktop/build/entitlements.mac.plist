@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Hardened Runtime 必须开启，否则 Gatekeeper 会拒绝 -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- 网络访问（AI 模型 API 调用等） -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- 读取用户目录下的文件（项目文件、配置等） -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <!-- Apple Events（如需要与其他 App 通信） -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>
