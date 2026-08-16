@@ -601,6 +601,7 @@ export type AgentApi = {
   downloadUpdate(): Promise<void>
   installUpdate(): Promise<void>
   getUpdateStatus(): Promise<UpdateStatus>
+  getAppVersion(): Promise<string>
   onUpdateStatus(callback: (status: UpdateStatus) => void): () => void
 }
 
@@ -1348,6 +1349,9 @@ export const api: AgentApi = window.agentApi ?? {
   },
   async getUpdateStatus() {
     return { state: 'not-available', currentVersion: 'dev' } as UpdateStatus
+  },
+  async getAppVersion() {
+    return 'dev'
   },
   onUpdateStatus() {
     return () => undefined

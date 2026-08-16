@@ -124,6 +124,7 @@ contextBridge.exposeInMainWorld('agentApi', {
   downloadUpdate: () => ipcRenderer.invoke('updater:download'),
   installUpdate: () => ipcRenderer.invoke('updater:install'),
   getUpdateStatus: () => ipcRenderer.invoke('updater:status'),
+  getAppVersion: () => ipcRenderer.invoke('app:version'),
   onUpdateStatus: (callback: (status: unknown) => void) => {
     const listener = (_: unknown, status: unknown) => callback(status)
     ipcRenderer.on('updater:status', listener)

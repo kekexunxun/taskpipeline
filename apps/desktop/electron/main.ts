@@ -3229,6 +3229,7 @@ function registerIpc(): void {
   ipcMain.handle('updater:download', () => downloadUpdate())
   ipcMain.handle('updater:install', () => quitAndInstall())
   ipcMain.handle('updater:status', () => getUpdateStatus())
+  ipcMain.handle('app:version', () => app.getVersion())
 }
 
 // 统一应用图标：dev 环境取 build/icon.png 源文件，打包后取 vite 从 public/ 拷贝到 dist/ 的副本，

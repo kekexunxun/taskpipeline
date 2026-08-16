@@ -25,7 +25,7 @@ import { SkillSettingsTab } from './SkillSettingsTab'
 import { ModelBadges } from '@/components/ModelBadges'
 import { HitlModeSwitcher, type HitlMode } from '@/components/HitlModeSwitcher'
 import { detectVendor, MODEL_VENDORS, type ModelVendor } from '@/utils/model-vendors'
-import { api, type CapabilityKey, type MemorySearchResult, type SystemDefaultModel } from '@/api'
+import { api, type CapabilityKey, type MemorySearchResult, type SystemDefaultModel, type UpdateStatus } from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
 import { useAgents } from '@/hooks/useAgents'
 import { cn } from '@/lib/utils'
@@ -607,6 +607,106 @@ function AgentCard({
   )
 }
 
+/** 版本信息区块：显示当前版本号 + 检查更新按钮 + 更新状态反馈。 */
+function VersionSection() {
+  const [appVersion, setAppVersion] = useState<string>('')
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
+  const [checking, setChecking] = useState(false)
+
+  useEffect(() => {
+    void api
+      .getAppVersion()
+      .then((version) => setAppVersion(version || 'dev'))
+      .catch(() => setAppVersion('dev'))
+    void api
+      .getUpdateStatus()
+      .then(setUpdateStatus)
+      .catch(() => undefined)
+    const unsubscribe = api.onUpdateStatus((status) => {
+      setUpdateStatus(status)
+      if (status.state === 'checking') setChecking(true)
+      else setChecking(false)
+    })
+    return unsubscribe
+  }, [])
+
+  const handleCheckUpdate = () => {
+    setChecking(true)
+    void api.checkForUpdate()
+  }
+
+  const handleDownload = () => {
+    void api.downloadUpdate()
+  }
+
+  const handleInstall = () => {
+    void api.installUpdate()
+  }
+
+  const statusText = (() => {
+    if (!updateStatus) return ''
+    switch (updateStatus.state) {
+      case 'checking':
+        return '正在检查更新…'
+      case 'available':
+        return `发现新版本 v${updateStatus.version}`
+      case 'not-available':
+        return '当前已是最新版本'
+      case 'downloading':
+        return `正在下载 v${updateStatus.version}… ${updateStatus.progress}%`
+      case 'downloaded':
+        return `v${updateStatus.version} 已下载完成，点击重启安装`
+      case 'error':
+        return `检查更新失败：${updateStatus.message}`
+      default:
+        return ''
+    }
+  })()
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-3">
+        <span className="text-xs text-muted-foreground">当前版本</span>
+        <Badge variant="secondary" className="font-mono text-xs">
+          {appVersion ? (appVersion === 'dev' ? 'dev' : `v${appVersion}`) : '...'}
+        </Badge>
+      </div>
+      <div className="flex items-center gap-3">
+        {updateStatus?.state === 'available' ? (
+          <Button size="sm" variant="secondary" onClick={handleDownload}>
+            <DownloadIcon size={12} />
+            下载更新
+          </Button>
+        ) : updateStatus?.state === 'downloaded' ? (
+          <Button size="sm" variant="default" onClick={handleInstall}>
+            <RefreshCwIcon size={12} />
+            重启并更新
+          </Button>
+        ) : (
+          <Button size="sm" variant="outline" disabled={checking} onClick={handleCheckUpdate}>
+            {checking ? <Loader2Icon size={12} className="animate-spin" /> : <RefreshCwIcon size={12} />}
+            检查更新
+          </Button>
+        )}
+        {statusText && (
+          <span
+            className={cn(
+              'text-xs',
+              updateStatus?.state === 'error'
+                ? 'text-destructive'
+                : updateStatus?.state === 'downloaded'
+                  ? 'text-emerald-500'
+                  : 'text-muted-foreground'
+            )}
+          >
+            {statusText}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function SettingsDialog({
   open,
   onOpenChange,
@@ -1071,6 +1171,9 @@ export function SettingsDialog({
                 </TabsTrigger>
                 <TabsTrigger className="h-7 justify-start px-2 text-xs!" value="skill">
                   Skill
+                </TabsTrigger>
+                <TabsTrigger className="h-7 justify-start px-2 text-xs!" value="about">
+                  关于
                 </TabsTrigger>
               </TabsList>
               <div className="thin-scrollbar min-h-0 space-y-5 overflow-y-auto p-6">
@@ -1653,6 +1756,11 @@ export function SettingsDialog({
                 </TabsContent>
                 <TabsContent value="skill" className="space-y-5">
                   <SkillSettingsTab />
+                </TabsContent>
+                <TabsContent value="about" className="space-y-5">
+                  <Section title="版本信息" description="查看当前版本并检查更新。">
+                    <VersionSection />
+                  </Section>
                 </TabsContent>
               </div>
             </Tabs>
