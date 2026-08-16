@@ -633,6 +633,13 @@ function VersionSection() {
   const handleCheckUpdate = () => {
     setChecking(true)
     void api.checkForUpdate()
+    // 开发环境下 autoUpdater 不工作，3 秒后自动复位避免一直转圈
+    if (appVersion === 'dev') {
+      setTimeout(() => {
+        setChecking(false)
+        setUpdateStatus({ state: 'not-available', currentVersion: 'dev' })
+      }, 2000)
+    }
   }
 
   const handleDownload = () => {
@@ -688,21 +695,30 @@ function VersionSection() {
             检查更新
           </Button>
         )}
-        {statusText && (
+        {statusText && updateStatus?.state !== 'error' && (
           <span
             className={cn(
               'text-xs',
-              updateStatus?.state === 'error'
-                ? 'text-destructive'
-                : updateStatus?.state === 'downloaded'
-                  ? 'text-emerald-500'
-                  : 'text-muted-foreground'
+              updateStatus?.state === 'downloaded' ? 'text-emerald-500' : 'text-muted-foreground'
             )}
           >
             {statusText}
           </span>
         )}
+        {updateStatus?.state === 'error' && (
+          <span className="flex items-center gap-1 text-xs text-destructive">
+            <InfoIcon size={12} />
+            检查失败
+          </span>
+        )}
       </div>
+      {updateStatus?.state === 'error' && (
+        <div className="max-h-32 overflow-y-auto rounded-md border border-destructive/40 bg-destructive/10 p-3">
+          <p className="text-[11px] leading-4 break-words whitespace-pre-wrap text-destructive/90">
+            {updateStatus.message}
+          </p>
+        </div>
+      )}
     </div>
   )
 }

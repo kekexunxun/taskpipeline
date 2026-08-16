@@ -1,7 +1,47 @@
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { app, BrowserWindow } from 'electron'
 import electronUpdater from 'electron-updater'
 
 const { autoUpdater } = electronUpdater
+
+/**
+ * GitHub Personal Access Token（私有仓库访问 Release 用）。
+ * 留空字符串 = 公开仓库，无需 Token。
+ * Fine-grained token 权限：Repository permissions → Contents → Read-only
+ */
+const GITHUB_TOKEN = ''
+
+/** 更新检查间隔：2 小时 */
+const UPDATE_CHECK_INTERVAL = 2 * 60 * 60 * 1000
+
+/** 存储上次检查更新时间的文件路径 */
+function getLastCheckFile(): string {
+  return join(app.getPath('userData'), 'last-update-check.json')
+}
+
+/** 读取上次检查更新的时间戳 */
+function getLastCheckTime(): number {
+  try {
+    const file = getLastCheckFile()
+    if (existsSync(file)) {
+      const data = JSON.parse(readFileSync(file, 'utf-8'))
+      return data.lastCheck ?? 0
+    }
+  } catch {
+    // ignore
+  }
+  return 0
+}
+
+/** 保存上次检查更新的时间戳 */
+function setLastCheckTime(time: number): void {
+  try {
+    writeFileSync(getLastCheckFile(), JSON.stringify({ lastCheck: time }), 'utf-8')
+  } catch {
+    // ignore
+  }
+}
 
 /**
  * 自动更新状态类型（与渲染进程保持一致）。
@@ -54,6 +94,11 @@ export function initAutoUpdater() {
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
 
+  // 如果配置了 GitHub Token，设置请求头用于私有仓库访问
+  if (GITHUB_TOKEN) {
+    autoUpdater.requestHeaders = { authorization: `token ${GITHUB_TOKEN}` }
+  }
+
   autoUpdater.on('checking-for-update', () => {
     broadcast({ state: 'checking' })
   })
@@ -81,14 +126,33 @@ export function initAutoUpdater() {
     broadcast({ state: 'error', message: error.message ?? String(error) })
   })
 
-  // 启动后延迟 3 秒检查更新，避免阻塞窗口渲染
+  // 启动后延迟 3 秒检查是否需要更新
   setTimeout(() => {
+    const now = Date.now()
+    const lastCheck = getLastCheckTime()
+    const timeSinceLastCheck = now - lastCheck
+
+    // 如果距离上次检查不足 2 小时，跳过自动检查
+    if (timeSinceLastCheck < UPDATE_CHECK_INTERVAL) {
+      // 仍然获取当前状态，但不触发网络请求
+      currentStatus = { state: 'not-available', currentVersion: autoUpdater.currentVersion }
+      return
+    }
+
+    // 记录本次检查时间并执行检查
+    setLastCheckTime(now)
     void checkForUpdates()
   }, 3000)
 }
 
 /** 手动触发检查更新。 */
 export async function checkForUpdates(): Promise<void> {
+  // 手动检查时也更新时间戳，避免与自动检查重复
+  setLastCheckTime(Date.now())
+  // 每次检查前刷新 Token（硬编码值不变，保留结构以备将来扩展）
+  if (GITHUB_TOKEN) {
+    autoUpdater.requestHeaders = { authorization: `token ${GITHUB_TOKEN}` }
+  }
   try {
     await autoUpdater.checkForUpdates()
   } catch (error) {
