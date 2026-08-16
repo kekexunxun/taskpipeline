@@ -58,6 +58,8 @@ jobs:
       - name: Package
         run: npm run ${{ matrix.script }}
         env:
+          # electron-builder publish 到 GitHub Release 需要 GH_TOKEN
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # macOS 签名与公证（可选）：secrets 未配置时置为 null（即不注入该变量），
           # 避免 electron-builder 把空字符串 CSC_LINK 误当文件路径报 "not a file"
           CSC_LINK: ${{ secrets.MAC_CSC_LINK || null }}
