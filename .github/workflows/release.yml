@@ -18,10 +18,6 @@ jobs:
         include:
           - os: macos-latest
             script: package:mac
-          # Intel x64 版 macOS：large 后缀为 Intel runner，
-          # qodercli/原生模块会按 runner 架构自动处理，产物为 darwin-x64
-          # - os: macos-15-large
-          # script: package:mac
           # 固定 windows-2022：windows-latest(2025) 镜像缺少 node-gyp 可用的
           # Visual Studio C++ 工具链，会导致 better-sqlite3 重编译失败
           - os: windows-2022
@@ -78,6 +74,52 @@ jobs:
             release/*.exe
             release/*.yml
           if-no-files-found: error
+
+  # Intel x64 macOS 构建：非阻塞，即使失败也不影响最终发布
+  # large 后缀为 Intel runner，qodercli/原生模块会按 runner 架构自动处理，产物为 darwin-x64
+  build-intel-mac:
+    name: Build (macos-15-large)
+    runs-on: macos-15-large
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Python for node-gyp
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          npm_config_python: python
+
+      - name: Package
+        run: npm run package:mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK || null }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD || null }}
+          APPLE_ID: ${{ secrets.APPLE_ID || null }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || null }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || null }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: release-macos-15-large
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.yml
+          if-no-files-found: warn
 
   release:
     name: Publish GitHub Release
