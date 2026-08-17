@@ -428,6 +428,9 @@ export function SubTaskHeader({
 }) {
   return (
     <span className="inline-flex w-full min-w-0 items-center gap-1.5">
+      <Badge variant="outline" className="shrink-0 px-1 py-0 text-[10px] text-muted-foreground">
+        Agent
+      </Badge>
       <span className="min-w-0 truncate text-xs font-medium text-foreground/80">{description || '子任务'}</span>
       {/* {subagentType && (
         <Badge variant="outline" className="shrink-0 px-1 py-0 font-mono text-[10px]">
