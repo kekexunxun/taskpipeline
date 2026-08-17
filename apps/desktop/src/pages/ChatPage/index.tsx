@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import { LoaderIcon } from 'lucide-react'
 import { ChatHistoryList } from './components/ChatHistoryList'
 import { ChatConversation } from './components/ChatConversation'
 import { ChatComposer } from './components/ChatComposer'
@@ -84,6 +85,11 @@ function ChatPageInner() {
   }
 
   const handleSend = async (value: string, files?: UserFileAttachment[]) => {
+    // 对话进行中，将消息加入待发送队列（本轮结束后自动发送）
+    if (chat.streaming && chat.activeId) {
+      chat.enqueuePending(chat.activeId, value, files)
+      return
+    }
     const wasEmpty = !chat.activeId
     const newId = await chat.send(value, files)
     if (newId && wasEmpty) navigate(`/chat/${newId}`)
@@ -221,6 +227,65 @@ function ChatPageInner() {
             />
 
             <div className="shrink-0 border-t bg-background/95 px-4 pt-2 pb-2.5">
+              {chat.pendingMessages.length > 0 && (
+                <div className="mb-2 space-y-1.5">
+                  {chat.pendingMessages.length > 1 && (
+                    <div className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
+                      <svg
+                        className="size-3"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <circle cx="12" cy="12" r="10" />
+                        <polyline points="12 6 12 12 16 14" />
+                      </svg>
+                      <span>{chat.pendingMessages.length} 条消息将在当前对话结束后依次发送</span>
+                    </div>
+                  )}
+                  {chat.pendingMessages.map((msg, index) => (
+                    <div
+                      key={msg.id}
+                      className="group flex items-center gap-2 rounded-md border border-dashed border-border/60 bg-muted/30 px-2.5 py-1.5"
+                    >
+                      {chat.pendingMessages.length > 1 && (
+                        <span className="shrink-0 text-[10px] text-muted-foreground/60">{index + 1}</span>
+                      )}
+                      {/* 旋转 loader 图标 */}
+                      <LoaderIcon className="size-3 shrink-0 animate-spin text-primary/60" />
+                      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{msg.text}</span>
+                      {/* 附件指示器 */}
+                      {msg.files && msg.files.length > 0 && (
+                        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                          📎 {msg.files.length}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => chat.activeId && chat.removePendingMessage(chat.activeId, msg.id)}
+                        className="shrink-0 rounded p-0.5 text-muted-foreground/50 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive"
+                        title="删除"
+                      >
+                        <svg
+                          className="size-3"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <line x1="18" y1="6" x2="6" y2="18" />
+                          <line x1="6" y1="6" x2="18" y2="18" />
+                        </svg>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <ChatComposer
                 value={chat.draft}
                 onChange={chat.setDraft}
@@ -230,9 +295,13 @@ function ChatPageInner() {
                 placeholder={
                   !hasModel
                     ? '请先在设置中配置可用模型'
-                    : chat.taskCreationEnabled
-                      ? '描述准备创建的 Jira 任务，Agent 会补齐必要信息'
-                      : undefined
+                    : chat.streaming
+                      ? chat.pendingMessages.length > 0
+                        ? '继续输入，排队等待发送'
+                        : '输入消息，将在当前对话结束后自动发送'
+                      : chat.taskCreationEnabled
+                        ? '描述准备创建的 Jira 任务，Agent 会补齐必要信息'
+                        : undefined
                 }
                 streaming={chat.streaming}
                 hitlContextType="conversation"

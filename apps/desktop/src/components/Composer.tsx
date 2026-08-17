@@ -68,9 +68,9 @@ function Controlled({
   }, [controller, value])
 
   const trimmed = value.trim()
-  const busy = streaming || submitting
+  const busy = submitting
   const hasAttachments = controller.attachments.files.length > 0
-  const canSend = !disabled && !busy && (trimmed.length > 0 || hasAttachments)
+  const canSend = !disabled && (trimmed.length > 0 || hasAttachments)
   const showStop = streaming && onStop
   const defaultPlaceholder = disabled
     ? '等待执行器就绪'
@@ -147,7 +147,7 @@ function Controlled({
         <PromptInputTextarea
           data-testid="chat-composer"
           className="max-h-52 min-h-10 px-3 py-2 text-xs! leading-5 placeholder:text-muted-foreground"
-          disabled={disabled || busy}
+          disabled={disabled}
           placeholder={placeholder ?? defaultPlaceholder}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={(event) => {

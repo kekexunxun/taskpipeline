@@ -56,6 +56,13 @@ type ActiveStream = {
   closed: Promise<void>
 }
 
+/** 排队等待发送的消息（当前对话进行中用户预输入的下一轮消息）。 */
+export type PendingMessage = {
+  id: string
+  text: string
+  files?: UserFileAttachment[]
+}
+
 function textOf(parts: DriverPart[]): string {
   return parts
     .filter((p): p is Extract<DriverPart, { type: 'text' }> => p.type === 'text')
@@ -106,6 +113,12 @@ export function useChat() {
   useEffect(() => {
     pendingApprovalsRef.current = pendingApprovals
   }, [pendingApprovals])
+  /** chatId → 排队等待发送的消息（对话进行中用户预输入）。 */
+  const [pendingMessagesByChat, setPendingMessagesByChat] = useState<Record<string, PendingMessage[]>>({})
+  const pendingMessagesByChatRef = useRef<Record<string, PendingMessage[]>>({})
+  useEffect(() => {
+    pendingMessagesByChatRef.current = pendingMessagesByChat
+  }, [pendingMessagesByChat])
   /** 活跃流表(key = chatId,同一对话同时只允许一个流)。 */
   const activeStreams = useRef<Map<string, ActiveStream>>(new Map())
   /** 流看门狗:每个流一个 timer,收到事件时重置;超时(主进程崩溃/IPC 断连)则清理残留流状态。 */
@@ -299,6 +312,11 @@ export function useChat() {
         delete next[id]
         return next
       })
+      setPendingMessagesByChat((current) => {
+        const next = { ...current }
+        delete next[id]
+        return next
+      })
       if (activeIdRef.current === id) {
         activeIdRef.current = undefined
         setActiveId(undefined)
@@ -436,6 +454,30 @@ export function useChat() {
       const next = { ...current }
       delete next[chatId]
       return next
+    })
+  }, [])
+
+  /** 将消息加入指定对话的待发送队列（对话进行中用户预输入）。 */
+  const enqueuePending = useCallback((chatId: string, text: string, files?: UserFileAttachment[]) => {
+    const message: PendingMessage = { id: crypto.randomUUID(), text, files }
+    setPendingMessagesByChat((current) => ({
+      ...current,
+      [chatId]: [...(current[chatId] ?? []), message]
+    }))
+  }, [])
+
+  /** 从待发送队列中移除指定消息。 */
+  const removePendingMessage = useCallback((chatId: string, messageId: string) => {
+    setPendingMessagesByChat((current) => {
+      const list = current[chatId]
+      if (!list) return current
+      const filtered = list.filter((m) => m.id !== messageId)
+      if (filtered.length === 0) {
+        const next = { ...current }
+        delete next[chatId]
+        return next
+      }
+      return { ...current, [chatId]: filtered }
     })
   }, [])
 
@@ -603,6 +645,21 @@ export function useChat() {
         // 流结束:该对话未确认的 HITL 请求默认拒绝(替代原全局 task:ui-clear)。
         flushApprovals(chatId)
         await refreshMetas()
+        // 自动发送排队中的下一条待发送消息。
+        const pending = pendingMessagesByChatRef.current[chatId]
+        if (pending && pending.length > 0) {
+          const [next, ...rest] = pending
+          setPendingMessagesByChat((current) => {
+            const updated = current[chatId]?.filter((m) => m.id !== next.id) ?? []
+            if (updated.length === 0) {
+              const n = { ...current }
+              delete n[chatId]
+              return n
+            }
+            return { ...current, [chatId]: rest }
+          })
+          void send(next.text, next.files)
+        }
       })
 
       return chatId
@@ -633,6 +690,11 @@ export function useChat() {
   const hint = activeId ? hintsByChat[activeId] : undefined
   /** 当前对话的确认请求(内联卡片渲染源)。 */
   const approvals = useMemo(() => (activeId ? (pendingApprovals[activeId] ?? []) : []), [activeId, pendingApprovals])
+  /** 当前对话的待发送消息队列。 */
+  const pendingMessages = useMemo(
+    () => (activeId ? (pendingMessagesByChat[activeId] ?? []) : []),
+    [activeId, pendingMessagesByChat]
+  )
   /** 当前选中模型是否支持视觉/多模态输入（控制附件入口显隐）。 */
   const modelSupportsVision = useMemo(() => {
     if (!model) return false
@@ -658,6 +720,8 @@ export function useChat() {
       streamingChatIds,
       /** 当前对话待确认的 HITL 请求（内联卡片用）。 */
       approvals,
+      /** 当前对话的待发送消息队列。 */
+      pendingMessages,
       modelGroups,
       model,
       driverId,
@@ -684,6 +748,8 @@ export function useChat() {
       stop,
       pushApproval,
       respondApproval,
+      enqueuePending,
+      removePendingMessage,
       refreshMetas
     }),
     [
@@ -698,6 +764,7 @@ export function useChat() {
       hint,
       streamingChatIds,
       approvals,
+      pendingMessages,
       modelGroups,
       model,
       driverId,
@@ -723,6 +790,8 @@ export function useChat() {
       stop,
       pushApproval,
       respondApproval,
+      enqueuePending,
+      removePendingMessage,
       refreshMetas
     ]
   )
