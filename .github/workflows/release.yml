@@ -49,6 +49,25 @@ jobs:
         env:
           npm_config_python: python
 
+      # macOS 签名与公证（可选）：
+      # 必须通过 bash + $GITHUB_ENV 条件写入，而非 env: 块直接引用 secrets。
+      # 原因：GitHub Actions 的 env: 块不支持真正的"不设置"——
+      # ${{ secrets.X || null }} 在 secret 为空时会将变量设为空字符串 ""，
+      # electron-builder 拿到空 CSC_LINK 后 path.resolve(dir, "") 解析为工作目录本身，
+      # 触发 "not a file" 错误。bash 条件确保仅当 secret 非空时才写入 GITHUB_ENV。
+      - name: Setup macOS signing env
+        if: runner.os == 'macOS'
+        run: |
+          if [ -n "${{ secrets.MAC_CSC_LINK }}" ]; then
+            echo "CSC_LINK=${{ secrets.MAC_CSC_LINK }}" >> $GITHUB_ENV
+            echo "CSC_KEY_PASSWORD=${{ secrets.MAC_CSC_KEY_PASSWORD }}" >> $GITHUB_ENV
+          fi
+          if [ -n "${{ secrets.APPLE_ID }}" ]; then
+            echo "APPLE_ID=${{ secrets.APPLE_ID }}" >> $GITHUB_ENV
+            echo "APPLE_APP_SPECIFIC_PASSWORD=${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" >> $GITHUB_ENV
+            echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}" >> $GITHUB_ENV
+          fi
+
       # 根脚本先构建所有 workspace，再走 prepackage:* 钩子
       # （拷贝 monorepo 内部包 + qodercli 二进制），最后 electron-builder
       - name: Package
@@ -56,13 +75,6 @@ jobs:
         env:
           # electron-builder publish 到 GitHub Release 需要 GH_TOKEN
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS 签名与公证（可选）：secrets 未配置时置为 null（即不注入该变量），
-          # 避免 electron-builder 把空字符串 CSC_LINK 误当文件路径报 "not a file"
-          CSC_LINK: ${{ secrets.MAC_CSC_LINK || null }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD || null }}
-          APPLE_ID: ${{ secrets.APPLE_ID || null }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || null }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || null }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v5
@@ -75,51 +87,58 @@ jobs:
             release/*.yml
           if-no-files-found: error
 
-  # Intel x64 macOS 构建：非阻塞，即使失败也不影响最终发布
+  # Intel x64 macOS 构建：暂时禁用（macos-15-large 为付费 runner，需解决 GitHub 账单问题后启用）
   # large 后缀为 Intel runner，qodercli/原生模块会按 runner 架构自动处理，产物为 darwin-x64
-  build-intel-mac:
-    name: Build (macos-15-large)
-    runs-on: macos-15-large
-    continue-on-error: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Setup Python for node-gyp
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: npm ci
-        env:
-          npm_config_python: python
-
-      - name: Package
-        run: npm run package:mac
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_LINK: ${{ secrets.MAC_CSC_LINK || null }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD || null }}
-          APPLE_ID: ${{ secrets.APPLE_ID || null }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || null }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || null }}
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v5
-        with:
-          name: release-macos-15-large
-          path: |
-            release/*.dmg
-            release/*.zip
-            release/*.yml
-          if-no-files-found: warn
+  # build-intel-mac:
+  #   name: Build (macos-15-large)
+  #   runs-on: macos-15-large
+  #   continue-on-error: true
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v5
+  #
+  #     - name: Setup Node.js
+  #       uses: actions/setup-node@v5
+  #       with:
+  #         node-version: 22
+  #         cache: npm
+  #
+  #     - name: Setup Python for node-gyp
+  #       uses: actions/setup-python@v6
+  #       with:
+  #         python-version: '3.11'
+  #
+  #     - name: Install dependencies
+  #       run: npm ci
+  #       env:
+  #         npm_config_python: python
+  #
+  #     - name: Setup macOS signing env
+  #       run: |
+  #         if [ -n "${{ secrets.MAC_CSC_LINK }}" ]; then
+  #           echo "CSC_LINK=${{ secrets.MAC_CSC_LINK }}" >> $GITHUB_ENV
+  #           echo "CSC_KEY_PASSWORD=${{ secrets.MAC_CSC_KEY_PASSWORD }}" >> $GITHUB_ENV
+  #         fi
+  #         if [ -n "${{ secrets.APPLE_ID }}" ]; then
+  #           echo "APPLE_ID=${{ secrets.APPLE_ID }}" >> $GITHUB_ENV
+  #           echo "APPLE_APP_SPECIFIC_PASSWORD=${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" >> $GITHUB_ENV
+  #           echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}" >> $GITHUB_ENV
+  #         fi
+  #
+  #     - name: Package
+  #       run: npm run package:mac
+  #       env:
+  #         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #
+  #     - name: Upload build artifacts
+  #       uses: actions/upload-artifact@v5
+  #       with:
+  #         name: release-macos-15-large
+  #         path: |
+  #           release/*.dmg
+  #           release/*.zip
+  #           release/*.yml
+  #         if-no-files-found: warn
 
   release:
     name: Publish GitHub Release
