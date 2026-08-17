@@ -1,6 +1,8 @@
 import { DiamondIcon, Loader2Icon, UserRoundIcon } from 'lucide-react'
+import { useMemo } from 'react'
 import type { ChatApprovalRequest } from '../hooks/useChat'
 import { ChatMessageView, MESSAGE_WIDTH_CLASS } from './ChatMessage'
+import { ChatProgressIndicator } from './ChatProgressIndicator'
 import { ToolApprovalCard } from '@/components/ToolApprovalCard'
 import type { ChatMessage } from '@/api'
 import { Conversation, ConversationContent, ConversationScrollButton } from '@/components/ai-elements/conversation'
@@ -23,6 +25,45 @@ export function ChatConversation({
   onExecuteJira?(taskKey: string): Promise<void>
 }) {
   const lastIndex = messages.length - 1
+
+  // 计算轮次：每条 user 消息开启一轮，后续 assistant 消息属于同一轮
+  const turnMap = useMemo(() => {
+    const map = new Map<string, number>()
+    let turn = -1
+    for (const msg of messages) {
+      if (msg.role === 'user') turn++
+      map.set(msg.id, Math.max(0, turn))
+    }
+    return map
+  }, [messages])
+
+  const turnCount = useMemo(() => {
+    if (turnMap.size === 0) return 0
+    let max = 0
+    for (const v of turnMap.values()) if (v > max) max = v
+    return max + 1
+  }, [turnMap])
+
+  // 每轮的用户消息文本（用于右侧进度条卡片展示）
+  const turnUserMessages = useMemo(() => {
+    const map = new Map<number, string>()
+    for (const msg of messages) {
+      if (msg.role === 'user') {
+        const turn = turnMap.get(msg.id)
+        if (turn != null && !map.has(turn)) {
+          map.set(
+            turn,
+            msg.parts
+              .filter((p) => p.type === 'text')
+              .map((p) => p.text)
+              .join(' ')
+          )
+        }
+      }
+    }
+    return map
+  }, [messages, turnMap])
+
   return (
     <Conversation className="min-h-0 flex-1 overflow-hidden">
       <ConversationContent className="mx-auto w-full max-w-3xl gap-5 px-5 py-5">
@@ -33,6 +74,7 @@ export function ChatConversation({
             isAnimating={streaming && !message.metadata?.status && index === lastIndex}
             hint={index === lastIndex ? hint : undefined}
             onExecuteJira={onExecuteJira}
+            turnIndex={turnMap.get(message.id)}
           />
         ))}
         {approvals?.map((approval) => (
@@ -57,6 +99,7 @@ export function ChatConversation({
           </div>
         )}
       </ConversationContent>
+      <ChatProgressIndicator turnCount={turnCount} turnUserMessages={turnUserMessages} />
       <ConversationScrollButton />
     </Conversation>
   )

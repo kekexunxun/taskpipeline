@@ -24,13 +24,16 @@ function ChatMessageImpl({
   message,
   isAnimating,
   hint,
-  onExecuteJira
+  onExecuteJira,
+  turnIndex
 }: {
   message: ChatMessage
   isAnimating?: boolean
   /** 阶段提示（关键词提取/记忆检索中…）：优先于默认思考文案展示在 pending 占位里。 */
   hint?: string
   onExecuteJira?(taskKey: string): Promise<void>
+  /** 轮次索引（user+agent 为一轮），用于右侧进度条定位 */
+  turnIndex?: number
 }) {
   const [executing, setExecuting] = useState(false)
   const isUser = message.role === 'user'
@@ -93,7 +96,12 @@ function ChatMessageImpl({
     ) : null
 
   return (
-    <div className={cn('flex w-full', containerClass)} data-role={message.role} data-driver-id={message.driverId}>
+    <div
+      className={cn('flex w-full', containerClass)}
+      data-role={message.role}
+      data-driver-id={message.driverId}
+      {...(isUser && turnIndex != null ? { 'data-turn-index': turnIndex } : {})}
+    >
       <div className={cn('flex min-w-0 flex-col gap-1.5 overflow-hidden', alignClass, widthClass)}>
         <div
           className={cn(
@@ -106,7 +114,7 @@ function ChatMessageImpl({
               <BotIcon size={10} />
             </span>
           )}
-          <strong className="font-semibold text-foreground/80">{isUser ? '你' : driverLabel(message.driverId)}</strong>
+          <strong className="font-semibold text-foreground/70">{isUser ? '你' : driverLabel(message.driverId)}</strong>
           {time && <time className="font-mono text-[10px]">{time}</time>}
           {isAborted && <Badge variant="muted">已停止</Badge>}
           {isError && <Badge variant="destructive">失败</Badge>}
@@ -189,7 +197,7 @@ function UserBubble({ message }: { message: ChatMessage }) {
     [message.parts]
   )
   return (
-    <div className="max-w-full rounded-2xl rounded-tr-sm border border-border/40 bg-secondary px-3.5 py-2 text-sm leading-6 break-words whitespace-pre-wrap text-foreground">
+    <div className="max-w-full rounded-2xl rounded-tr-sm border border-border/40 bg-secondary px-3.5 py-2 text-sm leading-6 break-words whitespace-pre-wrap text-foreground/85">
       {text}
     </div>
   )
