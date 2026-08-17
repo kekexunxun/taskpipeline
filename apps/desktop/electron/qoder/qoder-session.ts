@@ -308,6 +308,26 @@ export class QoderSession {
     }
   }
 
+  /**
+   * 对话引导：在当前轮次中注入一条引导消息，不打断对话、不触发新的 assistant 回复。
+   * 利用 SDK 的 priority + shouldQuery 机制：
+   *  - priority: 'next' — 在下一个合适时机投递（不打断当前生成）
+   *  - shouldQuery: false — 只加入上下文，不触发 assistant 回复
+   */
+  injectGuidance(text: string): void {
+    if (this.closed) return
+    const message: SDKUserMessage = {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text }] },
+      parent_tool_use_id: null,
+      priority: 'next',
+      shouldQuery: false
+    }
+    const waiter = this.inputWaiters.shift()
+    if (waiter) waiter(message)
+    else this.inputQueue.push(message)
+  }
+
   /** 结束会话:关闭 query、唤醒所有挂起等待。关闭带超时保护,避免 qodercli 子进程异常时悬挂。 */
   async close(): Promise<void> {
     if (this.closed) return

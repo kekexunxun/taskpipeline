@@ -601,6 +601,8 @@ export type AgentApi = {
   getDefaultModel(): Promise<SystemDefaultModel | undefined>
   startChatStream(input: StartChatStreamInput): Promise<void>
   abortChat(input: AbortChatStreamInput): Promise<void>
+  /** 对话引导：在当前轮次注入引导消息，不打断对话。 */
+  injectChatGuidance(chatId: string, text: string): Promise<void>
   /** 保存附件到本地缓存，返回本地路径元信息。 */
   saveChatAttachment(
     chatId: string,
@@ -1347,6 +1349,9 @@ export const api: AgentApi = window.agentApi ?? {
     memoryListeners.forEach((callback) =>
       callback({ streamId, chatId, driverId, chunk: { type: 'done', status: 'aborted' }, done: true })
     )
+  },
+  async injectChatGuidance() {
+    // 内存实现：引导消息无持久化需求，静默忽略
   },
   onChatStreamEvent(callback) {
     memoryListeners.add(callback)

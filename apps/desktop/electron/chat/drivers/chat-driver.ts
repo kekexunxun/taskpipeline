@@ -133,6 +133,13 @@ export interface ChatDriver {
    * 无状态 driver(如 OpenAI,每轮全量发送)可不实现。
    */
   closeSession?(id: string): void
+  /**
+   * 对话引导：在当前轮次中注入引导消息，不打断对话。
+   * Qoder 走 SDK priority + shouldQuery 原生机制；
+   * OpenAI 排队等当前轮次结束后注入历史（请求-响应模式无法中途注入）。
+   * 无活跃流时忽略。
+   */
+  injectGuidance?(conversationId: string, text: string): void
   /** 释放 driver 持有的资源(MCP client / HTTP pool / SDK 子进程)。 */
   dispose(): void
 }

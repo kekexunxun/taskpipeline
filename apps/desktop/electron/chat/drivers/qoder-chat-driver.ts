@@ -359,6 +359,11 @@ export class QoderChatDriver implements ChatDriver {
     void this.sessions.close(conversationId)
   }
 
+  injectGuidance(conversationId: string, text: string): void {
+    const session = this.sessions.get(conversationId)
+    session?.injectGuidance(text)
+  }
+
   dispose(): void {
     void this.sessions.dispose()
   }

@@ -95,6 +95,16 @@ function ChatPageInner() {
     if (newId && wasEmpty) navigate(`/chat/${newId}`)
   }
 
+  /** 将 pending 消息的文本作为对话引导注入当前轮次 */
+  const handleGuidance = async (text: string) => {
+    if (!chat.activeId) return
+    try {
+      await api.injectChatGuidance(chat.activeId, text)
+    } catch (reason) {
+      showError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }
+
   // 欢迎页发送：若选择了项目目录，先创建带目录的对话再发送
   const welcomeHandleSend = async (value: string, files?: UserFileAttachment[]) => {
     setWelcomeDraft('') // 清空欢迎页草稿
@@ -227,7 +237,7 @@ function ChatPageInner() {
             />
 
             <div className="shrink-0 border-t bg-background/95 px-4 pt-2 pb-2.5">
-              {chat.pendingMessages.length > 0 && (
+              {chat.pendingMessages.length > 0 && chat.activeId && (
                 <div className="mb-2 space-y-1.5">
                   {chat.pendingMessages.length > 1 && (
                     <div className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
@@ -263,10 +273,19 @@ function ChatPageInner() {
                           📎 {msg.files.length}
                         </span>
                       )}
+                      {/* 引导按钮 */}
+                      <button
+                        type="button"
+                        onClick={() => void handleGuidance(msg.text)}
+                        className="shrink-0 rounded px-1 py-0.5 text-[9px] text-primary/60 hover:bg-primary/10 hover:text-primary"
+                        title="对话引导"
+                      >
+                        引导
+                      </button>
                       <button
                         type="button"
                         onClick={() => chat.activeId && chat.removePendingMessage(chat.activeId, msg.id)}
-                        className="shrink-0 rounded p-0.5 text-muted-foreground/50 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive"
+                        className="shrink-0 rounded p-0.5 text-muted-foreground/40 hover:bg-destructive/10 hover:text-destructive"
                         title="删除"
                       >
                         <svg

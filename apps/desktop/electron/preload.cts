@@ -98,6 +98,9 @@ contextBridge.exposeInMainWorld('agentApi', {
   getDefaultModel: () => ipcRenderer.invoke('chats:default-model'),
   startChatStream: (input: unknown) => ipcRenderer.invoke('chats:start-stream', input),
   abortChat: (input: unknown) => ipcRenderer.invoke('chats:abort', input),
+  /** 对话引导：在当前轮次注入引导消息，不打断对话。 */
+  injectChatGuidance: (chatId: string, text: string) =>
+    ipcRenderer.invoke('chats:inject-guidance', chatId, text),
   /** 保存附件到本地缓存（渲染进程 → 主进程写文件，返回本地路径）。 */
   saveChatAttachment: (chatId: string, data: ArrayBuffer, filename: string, mediaType: string) =>
     ipcRenderer.invoke('chats:save-attachment', chatId, data, filename, mediaType),

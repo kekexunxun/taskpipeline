@@ -3207,6 +3207,9 @@ function registerIpc(): void {
     void chatService.startChatStream(input).catch((reason) => console.error('[chat] stream failed', reason))
   })
   ipcMain.handle('chats:abort', (_event, input) => chatService.abortChat(input))
+  ipcMain.handle('chats:inject-guidance', (_event, chatId: string, text: string) =>
+    chatService.injectGuidance(chatId, text)
+  )
   // 附件缓存：渲染进程把文件 ArrayBuffer 发过来，主进程写入本地，返回路径元信息。
   ipcMain.handle(
     'chats:save-attachment',

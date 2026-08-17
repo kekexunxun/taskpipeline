@@ -99,6 +99,12 @@ export class ChatService {
   private readonly activeStreams = new Map<string, ActiveStream>()
   /** 活跃流的完整生命周期 Promise（含 finally 持久化），供退出时 await 确保落盘。 */
   private readonly activeStreamLifecycles = new Map<string, Promise<void>>()
+  /**
+   * 对话引导队列（OpenAI 等无状态 driver 用）：
+   * 流式期间收到的引导消息暂存于此，当前轮次结束后作为 system 消息写入历史，
+   * 下一轮 streamChat 自然带入上下文。Qoder driver 走 SDK 原生注入，不经过此队列。
+   */
+  private readonly pendingGuidanceByChat = new Map<string, string[]>()
   /** 应用正在退出：阻止新流启动，abortAllActiveStreams 期间为 true。 */
   private isQuitting = false
   /** 流式期间增量持久化定时间隔 ID（finally 中清除）。 */
@@ -253,6 +259,29 @@ export class ChatService {
   abortChat(input: AbortChatStreamInput): void {
     const active = this.activeStreams.get(input.chatId)
     if (active?.streamId === input.streamId) active.abort.abort()
+  }
+
+  /**
+   * 对话引导：在当前轮次中注入引导消息，不打断对话。
+   * - Qoder driver：走 SDK 原生 priority + shouldQuery 机制，实时注入当前轮次。
+   * - OpenAI driver：请求-响应模式无法中途注入，排队等当前轮次结束后写入历史。
+   * - 无活跃流时忽略（引导只对正在进行的对话生效）。
+   */
+  async injectGuidance(chatId: string, text: string): Promise<void> {
+    const active = this.activeStreams.get(chatId)
+    if (!active) return
+    const conversation = await this.storage.getConversation(chatId)
+    if (!conversation?.driverId) return
+    const driver = this.driverRegistry.tryGet(conversation.driverId)
+    // Qoder driver 有活跃会话：直接走 SDK 原生注入
+    if (driver?.injectGuidance) {
+      driver.injectGuidance(chatId, text)
+      return
+    }
+    // OpenAI 等无状态 driver：排队，当前轮次结束后持久化
+    const queue = this.pendingGuidanceByChat.get(chatId) ?? []
+    queue.push(text)
+    this.pendingGuidanceByChat.set(chatId, queue)
   }
 
   /**
@@ -519,6 +548,26 @@ export class ChatService {
         const message = reason instanceof Error ? reason.message : String(reason)
         this.dispatch(effective, { type: 'error', message: `保存聊天失败:${message}` })
       } finally {
+        // 持久化排队的对话引导（OpenAI 等无状态 driver）：
+        // 每条引导作为独立 user 消息写入历史，下一轮 streamChat 自然带入上下文。
+        const guidanceQueue = this.pendingGuidanceByChat.get(input.chatId)
+        if (guidanceQueue && guidanceQueue.length > 0) {
+          this.pendingGuidanceByChat.delete(input.chatId)
+          try {
+            for (const text of guidanceQueue) {
+              await this.storage.appendMessage(input.chatId, {
+                id: randomUUID(),
+                role: 'user',
+                createdAt: new Date().toISOString(),
+                driverId: effective.driverId,
+                raw: { kind: 'user', text }
+              } as StoredMessageRecord)
+            }
+          } catch (reason) {
+            const message = reason instanceof Error ? reason.message : String(reason)
+            this.dispatch(effective, { type: 'error', message: `保存对话引导失败:${message}` })
+          }
+        }
         toolSource?.close()
         taskBackend?.close()
         if (status === 'aborted') this.dispatch(effective, { type: 'done', status: 'aborted' })

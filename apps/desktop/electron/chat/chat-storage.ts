@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ChatConversation, ChatConversationMeta, ChatGroup, StoredMessageRecord } from './chat-types.js'
@@ -83,6 +83,21 @@ export class ChatStorage {
   private dirEnsurePromise: Promise<void> | undefined
 
   /**
+   * 对话级别的内存缓存:chatId → ChatConversation。
+   *
+   * 解决问题:`appendMessage` / `replaceMessages` / `updateMeta` 需要先读出现有对话再修改,
+   * 如果从磁盘读(`getConversation`),在并发写(异步 writeQueue)场景下会读到旧数据,
+   * 导致后一次写覆盖前一次写的结果(消息丢失)。
+   *
+   * 缓存策略:
+   *  - `saveConversation` 写入时同步更新缓存;
+   *  - `getConversation` 优先返回缓存(缓存命中时不读磁盘);
+   *  - `deleteConversation` 清除缓存;
+   *  - 缓存未命中时回退到磁盘读取(冷启动 / 首次访问)。
+   */
+  private readonly conversationCache = new Map<string, ChatConversation>()
+
+  /**
    * 写操作串行化队列:per-file promise chain。
    * 同一文件的写操作按入队顺序执行,不同文件互不阻塞(真正并行)。
    */
@@ -115,6 +130,8 @@ export class ChatStorage {
     if (index?.version === STORAGE_VERSION) {
       this.indexCache = index
       this.indexLoaded = true
+      // 异步修复:磁盘上有文件但 index 里丢失的对话(崩溃/竞态导致 index 漏写)。
+      void this.reconcileOrphanedConversations()
       return this.indexCache
     }
     // v4 不存在 → 尝试从 v3 迁移
@@ -124,6 +141,7 @@ export class ChatStorage {
       this.indexLoaded = true
       // 写入 v4
       await this.enqueueIndexWrite(migrated)
+      void this.reconcileOrphanedConversations()
       return this.indexCache
     }
     this.indexLoaded = true
@@ -266,10 +284,15 @@ export class ChatStorage {
   }
 
   async getConversation(id: string): Promise<ChatConversation | undefined> {
+    // 优先返回内存缓存(避免并发写场景下从磁盘读到旧数据)。
+    const cached = this.conversationCache.get(id)
+    if (cached) return cached
     await this.ensureDir()
     const file = await parseFile<ChatFile>(conversationPath(this.dataDir, id))
     if (file?.version !== STORAGE_VERSION || file.conversation?.id !== id || !Array.isArray(file.conversation.messages))
       return undefined
+    // 写入缓存,后续访问直接命中。
+    this.conversationCache.set(id, file.conversation)
     return file.conversation
   }
 
@@ -277,6 +300,8 @@ export class ChatStorage {
     await this.ensureDir()
     const normalized: ChatConversation = { ...conversation, messageCount: conversation.messages.length }
     const file: ChatFile = { version: STORAGE_VERSION, conversation: normalized }
+    // 同步更新对话缓存(在磁盘写入之前),确保后续 getConversation 拿到最新版本。
+    this.conversationCache.set(normalized.id, normalized)
     // 会话文件写入(按 chatId 串行化,不同对话真正并行)。
     await this.enqueueConversationWrite(normalized.id, file)
     // 绑定了工作目录 = 项目对话,更新对应 group
@@ -352,6 +377,8 @@ export class ChatStorage {
 
   async deleteConversation(id: string): Promise<void> {
     await this.ensureDir()
+    // 清除对话缓存。
+    this.conversationCache.delete(id)
     const file = conversationPath(this.dataDir, id)
     try {
       await unlink(file)
@@ -490,5 +517,52 @@ export class ChatStorage {
       }
     }
     return this.getCachedGroups().filter((g) => kept.has(g.id))
+  }
+
+  /**
+   * 修复孤立对话:扫描磁盘上的 chat-*.json 文件,找出不在 index 中的对话并恢复。
+   *
+   * 触发时机:`loadIndex` 完成后异步调用(不阻塞首次加载)。
+   * 修复方式:读取孤立文件的 conversation,补入 index(同时写入对话缓存).
+   */
+  private async reconcileOrphanedConversations(): Promise<void> {
+    await this.ensureDir()
+    await this.loadIndex()
+    const indexIds = new Set(this.getCachedMetas().map((m) => m.id))
+
+    let entries: string[]
+    try {
+      entries = await readdir(chatsDir(this.dataDir))
+    } catch {
+      return
+    }
+
+    const orphanIds: string[] = []
+    for (const entry of entries) {
+      if (!entry.startsWith('chat-') || !entry.endsWith('.json')) continue
+      const id = entry.slice(5, entry.length - 5) // 'chat-'.length = 5, '.json'.length = 5
+      if (!indexIds.has(id)) orphanIds.push(id)
+    }
+
+    if (orphanIds.length === 0) return
+
+    let recovered = 0
+    for (const id of orphanIds) {
+      try {
+        const file = await parseFile<ChatFile>(conversationPath(this.dataDir, id))
+        if (!file?.conversation || file.conversation.id !== id || !Array.isArray(file.conversation.messages)) continue
+        // 写入缓存 + 补入 index。
+        this.conversationCache.set(id, file.conversation)
+        const meta = (({ messages: _messages, ...rest }) => rest)(file.conversation)
+        await this.upsertMeta(() => meta, file.conversation)
+        recovered++
+      } catch {
+        // 单个文件修复失败不影响其它文件。
+      }
+    }
+
+    if (recovered > 0) {
+      console.warn(`[chat-storage] reconciled ${recovered} orphaned conversation(s): ${orphanIds.join(', ')}`)
+    }
   }
 }
