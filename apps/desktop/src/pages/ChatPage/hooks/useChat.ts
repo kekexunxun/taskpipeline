@@ -397,6 +397,12 @@ export function useChat() {
     const id = chatId ?? activeIdRef.current
     if (!id) return
     setPendingApprovals((current) => ({ ...current, [id]: [...(current[id] ?? []), request] }))
+    // HITL 等待期间无流式事件到达属正常态,清除看门狗避免误杀(用户可通过停止按钮主动中止)。
+    const timer = streamWatchdogs.current.get(id)
+    if (timer) {
+      clearTimeout(timer)
+      streamWatchdogs.current.delete(id)
+    }
   }, [])
 
   /** 响应确认请求（允许/拒绝），并把它从对应对话的队列移除。 */
@@ -519,6 +525,8 @@ export function useChat() {
             chatId,
             setTimeout(() => {
               if (activeStreams.current.get(chatId)?.streamId === streamId) {
+                // HITL 等待用户响应期间无事件到达属正常态,不视为流死亡(用户可通过停止按钮中止)。
+                if (pendingApprovalsRef.current[chatId]?.length) return
                 activeStreams.current.get(chatId)?.abort()
                 activeStreams.current.delete(chatId)
                 streamWatchdogs.current.delete(chatId)

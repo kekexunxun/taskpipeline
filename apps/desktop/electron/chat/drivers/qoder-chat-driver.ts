@@ -447,10 +447,11 @@ export class QoderChatDriver implements ChatDriver {
               sdkOpts: CanUseToolOptions
             ): Promise<PermissionResult> => {
               // SDK 侧已中止(超时/会话关闭/用户停止):弹窗前直接拒绝,避免确认框挂到 10 分钟超时。
+              // interrupt:true 让 SDK 立即停止当前回合,避免继续生成「用户拒绝」回复导致会话状态混乱。
               if (sdkOpts.signal.aborted) {
                 // HITL 拒绝标记:记录 toolUseID,handleToolResult 据此补标 isError。
                 sessionRef?.current?.deniedCallIds.add(sdkOpts.toolUseID)
-                return { behavior: 'deny', message: '工具调用已中止', interrupt: false }
+                return { behavior: 'deny', message: '工具调用已中止', interrupt: true }
               }
               const decision = await this.onToolPermission!(toolName, toolInput, {
                 signal: sdkOpts.signal,
@@ -459,6 +460,12 @@ export class QoderChatDriver implements ChatDriver {
                 ...(sdkOpts.displayName ? { displayName: sdkOpts.displayName } : {}),
                 ...(sdkOpts.description ? { description: sdkOpts.description } : {})
               })
+              // 等待用户响应期间信号被中止(看门狗超时/用户主动停止):
+              // 返回 interrupt:true 让 SDK 立即停止,而非继续生成回复导致会话状态不一致。
+              if (sdkOpts.signal.aborted) {
+                sessionRef?.current?.deniedCallIds.add(sdkOpts.toolUseID)
+                return { behavior: 'deny', message: '工具调用已中止', interrupt: true }
+              }
               if (decision === 'deny') {
                 // HITL 拒绝标记:记录 toolUseID,handleToolResult 据此补标 isError。
                 sessionRef?.current?.deniedCallIds.add(sdkOpts.toolUseID)
