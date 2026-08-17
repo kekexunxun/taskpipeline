@@ -434,14 +434,15 @@ export function BashToolBlock({
   icon?: ComponentType<{ size?: number; className?: string }>
   onApprove?: (confirmed: boolean) => void
 }) {
-  const [open, setOpen] = useState(false)
+  const [manualOpen, setManualOpen] = useState(false)
+  const open = status === 'running' || manualOpen
   const command = getInputField(input, 'command') || ''
   const description = getInputField(input, 'description')
   const outputText = stringifyOutput(output)
   const isPending = status === 'pending' && onApprove
 
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="not-prose w-full">
+    <Collapsible open={open} onOpenChange={setManualOpen} className="not-prose w-full">
       <CollapsibleTrigger
         className={cn(
           'group flex w-full items-center gap-2 rounded-md border px-3 py-1.5 text-left text-[10px]! transition-colors',
