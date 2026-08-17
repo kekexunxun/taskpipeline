@@ -197,7 +197,7 @@ function UserBubble({ message }: { message: ChatMessage }) {
     [message.parts]
   )
   return (
-    <div className="max-w-full rounded-2xl rounded-tr-sm border border-border/40 bg-secondary px-3.5 py-2 text-sm leading-6 break-words whitespace-pre-wrap text-foreground/85">
+    <div className="max-w-full rounded-2xl rounded-tr-sm border border-border/40 bg-secondary px-3.5 py-2 text-sm leading-6 break-words whitespace-pre-wrap">
       {text}
     </div>
   )
