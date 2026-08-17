@@ -87,7 +87,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "perMachine": false
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
     },
     "linux": {
       "category": "Development",
