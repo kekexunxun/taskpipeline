@@ -10,7 +10,7 @@
     "directory": "apps/desktop"
   },
   "scripts": {
-    "predev": "node scripts/sync-icon.mjs && node scripts/patch-dev-app-name.mjs && npm run build -w @task-pipeline/core && npm run build -w @task-pipeline/integrations && npm run build -w @task-pipeline/pi-package",
+    "predev": "node scripts/sync-icon.mjs && node scripts/patch-dev-app-name.mjs && node scripts/copy-qodercli.mjs && npm run build -w @task-pipeline/core && npm run build -w @task-pipeline/integrations && npm run build -w @task-pipeline/pi-package",
     "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json --watch\" \"wait-on tcp:5173 file:dist-electron/main.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "build": "vite build && tsc -p tsconfig.electron.json",
     "prebuild": "node scripts/sync-icon.mjs",

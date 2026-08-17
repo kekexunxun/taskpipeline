@@ -18,6 +18,7 @@
 // 该步骤必须早于 electron-builder 运行:在 prepackage 阶段触发。
 
 import { chmodSync, copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs'
+import { execSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -46,4 +47,15 @@ if (process.platform !== 'win32') {
   // 至少保证 rwxr-xr-x;若源更严格(例如仅 owner 可执行)则尊重源。
   chmodSync(dest, srcMode | 0o755)
 }
+
+// macOS: 从 node_modules 拷贝出的二进制可能带 com.apple.provenance 扩展属性,
+// 导致 Gatekeeper 直接 SIGKILL。用 ad-hoc 重签名清除 provenance 标记。
+if (process.platform === 'darwin') {
+  try {
+    execSync(`codesign --force --sign - "${dest}"`, { stdio: 'ignore' })
+  } catch {
+    console.warn('[copy-qodercli] codesign failed, binary may be blocked by macOS Gatekeeper')
+  }
+}
+
 console.log(`[copy-qodercli] staged ${dest}`)

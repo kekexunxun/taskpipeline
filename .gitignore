@@ -14,3 +14,4 @@ apps/desktop/main.js
 .DS_Store
 .reasonix/
 reasonix.toml
+apps/desktop/qoder-bin/
