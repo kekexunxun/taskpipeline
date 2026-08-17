@@ -7,9 +7,14 @@
  *  - `ChatMessageMetadata` 仍然跨 driver 共享 (status / model / taskCreation);
  *  - `ChatConversation` / `ChatConversationMeta` / `ChatModelInfo` / `ChatModelGroup`
  *    保留旧的形态,前端不用大改。
+ *  - `UserFileAttachment` 是用户上传附件的本地缓存描述（路径 + 元信息）。
  *
  * 注意：本文件**只放类型**。driver 的运行时实现见 `drivers/*`,存储见 `chat-storage.ts`。
  */
+
+import type { UserFileAttachment } from './chat-attachment-cache.js'
+
+export type { UserFileAttachment }
 
 /** 当前支持的 chat driver。driverId 在所有抽象层 (主进程 / IPC / 前端) 保持一致。 */
 export type ChatDriverId = 'qoder' | 'openai'
@@ -89,6 +94,14 @@ export type DriverPart =
   | { driverId: 'openai'; type: 'openai.tool-result'; toolCallId: string; output: unknown; parentTaskId?: string }
   | { driverId: 'openai'; type: 'openai.thinking'; text: string; parentTaskId?: string }
   | { driverId: ChatDriverId; type: 'text'; text: string; parentTaskId?: string }
+  | {
+      driverId: ChatDriverId
+      type: 'file'
+      mediaType: string
+      localPath: string
+      filename?: string
+      parentTaskId?: string
+    }
 
 /** 单条消息的流式用量（openai driver 从 ai-sdk finish chunk 收集；qoder 暂无数据）。 */
 export type ChatUsage = {
@@ -258,7 +271,7 @@ export type StartChatStreamInput = {
   /** 运行时模型参数（选择器调节产出；ChatService 随对话落盘并透传给 driver）。 */
   modelParams?: ModelParams
   /** 用户当前输入(未持久化),ChatService 会按 driverId 调 `driver.serializeUserMessage` 包成 record。 */
-  message: { id: string; text: string; createdAt: string }
+  message: { id: string; text: string; createdAt: string; files?: UserFileAttachment[] }
   mode?: ChatAgentMode
   /** 选中的 MCP 服务列表（落盘 + 注入 driver 工具：Qoder 走 mcpServers，OpenAI 走 MCP 桥接工具）。 */
   mcpService?: McpServiceId[]

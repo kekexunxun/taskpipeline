@@ -329,7 +329,12 @@ export class ChatService {
     )
     const turnTraceId = turn?.traceId
     const turnKey = turn?.turnKey
-    const userRecord = driver.serializeUserMessage({ id: input.message.id, text: input.message.text, createdAt: now })
+    const userRecord = driver.serializeUserMessage({
+      id: input.message.id,
+      text: input.message.text,
+      createdAt: now,
+      ...(input.message.files?.length ? { files: input.message.files } : {})
+    })
     const existing = conversation.messages.filter((message) => message.id !== userRecord.id)
     // 选中 Agent 的 systemPrompt：以 system 消息插入本轮上下文（复用 memoryContext 的插入模式），
     // 随 messages 一起落盘，保证注入内容进入模型上下文且历史加载后仍可见。
@@ -440,7 +445,12 @@ export class ChatService {
           model: effective.model,
           ...(effective.modelParams ? { modelParams: effective.modelParams } : {}),
           history,
-          userInput: { id: input.message.id, text: input.message.text, createdAt: now },
+          userInput: {
+            id: input.message.id,
+            text: input.message.text,
+            createdAt: now,
+            ...(input.message.files?.length ? { files: input.message.files } : {})
+          },
           signal: abort.signal,
           cwd: conversation.workingDirectory,
           ...(turnTraceId ? { traceId: turnTraceId } : {}),

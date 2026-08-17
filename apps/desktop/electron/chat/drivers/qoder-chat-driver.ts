@@ -26,8 +26,16 @@ import {
   type PermissionResult,
   type SdkMcpToolDefinition
 } from '@qoder-ai/qoder-agent-sdk'
-import type { ChatModelInfo, ChatStreamChunk, DriverPart, StoredMessage, StoredMessageRecord } from '../chat-types.js'
+import type {
+  ChatModelInfo,
+  ChatStreamChunk,
+  DriverPart,
+  StoredMessage,
+  StoredMessageRecord,
+  UserFileAttachment
+} from '../chat-types.js'
 import { QoderSession, QoderSessionRegistry } from '../../qoder/qoder-session.js'
+import type { ChatAttachmentCache } from '../chat-attachment-cache.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
 import { QoderTraceBuilder } from '../../trace/instrument/qoder-trace-builder.js'
 import type { McpServiceProfileResolver } from '../mcp-services.js'
@@ -71,7 +79,7 @@ export type QoderToolPermissionHandler = (
  *  - 系统消息: `{ kind: "system", text: string }` (memory context 等)。
  */
 type QoderRawMessage =
-  | { kind: 'user'; text: string }
+  | { kind: 'user'; text: string; files?: UserFileAttachment[] }
   | { kind: 'assistant'; parts: DriverPart[]; sessionId?: string }
   | { kind: 'system'; text: string }
 
@@ -82,8 +90,22 @@ function emptyParts(): DriverPart[] {
 function rawToParts(raw: unknown): DriverPart[] {
   if (!raw || typeof raw !== 'object') return emptyParts()
   const record = raw as QoderRawMessage
-  if (record.kind === 'user' || record.kind === 'system')
-    return [{ driverId: 'qoder', type: 'text', text: record.text }]
+  if (record.kind === 'user') {
+    const parts: DriverPart[] = [{ driverId: 'qoder', type: 'text', text: record.text }]
+    if (record.files?.length) {
+      for (const file of record.files) {
+        parts.push({
+          driverId: 'qoder',
+          type: 'file',
+          mediaType: file.mediaType,
+          localPath: file.localPath,
+          filename: file.filename
+        })
+      }
+    }
+    return parts
+  }
+  if (record.kind === 'system') return [{ driverId: 'qoder', type: 'text', text: record.text }]
   if (record.kind === 'assistant' && Array.isArray(record.parts)) return record.parts
   return emptyParts()
 }
@@ -164,7 +186,9 @@ export class QoderChatDriver implements ChatDriver {
      * Skill 配置根（dataDir，其下有 skills/<name>/SKILL.md）。
      * 选中技能时透传 SDK `skills` 并切 QODER_CONFIG_DIR 让 CLI 从该目录发现技能（实测定案，见计划 §4.2）。
      */
-    private readonly skillsConfigRoot?: string
+    private readonly skillsConfigRoot?: string,
+    /** 附件缓存（用于读取本地文件内容，构建多模态消息）。 */
+    private readonly attachmentCache?: ChatAttachmentCache
   ) {
     if (!tokenProvider) throw new Error('QoderChatDriver requires a token provider')
     if (!statusProvider) throw new Error('QoderChatDriver requires a status provider')
@@ -187,13 +211,22 @@ export class QoderChatDriver implements ChatDriver {
     }
   }
 
-  serializeUserMessage(input: { id: string; text: string; createdAt: string }): StoredMessageRecord {
+  serializeUserMessage(input: {
+    id: string
+    text: string
+    createdAt: string
+    files?: UserFileAttachment[]
+  }): StoredMessageRecord {
     return {
       id: input.id,
       role: 'user',
       createdAt: input.createdAt,
       driverId: 'qoder',
-      raw: { kind: 'user', text: input.text } satisfies QoderRawMessage
+      raw: {
+        kind: 'user',
+        text: input.text,
+        ...(input.files?.length ? { files: input.files } : {})
+      } satisfies QoderRawMessage
     }
   }
 
@@ -291,6 +324,8 @@ export class QoderChatDriver implements ChatDriver {
     try {
       for await (const chunk of session.turn({
         text: input.userInput.text,
+        files: input.userInput.files,
+        attachmentCache: this.attachmentCache,
         toolSource: input.toolSource,
         signal: input.signal
       })) {

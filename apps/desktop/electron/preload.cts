@@ -98,6 +98,9 @@ contextBridge.exposeInMainWorld('agentApi', {
   getDefaultModel: () => ipcRenderer.invoke('chats:default-model'),
   startChatStream: (input: unknown) => ipcRenderer.invoke('chats:start-stream', input),
   abortChat: (input: unknown) => ipcRenderer.invoke('chats:abort', input),
+  /** 保存附件到本地缓存（渲染进程 → 主进程写文件，返回本地路径）。 */
+  saveChatAttachment: (chatId: string, data: ArrayBuffer, filename: string, mediaType: string) =>
+    ipcRenderer.invoke('chats:save-attachment', chatId, data, filename, mediaType),
   chooseDirectory: () => ipcRenderer.invoke('dialog:choose-directory'),
   chooseDirectories: () => ipcRenderer.invoke('dialog:choose-directories'),
   // === Chat 分组(工作区 CRUD) ==================================================

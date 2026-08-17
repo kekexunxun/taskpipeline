@@ -16,6 +16,7 @@ import { UiRequestDialog } from '@/pages/CodingPage/components/UiRequestDialog'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { api } from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
+import type { UserFileAttachment } from '@/api'
 
 export default function ChatPage() {
   return (
@@ -82,14 +83,14 @@ function ChatPageInner() {
     }
   }
 
-  const handleSend = async (value: string) => {
+  const handleSend = async (value: string, files?: UserFileAttachment[]) => {
     const wasEmpty = !chat.activeId
-    const newId = await chat.send(value)
+    const newId = await chat.send(value, files)
     if (newId && wasEmpty) navigate(`/chat/${newId}`)
   }
 
   // 欢迎页发送：若选择了项目目录，先创建带目录的对话再发送
-  const welcomeHandleSend = async (value: string) => {
+  const welcomeHandleSend = async (value: string, files?: UserFileAttachment[]) => {
     setWelcomeDraft('') // 清空欢迎页草稿
     if (welcomeDirectory) {
       setIsTransitioning(true)
@@ -98,7 +99,7 @@ function ChatPageInner() {
         const id = await chat.create(welcomeDirectory)
         if (id) {
           // 2. 发送消息（使用刚创建的对话）
-          await chat.send(value)
+          await chat.send(value, files)
           // 3. 导航到对话页面
           navigate(`/chat/${id}`)
         }
@@ -236,6 +237,8 @@ function ChatPageInner() {
                 streaming={chat.streaming}
                 hitlContextType="conversation"
                 hitlContextId={chat.activeId}
+                modelSupportsVision={chat.modelSupportsVision}
+                chatId={chat.activeId}
                 leftSlot={
                   <>
                     <ChatModelSelector

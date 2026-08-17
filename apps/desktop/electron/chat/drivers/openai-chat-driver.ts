@@ -25,10 +25,12 @@ import type {
   ModelCapability,
   ModelParams,
   StoredMessage,
-  StoredMessageRecord
+  StoredMessageRecord,
+  UserFileAttachment
 } from '../chat-types.js'
 import type { McpServiceProfileResolver } from '../mcp-services.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
+import type { ChatAttachmentCache } from '../chat-attachment-cache.js'
 import { detectVendor, createVendorModel, type ModelVendor } from './model-providers.js'
 import { isOpenAIModelValue, prefixOfVendor, stripModelPrefix } from './model-value.js'
 import type { ChatDriver, StreamChatInput } from './chat-driver.js'
@@ -47,6 +49,8 @@ type OpenAIProfile = {
   displayName?: string
   apiKeyEnv?: string
   isDefault?: boolean
+  /** 是否支持视觉/多模态输入（图片等附件）。缺省时按模型名自动推断。 */
+  isVl?: boolean
   /** 用户显式声明的可调参数能力；缺省时按 vendor 自动推断。 */
   capabilities?: CapabilityKey[]
 }
@@ -73,6 +77,23 @@ function capabilitiesForProfile(profile: OpenAIProfile): ModelCapability[] {
         ? ['reasoningEffort', 'maxOutputTokens']
         : [])
   return keys.map(capabilityOf)
+}
+
+/** 按模型名推断是否支持视觉/多模态输入。 */
+function detectVisionSupport(modelName: string): boolean {
+  const lower = modelName.toLowerCase()
+  const visionPatterns = [
+    'gpt-4o',
+    'gpt-4-turbo',
+    'gpt-4-vision',
+    'claude-3',
+    'claude-4',
+    'gemini',
+    'llava',
+    'qwen-vl',
+    'internvl'
+  ]
+  return visionPatterns.some((pattern) => lower.includes(pattern))
 }
 
 /**
@@ -148,15 +169,29 @@ function resolveProfileForValue(
  *  - 系统消息: `{ kind: "system", text: string }`。
  */
 type OpenAIRawMessage =
-  | { kind: 'user'; text: string }
+  | { kind: 'user'; text: string; files?: UserFileAttachment[] }
   | { kind: 'assistant'; parts: DriverPart[] }
   | { kind: 'system'; text: string }
 
 function rawToParts(raw: unknown): DriverPart[] {
   if (!raw || typeof raw !== 'object') return []
   const record = raw as OpenAIRawMessage
-  if (record.kind === 'user' || record.kind === 'system')
-    return [{ driverId: 'openai', type: 'text', text: record.text }]
+  if (record.kind === 'user') {
+    const parts: DriverPart[] = [{ driverId: 'openai', type: 'text', text: record.text }]
+    if (record.files?.length) {
+      for (const file of record.files) {
+        parts.push({
+          driverId: 'openai',
+          type: 'file',
+          mediaType: file.mediaType,
+          localPath: file.localPath,
+          filename: file.filename
+        })
+      }
+    }
+    return parts
+  }
+  if (record.kind === 'system') return [{ driverId: 'openai', type: 'text', text: record.text }]
   if (record.kind === 'assistant' && Array.isArray(record.parts)) return record.parts
   return []
 }
@@ -243,7 +278,10 @@ function buildAiTools(source: ToolSource): Record<string, ReturnType<typeof aiTo
  *  - ai-sdk 7 起 messages 里不允许 system 角色,history 中的 system 消息单独收集,
  *    由调用方通过 `system` 选项传给 streamText。
  */
-function historyToModelMessages(history: StoredMessage[]): { messages: ModelMessage[]; systemText: string } {
+function historyToModelMessages(
+  history: StoredMessage[],
+  attachmentCache?: ChatAttachmentCache
+): { messages: ModelMessage[]; systemText: string } {
   const out: ModelMessage[] = []
   const systemParts: string[] = []
   for (const message of history) {
@@ -256,11 +294,31 @@ function historyToModelMessages(history: StoredMessage[]): { messages: ModelMess
       continue
     }
     if (message.role === 'user') {
-      const text = message.parts
-        .filter((p) => p.type === 'text')
-        .map((p) => (p as { type: 'text'; text: string }).text)
-        .join('\n')
-      if (text) out.push({ role: 'user', content: text })
+      const textParts = message.parts.filter((p) => p.type === 'text')
+      const fileParts = message.parts.filter((p) => p.type === 'file')
+      const text = textParts.map((p) => (p as { type: 'text'; text: string }).text).join('\n')
+
+      if (fileParts.length && attachmentCache) {
+        // 有附件的历史用户消息：构建多模态 content
+        const contentParts: Array<
+          { type: 'text'; text: string } | { type: 'image'; image: string | URL; mediaType?: string }
+        > = [{ type: 'text', text }]
+        for (const fp of fileParts) {
+          const file = fp as { type: 'file'; mediaType: string; localPath: string }
+          if (file.mediaType.startsWith('image/') && attachmentCache.exists(file.localPath)) {
+            const buffer = attachmentCache.readAttachment(file.localPath)
+            const base64 = buffer.toString('base64')
+            contentParts.push({
+              type: 'image',
+              image: `data:${file.mediaType};base64,${base64}`,
+              mediaType: file.mediaType
+            })
+          }
+        }
+        out.push({ role: 'user', content: contentParts })
+      } else if (text) {
+        out.push({ role: 'user', content: text })
+      }
       continue
     }
     // assistant
@@ -329,7 +387,9 @@ export class OpenAIChatDriver implements ChatDriver {
     /** 用户勾选的 MCP 服务 → stdio 配置（缺省 = 不注入外部 MCP）。 */
     private readonly mcpProfileResolver?: McpServiceProfileResolver,
     /** 用户勾选的 Skill → 正文（缺省 = 不注入技能；ai-sdk 无 skills 概念，正文拼进 system）。 */
-    private readonly resolveSkillContent?: (names: string[]) => string | undefined
+    private readonly resolveSkillContent?: (names: string[]) => string | undefined,
+    /** 附件缓存（读取本地文件用于多模态 API 调用）。 */
+    private readonly attachmentCache?: ChatAttachmentCache
   ) {
     if (!store) throw new Error('OpenAIChatDriver requires a TaskStore')
     if (!getApiKey) throw new Error('OpenAIChatDriver requires an api key provider')
@@ -349,24 +409,35 @@ export class OpenAIChatDriver implements ChatDriver {
     for (const m of models) countByValue.set(m.value, (countByValue.get(m.value) ?? 0) + 1)
     return models.map(({ profile, value }) => {
       const capabilities = capabilitiesForProfile(profile)
+      const isVl = profile.isVl ?? detectVisionSupport(profile.model ?? '')
       return {
         value: (countByValue.get(value) ?? 0) > 1 && profile.id ? `${value}@${profile.id}` : value,
         displayName: profile.displayName || profile.model || 'OpenAI-Compatible',
         /** 厂商 id（前端据此查 MODEL_VENDORS 展示厂商名，如「DeepSeek 官方」）。 */
         vendor: profile.vendor ?? detectVendor(profile.baseUrl),
         isDefault: profile.isDefault === true,
+        isVl,
         ...(capabilities.length ? { capabilities } : {})
       }
     })
   }
 
-  serializeUserMessage(input: { id: string; text: string; createdAt: string }): StoredMessageRecord {
+  serializeUserMessage(input: {
+    id: string
+    text: string
+    createdAt: string
+    files?: UserFileAttachment[]
+  }): StoredMessageRecord {
     return {
       id: input.id,
       role: 'user',
       createdAt: input.createdAt,
       driverId: 'openai',
-      raw: { kind: 'user', text: input.text } satisfies OpenAIRawMessage
+      raw: {
+        kind: 'user',
+        text: input.text,
+        ...(input.files?.length ? { files: input.files } : {})
+      } satisfies OpenAIRawMessage
     }
   }
 
@@ -451,7 +522,7 @@ export class OpenAIChatDriver implements ChatDriver {
     }
     // ai-sdk 7 起 system 内容必须走 `system` 选项,messages 里不允许 system 角色。
     // 构建单一分层系统提示，按顺序包含所有上下文信息。
-    const { messages, systemText } = historyToModelMessages(input.history)
+    const { messages, systemText } = historyToModelMessages(input.history, this.attachmentCache)
     const sections: string[] = []
     // 1. 系统基础指令
     if (taskSource?.systemPrompt()) {
@@ -479,7 +550,29 @@ export class OpenAIChatDriver implements ChatDriver {
     const last = messages.at(-1)
     const alreadyHasCurrentInput =
       last?.role === 'user' && typeof last.content === 'string' && last.content === input.userInput.text
-    if (!alreadyHasCurrentInput) messages.push({ role: 'user', content: input.userInput.text })
+    if (!alreadyHasCurrentInput) {
+      if (input.userInput.files?.length) {
+        // 有附件：构建多模态 content 数组（文本 + 图片）
+        const contentParts: Array<
+          { type: 'text'; text: string } | { type: 'image'; image: string | URL; mediaType?: string }
+        > = [{ type: 'text', text: input.userInput.text }]
+        for (const file of input.userInput.files) {
+          if (file.mediaType.startsWith('image/') && this.attachmentCache) {
+            const buffer = this.attachmentCache.readAttachment(file.localPath)
+            const base64 = buffer.toString('base64')
+            contentParts.push({
+              type: 'image',
+              image: `data:${file.mediaType};base64,${base64}`,
+              mediaType: file.mediaType
+            })
+          }
+          // 非图片附件暂忽略（后续可扩展为 document 类型）
+        }
+        messages.push({ role: 'user', content: contentParts })
+      } else {
+        messages.push({ role: 'user', content: input.userInput.text })
+      }
+    }
 
     const parts: DriverPart[] = []
     let taskCreated: ChatTaskCreationResult | undefined

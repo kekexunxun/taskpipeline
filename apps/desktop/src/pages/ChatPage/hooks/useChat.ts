@@ -15,7 +15,8 @@ import {
   type ChatStreamChunk,
   type DriverPart,
   type ModelParams,
-  type StoredMessageRecord
+  type StoredMessageRecord,
+  type UserFileAttachment
 } from '@/api'
 import { useChatModels } from '@/hooks/useChatModels'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
@@ -433,7 +434,7 @@ export function useChat() {
   }, [])
 
   const send = useCallback(
-    async (value?: string) => {
+    async (value?: string, files?: UserFileAttachment[]) => {
       const targetDraft = activeIdRef.current ? (draftsByChat[activeIdRef.current] ?? '') : ''
       const text = (value ?? targetDraft).trim()
       if (!driverId || !model || !text) return undefined
@@ -469,9 +470,19 @@ export function useChat() {
         role: 'user',
         createdAt,
         driverId,
-        raw: { kind: 'user', text }
+        raw: { kind: 'user', text, ...(files?.length ? { files } : {}) }
       }
-      const userMessage: ChatMessage = { ...userRecord, parts: [{ driverId, type: 'text', text }] }
+      const userParts: DriverPart[] = [
+        { driverId, type: 'text', text },
+        ...(files ?? []).map((f) => ({
+          driverId,
+          type: 'file' as const,
+          mediaType: f.mediaType,
+          localPath: f.localPath,
+          filename: f.filename
+        }))
+      ]
+      const userMessage: ChatMessage = { ...userRecord, parts: userParts }
       const assistantMessage: ChatMessage = {
         id: assistantId,
         role: 'assistant',
@@ -493,7 +504,7 @@ export function useChat() {
         driverId,
         model,
         modelParams,
-        message: { id: userId, text, createdAt },
+        message: { id: userId, text, createdAt, ...(files?.length ? { files } : {}) },
         mode: (taskCreationEnabled ? 'task-create' : 'chat') satisfies ChatAgentMode,
         mcpService,
         skills,
@@ -614,6 +625,15 @@ export function useChat() {
   const hint = activeId ? hintsByChat[activeId] : undefined
   /** 当前对话的确认请求(内联卡片渲染源)。 */
   const approvals = useMemo(() => (activeId ? (pendingApprovals[activeId] ?? []) : []), [activeId, pendingApprovals])
+  /** 当前选中模型是否支持视觉/多模态输入（控制附件入口显隐）。 */
+  const modelSupportsVision = useMemo(() => {
+    if (!model) return false
+    for (const group of modelGroups) {
+      const found = group.models.find((m) => m.value === model)
+      if (found) return Boolean(found.isVl)
+    }
+    return false
+  }, [model, modelGroups])
 
   return useMemo(
     () => ({
@@ -634,6 +654,7 @@ export function useChat() {
       model,
       driverId,
       modelParams,
+      modelSupportsVision,
       taskCreationEnabled,
       taskBackend,
       mcpService,

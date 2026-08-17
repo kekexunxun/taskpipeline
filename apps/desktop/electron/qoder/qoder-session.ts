@@ -19,8 +19,9 @@
  */
 
 import { accessToken, query, type Query, type SDKMessage, type SDKUserMessage } from '@qoder-ai/qoder-agent-sdk'
-import type { ChatStreamChunk, ChatTaskCreationResult, DriverPart } from '../chat/chat-types.js'
+import type { ChatStreamChunk, ChatTaskCreationResult, DriverPart, UserFileAttachment } from '../chat/chat-types.js'
 import type { ToolSource } from '../chat/drivers/tool-source.js'
+import type { ChatAttachmentCache } from '../chat/chat-attachment-cache.js'
 
 /** SDK query options(用于让会话 options 与 SDK 类型严格对齐)。 */
 type SdkQueryOptions = NonNullable<Parameters<typeof query>[0]['options']>
@@ -148,6 +149,10 @@ export type QoderTurnInput = {
   text: string
   toolSource?: ToolSource
   signal?: AbortSignal
+  /** 用户上传的附件（图片等多模态内容）。 */
+  files?: UserFileAttachment[]
+  /** 附件缓存（用于读取本地文件内容）。 */
+  attachmentCache?: ChatAttachmentCache
 }
 
 /**
@@ -262,7 +267,7 @@ export class QoderSession {
     for (const message of buffered) {
       this.handleMessage(message, turn)
     }
-    this.pushUserMessage(input.text)
+    this.pushUserMessage(input.text, input.files, input.attachmentCache)
     try {
       while (true) {
         // 先 drain 队列:回合结束(result)后可能还有已入队未 yield 的 part,不能丢。
@@ -347,10 +352,32 @@ export class QoderSession {
     return new Promise<SDKUserMessage | undefined>((resolve) => this.inputWaiters.push(resolve))
   }
 
-  private pushUserMessage(text: string): void {
+  private pushUserMessage(text: string, files?: UserFileAttachment[], attachmentCache?: ChatAttachmentCache): void {
+    // 构建 content blocks：文本 + 图片（如有附件）
+    const content: Array<Record<string, unknown>> = [{ type: 'text', text }]
+
+    if (files?.length && attachmentCache) {
+      for (const file of files) {
+        if (file.mediaType.startsWith('image/') && attachmentCache.exists(file.localPath)) {
+          const buffer = attachmentCache.readAttachment(file.localPath)
+          const base64 = buffer.toString('base64')
+          // Anthropic-style image content block（Qoder SDK 底层走 Anthropic API）
+          content.push({
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: file.mediaType,
+              data: base64
+            }
+          })
+        }
+        // 非图片附件暂忽略（后续可扩展）
+      }
+    }
+
     const message: SDKUserMessage = {
       type: 'user',
-      message: { role: 'user', content: [{ type: 'text', text }] },
+      message: { role: 'user', content: content as any },
       parent_tool_use_id: null
     }
     const waiter = this.inputWaiters.shift()

@@ -19,6 +19,14 @@ import type {
 
 import { pickSystemDefaultModel } from './utils/chat-models'
 
+/** 用户上传附件的本地缓存描述（主进程写入后返回）。 */
+export type UserFileAttachment = {
+  localPath: string
+  mediaType: string
+  filename?: string
+  size: number
+}
+
 export type ChangedFile = { repositoryId: string; repositoryName: string; path: string; status: string }
 export type TaskDetail = {
   task?: Task
@@ -196,6 +204,14 @@ export type DriverPart =
   | { driverId: 'openai'; type: 'openai.tool-result'; toolCallId: string; output: unknown; parentTaskId?: string }
   | { driverId: 'openai'; type: 'openai.thinking'; text: string; parentTaskId?: string }
   | { driverId: ChatDriverId; type: 'text'; text: string; parentTaskId?: string }
+  | {
+      driverId: ChatDriverId
+      type: 'file'
+      mediaType: string
+      localPath: string
+      filename?: string
+      parentTaskId?: string
+    }
 
 /** 单条消息的流式用量（openai driver 从 ai-sdk finish chunk 收集；qoder 暂无数据）。 */
 export type ChatUsage = {
@@ -345,7 +361,7 @@ export type StartChatStreamInput = {
   /** 运行时模型参数（选择器调节产出；ChatService 随对话落盘并透传给 driver）。 */
   modelParams?: ModelParams
   /** 用户当前输入(未持久化),ChatService 会按 driverId 调 `driver.serializeUserMessage` 包成 record。 */
-  message: { id: string; text: string; createdAt: string }
+  message: { id: string; text: string; createdAt: string; files?: UserFileAttachment[] }
   mode?: ChatAgentMode
   /** 选中的 MCP 服务列表（落盘 + 注入 driver 工具：Qoder 走 mcpServers，OpenAI 走 MCP 桥接工具）。 */
   mcpService?: string[]
@@ -585,6 +601,13 @@ export type AgentApi = {
   getDefaultModel(): Promise<SystemDefaultModel | undefined>
   startChatStream(input: StartChatStreamInput): Promise<void>
   abortChat(input: AbortChatStreamInput): Promise<void>
+  /** 保存附件到本地缓存，返回本地路径元信息。 */
+  saveChatAttachment(
+    chatId: string,
+    data: ArrayBuffer,
+    filename: string,
+    mediaType: string
+  ): Promise<UserFileAttachment>
   onChatStreamEvent(callback: (event: ChatStreamEvent) => void): () => void
   // trace（v2：AgentSpan 管道）
   listTrace(): Promise<TraceSummary[]>
@@ -1232,6 +1255,15 @@ export const api: AgentApi = window.agentApi ?? {
   },
   async getDefaultModel() {
     return pickSystemDefaultModel(defaultModelGroups)
+  },
+  async saveChatAttachment(_chatId: string, data: ArrayBuffer, filename: string, mediaType: string) {
+    // Mock 实现：不真正写文件，返回一个假路径（仅开发调试用）。
+    return {
+      localPath: `/tmp/mock-attachments/${Date.now()}-${filename}`,
+      mediaType,
+      filename,
+      size: data.byteLength
+    }
   },
   async startChatStream({ streamId, chatId, driverId, model, message, mode }) {
     const conv = memoryChats.get(chatId)

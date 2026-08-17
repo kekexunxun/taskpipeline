@@ -1,4 +1,4 @@
-import { api, type ChatStreamEvent, type ModelParams } from '@/api'
+import { api, type ChatStreamEvent, type ModelParams, type UserFileAttachment } from '@/api'
 
 /**
  * 单次 chat 流的回调订阅。
@@ -25,7 +25,7 @@ export class ElectronChatTransport {
     model: string
     /** 运行时模型参数（选择器调节产出，透传给主进程 ChatService）。 */
     modelParams?: ModelParams
-    message: { id: string; text: string; createdAt: string }
+    message: { id: string; text: string; createdAt: string; files?: UserFileAttachment[] }
     mode?: 'chat' | 'task-create'
     /** 选中的 MCP 服务列表（透传给主进程 ChatService）。 */
     mcpService?: string[]

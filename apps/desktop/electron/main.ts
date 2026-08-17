@@ -72,6 +72,7 @@ import { PiTraceBuilder } from './trace/instrument/pi-trace-builder.js'
 import { QoderTraceBuilder } from './trace/instrument/qoder-trace-builder.js'
 import { resolveBundledOcrBinary, resolveOcrBinary, createOcrRunner } from './ocr.js'
 import { ChatService, type ChatTraceManager } from './chat/chat-service.js'
+import { ChatAttachmentCache } from './chat/chat-attachment-cache.js'
 import { LITE_MODEL_PATTERN } from './chat/system-default-model.js'
 import { ChatDriverRegistry } from './chat/drivers/driver-registry.js'
 import { QoderChatDriver } from './chat/drivers/qoder-chat-driver.js'
@@ -765,6 +766,7 @@ const resolveSkillContent = (names: string[]): string | undefined => {
   const parts = names.map((name) => readSkillContent(skillsRoot, name)).filter((part): part is string => Boolean(part))
   return parts.length > 0 ? parts.join('\n\n') : undefined
 }
+const chatAttachmentCache = new ChatAttachmentCache(dataDir)
 const chatDriverRegistry = new ChatDriverRegistry()
 chatDriverRegistry.register(
   new QoderChatDriver(
@@ -807,7 +809,8 @@ chatDriverRegistry.register(
       return ok ? 'allow' : 'deny'
     },
     // 选中 Skill 时切 QODER_CONFIG_DIR 指向 dataDir（其下 skills/ 即 CLI 技能根，实测定案）。
-    dataDir
+    dataDir,
+    chatAttachmentCache
   )
 )
 chatDriverRegistry.register(
@@ -823,7 +826,8 @@ chatDriverRegistry.register(
     },
     tracePipeline,
     chatMcpResolver,
-    resolveSkillContent
+    resolveSkillContent,
+    chatAttachmentCache
   )
 )
 
@@ -3177,6 +3181,7 @@ function registerIpc(): void {
   ipcMain.handle('chats:delete', async (_event, id: string) => {
     await chatService.deleteChat(id)
     memoryService.deleteConversationMemories(id)
+    chatAttachmentCache.deleteAttachments(id)
   })
   ipcMain.handle('chats:set-directory', async (_event, id: string, workingDirectory?: string) =>
     chatService.setChatWorkingDirectory(id, workingDirectory)
@@ -3202,6 +3207,12 @@ function registerIpc(): void {
     void chatService.startChatStream(input).catch((reason) => console.error('[chat] stream failed', reason))
   })
   ipcMain.handle('chats:abort', (_event, input) => chatService.abortChat(input))
+  // 附件缓存：渲染进程把文件 ArrayBuffer 发过来，主进程写入本地，返回路径元信息。
+  ipcMain.handle(
+    'chats:save-attachment',
+    (_event, chatId: string, data: ArrayBuffer, filename: string, mediaType: string) =>
+      chatAttachmentCache.saveAttachment(chatId, Buffer.from(data), filename, mediaType)
+  )
   // 纯目录选择(项目对话绑定用,不校验 git;repos:choose-folder 才校验仓库)。
   ipcMain.handle('dialog:choose-directory', async () => {
     if (!mainWindow) return undefined

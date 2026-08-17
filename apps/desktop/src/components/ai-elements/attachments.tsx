@@ -3,9 +3,10 @@
 import type { FileUIPart, SourceDocumentUIPart } from 'ai'
 import { FileTextIcon, GlobeIcon, ImageIcon, Music2Icon, PaperclipIcon, VideoIcon, XIcon } from 'lucide-react'
 import type { ComponentProps, HTMLAttributes, ReactNode } from 'react'
-import { createContext, useCallback, useContext, useMemo } from 'react'
+import { createContext, useCallback, useContext, useMemo, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
+import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 
 // ============================================================================
@@ -65,9 +66,9 @@ export const getAttachmentLabel = (data: AttachmentData): string => {
 
 const renderAttachmentImage = (url: string, filename: string | undefined, isGrid: boolean) =>
   isGrid ? (
-    <img alt={filename || 'Image'} className="size-full object-cover" height={96} src={url} width={96} />
+    <img alt={filename || 'Image'} className="size-full object-cover" height={64} src={url} width={64} />
   ) : (
-    <img alt={filename || 'Image'} className="size-full rounded object-cover" height={20} src={url} width={20} />
+    <img alt={filename || 'Image'} className="size-full rounded object-cover" height={20} width={20} />
   )
 
 // ============================================================================
@@ -120,7 +121,7 @@ export const Attachments = ({ variant = 'grid', className, children, ...props }:
         className={cn(
           'flex items-start',
           variant === 'list' ? 'flex-col gap-2' : 'flex-wrap gap-2',
-          variant === 'grid' && 'ml-auto w-fit',
+          variant === 'grid' && 'w-fit',
           className
         )}
         {...props}
@@ -154,7 +155,7 @@ export const Attachment = ({ data, onRemove, className, children, ...props }: At
       <div
         className={cn(
           'group relative',
-          variant === 'grid' && 'size-24 overflow-hidden rounded-lg',
+          variant === 'grid' && 'size-16 overflow-hidden rounded-lg',
           variant === 'inline' && [
             'flex h-8 cursor-pointer items-center gap-1.5 select-none',
             'rounded-md border border-border px-1.5',
@@ -182,6 +183,7 @@ export type AttachmentPreviewProps = HTMLAttributes<HTMLDivElement> & {
 
 export const AttachmentPreview = ({ fallbackIcon, className, ...props }: AttachmentPreviewProps) => {
   const { data, mediaCategory, variant } = useAttachmentContext()
+  const [previewOpen, setPreviewOpen] = useState(false)
 
   const iconSize = variant === 'inline' ? 'size-3' : 'size-4'
 
@@ -200,19 +202,44 @@ export const AttachmentPreview = ({ fallbackIcon, className, ...props }: Attachm
     return fallbackIcon ?? renderIcon(Icon)
   }
 
+  const isClickable = mediaCategory === 'image' && data.type === 'file' && data.url
+
   return (
-    <div
-      className={cn(
-        'flex shrink-0 items-center justify-center overflow-hidden',
-        variant === 'grid' && 'size-full bg-muted',
-        variant === 'inline' && 'size-5 rounded bg-background',
-        variant === 'list' && 'size-12 rounded bg-muted',
-        className
+    <>
+      <div
+        className={cn(
+          'flex shrink-0 items-center justify-center overflow-hidden',
+          variant === 'grid' && 'size-full bg-muted',
+          variant === 'inline' && 'size-5 rounded bg-background',
+          variant === 'list' && 'size-12 rounded bg-muted',
+          isClickable && 'cursor-pointer',
+          className
+        )}
+        onClick={isClickable ? () => setPreviewOpen(true) : undefined}
+        onKeyDown={
+          isClickable
+            ? (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  setPreviewOpen(true)
+                }
+              }
+            : undefined
+        }
+        role={isClickable ? 'button' : undefined}
+        tabIndex={isClickable ? 0 : undefined}
+        {...props}
+      >
+        {renderContent()}
+      </div>
+      {isClickable && (
+        <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+          <DialogContent className="max-h-[90vh] w-auto max-w-[90vw] overflow-hidden p-3 pt-9">
+            <img alt={data.filename || 'Preview'} className="max-h-[80vh] max-w-full object-contain" src={data.url} />
+          </DialogContent>
+        </Dialog>
       )}
-      {...props}
-    >
-      {renderContent()}
-    </div>
+    </>
   )
 }
 
@@ -270,11 +297,10 @@ export const AttachmentRemove = ({ label = 'Remove', className, children, ...pro
       aria-label={label}
       className={cn(
         variant === 'grid' && [
-          'absolute top-2 right-2 size-6 rounded-full p-0',
-          'bg-background/80 backdrop-blur-sm',
-          'opacity-0 transition-opacity group-hover:opacity-100',
-          'hover:bg-background',
-          '[&>svg]:size-3'
+          'absolute top-1 right-1 z-10 size-4 rounded-full p-0',
+          'bg-background/90 shadow-sm backdrop-blur-sm',
+          'hover:text-destructive-foreground hover:bg-destructive',
+          '[&>svg]:size-2.5'
         ],
         variant === 'inline' && [
           'size-5 rounded p-0',

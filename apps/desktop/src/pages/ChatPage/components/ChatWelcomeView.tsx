@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { ChatComposer } from './ChatComposer'
 import { ChatProjectSwitcher } from './ChatProjectSwitcher'
 import { Button } from '@/components/ui/button'
-import type { ChatGroup } from '@/api'
+import type { ChatGroup, UserFileAttachment } from '@/api'
 
 const EXAMPLE_PROMPTS = [
   '帮我分析当前项目的代码结构和依赖关系',
@@ -27,7 +27,7 @@ export function ChatWelcomeView({
 }: {
   composerValue: string
   onComposerChange(value: string): void
-  onSend(value: string): void
+  onSend(value: string, files?: UserFileAttachment[]): void
   onStop?(): void
   disabled?: boolean
   streaming?: boolean

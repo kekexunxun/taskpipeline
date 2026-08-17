@@ -27,7 +27,8 @@ import type {
   McpServiceId,
   ModelParams,
   StoredMessage,
-  StoredMessageRecord
+  StoredMessageRecord,
+  UserFileAttachment
 } from '../chat-types.js'
 import type { ToolSource } from './tool-source.js'
 
@@ -49,7 +50,7 @@ export type StreamChatInput = {
    */
   modelParams?: ModelParams
   history: StoredMessage[]
-  userInput: { id: string; text: string; createdAt: string }
+  userInput: { id: string; text: string; createdAt: string; files?: UserFileAttachment[] }
   signal: AbortSignal
   toolSource?: ToolSource
   /**
@@ -101,7 +102,12 @@ export interface ChatDriver {
   /**
    * 把当前用户输入包装成 driver 自己的 `raw` 形态(给存储层用)。
    */
-  serializeUserMessage(input: { id: string; text: string; createdAt: string }): StoredMessageRecord
+  serializeUserMessage(input: {
+    id: string
+    text: string
+    createdAt: string
+    files?: UserFileAttachment[]
+  }): StoredMessageRecord
   /**
    * 把 assistant 消息在流式过程中累积的 `parts` 包装成 driver 自己的 `raw` 形态(给存储层用)。
    * driver 内部负责决定"如何把 parts 平展成 raw JSON",存储层不解析。
