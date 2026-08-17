@@ -148,8 +148,6 @@ export function ChatProgressIndicator({ turnCount, turnUserMessages }: ChatProgr
                   sideOffset={8}
                   className="w-80 rounded-lg border border-border/50 bg-background p-0 shadow-[0_8px_32px_rgba(0,0,0,0.12)]"
                   onPointerDownOutside={() => setPopoverTurn(null)}
-                  onMouseEnter={cancelClose}
-                  onMouseLeave={scheduleClose}
                 >
                   {/* Popover 头部：轮次信息 */}
                   <div className="flex items-center gap-2 border-b border-border/40 px-3 py-2">
