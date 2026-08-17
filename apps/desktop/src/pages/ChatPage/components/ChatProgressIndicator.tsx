@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useStickToBottomContext } from 'use-stick-to-bottom'
 import { cn } from '@/lib/utils'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
@@ -56,10 +56,24 @@ export function ChatProgressIndicator({ turnCount, turnUserMessages }: ChatProgr
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const handleAreaLeave = useCallback(() => {
-    setHoveredTurn(null)
-    setPopoverTurn(null)
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout>>(null)
+
+  const cancelClose = useCallback(() => {
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
   }, [])
+
+  const scheduleClose = useCallback(() => {
+    cancelClose()
+    closeTimerRef.current = setTimeout(() => {
+      setHoveredTurn(null)
+      setPopoverTurn(null)
+    }, 200)
+  }, [cancelClose])
+
+  useEffect(() => () => cancelClose(), [cancelClose])
 
   // 卡片高亮项：hover 时跟随 hoveredTurn，否则跟随滚动位置 activeTurn
   const highlightTurn = hoveredTurn ?? activeTurn
@@ -70,7 +84,8 @@ export function ChatProgressIndicator({ turnCount, turnUserMessages }: ChatProgr
     <div
       className="absolute top-0 right-0 bottom-0 z-10 hidden min-[1100px]:flex"
       style={{ width: '280px' }}
-      onMouseLeave={handleAreaLeave}
+      onMouseEnter={cancelClose}
+      onMouseLeave={scheduleClose}
     >
       {/* ---- 卡片：hover 进度条区域时展示（自动高度） ---- */}
       <div
@@ -133,6 +148,8 @@ export function ChatProgressIndicator({ turnCount, turnUserMessages }: ChatProgr
                   sideOffset={8}
                   className="w-80 rounded-lg border border-border/50 bg-background p-0 shadow-[0_8px_32px_rgba(0,0,0,0.12)]"
                   onPointerDownOutside={() => setPopoverTurn(null)}
+                  onMouseEnter={cancelClose}
+                  onMouseLeave={scheduleClose}
                 >
                   {/* Popover 头部：轮次信息 */}
                   <div className="flex items-center gap-2 border-b border-border/40 px-3 py-2">
