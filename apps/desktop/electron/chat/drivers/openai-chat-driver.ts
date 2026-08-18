@@ -31,6 +31,7 @@ import type {
 import type { McpServiceProfileResolver } from '../mcp-services.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
 import type { ChatAttachmentCache } from '../chat-attachment-cache.js'
+import { createWebFetchAiTool } from '../web-fetch-tool.js'
 import { detectVendor, createVendorModel, type ModelVendor } from './model-providers.js'
 import { isOpenAIModelValue, prefixOfVendor, stripModelPrefix } from './model-value.js'
 import type { ChatDriver, StreamChatInput } from './chat-driver.js'
@@ -520,6 +521,8 @@ export class OpenAIChatDriver implements ChatDriver {
       }
       if (Object.keys(bridged).length) mergedTools = { ...(mergedTools ?? {}), ...bridged }
     }
+    // 内置轻量级 web_fetch 工具：为 OpenAI 链路提供基础网页抓取能力（Qoder 链路走 CLI 内置 WebFetch）。
+    mergedTools = { ...(mergedTools ?? {}), web_fetch: createWebFetchAiTool() as unknown as ReturnType<typeof aiTool> }
     // ai-sdk 7 起 system 内容必须走 `system` 选项,messages 里不允许 system 角色。
     // 构建单一分层系统提示，按顺序包含所有上下文信息。
     const { messages, systemText } = historyToModelMessages(input.history, this.attachmentCache)

@@ -5,6 +5,7 @@
  * - Read: "已查看 xxx" 思考过程风格(悬停箭头,可展开)
  * - Grep: "已检索 n 文件" 思考过程风格(展开查看文件列表与行号)
  * - Bash: 终端卡片(命令 + 状态色 + 展开看结果)
+ * - WebFetch: 终端卡片(URL + 查询 + 状态色 + 展开看结果)
  */
 
 import {
@@ -12,6 +13,7 @@ import {
   FileEditIcon,
   FileIcon,
   FilePlus2Icon,
+  GlobeIcon,
   Loader2Icon,
   PuzzleIcon,
   TerminalIcon,
@@ -513,6 +515,94 @@ export function BashToolBlock({
               <pre className="m-0 font-mono text-[10px] leading-4 break-words whitespace-pre-wrap text-muted-foreground/60">
                 {outputText}
               </pre>
+            )}
+          </div>
+        </CollapsibleContent>
+      )}
+    </Collapsible>
+  )
+}
+
+// === WebFetch 工具(终端卡片风格) ===
+
+/** 从 URL 中提取域名用于展示。 */
+function extractDomain(url: string): string {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return url
+  }
+}
+
+export function WebFetchToolBlock({
+  input,
+  output,
+  status
+}: {
+  input?: unknown
+  output?: unknown
+  status: 'running' | 'done' | 'error'
+}) {
+  const [manualOpen, setManualOpen] = useState(false)
+  const open = status === 'running' || manualOpen
+  const url = getInputField(input, 'url') || ''
+  const prompt = getInputField(input, 'prompt')
+  const outputText = stringifyOutput(output)
+  const domain = extractDomain(url)
+
+  return (
+    <Collapsible open={open} onOpenChange={setManualOpen} className="not-prose w-full">
+      <CollapsibleTrigger
+        className={cn(
+          'group flex w-full items-center gap-2 rounded-md border px-3 py-1.5 text-left text-[10px]! transition-colors',
+          'hover:bg-muted/30',
+          status === 'error' ? 'border-red-500/20 bg-red-500/5' : 'border-border/40 bg-muted/20',
+          open && 'rounded-b-none border-b-transparent'
+        )}
+      >
+        <GlobeIcon size={13} className="shrink-0 text-muted-foreground/60" />
+        <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground/80">
+          {domain || url || '抓取网页'}
+        </span>
+        <span className="shrink-0">
+          {status === 'running' && (
+            <span className="inline-flex items-center gap-1 text-amber-500/80">
+              <Loader2Icon size={11} className="animate-spin" />
+              抓取中
+            </span>
+          )}
+          {status === 'done' && <span className="text-emerald-500/80">已完成</span>}
+          {status === 'error' && <span className="text-red-400">失败</span>}
+        </span>
+        <ChevronRightIcon
+          size={12}
+          className={cn('shrink-0 text-muted-foreground/40 transition-transform', open && 'rotate-90')}
+        />
+      </CollapsibleTrigger>
+      {(url || prompt || outputText) && (
+        <CollapsibleContent className="overflow-hidden">
+          <div className="max-h-[300px] overflow-y-auto rounded-b-md border border-t-0 border-border/40 bg-muted/10 px-4 py-2">
+            {url && (
+              <div className="mb-2 font-mono text-[10px] leading-4 text-muted-foreground">
+                <span className="select-none">$ </span>
+                {url}
+              </div>
+            )}
+            {prompt && (
+              <div className="mb-3">
+                <div className="mb-1 text-[10px]! font-medium text-muted-foreground/50">查询</div>
+                <pre className="m-0 font-mono text-[10px] leading-4 break-words whitespace-pre-wrap text-muted-foreground/60">
+                  {prompt}
+                </pre>
+              </div>
+            )}
+            {outputText && (
+              <div>
+                <div className="mb-1 text-[10px]! font-medium text-muted-foreground/50">结果</div>
+                <pre className="m-0 font-mono text-[10px] leading-4 break-words whitespace-pre-wrap text-muted-foreground/60">
+                  {outputText}
+                </pre>
+              </div>
             )}
           </div>
         </CollapsibleContent>

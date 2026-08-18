@@ -9,7 +9,8 @@ import {
   ReadToolBlock,
   GrepToolBlock,
   BashToolBlock,
-  McpToolBlock
+  McpToolBlock,
+  WebFetchToolBlock
 } from './parts/ToolBlocks'
 import type { DriverPart } from '@/api'
 import {
@@ -214,6 +215,9 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
       }
       if (toolNameLower === 'bash') {
         return <BashToolBlock key={key} input={part.input} output={result?.output} status={status} />
+      }
+      if (toolNameLower === 'webfetch' || toolNameLower === 'web_fetch') {
+        return <WebFetchToolBlock key={key} input={part.input} output={result?.output} status={status} />
       }
       // 目录列举类工具（Qoder Glob / Pi find+ls+list_dir）不单独展示，统一隐藏
       if (
