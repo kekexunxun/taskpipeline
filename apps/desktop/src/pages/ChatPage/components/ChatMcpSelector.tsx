@@ -4,7 +4,7 @@ import {
   CheckIcon,
   ChevronDownIcon,
   CircleDotIcon,
-  GitlabIcon,
+  GitBranchIcon,
   Loader2Icon,
   PlusIcon,
   ServerIcon
@@ -28,11 +28,11 @@ import { openSettingsTab } from '@/utils/open-settings'
 
 export type McpServiceId = string
 
-type McpOption = { id: string; label: string; icon: typeof GitlabIcon; builtin: boolean }
+type McpOption = { id: string; label: string; icon: typeof GitBranchIcon; builtin: boolean }
 
 /** 内置服务图标（与历史固定列表一致）；自定义服务统一 ServerIcon。 */
-const BUILTIN_ICONS: Record<string, typeof GitlabIcon> = {
-  gitlab: GitlabIcon,
+const BUILTIN_ICONS: Record<string, typeof GitBranchIcon> = {
+  gitlab: GitBranchIcon,
   jira: CircleDotIcon,
   confluence: BookOpenIcon
 }

@@ -7,6 +7,8 @@ import { TraceList } from './components/TraceList'
 import { Waterfall } from './components/Waterfall'
 import { PayloadInspector } from './components/PayloadInspector'
 
+const resolveTitle = (s: TraceSummary) => s.title
+
 function span(partial: Partial<AgentSpan>): AgentSpan {
   return {
     spanId: 'evt-t1-1',
@@ -56,7 +58,16 @@ describe('TracePage 组件（v2）', () => {
         sequence: 2
       })
     ]
-    render(<TraceDetail traceId="t1" spans={spans} loading={false} summary={summary} onBack={vi.fn()} />)
+    render(
+      <TraceDetail
+        traceId="t1"
+        spans={spans}
+        loading={false}
+        summary={summary}
+        resolveTitle={resolveTitle}
+        onBack={vi.fn()}
+      />
+    )
     expect(screen.getByText('测试提问')).toBeTruthy()
     expect(screen.getByText('gpt-4o')).toBeTruthy()
     // 两态状态徽章：已结束（无"失败"态）
@@ -70,6 +81,7 @@ describe('TracePage 组件（v2）', () => {
         spans={[span({ spanId: 's1' })]}
         loading={false}
         summary={{ ...summary, errorCount: 3, interrupted: true }}
+        resolveTitle={resolveTitle}
         onBack={vi.fn()}
       />
     )
@@ -85,6 +97,7 @@ describe('TracePage 组件（v2）', () => {
         spans={[span({ spanId: 's1' })]}
         loading={false}
         summary={{ ...summary, status: 'running' }}
+        resolveTitle={resolveTitle}
         onBack={vi.fn()}
       />
     )
@@ -134,6 +147,7 @@ describe('TracePage 组件（v2）', () => {
         status="error"
         agent=""
         query=""
+        resolveTitle={resolveTitle}
         onSelect={onSelect}
         onDelete={vi.fn()}
       />
@@ -159,6 +173,7 @@ describe('TracePage 组件（v2）', () => {
         status="all"
         agent=""
         query=""
+        resolveTitle={resolveTitle}
         onSelect={vi.fn()}
         onDelete={vi.fn()}
       />
@@ -180,6 +195,7 @@ describe('TracePage 组件（v2）', () => {
         status="running"
         agent=""
         query=""
+        resolveTitle={resolveTitle}
         onSelect={vi.fn()}
         onDelete={vi.fn()}
       />
@@ -196,6 +212,7 @@ describe('TracePage 组件（v2）', () => {
         status="ended"
         agent=""
         query=""
+        resolveTitle={resolveTitle}
         onSelect={vi.fn()}
         onDelete={vi.fn()}
       />
@@ -214,6 +231,7 @@ describe('TracePage 组件（v2）', () => {
         status="all"
         agent=""
         query=""
+        resolveTitle={resolveTitle}
         onSelect={vi.fn()}
         onDelete={onDelete}
       />

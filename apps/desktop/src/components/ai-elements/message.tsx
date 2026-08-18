@@ -1,7 +1,6 @@
 'use client'
 
 import { cjk } from '@streamdown/cjk'
-import { code } from '@streamdown/code'
 import { math } from '@streamdown/math'
 import { mermaid } from '@streamdown/mermaid'
 import type { UIMessage } from 'ai'
@@ -9,7 +8,7 @@ import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, CopyIcon } from 'lucide-r
 import type { BundledLanguage } from 'shiki'
 import type { ComponentProps, HTMLAttributes, ReactElement, ReactNode } from 'react'
 import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import type { Components, CustomRendererProps } from 'streamdown'
+import type { Components, CustomRendererProps, PluginConfig } from 'streamdown'
 import { Streamdown, useIsCodeFenceIncomplete } from 'streamdown'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
@@ -313,7 +312,11 @@ export const MessageBranchPage = ({ className, ...props }: MessageBranchPageProp
 
 export type MessageResponseProps = ComponentProps<typeof Streamdown>
 
-const streamdownPlugins = { cjk, code, math, mermaid }
+const streamdownPlugins: PluginConfig = {
+  cjk,
+  math,
+  mermaid
+}
 
 /**
  * Streamdown CustomRenderer —— 终端卡片风格代码块。
