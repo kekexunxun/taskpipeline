@@ -4,6 +4,7 @@ import {
   ChevronRightIcon,
   DownloadIcon,
   ExternalLinkIcon,
+  FolderOpenIcon,
   GitBranchIcon,
   KeyRoundIcon,
   Loader2Icon,
@@ -772,6 +773,10 @@ export function SettingsDialog({
     open: false,
     mode: 'create'
   })
+  const [dataDir, setDataDir] = useState('')
+  const [pendingDataDir, setPendingDataDir] = useState<string | undefined>(undefined)
+  const [migrating, setMigrating] = useState(false)
+  const [restartDialogOpen, setRestartDialogOpen] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -878,6 +883,8 @@ export function SettingsDialog({
         .getDefaultModel()
         .then(setSystemDefault)
         .catch(() => undefined)
+      // 数据目录
+      setDataDir(await api.getDataDir())
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -1315,6 +1322,72 @@ export function SettingsDialog({
                         }}
                       />
                     </SettingField>
+                  </Section>
+                  <Section
+                    title="数据目录"
+                    description="对话记录、任务数据、附件等本地存储位置。修改后需重启应用生效。"
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <Input
+                          readOnly
+                          value={pendingDataDir ?? dataDir}
+                          className="flex-1 text-xs"
+                          placeholder="当前数据目录"
+                        />
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={async () => {
+                            try {
+                              const chosen = await api.chooseDataDir()
+                              if (chosen && chosen !== dataDir) {
+                                setPendingDataDir(chosen)
+                              }
+                            } catch (reason) {
+                              showError(reason instanceof Error ? reason.message : String(reason))
+                            }
+                          }}
+                        >
+                          <FolderOpenIcon size={11} className="mr-1" />
+                          浏览
+                        </Button>
+                      </div>
+                      {pendingDataDir && pendingDataDir !== dataDir && (
+                        <div className="flex items-center justify-between gap-2 rounded-md border border-amber-500/30 bg-amber-50 px-3 py-2 dark:bg-amber-950/20">
+                          <span className="text-[11px] text-amber-700 dark:text-amber-400">
+                            保存后将自动迁移现有数据到新目录，完成后需重启应用生效。
+                          </span>
+                          <Button
+                            size="sm"
+                            variant="default"
+                            disabled={migrating}
+                            onClick={async () => {
+                              setMigrating(true)
+                              try {
+                                await api.setDataDir(pendingDataDir)
+                                setDataDir(pendingDataDir)
+                                setPendingDataDir(undefined)
+                                setRestartDialogOpen(true)
+                              } catch (reason) {
+                                showError(reason instanceof Error ? reason.message : String(reason))
+                              } finally {
+                                setMigrating(false)
+                              }
+                            }}
+                          >
+                            {migrating ? (
+                              <>
+                                <Loader2Icon size={11} className="mr-1 animate-spin-slow" />
+                                迁移中...
+                              </>
+                            ) : (
+                              '保存并迁移'
+                            )}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
                   </Section>
                 </TabsContent>
                 <TabsContent value="gitlab" className="space-y-5">
@@ -1889,6 +1962,32 @@ export function SettingsDialog({
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction onClick={() => void removeRepository()}>删除配置</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={restartDialogOpen}
+        onOpenChange={(next) => {
+          if (!next) setRestartDialogOpen(false)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>重启应用？</AlertDialogTitle>
+            <AlertDialogDescription>
+              数据已迁移到新目录，需要重启应用才能使新目录生效。是否立即重启？
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>稍后重启</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setRestartDialogOpen(false)
+                void api.relaunchApp()
+              }}
+            >
+              立即重启
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

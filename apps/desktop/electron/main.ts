@@ -1,5 +1,15 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { createRequire } from 'node:module'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -186,7 +196,23 @@ let mainWindow: BrowserWindow | undefined
 let piSession: AgentSession | undefined
 let unsubscribePi: (() => void) | undefined
 const pendingUi = new Map<string, (response: Record<string, unknown>) => void>()
-const dataDir = process.env.TASK_PIPELINE_DATA_DIR ?? join(app.getPath('userData'), 'data')
+// 自定义数据目录配置文件：userData/data-dir.json → { "path": "..." }
+const dataDirConfigPath = join(app.getPath('userData'), 'data-dir.json')
+function readCustomDataDir(): string | undefined {
+  try {
+    if (existsSync(dataDirConfigPath)) {
+      const parsed = JSON.parse(readFileSync(dataDirConfigPath, 'utf-8'))
+      if (typeof parsed.path === 'string' && parsed.path.length > 0) return parsed.path
+    }
+  } catch {
+    /* 配置文件损坏时回退默认 */
+  }
+  return undefined
+}
+function writeCustomDataDir(dir: string): void {
+  writeFileSync(dataDirConfigPath, JSON.stringify({ path: dir }, null, 2), 'utf-8')
+}
+const dataDir = process.env.TASK_PIPELINE_DATA_DIR ?? readCustomDataDir() ?? join(app.getPath('userData'), 'data')
 process.env.TASK_PIPELINE_DATA_DIR = dataDir
 mkdirSync(dataDir, { recursive: true })
 // Skill 根目录（dataDir/skills）：设置页管理 + 对话注入（Qoder 走 QODER_CONFIG_DIR，OpenAI 走 system 拼接）。
@@ -3336,6 +3362,41 @@ function registerIpc(): void {
   ipcMain.handle('updater:install', () => quitAndInstall())
   ipcMain.handle('updater:status', () => getUpdateStatus())
   ipcMain.handle('app:version', () => app.getVersion())
+  // === 数据目录 ============================================================
+  ipcMain.handle('app:get-data-dir', () => dataDir)
+  ipcMain.handle('app:set-data-dir', async (_event, dir: string) => {
+    if (!dir || typeof dir !== 'string') throw new Error('无效的数据目录路径')
+    if (dir === dataDir) return // 路径相同，无需迁移
+    const oldDir = dataDir
+    // 创建目标目录
+    mkdirSync(dir, { recursive: true })
+    // 迁移数据：递归复制旧目录内容到新目录
+    try {
+      cpSync(oldDir, dir, { recursive: true, force: true })
+    } catch (error) {
+      throw new Error(`数据迁移失败: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    // 清理旧目录（失败不影响迁移结果）
+    try {
+      rmSync(oldDir, { recursive: true, force: true })
+    } catch {
+      // 忽略清理失败，不影响迁移流程
+    }
+    // 保存新路径
+    writeCustomDataDir(dir)
+  })
+  ipcMain.handle('app:choose-data-dir', async () => {
+    if (!mainWindow) return undefined
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: '选择数据目录',
+      properties: ['openDirectory', 'createDirectory']
+    })
+    return result.filePaths[0] || undefined
+  })
+  ipcMain.handle('app:relaunch', () => {
+    app.relaunch()
+    app.exit(0)
+  })
 }
 
 // 统一应用图标：dev 环境取 build/icon.png 源文件，打包后取 vite 从 public/ 拷贝到 dist/ 的副本，

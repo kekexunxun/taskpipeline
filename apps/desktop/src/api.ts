@@ -679,6 +679,11 @@ export type AgentApi = {
   installUpdate(): Promise<void>
   getUpdateStatus(): Promise<UpdateStatus>
   getAppVersion(): Promise<string>
+  // 数据目录
+  getDataDir(): Promise<string>
+  setDataDir(dir: string): Promise<void>
+  chooseDataDir(): Promise<string | undefined>
+  relaunchApp(): Promise<void>
   onUpdateStatus(callback: (status: UpdateStatus) => void): () => void
 }
 
@@ -1450,6 +1455,18 @@ export const api: AgentApi = window.agentApi ?? {
   },
   async getAppVersion() {
     return 'dev'
+  },
+  async getDataDir() {
+    return ''
+  },
+  async setDataDir() {
+    // Demo mode: no-op
+  },
+  async chooseDataDir() {
+    return undefined
+  },
+  async relaunchApp() {
+    // Demo mode: no-op
   },
   onUpdateStatus() {
     return () => undefined

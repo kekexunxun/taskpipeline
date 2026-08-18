@@ -138,6 +138,10 @@ contextBridge.exposeInMainWorld('agentApi', {
   installUpdate: () => ipcRenderer.invoke('updater:install'),
   getUpdateStatus: () => ipcRenderer.invoke('updater:status'),
   getAppVersion: () => ipcRenderer.invoke('app:version'),
+  getDataDir: () => ipcRenderer.invoke('app:get-data-dir'),
+  setDataDir: (dir: string) => ipcRenderer.invoke('app:set-data-dir', dir),
+  chooseDataDir: () => ipcRenderer.invoke('app:choose-data-dir'),
+  relaunchApp: () => ipcRenderer.invoke('app:relaunch'),
   onUpdateStatus: (callback: (status: unknown) => void) => {
     const listener = (_: unknown, status: unknown) => callback(status)
     ipcRenderer.on('updater:status', listener)
