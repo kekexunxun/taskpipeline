@@ -1,4 +1,4 @@
-import { MapIcon, MessageSquareIcon } from 'lucide-react'
+import { MapIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
@@ -36,13 +36,11 @@ export function ChatModeToggle({
           )}
           onClick={() => onChange(isPlanMode ? 'normal' : 'plan')}
         >
-          {isPlanMode ? <MapIcon size={11} /> : <MessageSquareIcon size={11} />}
-          <span>{isPlanMode ? '计划模式' : '普通模式'}</span>
+          <MapIcon size={11} />
+          <span>计划模式</span>
         </Button>
       </TooltipTrigger>
-      <TooltipContent side="top">
-        {isPlanMode ? '已开启计划模式，Agent 将只做分析不执行修改' : '切换到计划模式（只读分析）'}
-      </TooltipContent>
+      <TooltipContent side="top">{isPlanMode ? '关闭计划模式' : '开启计划模式（只读分析）'}</TooltipContent>
     </Tooltip>
   )
 }
