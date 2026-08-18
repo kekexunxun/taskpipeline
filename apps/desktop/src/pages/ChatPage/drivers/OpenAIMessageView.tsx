@@ -1,5 +1,5 @@
-import type { ChatMessage } from "@/api";
-import { PartRenderer } from "./PartRenderer";
+import { PartRenderer } from './PartRenderer'
+import type { ChatMessage, ChatPlan } from '@/api'
 
 /**
  * OpenAI 专属消息视图。
@@ -11,10 +11,20 @@ import { PartRenderer } from "./PartRenderer";
  */
 export function OpenAIMessageView({
   message,
-  isAnimating
+  isAnimating,
+  onExecutePlan
 }: {
-  message: ChatMessage;
-  isAnimating?: boolean;
+  message: ChatMessage
+  isAnimating?: boolean
+  onExecutePlan?: (plan: ChatPlan) => void
 }) {
-  return <PartRenderer parts={message.parts} isStreaming={isAnimating} />;
+  const isPlanMode = message.metadata?.isPlanMode === true
+  return (
+    <PartRenderer
+      parts={message.parts}
+      isStreaming={isAnimating}
+      isPlanMode={isPlanMode}
+      onExecutePlan={onExecutePlan}
+    />
+  )
 }

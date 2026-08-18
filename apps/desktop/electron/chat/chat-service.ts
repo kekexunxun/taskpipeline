@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { BrowserWindow } from 'electron'
 import type { TaskStore } from '@task-pipeline/core'
 import { ChatStorage } from './chat-storage.js'
+import { ChatPlanStorage } from './chat-plan-storage.js'
 import type { ChatDriverRegistry } from './drivers/driver-registry.js'
 import { createProjectQueryToolSource } from './drivers/project-query-tools.js'
 import type { ToolSource } from './drivers/tool-source.js'
@@ -11,6 +12,7 @@ import type {
   AbortChatStreamInput,
   ChatConversation,
   ChatConversationMeta,
+  ChatConversationMode,
   ChatMessageMetadata,
   ChatModelGroup,
   ChatGroup,
@@ -96,6 +98,8 @@ export type ChatStagePhase = 'keyword' | 'chat' | 'memory'
  */
 export class ChatService {
   private readonly storage: ChatStorage
+  private readonly planStorage: ChatPlanStorage
+  private readonly dataDir: string
   private readonly activeStreams = new Map<string, ActiveStream>()
   /** 活跃流的完整生命周期 Promise（含 finally 持久化），供退出时 await 确保落盘。 */
   private readonly activeStreamLifecycles = new Map<string, Promise<void>>()
@@ -121,7 +125,9 @@ export class ChatService {
     private readonly traceManager?: ChatTraceManager,
     private readonly resolveWorkspaceContext?: WorkspaceContextResolver
   ) {
+    this.dataDir = dataDir
     this.storage = new ChatStorage(dataDir)
+    this.planStorage = new ChatPlanStorage(dataDir)
   }
 
   async listChats(): Promise<ChatConversationMeta[]> {
@@ -458,6 +464,24 @@ export class ChatService {
         systemMessages.length > 0 ? [...messages.slice(0, -1), ...systemMessages, userRecord] : messages
       const history = historyRecords.map((record) => this.deserializeRecord(record))
 
+      // 解析实际生效的对话模式（前端指定 > 自动检测 > 对话持久化值 > 默认 normal）
+      let effectiveChatMode: ChatConversationMode = input.chatMode ?? conversation.chatMode ?? 'normal'
+      if (effectiveChatMode === 'normal') {
+        const autoDetected = detectPlanModeNeeded(input.message.text, history)
+        if (autoDetected) {
+          effectiveChatMode = 'plan'
+          this.dispatch(effective, { type: 'status', text: '已自动切换到计划模式' })
+        }
+      }
+      // 自动切换时持久化 chatMode，保证切换对话后恢复
+      if (effectiveChatMode !== (conversation.chatMode ?? 'normal')) {
+        try {
+          await this.storage.updateMeta(input.chatId, { chatMode: effectiveChatMode })
+        } catch {
+          /* 持久化失败不影响本轮 */
+        }
+      }
+
       this.dispatch(effective, {
         type: 'start',
         messageId: assistantId,
@@ -466,6 +490,11 @@ export class ChatService {
 
       // 流式期间每 3 秒把已累积的 parts 覆盖写入磁盘，崩溃/强杀最多丢 3 秒内容。
       this.startPartialPersist(input.chatId, assistantId, parts, now, effective)
+
+      // 计划模式：通知前端将后续内容渲染为 PlanCard
+      if (effectiveChatMode === 'plan') {
+        this.dispatch(effective, { type: 'plan-start' })
+      }
 
       // chat 阶段容器：主对话生成（driver 流式期间的 llm/tool/subtask span 挂入阶段）。
       await this.withStage(Boolean(turnTraceId), input.chatId, turnKey, 'chat', async () => {
@@ -486,24 +515,67 @@ export class ChatService {
           ...(toolSource ? { toolSource } : {}),
           ...(effective.mcpService?.length ? { mcpServices: effective.mcpService } : {}),
           ...(effective.skills?.length ? { skills: effective.skills } : {}),
-          ...(workspaceContext ? { workspaceContext } : {})
+          ...(workspaceContext ? { workspaceContext } : {}),
+          chatMode: effectiveChatMode
         })) {
           if (abort.signal.aborted) break
           // 累积 parts
           if (chunk.type === 'part') {
             parts.push(chunk.part)
             if (chunk.part.type === 'qoder.session') capturedSessionId = chunk.part.sessionId
+            this.dispatch(effective, chunk)
           } else if (chunk.type === 'task-created') {
             // task-created 已随 dispatch 透传给前端，无需本地累积。
+            this.dispatch(effective, chunk)
           } else if (chunk.type === 'done') {
             // driver 在流结束时带回用量（openai 路径），供 Trace 元信息展示与落盘。
             if (chunk.usage) streamUsage = chunk.usage
+            // 暂不 dispatch done，先处理计划模式
+          } else {
+            this.dispatch(effective, chunk)
           }
-          this.dispatch(effective, chunk)
         }
       })
       if (abort.signal.aborted) status = 'aborted'
       if (status === 'done' && parts.length === 0) throw new Error('模型返回了空响应')
+      // 计划模式：流成功后提取计划内容并保存为文件
+      if (status === 'done' && effectiveChatMode === 'plan') {
+        const planContent = parts
+          .filter((p): p is Extract<DriverPart, { type: 'text' }> => p.type === 'text')
+          .map((p) => p.text)
+          .join('')
+        if (planContent.trim()) {
+          try {
+            const plan = await this.planStorage.savePlan(input.chatId, assistantId, planContent)
+            // 将文本 parts 替换为计划 part（保留文件路径供执行时使用）
+            const planPart: DriverPart = {
+              driverId: effective.driverId,
+              type: 'plan',
+              plan: {
+                id: plan.id,
+                chatId: plan.chatId,
+                createdAt: plan.createdAt,
+                status: plan.status,
+                content: plan.content,
+                filePath: plan.filePath
+              }
+            }
+            // 保留非文本 parts（如 qoder.session），替换文本 parts 为计划 part
+            const nonTextParts = parts.filter((p) => p.type !== 'text')
+            const newParts = [...nonTextParts, planPart]
+            parts.length = 0
+            parts.push(...newParts)
+            // 通知前端用 plan part 替换所有 parts
+            this.dispatch(effective, { type: 'plan-part', parts: newParts })
+          } catch (error) {
+            console.warn('[chat] failed to save plan:', error)
+          }
+        }
+      }
+      // 最后才 dispatch done chunk（计划模式在 plan-part 之后）
+      if (status === 'done') {
+        this.dispatch(effective, { type: 'done', status: 'done', usage: streamUsage, model: effective.model })
+      }
     } catch (reason) {
       if (abort.signal.aborted) status = 'aborted'
       else {
@@ -688,6 +760,47 @@ export class ChatService {
 
 function titleOf(text: string): string {
   return text.slice(0, 32).replace(/\s+/g, ' ').trim() || '新对话'
+}
+
+/**
+ * 自动检测是否需要切换到计划模式。
+ *
+ * 判定条件（任一命中即返回 true）：
+ * 1. 消息过长（超过 500 字通常意味着复杂需求）
+ * 2. 关键词命中：大规模修改意图（重构/重写/迁移等）
+ * 3. 对话历史中已有计划内容（assistant 消息包含“实施计划”等标记）
+ */
+function detectPlanModeNeeded(messageText: string, history: StoredMessage[]): boolean {
+  // 1. 消息过长
+  if (messageText.length > 500) return true
+  // 2. 关键词：大规模修改意图
+  const complexityKeywords = [
+    '重构',
+    '重写',
+    '迁移',
+    '升级',
+    '架构',
+    '改造',
+    '全面',
+    '整体',
+    '系统性地',
+    '端到端',
+    'refactor',
+    'rewrite',
+    'migrate',
+    'redesign',
+    'overhaul'
+  ]
+  if (complexityKeywords.some((kw) => messageText.includes(kw))) return true
+  // 3. 对话历史中已有计划内容
+  const planIndicators = ['实施计划', '实现计划', 'implementation plan', 'approved plan']
+  const hasExistingPlan = history.some(
+    (m) =>
+      m.role === 'assistant' &&
+      m.parts.some((p) => p.type === 'text' && planIndicators.some((ind) => p.text.toLowerCase().includes(ind)))
+  )
+  if (hasExistingPlan) return true
+  return false
 }
 
 export type { ChatDriver } from './drivers/chat-driver.js'

@@ -12,7 +12,8 @@ import {
   McpToolBlock,
   WebFetchToolBlock
 } from './parts/ToolBlocks'
-import type { DriverPart } from '@/api'
+import type { ChatPlan, DriverPart } from '@/api'
+import { PlanCard } from '@/pages/ChatPage/components/PlanCard'
 import {
   SubTaskGroup,
   SubTaskHeader,
@@ -90,8 +91,21 @@ function TextPartOrDSML({ part, isAnimating }: { part: Extract<DriverPart, { typ
  *  - 多条 `qoder.subtask-progress` 聚合成卡片顶部一行统计(运行中附最新 description);
  *    subtask-start / subtask-end 只驱动 header 与状态徽章,不直接渲染。
  *  - `text` part 由 `TextPart` 渲染(`MessageResponse` 流式 markdown),不区分 driver。
+ *  - `plan` part 由 `PlanCard` 渲染，显示结构化计划并提供“执行计划”按钮。
+ *  - 当 `isPlanMode` 为 true 时，文本 parts 被累积并渲染为 PlanCard（显示“计划生成中...”）。
  */
-export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isStreaming?: boolean }) {
+export function PartRenderer({
+  parts,
+  isStreaming,
+  isPlanMode,
+  onExecutePlan
+}: {
+  parts: DriverPart[]
+  isStreaming?: boolean
+  /** 计划模式标记：为 true 时将文本内容渲染为 PlanCard（显示“计划生成中...”）。 */
+  isPlanMode?: boolean
+  onExecutePlan?: (plan: ChatPlan) => void
+}) {
   // 合并相邻的同类型流式增量 part:
   //  - qoder.thinking:SDK 按 thinking_delta 拆分,每条渲染一个折叠块会刷屏(8+ 个空标题块);
   //  - text:SDK 按 text_delta 拆分,每条渲染一个独立 markdown 块会让正文分段、代码块/列表断裂。
@@ -186,6 +200,9 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
   const renderSinglePart = (part: DriverPart, key: string): ReactNode => {
     if (part.type === 'text') {
       return <TextPartOrDSML key={key} part={part} isAnimating={isStreaming} />
+    }
+    if (part.type === 'plan') {
+      return <PlanCard key={key} plan={part.plan} onExecute={onExecutePlan} disabled={isStreaming} />
     }
     if (part.type === 'qoder.thinking' || part.type === 'openai.thinking') {
       return <ThinkingPart key={key} part={part} isStreaming={isStreaming} />
@@ -348,6 +365,30 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
         <SubTaskResultBlock output={absorbed?.output} isError={absorbed?.isError} />
       </SubTaskGroup>
     )
+  }
+
+  // 计划模式：将文本 parts 累积并渲染为 PlanCard（显示“计划生成中...”）
+  if (isPlanMode) {
+    const textContent = mergedParts
+      .filter((p): p is Extract<DriverPart, { type: 'text' }> => p.type === 'text')
+      .map((p) => p.text)
+      .join('')
+    if (textContent.trim()) {
+      return (
+        <PlanCard
+          plan={{
+            id: 'generating',
+            chatId: '',
+            createdAt: new Date().toISOString(),
+            status: 'executing',
+            content: textContent,
+            filePath: ''
+          }}
+          onExecute={onExecutePlan}
+          disabled={true}
+        />
+      )
+    }
   }
 
   return <>{blocks.map((block, index) => renderBlock(block, index))}</>

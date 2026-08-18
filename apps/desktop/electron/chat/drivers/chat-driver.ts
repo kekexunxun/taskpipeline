@@ -20,6 +20,7 @@
  */
 
 import type {
+  ChatConversationMode,
   ChatDriverId,
   ChatStreamChunk,
   ChatModelInfo,
@@ -82,6 +83,11 @@ export type StreamChatInput = {
    * 「LLM deepseek-v4-flash」等条目，被误读为任务主体模型。
    */
   traceLabel?: string
+  /**
+   * 对话模式。driver 据此调整行为：plan 模式下只读分析，不执行修改。
+   * Qoder driver 走 permissionMode: 'plan'；OpenAI driver 走 system prompt + 工具过滤。
+   */
+  chatMode?: ChatConversationMode
 }
 
 /**

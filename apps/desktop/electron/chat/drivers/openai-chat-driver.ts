@@ -15,6 +15,7 @@
 import { jsonSchema, stepCountIs, streamText, tool as aiTool, type ModelMessage } from 'ai'
 import { z } from 'zod'
 import type { AgentSpan, TaskStore } from '@task-pipeline/core'
+import { planModeInstruction } from '@task-pipeline/core'
 import { McpClient } from '@task-pipeline/integrations'
 import type {
   ChatModelInfo,
@@ -546,8 +547,25 @@ export class OpenAIChatDriver implements ChatDriver {
         sections.push(`<system-reminder>\n${skillContent}\n</system-reminder>`)
       }
     }
+    // 5. 计划模式指令（plan 模式下追加共享提示模板）
+    const chatMode = input.chatMode ?? 'normal'
+    const isPlanMode = chatMode === 'plan'
+    if (isPlanMode) {
+      sections.push(planModeInstruction())
+    }
     // 拼接为单一系统提示
     const system = sections.join('\n\n')
+    // 计划模式：过滤写入类工具，只保留只读工具（ProjectQueryToolSource 的 read_file/grep/glob/list_dir、web_fetch、readOnlyHint MCP 工具）
+    let effectiveTools = mergedTools
+    if (isPlanMode && mergedTools && taskSource) {
+      const writeToolNames = new Set(
+        taskSource
+          .tools()
+          .filter((t) => !t.annotations?.readOnlyHint)
+          .map((t) => t.name)
+      )
+      effectiveTools = Object.fromEntries(Object.entries(mergedTools).filter(([name]) => !writeToolNames.has(name)))
+    }
     // 当前用户消息已由编排层（ChatService）写入 history（history 末尾即本条提问）：
     // 直接 push 会造成 prompt 里两条一模一样的 user 消息，这里只在确实缺失时才追加。
     const last = messages.at(-1)
@@ -628,7 +646,7 @@ export class OpenAIChatDriver implements ChatDriver {
       ...(system ? { system } : {}),
       ...(providerOptions ? { providerOptions: providerOptions as never } : {}),
       // 任务工具与 MCP 桥接工具合并注入；只有 MCP 工具（无 taskSource）时同样启用多步循环。
-      ...(mergedTools ? { tools: mergedTools, stopWhen: stepCountIs(10) } : {})
+      ...(effectiveTools ? { tools: effectiveTools, stopWhen: stepCountIs(10) } : {})
     })
 
     try {

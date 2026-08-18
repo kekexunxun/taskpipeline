@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { LoaderIcon } from 'lucide-react'
 import { ChatHistoryList } from './components/ChatHistoryList'
@@ -11,13 +11,14 @@ import { ChatAgentSelector } from './components/ChatAgentSelector'
 import { ChatWelcomeView } from './components/ChatWelcomeView'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
 import { TaskCreationTool } from './components/TaskCreationTool'
+import { ChatModeToggle } from './components/ChatModeToggle'
 import type { ChatApprovalRequest } from './hooks/useChat'
 import { useChat } from './hooks/useChat'
 import { UiRequestDialog } from '@/pages/CodingPage/components/UiRequestDialog'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { api } from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
-import type { UserFileAttachment } from '@/api'
+import type { ChatPlan, UserFileAttachment } from '@/api'
 
 export default function ChatPage() {
   return (
@@ -42,6 +43,19 @@ function ChatPageInner() {
   const [welcomeDraft, setWelcomeDraft] = useState('')
   // 工作区创建弹窗
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false)
+
+  // 执行计划回调：切换 chatMode 为 normal 并发送执行指令
+  const handleExecutePlan = useCallback(
+    (plan: ChatPlan) => {
+      // 切换到 normal 模式，然后发送执行指令
+      if (chat.activeId) {
+        chat.setChatMode(chat.activeId, 'normal')
+      }
+      const executeMessage = `请按照计划文件执行：\`${plan.filePath}\`\n\n请先读取该文件，然后按照计划逐步执行。`
+      void chat.send(executeMessage)
+    },
+    [chat]
+  )
 
   // 工具调用 HITL：Qoder 等 driver 的 can_use_tool 确认请求由主进程以
   // extension_ui_request 广播（task:event 通道）。
@@ -192,6 +206,11 @@ function ChatPageInner() {
                 <ChatMcpSelector selected={chat.mcpService} onChange={chat.setMcpService} disabled={chat.streaming} />
                 <ChatSkillSelector selected={chat.skills} onChange={chat.setSkills} disabled={chat.streaming} />
                 <ChatAgentSelector selected={chat.agentId} onChange={chat.setAgentId} disabled={chat.streaming} />
+                <ChatModeToggle
+                  mode={chat.chatMode}
+                  disabled={chat.streaming}
+                  onChange={(mode) => chat.setChatMode(chat.activeId, mode)}
+                />
                 <TaskCreationTool
                   selected={chat.taskCreationEnabled}
                   disabled={chat.streaming}
@@ -236,6 +255,7 @@ function ChatPageInner() {
                   throw reason
                 }
               }}
+              onExecutePlan={handleExecutePlan}
             />
 
             <div className="shrink-0 border-t bg-background/95 px-4 pt-2 pb-2.5">
@@ -346,6 +366,11 @@ function ChatPageInner() {
                     />
                     <ChatSkillSelector selected={chat.skills} onChange={chat.setSkills} disabled={chat.streaming} />
                     <ChatAgentSelector selected={chat.agentId} onChange={chat.setAgentId} disabled={chat.streaming} />
+                    <ChatModeToggle
+                      mode={chat.chatMode}
+                      disabled={chat.streaming}
+                      onChange={(mode) => chat.setChatMode(chat.activeId, mode)}
+                    />
                     <TaskCreationTool
                       selected={chat.taskCreationEnabled}
                       disabled={chat.streaming}

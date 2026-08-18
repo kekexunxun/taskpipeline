@@ -5,7 +5,7 @@ import { OpenAIMessageView } from '../drivers/OpenAIMessageView'
 import { MessageCopyButton } from '@/components/ai-elements/message'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import type { ChatDriverId, ChatMessage } from '@/api'
+import type { ChatDriverId, ChatMessage, ChatPlan } from '@/api'
 import { cn } from '@/lib/utils'
 
 /** 消息气泡宽度 class，与 ToolApprovalCard 共享 */
@@ -25,6 +25,7 @@ function ChatMessageImpl({
   isAnimating,
   hint,
   onExecuteJira,
+  onExecutePlan,
   turnIndex
 }: {
   message: ChatMessage
@@ -32,6 +33,8 @@ function ChatMessageImpl({
   /** 阶段提示（关键词提取/记忆检索中…）：优先于默认思考文案展示在 pending 占位里。 */
   hint?: string
   onExecuteJira?(taskKey: string): Promise<void>
+  /** 执行计划回调：点击“执行计划”按钮时触发，切换 chatMode 并发送执行指令。 */
+  onExecutePlan?(plan: ChatPlan): void
   /** 轮次索引（user+agent 为一轮），用于右侧进度条定位 */
   turnIndex?: number
 }) {
@@ -140,7 +143,9 @@ function ChatMessageImpl({
               <>
                 {/* 失败前已有产出(thinking / 正文 / 工具调用)时照常渲染,错误块追加在下方,
                     不再用错误块整体替换正文(Qoder 中途失败时避免"界面没有任何展示")。 */}
-                {message.parts.length > 0 && <DriverMessageBody message={message} isAnimating={isStreaming} />}
+                {message.parts.length > 0 && (
+                  <DriverMessageBody message={message} isAnimating={isStreaming} onExecutePlan={onExecutePlan} />
+                )}
                 {isError && (
                   <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-3.5 py-2.5 text-xs leading-5 break-words whitespace-pre-wrap text-destructive">
                     {errorMessage ?? '模型返回异常，请稍后重试'}
@@ -206,12 +211,20 @@ function UserBubble({ message }: { message: ChatMessage }) {
 /**
  * 助手消息正文 —— 按 `driverId` 路由到 driver 专属视图。
  */
-function DriverMessageBody({ message, isAnimating }: { message: ChatMessage; isAnimating?: boolean }) {
+function DriverMessageBody({
+  message,
+  isAnimating,
+  onExecutePlan
+}: {
+  message: ChatMessage
+  isAnimating?: boolean
+  onExecutePlan?: (plan: ChatPlan) => void
+}) {
   if (message.driverId === 'qoder') {
-    return <QoderMessageView message={message} isAnimating={isAnimating} />
+    return <QoderMessageView message={message} isAnimating={isAnimating} onExecutePlan={onExecutePlan} />
   }
   if (message.driverId === 'openai') {
-    return <OpenAIMessageView message={message} isAnimating={isAnimating} />
+    return <OpenAIMessageView message={message} isAnimating={isAnimating} onExecutePlan={onExecutePlan} />
   }
   // 未知 driver 兜底:把 parts 走 PartRenderer 的 fallback 分支
   return (

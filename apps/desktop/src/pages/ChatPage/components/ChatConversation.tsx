@@ -5,7 +5,7 @@ import { ChatMessageView, MESSAGE_WIDTH_CLASS } from './ChatMessage'
 import { ChatProgressIndicator } from './ChatProgressIndicator'
 import { ToolApprovalCard, AskUserQuestionCard } from '@/components/ToolApprovalCard'
 import type { AnsweredApproval } from '@/components/ToolApprovalCard'
-import type { ChatMessage } from '@/api'
+import type { ChatMessage, ChatPlan } from '@/api'
 import { Conversation, ConversationContent, ConversationScrollButton } from '@/components/ai-elements/conversation'
 
 export function ChatConversation({
@@ -15,7 +15,8 @@ export function ChatConversation({
   approvals,
   answered,
   onRespondApproval,
-  onExecuteJira
+  onExecuteJira,
+  onExecutePlan
 }: {
   messages: ChatMessage[]
   streaming?: boolean
@@ -27,6 +28,8 @@ export function ChatConversation({
   answered?: AnsweredApproval[]
   onRespondApproval?(id: string, response: { confirmed: boolean } | { value: string | string[] }): void
   onExecuteJira?(taskKey: string): Promise<void>
+  /** 执行计划回调：切换 chatMode 为 normal 并发送执行指令。 */
+  onExecutePlan?(plan: ChatPlan): void
 }) {
   const lastIndex = messages.length - 1
 
@@ -78,6 +81,7 @@ export function ChatConversation({
             isAnimating={streaming && !message.metadata?.status && index === lastIndex}
             hint={index === lastIndex ? hint : undefined}
             onExecuteJira={onExecuteJira}
+            onExecutePlan={onExecutePlan}
             turnIndex={turnMap.get(message.id)}
           />
         ))}

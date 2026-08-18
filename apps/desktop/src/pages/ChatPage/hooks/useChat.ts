@@ -7,6 +7,7 @@ import {
   type ChatAgentMode,
   type ChatConversation,
   type ChatConversationMeta,
+  type ChatConversationMode,
   type ChatDriverId,
   type ChatMessage,
   type ChatMessageMetadata,
@@ -148,6 +149,10 @@ export function useChat() {
   const [skills, setSkills] = useState<string[]>([])
   /** 选中的 Agent id（随对话落盘，切换对话时按落盘值恢复）。 */
   const [agentId, setAgentIdState] = useState<string>()
+  /** 对话模式（随对话落盘，切换对话时按落盘值恢复）。 */
+  const [chatModeByChat, setChatModeByChat] = useState<Record<string, ChatConversationMode>>({})
+  /** 默认对话模式（无 activeId 时使用，创建新对话后应用）。 */
+  const [defaultChatMode, setDefaultChatMode] = useState<ChatConversationMode>('normal')
   const [agents, setAgents] = useState<AgentProfile[]>([])
   /** 选中 Agent 的 profile 引用，send() 发送时取 systemPrompt 注入（避免 send 依赖重建）。 */
   const selectedAgentRef = useRef<AgentProfile | undefined>(undefined)
@@ -163,6 +168,26 @@ export function useChat() {
   useEffect(() => {
     selectedAgentRef.current = agentId ? agents.find((agent) => agent.id === agentId) : undefined
   }, [agentId, agents])
+
+  /** 设置对话模式（与任务创建模式互斥）。无 chatId 时设置默认模式，创建新对话时应用。 */
+  const setChatMode = useCallback(
+    (chatId: string | undefined, mode: ChatConversationMode) => {
+      if (!chatId) {
+        setDefaultChatMode(mode)
+        // 计划模式与任务创建模式互斥：切换到 plan 时自动关闭 taskCreation
+        if (mode === 'plan' && taskCreationEnabled) {
+          setTaskCreationEnabled(false)
+        }
+        return
+      }
+      setChatModeByChat((current) => ({ ...current, [chatId]: mode }))
+      // 计划模式与任务创建模式互斥：切换到 plan 时自动关闭 taskCreation
+      if (mode === 'plan' && taskCreationEnabled) {
+        setTaskCreationEnabled(false)
+      }
+    },
+    [taskCreationEnabled]
+  )
 
   const refreshMetas = useCallback(async () => {
     try {
@@ -251,6 +276,8 @@ export function useChat() {
       setMcpService(conv.mcpService ?? [])
       setSkills(conv.skills ?? [])
       setAgentIdState(conv.agentId)
+      // 对话模式按落盘值恢复
+      setChatModeByChat((current) => ({ ...current, [id]: conv.chatMode ?? 'normal' }))
     },
     [conversationsByChat, loadConversation, modelGroups, setModelAndDriver]
   )
@@ -264,6 +291,8 @@ export function useChat() {
         setActiveId(next.id)
         setConversationsByChat((current) => ({ ...current, [next.id]: next }))
         setMessagesByChat((current) => ({ ...current, [next.id]: [] }))
+        // 应用默认对话模式
+        setChatModeByChat((current) => ({ ...current, [next.id]: defaultChatMode }))
         await refreshMetas()
         return next.id
       } catch (reason) {
@@ -271,7 +300,7 @@ export function useChat() {
         return undefined
       }
     },
-    [driverId, model, refreshMetas, showError]
+    [driverId, model, refreshMetas, showError, defaultChatMode]
   )
 
   const remove = useCallback(
@@ -384,6 +413,17 @@ export function useChat() {
           if (chunk.type === 'part') {
             return { ...message, parts: [...message.parts, chunk.part] }
           }
+          if (chunk.type === 'plan-start') {
+            // 计划模式开始：标记消息为计划模式，PartRenderer 将渲染为 PlanCard
+            const metadata = { ...(message.metadata ?? {}), isPlanMode: true } as ChatMessageMetadata
+            return { ...message, metadata }
+          }
+          if (chunk.type === 'plan-part') {
+            // 计划完成：用新的 parts 替换所有 parts（文本 -> 计划卡片）
+            // 同时清除 isPlanMode 标记（plan part 已经包含完整计划）
+            const metadata = { ...(message.metadata ?? {}), isPlanMode: false } as ChatMessageMetadata
+            return { ...message, parts: chunk.parts, metadata }
+          }
           if (chunk.type === 'error') {
             // 驱动失败:标记消息为 error 并带上异常详情,界面红色错误块展示。
             const metadata = {
@@ -394,7 +434,7 @@ export function useChat() {
             return { ...message, metadata }
           }
           if (chunk.type === 'done' && chunk.status === 'error') {
-            // 兜底:若 error chunk 未送达(理论上不会),done(status=error) 也能让消息进入错误态。
+            // 兆底:如 error chunk 未送达(理论上不会),done(status=error) 也能让消息进入错误态。
             const metadata = { ...(message.metadata ?? {}), status: 'error' } as ChatMessageMetadata
             return { ...message, metadata }
           }
@@ -546,6 +586,8 @@ export function useChat() {
           setActiveId(created.id)
           setConversationsByChat((current) => ({ ...current, [created.id]: created }))
           setMessagesByChat((current) => ({ ...current, [created.id]: [] }))
+          // 应用默认对话模式
+          setChatModeByChat((current) => ({ ...current, [created.id]: defaultChatMode }))
           await refreshMetas()
         } catch (reason) {
           showError(reason instanceof Error ? reason.message : String(reason))
@@ -600,6 +642,7 @@ export function useChat() {
         modelParams,
         message: { id: userId, text, createdAt, ...(files?.length ? { files } : {}) },
         mode: (taskCreationEnabled ? 'task-create' : 'chat') satisfies ChatAgentMode,
+        chatMode: chatModeByChat[chatId] ?? 'normal',
         mcpService,
         skills,
         agentId,
@@ -744,6 +787,8 @@ export function useChat() {
     () => (activeId ? (pendingMessagesByChat[activeId] ?? []) : []),
     [activeId, pendingMessagesByChat]
   )
+  /** 当前对话的模式（无 activeId 时使用默认模式）。 */
+  const chatMode: ChatConversationMode = activeId ? (chatModeByChat[activeId] ?? defaultChatMode) : defaultChatMode
   /** 当前选中模型是否支持视觉/多模态输入（控制附件入口显隐）。 */
   const modelSupportsVision = useMemo(() => {
     if (!model) return false
@@ -783,6 +828,7 @@ export function useChat() {
       mcpService,
       skills,
       agentId,
+      chatMode,
       setDraft,
       setModelAndDriver,
       setModelParams,
@@ -791,6 +837,7 @@ export function useChat() {
       setMcpService,
       setSkills,
       setAgentId,
+      setChatMode,
       select,
       create,
       remove,
@@ -827,6 +874,7 @@ export function useChat() {
       mcpService,
       skills,
       agentId,
+      chatMode,
       setDraft,
       setModelAndDriver,
       setModelParams,
@@ -835,6 +883,7 @@ export function useChat() {
       setMcpService,
       setSkills,
       setAgentId,
+      setChatMode,
       select,
       create,
       remove,

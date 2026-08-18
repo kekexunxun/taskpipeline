@@ -17,6 +17,7 @@
  * 上层 (ChatService) 完全不感知 SDK 协议。
  */
 
+import { planModeInstruction } from '@task-pipeline/core'
 import type { z } from 'zod'
 import {
   createSdkMcpServer,
@@ -273,6 +274,7 @@ export class QoderChatDriver implements ChatDriver {
     // 历史末尾有 qoder.session 时自动 resume(底层能力,应用重启后上下文不丢)。
     // mcpServers 在会话创建时固化:本轮 MCP 选择与会话创建时不一致则关闭重建
     // (上下文经 resume 恢复),保证勾选变化真正生效。
+    // chatMode 通过系统提示注入，每次请求都生效，不需要重建会话。
     const mcpKey = [...(input.mcpServices ?? [])].sort().join(',')
     let session = this.sessions.get(input.conversationId)
     if (session && this.sessionMcpKeys.get(input.conversationId) !== mcpKey) {
@@ -408,12 +410,22 @@ export class QoderChatDriver implements ChatDriver {
     if (input.workspaceContext) {
       systemParts.push(input.workspaceContext)
     }
-    const systemPrompt = systemParts.length > 0 ? systemParts.join('\n\n') : undefined
+    const baseSystemPrompt = systemParts.length > 0 ? systemParts.join('\n\n') : undefined
+    // 计划模式：追加共享指令模板，让 LLM 只读分析并输出计划
+    const chatMode = input.chatMode ?? 'normal'
+    const isPlanMode = chatMode === 'plan'
+    const systemPrompt = isPlanMode
+      ? baseSystemPrompt
+        ? `${baseSystemPrompt}\n\n${planModeInstruction()}`
+        : planModeInstruction()
+      : baseSystemPrompt
     return {
       token,
       cwd: input.cwd ?? process.cwd(),
       model: input.model.startsWith('qoder:') ? input.model.slice(6) : input.model,
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
+      // Chat 计划模式：只通过系统提示约束 LLM 行为（只读分析），不使用 SDK 的 permissionMode: 'plan'
+      // （后者会期望 ExitPlanMode 工具，适用于 Coding 场景而非 Chat）
       permissionMode: 'default' as const,
       // HITL 确认需要用户人工决策，不设超时上限（SDK 条件：<=0 则不启动 setTimeout）。
       // 安全兜底由前端流看门狗（STREAM_WATCHDOG_MS 无事件 → abort 死流 → flushApprovals 拒绝）

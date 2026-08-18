@@ -1,4 +1,4 @@
-import { api, type ChatStreamEvent, type ModelParams, type UserFileAttachment } from '@/api'
+import { api, type ChatConversationMode, type ChatStreamEvent, type ModelParams, type UserFileAttachment } from '@/api'
 
 /**
  * 单次 chat 流的回调订阅。
@@ -27,6 +27,8 @@ export class ElectronChatTransport {
     modelParams?: ModelParams
     message: { id: string; text: string; createdAt: string; files?: UserFileAttachment[] }
     mode?: 'chat' | 'task-create'
+    /** 对话模式（normal=常规对话, plan=只读计划模式）。 */
+    chatMode?: ChatConversationMode
     /** 选中的 MCP 服务列表（透传给主进程 ChatService）。 */
     mcpService?: string[]
     /** 选中的 Skill 名列表（透传给主进程 ChatService）。 */
@@ -79,6 +81,7 @@ export class ElectronChatTransport {
         modelParams: input.modelParams,
         message: input.message,
         mode: input.mode,
+        chatMode: input.chatMode,
         mcpService: input.mcpService,
         skills: input.skills,
         agentId: input.agentId,

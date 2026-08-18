@@ -212,6 +212,34 @@ export type DriverPart =
       filename?: string
       parentTaskId?: string
     }
+  | {
+      driverId: ChatDriverId
+      type: 'plan'
+      plan: ChatPlan
+      parentTaskId?: string
+    }
+
+/**
+ * 对话计划结构（plan 模式下 LLM 输出的 Markdown 计划）。
+ * 存储于 dataDir/plans/{chatId}/{planId}.md，执行时告知 LLM 文件路径避免上下文爆炸。
+ */
+export type ChatPlan = {
+  /** 计划唯一 ID（与消息 ID 关联）。 */
+  id: string
+  /** 关联的对话 ID。 */
+  chatId: string
+  /** 计划创建时间。 */
+  createdAt: string
+  /** 计划状态：pending=待执行, executing=执行中, completed=已完成, failed=失败。 */
+  status: ChatPlanStatus
+  /** Markdown 格式的计划内容。 */
+  content: string
+  /** 计划文件存储路径（执行时告知 LLM）。 */
+  filePath: string
+}
+
+/** 计划状态。 */
+export type ChatPlanStatus = 'pending' | 'executing' | 'completed' | 'failed' | 'cancelled'
 
 /** 单条消息的流式用量（openai driver 从 ai-sdk finish chunk 收集；qoder 暂无数据）。 */
 export type ChatUsage = {
@@ -248,6 +276,8 @@ export type ChatMessage = StoredMessage & {
 
 export type ChatMessageStatus = 'done' | 'error' | 'aborted'
 export type ChatAgentMode = 'chat' | 'task-create'
+/** 对话模式：normal=常规对话, plan=只读计划模式。后续可扩展更多模式。 */
+export type ChatConversationMode = 'normal' | 'plan'
 export type ChatTaskCreationResult = {
   backend: 'jira' | 'github' | 'linear'
   externalKey: string
@@ -265,6 +295,8 @@ export type ChatMessageMetadata = {
   usage?: ChatUsage
   /** 本次回复的接口异常详情（流期间在飞消息标记用，持久化走 StoredMessageRecord.errorMessage）。 */
   errorMessage?: string
+  /** 计划模式标记：为 true 时 PartRenderer 将文本内容渲染为 PlanCard（显示“计划生成中...”）。 */
+  isPlanMode?: boolean
 }
 
 export type ChatConversationMeta = {
@@ -282,6 +314,8 @@ export type ChatConversationMeta = {
   skills?: string[]
   /** 最近一轮选中的 Agent id（随对话落盘，切换对话后恢复选择态）。 */
   agentId?: string
+  /** 对话模式（随对话落盘，切换对话后恢复）。未设置时默认 'normal'。 */
+  chatMode?: ChatConversationMode
   messageCount: number
   /** 绑定的本地工作目录(项目对话);无值 = 普通对话。 */
   workingDirectory?: string
@@ -363,6 +397,8 @@ export type StartChatStreamInput = {
   /** 用户当前输入(未持久化),ChatService 会按 driverId 调 `driver.serializeUserMessage` 包成 record。 */
   message: { id: string; text: string; createdAt: string; files?: UserFileAttachment[] }
   mode?: ChatAgentMode
+  /** 对话模式（normal=常规对话, plan=只读计划模式）。前端指定或由后端自动切换。 */
+  chatMode?: ChatConversationMode
   /** 选中的 MCP 服务列表（落盘 + 注入 driver 工具：Qoder 走 mcpServers，OpenAI 走 MCP 桥接工具）。 */
   mcpService?: string[]
   /** 选中的 Skill 名列表（落盘 + 注入 driver：Qoder 走 SDK skills，OpenAI 走 system 拼接）。 */
@@ -384,6 +420,10 @@ export type ChatStreamChunk =
   | { type: 'status'; text: string }
   | { type: 'error'; message: string }
   | { type: 'done'; status: ChatMessageStatus; usage?: ChatUsage; model?: string }
+  /** 计划模式开始：前端将后续文本 parts 渲染为 PlanCard（显示“计划生成中...”）。 */
+  | { type: 'plan-start' }
+  /** 计划模式：用计划卡片替换消息的所有文本 parts。 */
+  | { type: 'plan-part'; parts: DriverPart[] }
 
 export type ChatStreamEvent = {
   streamId: string
