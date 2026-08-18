@@ -2,7 +2,8 @@ import { DiamondIcon, Loader2Icon, UserRoundIcon } from 'lucide-react'
 import { useMemo } from 'react'
 import type { ChatApprovalRequest } from '../hooks/useChat'
 import { ChatMessageView, MESSAGE_WIDTH_CLASS } from './ChatMessage'
-import { ChatProgressIndicator } from './ChatProgressIndicator'
+// TODO: 进度条效果待优化，暂时隐藏
+// import { ChatProgressIndicator } from './ChatProgressIndicator'
 import { ToolApprovalCard, AskUserQuestionCard } from '@/components/ToolApprovalCard'
 import type { AnsweredApproval } from '@/components/ToolApprovalCard'
 import type { ChatMessage, ChatPlan } from '@/api'
@@ -44,7 +45,7 @@ export function ChatConversation({
     return map
   }, [messages])
 
-  const turnCount = useMemo(() => {
+  const _turnCount = useMemo(() => {
     if (turnMap.size === 0) return 0
     let max = 0
     for (const v of turnMap.values()) if (v > max) max = v
@@ -52,7 +53,7 @@ export function ChatConversation({
   }, [turnMap])
 
   // 每轮的用户消息文本（用于右侧进度条卡片展示）
-  const turnUserMessages = useMemo(() => {
+  const _turnUserMessages = useMemo(() => {
     const map = new Map<number, string>()
     for (const msg of messages) {
       if (msg.role === 'user') {
@@ -124,7 +125,8 @@ export function ChatConversation({
           </div>
         )}
       </ConversationContent>
-      <ChatProgressIndicator turnCount={turnCount} turnUserMessages={turnUserMessages} />
+      {/* TODO: 进度条效果待优化，暂时隐藏 */}
+      {/* <ChatProgressIndicator turnCount={turnCount} turnUserMessages={turnUserMessages} /> */}
       <ConversationScrollButton />
     </Conversation>
   )
