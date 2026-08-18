@@ -65,6 +65,8 @@ export type QoderTaskAgentDeps = TaskAgentDeps & {
   /**
    * Phase 2 HITL：工具调用确认回调。
    * 返回 "allow" 放行该工具调用，返回 "deny" 拒绝（SDK 会把拒绝消息反馈给 agent，让它换方案）。
+   * AskUserQuestion 返回 { type: 'askUser', answers } —— hook 组装为 SDK 的 allow + updatedInput。
+   * 拒绝时返回 { type: 'deny', message } —— 使用自定义拒绝消息。
    * `signal` 为 SDK 传入的会话中止信号：任务被 abort 时确认框应立刻按拒绝处理。
    * 未注入时所有 PermissionRequest hook 直接放行（保持原行为）。
    */
@@ -73,7 +75,7 @@ export type QoderTaskAgentDeps = TaskAgentDeps & {
     toolName: string,
     toolInput: unknown,
     signal?: AbortSignal
-  ) => Promise<'allow' | 'deny'>
+  ) => Promise<'allow' | 'deny' | { type: 'askUser'; answers: string[] } | { type: 'deny'; message: string }>
   /**
    * 测试用例生成阶段的 Agent 上下文（角色定义 + 领域指引）。
    * 存在时优先使用，回退现有 resolveAgentContext。
@@ -138,6 +140,36 @@ function buildPermissionHooks(
               }
             }
             const decision = await onPermissionRequest(taskId, input.tool_name, input.tool_input, options?.signal)
+            // AskUserQuestion：用户回答通过 allow + updatedInput 注入（官方 SDK 协议），
+            // answers 的 key 是完整的 question 文本，SDK 据此生成正常的 tool_result（非 error）。
+            if (typeof decision === 'object' && decision.type === 'askUser') {
+              const toolInputObj = (
+                typeof input.tool_input === 'object' && input.tool_input ? input.tool_input : {}
+              ) as Record<string, any>
+              const questions = Array.isArray(toolInputObj.questions) ? toolInputObj.questions : []
+              const answers: Record<string, string> = {}
+              questions.forEach((q: any, i: number) => {
+                if (q.question && decision.answers[i] !== undefined) {
+                  answers[q.question] = decision.answers[i]
+                }
+              })
+              return {
+                hookSpecificOutput: {
+                  hookEventName: 'PermissionRequest',
+                  decision: { behavior: 'allow', updatedInput: { questions, answers } }
+                }
+              }
+            }
+            if (typeof decision === 'object' && decision.type === 'deny') {
+              // 自定义拒绝消息（如 AskUserQuestion 取消）
+              if (toolUseID) deniedCallIds.add(toolUseID)
+              return {
+                hookSpecificOutput: {
+                  hookEventName: 'PermissionRequest',
+                  decision: { behavior: 'deny', message: decision.message, interrupt: false }
+                }
+              }
+            }
             if (decision === 'deny') {
               // HITL 拒绝标记:记录 toolUseID,onMessage 据此补标 is_error。
               if (toolUseID) deniedCallIds.add(toolUseID)

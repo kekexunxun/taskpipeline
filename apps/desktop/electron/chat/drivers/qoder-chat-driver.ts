@@ -63,13 +63,20 @@ type QoderStatusProvider = () => Promise<QoderStatus>
 /**
  * 工具调用 HITL 回调(对话板块)。
  * Qoder CLI 需要用户决策时调用:返回 'allow' 放行 / 'deny' 拒绝(带消息)。
+ * AskUserQuestion 返回 { type: 'askUser', answers } —— driver 组装为 SDK 的 allow + updatedInput。
+ * 拒绝时返回 { type: 'deny', message } —— driver 使用自定义消息。
  * 缺省不注入时,SDK 遇 `can_use_tool` 控制请求会直接抛错 —— 见 qoder-session 透传。
  */
+export type QoderToolPermissionHandlerResult =
+  | 'allow'
+  | 'deny'
+  | { type: 'askUser'; answers: string[] }
+  | { type: 'deny'; message: string }
 export type QoderToolPermissionHandler = (
   toolName: string,
   toolInput: Record<string, unknown>,
   options: { signal: AbortSignal; conversationId: string; title?: string; displayName?: string; description?: string }
-) => Promise<'allow' | 'deny'>
+) => Promise<QoderToolPermissionHandlerResult>
 
 /**
  * Qoder driver 自己的 raw 形态(给存储层用):
@@ -470,6 +477,28 @@ export class QoderChatDriver implements ChatDriver {
               if (sdkOpts.signal.aborted) {
                 sessionRef?.current?.deniedCallIds.add(sdkOpts.toolUseID)
                 return { behavior: 'deny', message: '工具调用已中止', interrupt: true }
+              }
+              // AskUserQuestion:用户回答通过 allow + updatedInput 注入(官方 SDK 协议),
+              // answers 的 key 是完整的 question 文本,SDK 据此生成正常的 tool_result(非 error)。
+              if (typeof decision === 'object' && decision.type === 'askUser') {
+                const questions = (toolInput as any).questions
+                const answers: Record<string, string> = {}
+                if (Array.isArray(questions)) {
+                  questions.forEach((q: any, i: number) => {
+                    if (q.question && decision.answers[i] !== undefined) {
+                      answers[q.question] = decision.answers[i]
+                    }
+                  })
+                }
+                return {
+                  behavior: 'allow',
+                  updatedInput: { questions: questions ?? [], answers }
+                }
+              }
+              if (typeof decision === 'object' && decision.type === 'deny') {
+                // 自定义拒绝消息(如 AskUserQuestion 取消)
+                sessionRef?.current?.deniedCallIds.add(sdkOpts.toolUseID)
+                return { behavior: 'deny', message: decision.message, interrupt: false }
               }
               if (decision === 'deny') {
                 // HITL 拒绝标记:记录 toolUseID,handleToolResult 据此补标 isError。

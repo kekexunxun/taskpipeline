@@ -779,6 +779,14 @@ chatDriverRegistry.register(
     // - auto 模式：仅危险操作（rm -rf / sudo / .env 等）弹窗确认；
     // - yolo 模式：全部自动放行。
     async (toolName, toolInput, { signal, conversationId, title, displayName, description }) => {
+      // AskUserQuestion：agent 主动向用户提问，强制等待用户回答（不受 HITL 模式限制）。
+      if (toolName === 'AskUserQuestion') {
+        const answers = await handleAskUserQuestion(toolInput, { signal, conversationId })
+        if (answers && answers.length > 0) {
+          return { type: 'askUser' as const, answers }
+        }
+        return { type: 'deny' as const, message: '用户取消了问答，请选择其他方式继续任务' }
+      }
       const hitlMode = getHitlModeForContext('conversation', conversationId)
       if (hitlMode === 'yolo') return 'allow'
       const needsConfirm =
@@ -1181,6 +1189,14 @@ function createQoderTaskAgent(): QoderTaskAgentDriver {
     // - ask/auto 模式：仅删除/重命名/移动等破坏性操作弹确认（任务面板原本就只拦截危险操作）；
     // - yolo 模式：全部自动放行。
     onPermissionRequest: async (taskId, toolName, toolInput, signal) => {
+      // AskUserQuestion：agent 主动向用户提问，强制等待用户回答（不受 HITL 模式限制）。
+      if (toolName === 'AskUserQuestion' && toolInput && typeof toolInput === 'object') {
+        const answers = await handleAskUserQuestion(toolInput as Record<string, unknown>, { signal, taskId })
+        if (answers && answers.length > 0) {
+          return { type: 'askUser' as const, answers }
+        }
+        return { type: 'deny' as const, message: '用户取消了问答，请选择其他方式继续任务' }
+      }
       const hitlMode = getHitlModeForContext('task', taskId)
       if (hitlMode === 'yolo') return 'allow'
       if (!isDangerousTool(toolName, toolInput)) return 'allow'
@@ -1672,6 +1688,52 @@ function emitPi(event: unknown): void {
       emitPi({ type: 'agent_error', message: error instanceof Error ? error.message : String(error) })
     )
   }
+}
+
+/**
+ * AskUserQuestion HITL：agent 向用户提问，展示选项让用户选择，把用户的选择作为工具结果返回。
+ * 支持多问题：questions 数组可包含多个问题，前端卡片逐一展示，用户逐个选择后一次性返回。
+ * 返回 string[]（每个问题的回答，按 questions 顺序）；用户取消或无问题时返回 undefined。
+ * 使用 'ask-user' 方法 → ChatPage 路由到内联卡片（非模态弹窗）。
+ */
+function handleAskUserQuestion(
+  toolInput: Record<string, unknown>,
+  options: { signal?: AbortSignal; conversationId?: string; taskId?: string }
+): Promise<string[] | undefined> {
+  const questions = (toolInput as any).questions
+  if (!Array.isArray(questions) || questions.length === 0) return Promise.resolve(undefined)
+  // 标准化所有问题（单/多问题统一形态）
+  const allQuestions = questions.map((q: any) => ({
+    header: (q.header as string) ?? '问题',
+    question: (q.question as string) ?? '',
+    options: Array.isArray(q.options) ? q.options : []
+  }))
+  return requestUi<string | string[]>(
+    'ask-user',
+    {
+      questions: allQuestions, // 完整问题列表（前端渲染所有问题）
+      // 兜底字段：单问题时兼容旧 UiRequestDialog 的 title/message/options
+      ...(allQuestions.length === 1
+        ? (() => {
+            const q = allQuestions[0]!
+            return {
+              title: q.header,
+              message: q.question,
+              options: q.options.map((o: any) => o.label),
+              optionDetails: q.options
+            }
+          })()
+        : {
+            title: allQuestions.length > 1 ? `${allQuestions.length} 个问题` : allQuestions[0]!.header
+          }),
+      ...options
+    },
+    { signal: options.signal }
+  ).then((result) => {
+    // 标准化为 string[]：单问题前端发 string（包装成单元素数组），多问题发 string[]（直接透传）。
+    if (result === undefined) return undefined
+    return Array.isArray(result) ? result : [result]
+  })
 }
 
 /**

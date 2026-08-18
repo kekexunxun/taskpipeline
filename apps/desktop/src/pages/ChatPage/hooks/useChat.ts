@@ -21,10 +21,10 @@ import {
 import { useChatModels } from '@/hooks/useChatModels'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
 import { isModelAvailable, isOpenAIModelValue, pickSystemDefaultModel } from '@/utils/chat-models'
-import type { ChatApprovalRequest } from '@/components/ToolApprovalCard'
+import type { ChatApprovalRequest, AnsweredApproval } from '@/components/ToolApprovalCard'
 
 // 兼容旧导入路径（ChatConversation / ChatPage 从 useChat import 该类型）。
-export type { ChatApprovalRequest } from '@/components/ToolApprovalCard'
+export type { ChatApprovalRequest, AnsweredApproval } from '@/components/ToolApprovalCard'
 
 const transport = new ElectronChatTransport()
 
@@ -113,6 +113,8 @@ export function useChat() {
   useEffect(() => {
     pendingApprovalsRef.current = pendingApprovals
   }, [pendingApprovals])
+  /** chatId → 已回答的 AskUserQuestion（保留展示已选结果，agent 产生新内容后清除）。 */
+  const [answeredApprovals, setAnsweredApprovals] = useState<Record<string, AnsweredApproval[]>>({})
   /** chatId → 排队等待发送的消息（对话进行中用户预输入）。 */
   const [pendingMessagesByChat, setPendingMessagesByChat] = useState<Record<string, PendingMessage[]>>({})
   const pendingMessagesByChatRef = useRef<Record<string, PendingMessage[]>>({})
@@ -307,6 +309,11 @@ export function useChat() {
         delete next[id]
         return next
       })
+      setAnsweredApprovals((current) => {
+        const next = { ...current }
+        delete next[id]
+        return next
+      })
       setHintsByChat((current) => {
         const next = { ...current }
         delete next[id]
@@ -400,6 +407,13 @@ export function useChat() {
       // 收到第一个 part 时切换到 streaming 状态(让 UI 的流式动画启用)，并清掉阶段提示（正文开始）。
       setStreamingChatIds((current) => new Set(current).add(chatId))
       setHintsByChat((current) => (current[chatId] ? { ...current, [chatId]: undefined } : current))
+      // agent 产生新内容 → 清除已回答的 AskUserQuestion 卡片（已完成展示使命）。
+      setAnsweredApprovals((current) => {
+        if (!current[chatId]?.length) return current
+        const next = { ...current }
+        delete next[chatId]
+        return next
+      })
     }
   }, [])
 
@@ -423,25 +437,57 @@ export function useChat() {
     }
   }, [])
 
-  /** 响应确认请求（允许/拒绝），并把它从对应对话的队列移除。 */
-  const respondApproval = useCallback(async (id: string, confirmed: boolean) => {
-    // 乐观移除：先清卡片再响应（IPC 失败时主进程超时兜底默认拒绝，卡片不残留误导）。
-    setPendingApprovals((current) => {
-      let changed = false
-      const next: Record<string, ChatApprovalRequest[]> = {}
-      for (const [chatId, list] of Object.entries(current)) {
-        const filtered = list.filter((approval) => approval.id !== id)
-        if (filtered.length !== list.length) changed = true
-        if (filtered.length) next[chatId] = filtered
+  /**
+   * 响应确认请求。
+   * - confirm 类型：乐观移除（IPC 失败时主进程超时兜底默认拒绝）。
+   * - ask-user 类型：从 pending 移到 answered（保留已选结果展示），agent 产生新内容后清除。
+   */
+  const respondApproval = useCallback(
+    async (id: string, response: { confirmed: boolean } | { value: string | string[] }) => {
+      // 找到该 approval 所属的 chatId 和原始数据（ask-user 需要保留到 answered 列表）。
+      let targetChatId: string | undefined
+      let matchedApproval: ChatApprovalRequest | undefined
+      for (const [chatId, list] of Object.entries(pendingApprovalsRef.current)) {
+        const found = list.find((a) => a.id === id)
+        if (found) {
+          targetChatId = chatId
+          matchedApproval = found
+          break
+        }
       }
-      return changed ? next : current
-    })
-    try {
-      await api.respondTaskUi({ id, confirmed })
-    } catch {
-      /* 主进程超时/会话关闭后响应为 no-op，忽略 */
-    }
-  }, [])
+
+      // 从 pending 移除
+      setPendingApprovals((current) => {
+        let changed = false
+        const next: Record<string, ChatApprovalRequest[]> = {}
+        for (const [chatId, list] of Object.entries(current)) {
+          const filtered = list.filter((approval) => approval.id !== id)
+          if (filtered.length !== list.length) changed = true
+          if (filtered.length) next[chatId] = filtered
+        }
+        return changed ? next : current
+      })
+
+      // ask-user 类型：保留到 answered 列表（展示已选结果）
+      if (matchedApproval?.method === 'ask-user' && targetChatId && 'value' in response) {
+        const val = response.value
+        const selections: Record<number, string> = Array.isArray(val)
+          ? Object.fromEntries(val.map((v, i) => [i, v]))
+          : { 0: val }
+        setAnsweredApprovals((current) => ({
+          ...current,
+          [targetChatId]: [...(current[targetChatId] ?? []), { id, approval: matchedApproval, selections }]
+        }))
+      }
+
+      try {
+        await api.respondTaskUi({ id, ...(response as any) })
+      } catch {
+        /* 主进程超时/会话关闭后响应为 no-op，忽略 */
+      }
+    },
+    []
+  )
 
   /** 流结束时未确认的请求默认拒绝（安全兜底）：通知主进程结束等待，并清空该对话卡片。 */
   const flushApprovals = useCallback((chatId: string) => {
@@ -649,6 +695,7 @@ export function useChat() {
         const pending = pendingMessagesByChatRef.current[chatId]
         if (pending && pending.length > 0) {
           const [next, ...rest] = pending
+          if (!next) return
           setPendingMessagesByChat((current) => {
             const updated = current[chatId]?.filter((m) => m.id !== next.id) ?? []
             if (updated.length === 0) {
@@ -690,6 +737,8 @@ export function useChat() {
   const hint = activeId ? hintsByChat[activeId] : undefined
   /** 当前对话的确认请求(内联卡片渲染源)。 */
   const approvals = useMemo(() => (activeId ? (pendingApprovals[activeId] ?? []) : []), [activeId, pendingApprovals])
+  /** 当前对话已回答的 AskUserQuestion（保留展示已选结果）。 */
+  const answered = useMemo(() => (activeId ? (answeredApprovals[activeId] ?? []) : []), [activeId, answeredApprovals])
   /** 当前对话的待发送消息队列。 */
   const pendingMessages = useMemo(
     () => (activeId ? (pendingMessagesByChat[activeId] ?? []) : []),
@@ -720,6 +769,8 @@ export function useChat() {
       streamingChatIds,
       /** 当前对话待确认的 HITL 请求（内联卡片用）。 */
       approvals,
+      /** 当前对话已回答的 AskUserQuestion（保留展示已选结果）。 */
+      answered,
       /** 当前对话的待发送消息队列。 */
       pendingMessages,
       modelGroups,
@@ -764,11 +815,13 @@ export function useChat() {
       hint,
       streamingChatIds,
       approvals,
+      answered,
       pendingMessages,
       modelGroups,
       model,
       driverId,
       modelParams,
+      modelSupportsVision,
       taskCreationEnabled,
       taskBackend,
       mcpService,

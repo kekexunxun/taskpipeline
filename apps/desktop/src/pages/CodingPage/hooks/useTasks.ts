@@ -365,8 +365,8 @@ export function useTasks(): CodingPageState {
         if (event.method === 'confirm') {
           // confirm 内联到任务执行流（按 taskId 归属，并行任务各自展示确认卡片）
           pushApproval(event.taskId, event)
-        } else if (['select', 'input', 'editor'].includes(event.method)) {
-          // 其余方法（信任项目配置等）保留 UiRequestDialog 模态兜底
+        } else if (['select', 'input', 'editor', 'ask-user'].includes(event.method)) {
+          // 其余方法（信任项目配置 / AskUserQuestion 等）保留 UiRequestDialog 模态兜底
           window.dispatchEvent(new CustomEvent('task:ui-request', { detail: event }))
         }
       }

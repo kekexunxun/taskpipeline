@@ -3,7 +3,8 @@ import { useMemo } from 'react'
 import type { ChatApprovalRequest } from '../hooks/useChat'
 import { ChatMessageView, MESSAGE_WIDTH_CLASS } from './ChatMessage'
 import { ChatProgressIndicator } from './ChatProgressIndicator'
-import { ToolApprovalCard } from '@/components/ToolApprovalCard'
+import { ToolApprovalCard, AskUserQuestionCard } from '@/components/ToolApprovalCard'
+import type { AnsweredApproval } from '@/components/ToolApprovalCard'
 import type { ChatMessage } from '@/api'
 import { Conversation, ConversationContent, ConversationScrollButton } from '@/components/ai-elements/conversation'
 
@@ -12,6 +13,7 @@ export function ChatConversation({
   streaming,
   hint,
   approvals,
+  answered,
   onRespondApproval,
   onExecuteJira
 }: {
@@ -21,7 +23,9 @@ export function ChatConversation({
   hint?: string
   /** 该对话待确认的 HITL 请求（内联卡片，渲染在消息流底部）。 */
   approvals?: ChatApprovalRequest[]
-  onRespondApproval?(id: string, confirmed: boolean): void
+  /** 该对话已回答的 AskUserQuestion（保留展示已选结果）。 */
+  answered?: AnsweredApproval[]
+  onRespondApproval?(id: string, response: { confirmed: boolean } | { value: string | string[] }): void
   onExecuteJira?(taskKey: string): Promise<void>
 }) {
   const lastIndex = messages.length - 1
@@ -77,12 +81,29 @@ export function ChatConversation({
             turnIndex={turnMap.get(message.id)}
           />
         ))}
-        {approvals?.map((approval) => (
-          <ToolApprovalCard
-            key={approval.id}
-            approval={approval}
+        {approvals?.map((approval) =>
+          approval.method === 'ask-user' ? (
+            <AskUserQuestionCard
+              key={approval.id}
+              approval={approval}
+              widthClass={MESSAGE_WIDTH_CLASS}
+              onRespond={(value) => onRespondApproval?.(approval.id, { value })}
+            />
+          ) : (
+            <ToolApprovalCard
+              key={approval.id}
+              approval={approval}
+              widthClass={MESSAGE_WIDTH_CLASS}
+              onRespond={(confirmed) => onRespondApproval?.(approval.id, { confirmed })}
+            />
+          )
+        )}
+        {answered?.map((item) => (
+          <AskUserQuestionCard
+            key={`answered-${item.id}`}
+            approval={item.approval}
+            selections={item.selections}
             widthClass={MESSAGE_WIDTH_CLASS}
-            onRespond={(confirmed) => onRespondApproval?.(approval.id, confirmed)}
           />
         ))}
         {streaming && approvals && approvals.length > 0 && (

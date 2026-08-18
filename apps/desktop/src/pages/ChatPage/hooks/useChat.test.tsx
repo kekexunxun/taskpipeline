@@ -113,7 +113,7 @@ describe('useChat（多对话并行 + 内联 HITL）', () => {
     expect(result.current.approvals).toHaveLength(1)
 
     await act(async () => {
-      await result.current.respondApproval('a1', true)
+      await result.current.respondApproval('a1', { confirmed: true })
     })
     expect(mockApi.respondTaskUi).toHaveBeenCalledWith({ id: 'a1', confirmed: true })
     await waitFor(() => expect(result.current.approvals).toHaveLength(0))

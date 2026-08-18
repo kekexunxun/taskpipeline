@@ -46,12 +46,13 @@ function ChatPageInner() {
   // 工具调用 HITL：Qoder 等 driver 的 can_use_tool 确认请求由主进程以
   // extension_ui_request 广播（task:event 通道）。
   // - confirm：内联到对话流（ChatToolApprovalCard），按 conversationId 归属，并行对话各自展示；
+  // - ask-user：AskUserQuestion 内联卡片（选项按钮），同样走 pushApproval 内联路径；
   // - select/input/editor：对话板块不会产生，保留 UiRequestDialog 作为兜底。
   useEffect(() => {
     const off = api.onTaskEvent(
       (event: { type?: string; method?: string; conversationId?: string } & ChatApprovalRequest) => {
         if (event?.type !== 'extension_ui_request') return
-        if (event.method === 'confirm') {
+        if (event.method === 'confirm' || event.method === 'ask-user') {
           pushApproval(event.conversationId, event)
         } else if (['select', 'input', 'editor'].includes(event.method ?? '')) {
           window.dispatchEvent(new CustomEvent('task:ui-request', { detail: event }))
@@ -224,7 +225,8 @@ function ChatPageInner() {
               streaming={chat.streaming}
               hint={chat.hint}
               approvals={chat.approvals}
-              onRespondApproval={(id, confirmed) => void chat.respondApproval(id, confirmed)}
+              answered={chat.answered}
+              onRespondApproval={(id, response) => void chat.respondApproval(id, response)}
               onExecuteJira={async (taskKey) => {
                 try {
                   const task = await api.importJiraTask(taskKey)

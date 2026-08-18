@@ -224,6 +224,10 @@ export function PartRenderer({ parts, isStreaming }: { parts: DriverPart[]; isSt
       ) {
         return null
       }
+      // AskUserQuestion：交互由内联 AskUserQuestionCard（approval 体系）承载，通用 ToolCallRow 隐藏。
+      if (toolNameLower === 'askuserquestion') {
+        return null
+      }
       if (part.name.startsWith('mcp__')) {
         return <McpToolBlock key={key} name={part.name} input={part.input} output={result?.output} status={status} />
       }
