@@ -42,9 +42,10 @@ function getInputField(input: unknown, field: string): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
-/** 从文件路径提取文件名。 */
+/** 从文件路径提取文件名（兼容 Unix `/` 与 Windows `\` 分隔符）。 */
 function extractFilename(filePath: string): string {
-  return filePath.split('/').pop() || filePath
+  const idx = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
+  return idx >= 0 ? filePath.slice(idx + 1) : filePath
 }
 
 /** 从 output 字符串中尝试提取新增/删除行数。 */
