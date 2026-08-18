@@ -490,28 +490,36 @@ textarea:focus-visible {
   animation: var(--animate-zoom-out);
 }
 .slide-in-from-top-2[data-state='open'] {
-  animation: var(--animate-slide-in-from-top);
+  animation-name: slide-in-from-top !important;
+  animation-fill-mode: both !important;
 }
 .slide-in-from-bottom-2[data-state='open'] {
-  animation: var(--animate-slide-in-from-bottom);
+  animation-name: slide-in-from-bottom !important;
+  animation-fill-mode: both !important;
 }
 .slide-in-from-left-2[data-state='open'] {
-  animation: var(--animate-slide-in-from-left);
+  animation-name: slide-in-from-left !important;
+  animation-fill-mode: both !important;
 }
 .slide-in-from-right-2[data-state='open'] {
-  animation: var(--animate-slide-in-from-right);
+  animation-name: slide-in-from-right !important;
+  animation-fill-mode: both !important;
 }
 .slide-out-to-top-2[data-state='closed'] {
-  animation: var(--animate-slide-out-to-top);
+  animation-name: slide-out-to-top !important;
+  animation-fill-mode: both !important;
 }
 .slide-out-to-bottom-2[data-state='closed'] {
-  animation: var(--animate-slide-out-to-bottom);
+  animation-name: slide-out-to-bottom !important;
+  animation-fill-mode: both !important;
 }
 .slide-out-to-left-2[data-state='closed'] {
-  animation: var(--animate-slide-out-to-left);
+  animation-name: slide-out-to-left !important;
+  animation-fill-mode: both !important;
 }
 .slide-out-to-right-2[data-state='closed'] {
-  animation: var(--animate-slide-out-to-right);
+  animation-name: slide-out-to-right !important;
+  animation-fill-mode: both !important;
 }
 
 /* ---------- Markdown content ---------- */

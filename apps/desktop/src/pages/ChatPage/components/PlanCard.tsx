@@ -63,7 +63,7 @@ export function PlanCard({
       <button
         type="button"
         className={cn(
-          'group flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors',
+          'group flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-[10px]! transition-colors',
           'hover:bg-muted/30',
           plan.status === 'failed' ? 'border-red-500/20 bg-red-500/5' : 'border-border/40 bg-muted/20'
         )}

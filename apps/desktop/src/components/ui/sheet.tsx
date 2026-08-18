@@ -71,8 +71,7 @@ const SheetContent = React.forwardRef<
         ref={ref}
         className={cn(
           'fixed z-50 flex flex-col gap-4 border bg-background p-5 shadow-lg',
-          'data-[state=open]:animate-in',
-          'data-[state=closed]:animate-out',
+          'data-[state=open]:animate-in data-[state=closed]:animate-out',
           sideClasses[side],
           className
         )}

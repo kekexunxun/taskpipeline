@@ -152,7 +152,8 @@ function ChatPageInner() {
   const showSidePanel = !isEmpty && Boolean(chat.conversation?.workingDirectory) && sidePanelOpen
   const headerSubtitle = isEmpty
     ? '输入消息即可自动创建新对话'
-    : `${chat.messages.length} 条消息 · ${hasModel ? `${chat.modelGroups.length} 个 Provider` : '未配置模型'}`
+    : // : `${chat.messages.length} 条消息 · ${hasModel ? `${chat.modelGroups.length} 个 Provider` : '未配置模型'}`
+      `${chat.messages.length} 条消息`
 
   return (
     <div

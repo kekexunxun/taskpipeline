@@ -49,7 +49,7 @@ export function ChatSidePanel({
       <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 flex-1 flex-col gap-0">
         <div className="flex shrink-0 items-center justify-between border-b px-3" style={{ minHeight: '64px' }}>
           <TabsList className="h-auto w-auto shrink-0 justify-start gap-0 rounded-none bg-transparent p-0">
-            <TabsTrigger value="changes" className="gap-1.5 text-xs">
+            <TabsTrigger value="changes" className="gap-1.5 text-xs!">
               <FileDiffIcon size={12} />
               文件变更
               {files.length > 0 && (
