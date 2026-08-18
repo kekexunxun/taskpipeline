@@ -13,11 +13,11 @@ import {
   FileEditIcon,
   FileIcon,
   FilePlus2Icon,
+  FileXIcon,
   GlobeIcon,
   Loader2Icon,
   PuzzleIcon,
-  TerminalIcon,
-  Trash2Icon
+  TerminalIcon
 } from 'lucide-react'
 import { useState, type ComponentType } from 'react'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -63,6 +63,12 @@ function parseLineStats(output: unknown): { added?: number; deleted?: number } {
   return {}
 }
 
+/** 计算字符串行数（空字符串返回 0）。 */
+function countLines(text: string): number {
+  if (!text) return 0
+  return text.split('\n').length
+}
+
 // === Write 工具 ===
 
 export function WriteToolBlock({
@@ -76,59 +82,107 @@ export function WriteToolBlock({
   status: 'running' | 'done' | 'error' | 'pending'
   onApprove?: (confirmed: boolean) => void
 }) {
+  const [manualOpen, setManualOpen] = useState(false)
+  const open = status === 'running' || manualOpen
   const filePath = getInputField(input, 'file_path') || getInputField(input, 'path') || ''
   const fileName = extractFilename(filePath)
+  const content = getInputField(input, 'content') || ''
+  // Write 的行数统计仅依赖 output 解析（无法准确计算整个文件的变更量）
   const { added, deleted } = parseLineStats(output)
   const hasLineStats = added !== undefined || deleted !== undefined
+  const outputText = stringifyOutput(output)
   const isPending = status === 'pending' && onApprove
 
   return (
-    <div
-      className={cn(
-        'not-prose my-1 flex w-full items-center justify-between rounded-md border px-3 py-1.5 text-xs',
-        status === 'error' ? 'border-red-500/20 bg-red-500/5' : 'border-border/40 bg-muted/20'
-      )}
-    >
-      <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
-        {status === 'running' ? (
-          <Loader2Icon size={13} className="shrink-0 animate-spin text-emerald-500" />
-        ) : isPending ? (
-          <FilePlus2Icon size={13} className="shrink-0 text-amber-500" />
-        ) : (
-          <FilePlus2Icon size={13} className="shrink-0 text-emerald-500" />
+    <Collapsible open={open} onOpenChange={setManualOpen} className="not-prose w-full">
+      <CollapsibleTrigger
+        className={cn(
+          'group flex w-full items-center gap-2 rounded-md border px-3 py-1.5 text-left text-[10px]! transition-colors',
+          'hover:bg-muted/30',
+          status === 'error' ? 'border-red-500/20 bg-red-500/5' : 'border-border/40 bg-muted/20',
+          open && 'rounded-b-none border-b-transparent'
         )}
-        <span className="truncate font-medium">{fileName || '写入文件'}</span>
-      </span>
-      <span className="flex shrink-0 items-center gap-2 font-mono text-[11px]">
-        {isPending ? (
-          <>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => onApprove(false)}
-              className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
-            >
-              取消
-            </Button>
-            <Button size="sm" onClick={() => onApprove(true)} className="h-6 px-2 text-xs">
-              确认
-            </Button>
-          </>
-        ) : (
-          <>
-            {status === 'running' && <span className="text-muted-foreground">写入中…</span>}
-            {hasLineStats && (
-              <>
-                {added !== undefined && <span className="text-emerald-500">+{added}</span>}
-                {deleted !== undefined && <span className="text-red-400">-{deleted}</span>}
-              </>
+      >
+        <FilePlus2Icon size={13} className={cn('shrink-0', isPending ? 'text-amber-500' : 'text-emerald-500')} />
+        <span className="min-w-0 flex-1 truncate font-medium text-muted-foreground/80">{fileName || '写入文件'}</span>
+        <span className="shrink-0">
+          {isPending ? (
+            <span className="inline-flex items-center gap-1.5">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={(e) => {
+                  e.preventDefault()
+                  onApprove(false)
+                }}
+                className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
+              >
+                取消
+              </Button>
+              <Button
+                size="sm"
+                onClick={(e) => {
+                  e.preventDefault()
+                  onApprove(true)
+                }}
+                className="h-6 px-2 text-xs"
+              >
+                确认
+              </Button>
+            </span>
+          ) : (
+            <>
+              {status === 'running' && (
+                <span className="inline-flex items-center gap-1 text-amber-500/80">
+                  <Loader2Icon size={11} className="animate-spin" />
+                  写入中
+                </span>
+              )}
+              {status === 'done' && (
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="text-emerald-500/80">已写入</span>
+                  {hasLineStats && (
+                    <span className="font-mono text-[11px]">
+                      {added !== undefined && <span className="text-emerald-500">+{added}</span>}
+                      {deleted !== undefined && <span className="ml-0.5 text-red-400">-{deleted}</span>}
+                    </span>
+                  )}
+                </span>
+              )}
+              {status === 'error' && <span className="text-red-400">失败</span>}
+            </>
+          )}
+        </span>
+        {!isPending && (
+          <ChevronRightIcon
+            size={12}
+            className={cn('shrink-0 text-muted-foreground/40 transition-transform', open && 'rotate-90')}
+          />
+        )}
+      </CollapsibleTrigger>
+      {(content || outputText) && (
+        <CollapsibleContent className="overflow-hidden">
+          <div className="max-h-[200px] overflow-y-auto rounded-b-md border border-t-0 border-border/40 bg-muted/10 px-4 py-2">
+            {content && (
+              <div className="mb-2">
+                <div className="mb-1 text-[10px]! font-medium text-muted-foreground/50">写入内容</div>
+                <pre className="m-0 font-mono text-[10px] leading-4 break-words whitespace-pre-wrap text-muted-foreground/60">
+                  {content}
+                </pre>
+              </div>
             )}
-            {!hasLineStats && status === 'done' && <span className="text-muted-foreground">已写入</span>}
-            {status === 'error' && <span className="text-red-400">失败</span>}
-          </>
-        )}
-      </span>
-    </div>
+            {outputText && (
+              <div>
+                <div className="mb-1 text-[10px]! font-medium text-muted-foreground/50">结果</div>
+                <pre className="m-0 font-mono text-[10px] leading-4 break-words whitespace-pre-wrap text-muted-foreground/60">
+                  {outputText}
+                </pre>
+              </div>
+            )}
+          </div>
+        </CollapsibleContent>
+      )}
+    </Collapsible>
   )
 }
 
@@ -145,59 +199,118 @@ export function EditToolBlock({
   status: 'running' | 'done' | 'error' | 'pending'
   onApprove?: (confirmed: boolean) => void
 }) {
+  const [manualOpen, setManualOpen] = useState(false)
+  const open = status === 'running' || manualOpen
   const filePath = getInputField(input, 'file_path') || getInputField(input, 'path') || ''
   const fileName = extractFilename(filePath)
-  const { added, deleted } = parseLineStats(output)
+  const oldString = getInputField(input, 'old_string') || ''
+  const newString = getInputField(input, 'new_string') || ''
+  // 优先从 output 解析，否则根据 old/new 行数自行计算
+  const outputStats = parseLineStats(output)
+  const added = outputStats.added ?? (newString ? countLines(newString) : undefined)
+  const deleted = outputStats.deleted ?? (oldString ? countLines(oldString) : undefined)
   const hasLineStats = added !== undefined || deleted !== undefined
+  const outputText = stringifyOutput(output)
   const isPending = status === 'pending' && onApprove
 
   return (
-    <div
-      className={cn(
-        'not-prose my-1 flex w-full items-center justify-between rounded-md border px-3 py-1.5 text-xs',
-        status === 'error' ? 'border-red-500/20 bg-red-500/5' : 'border-border/40 bg-muted/20'
-      )}
-    >
-      <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
-        {status === 'running' ? (
-          <Loader2Icon size={13} className="shrink-0 animate-spin text-blue-500" />
-        ) : isPending ? (
-          <FileEditIcon size={13} className="shrink-0 text-amber-500" />
-        ) : (
-          <FileEditIcon size={13} className="shrink-0 text-blue-500" />
+    <Collapsible open={open} onOpenChange={setManualOpen} className="not-prose w-full">
+      <CollapsibleTrigger
+        className={cn(
+          'group flex w-full items-center gap-2 rounded-md border px-3 py-1.5 text-left text-[10px]! transition-colors',
+          'hover:bg-muted/30',
+          status === 'error' ? 'border-red-500/20 bg-red-500/5' : 'border-border/40 bg-muted/20',
+          open && 'rounded-b-none border-b-transparent'
         )}
-        <span className="truncate font-medium">{fileName || '编辑文件'}</span>
-      </span>
-      <span className="flex shrink-0 items-center gap-2 font-mono text-[11px]">
-        {isPending ? (
-          <>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => onApprove(false)}
-              className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
-            >
-              取消
-            </Button>
-            <Button size="sm" onClick={() => onApprove(true)} className="h-6 px-2 text-xs">
-              确认
-            </Button>
-          </>
-        ) : (
-          <>
-            {status === 'running' && <span className="text-muted-foreground">编辑中…</span>}
-            {hasLineStats && (
-              <>
-                {added !== undefined && <span className="text-emerald-500">+{added}</span>}
-                {deleted !== undefined && <span className="text-red-400">-{deleted}</span>}
-              </>
+      >
+        <FileEditIcon size={13} className={cn('shrink-0', isPending ? 'text-amber-500' : 'text-blue-500')} />
+        <span className="min-w-0 flex-1 truncate font-medium text-muted-foreground/80">{fileName || '编辑文件'}</span>
+        <span className="shrink-0">
+          {isPending ? (
+            <span className="inline-flex items-center gap-1.5">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={(e) => {
+                  e.preventDefault()
+                  onApprove(false)
+                }}
+                className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
+              >
+                取消
+              </Button>
+              <Button
+                size="sm"
+                onClick={(e) => {
+                  e.preventDefault()
+                  onApprove(true)
+                }}
+                className="h-6 px-2 text-xs"
+              >
+                确认
+              </Button>
+            </span>
+          ) : (
+            <>
+              {status === 'running' && (
+                <span className="inline-flex items-center gap-1 text-amber-500/80">
+                  <Loader2Icon size={11} className="animate-spin" />
+                  编辑中
+                </span>
+              )}
+              {status === 'done' && (
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="text-blue-500/80">已编辑</span>
+                  {hasLineStats && (
+                    <span className="font-mono text-[11px]">
+                      {added !== undefined && <span className="text-emerald-500">+{added}</span>}
+                      {deleted !== undefined && <span className="ml-0.5 text-red-400">-{deleted}</span>}
+                    </span>
+                  )}
+                </span>
+              )}
+              {status === 'error' && <span className="text-red-400">失败</span>}
+            </>
+          )}
+        </span>
+        {!isPending && (
+          <ChevronRightIcon
+            size={12}
+            className={cn('shrink-0 text-muted-foreground/40 transition-transform', open && 'rotate-90')}
+          />
+        )}
+      </CollapsibleTrigger>
+      {(oldString || newString || outputText) && (
+        <CollapsibleContent className="overflow-hidden">
+          <div className="max-h-[200px] overflow-y-auto rounded-b-md border border-t-0 border-border/40 bg-muted/10 px-4 py-2">
+            {oldString && (
+              <div className="mb-2">
+                <div className="mb-1 text-[10px]! font-medium text-red-400/70">删除</div>
+                <pre className="m-0 border-l-2 border-red-400/30 pl-2 font-mono text-[10px] leading-4 break-words whitespace-pre-wrap text-red-300/60">
+                  {oldString}
+                </pre>
+              </div>
             )}
-            {!hasLineStats && status === 'done' && <span className="text-muted-foreground">已编辑</span>}
-            {status === 'error' && <span className="text-red-400">失败</span>}
-          </>
-        )}
-      </span>
-    </div>
+            {newString && (
+              <div className="mb-2">
+                <div className="mb-1 text-[10px]! font-medium text-emerald-400/70">新增</div>
+                <pre className="m-0 border-l-2 border-emerald-400/30 pl-2 font-mono text-[10px] leading-4 break-words whitespace-pre-wrap text-emerald-300/60">
+                  {newString}
+                </pre>
+              </div>
+            )}
+            {outputText && (
+              <div>
+                <div className="mb-1 text-[10px]! font-medium text-muted-foreground/50">结果</div>
+                <pre className="m-0 font-mono text-[10px] leading-4 break-words whitespace-pre-wrap text-muted-foreground/60">
+                  {outputText}
+                </pre>
+              </div>
+            )}
+          </div>
+        </CollapsibleContent>
+      )}
+    </Collapsible>
   )
 }
 
@@ -623,50 +736,79 @@ export function DeleteToolBlock({
   status: 'running' | 'done' | 'error' | 'pending'
   onApprove?: (confirmed: boolean) => void
 }) {
+  const [manualOpen, setManualOpen] = useState(false)
+  const open = status === 'running' || manualOpen
   const filePath = getInputField(input, 'file_path') || getInputField(input, 'path') || ''
   const fileName = extractFilename(filePath)
   const isPending = status === 'pending' && onApprove
 
   return (
-    <div
-      className={cn(
-        'not-prose my-1 flex w-full items-center justify-between rounded-md border px-3 py-1.5 text-xs',
-        'border-red-500/20 bg-red-500/5'
+    <Collapsible open={open} onOpenChange={setManualOpen} className="not-prose w-full">
+      <CollapsibleTrigger
+        className={cn(
+          'group flex w-full items-center gap-2 rounded-md border px-3 py-1.5 text-left text-[10px]! transition-colors',
+          'hover:bg-muted/30',
+          'border-red-500/20 bg-red-500/5',
+          open && 'rounded-b-none border-b-transparent'
+        )}
+      >
+        <FileXIcon size={13} className={cn('shrink-0', isPending ? 'text-amber-500' : 'text-red-500')} />
+        <span className="min-w-0 flex-1 truncate font-medium text-muted-foreground/80">{fileName || '删除文件'}</span>
+        <span className="shrink-0">
+          {isPending ? (
+            <span className="inline-flex items-center gap-1.5">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={(e) => {
+                  e.preventDefault()
+                  onApprove(false)
+                }}
+                className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
+              >
+                取消
+              </Button>
+              <Button
+                size="sm"
+                onClick={(e) => {
+                  e.preventDefault()
+                  onApprove(true)
+                }}
+                className="h-6 px-2 text-xs"
+              >
+                确认
+              </Button>
+            </span>
+          ) : (
+            <>
+              {status === 'running' && (
+                <span className="inline-flex items-center gap-1 text-amber-500/80">
+                  <Loader2Icon size={11} className="animate-spin" />
+                  删除中
+                </span>
+              )}
+              {status === 'done' && <span className="text-red-400">已删除</span>}
+              {status === 'error' && <span className="text-red-400">失败</span>}
+            </>
+          )}
+        </span>
+        {!isPending && (
+          <ChevronRightIcon
+            size={12}
+            className={cn('shrink-0 text-muted-foreground/40 transition-transform', open && 'rotate-90')}
+          />
+        )}
+      </CollapsibleTrigger>
+      {filePath && (
+        <CollapsibleContent className="overflow-hidden">
+          <div className="rounded-b-md border border-t-0 border-border/40 bg-muted/10 px-4 py-2">
+            <div className="mb-1 text-[10px]! font-medium text-muted-foreground/50">文件路径</div>
+            <pre className="m-0 font-mono text-[10px] leading-4 break-words whitespace-pre-wrap text-muted-foreground/60">
+              {filePath}
+            </pre>
+          </div>
+        </CollapsibleContent>
       )}
-    >
-      <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
-        {status === 'running' ? (
-          <Loader2Icon size={13} className="shrink-0 animate-spin text-red-500" />
-        ) : isPending ? (
-          <Trash2Icon size={13} className="shrink-0 text-amber-500" />
-        ) : (
-          <Trash2Icon size={13} className="shrink-0 text-red-500" />
-        )}
-        <span className="truncate font-medium">{fileName || '删除文件'}</span>
-      </span>
-      <span className="flex shrink-0 items-center gap-2 font-mono text-[11px]">
-        {isPending ? (
-          <>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => onApprove(false)}
-              className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
-            >
-              取消
-            </Button>
-            <Button size="sm" onClick={() => onApprove(true)} className="h-6 px-2 text-xs">
-              确认
-            </Button>
-          </>
-        ) : (
-          <>
-            {status === 'running' && <span className="text-muted-foreground">删除中…</span>}
-            {status === 'done' && <span className="text-red-400">已删除</span>}
-            {status === 'error' && <span className="text-red-400">失败</span>}
-          </>
-        )}
-      </span>
-    </div>
+    </Collapsible>
   )
 }

@@ -28,6 +28,8 @@ export type UserFileAttachment = {
 }
 
 export type ChangedFile = { repositoryId: string; repositoryName: string; path: string; status: string }
+/** 对话级 Git 文件变更（仅工作区状态，不依赖 baseBranch）。 */
+export type ChatChangedFile = { path: string; status: string }
 export type TaskDetail = {
   task?: Task
   /** 主进程 activeTaskOperations 判定的运行中标记（应用重启后前端据此恢复 running，避免误显示"继续生成计划"）。 */
@@ -651,6 +653,16 @@ export type AgentApi = {
     mediaType: string
   ): Promise<UserFileAttachment>
   onChatStreamEvent(callback: (event: ChatStreamEvent) => void): () => void
+  /** 对话级 Git 文件变更（根据 workingDirectory 查询工作区状态）。 */
+  getChatChangedFiles(workingDirectory?: string): Promise<ChatChangedFile[]>
+  /** 单文件 diff（支持 untracked / modified / deleted）。 */
+  getFileDiff(workingDirectory?: string, filePath?: string, status?: string): Promise<string>
+  /** 单文件内容对比（返回原始和当前内容，用于 CodeMirror MergeView）。 */
+  getFileDiffContents(
+    workingDirectory?: string,
+    filePath?: string,
+    status?: string
+  ): Promise<{ original: string; current: string }>
   // trace（v2：AgentSpan 管道）
   listTrace(): Promise<TraceSummary[]>
   getTrace(kind: string, traceId: string): Promise<AgentSpan[]>
@@ -1398,6 +1410,15 @@ export const api: AgentApi = window.agentApi ?? {
     return () => {
       memoryListeners.delete(callback)
     }
+  },
+  async getChatChangedFiles() {
+    return []
+  },
+  async getFileDiff() {
+    return ''
+  },
+  async getFileDiffContents() {
+    return { original: '', current: '' }
   },
   async listTrace() {
     return []

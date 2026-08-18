@@ -3278,6 +3278,36 @@ function registerIpc(): void {
     (_event, chatId: string, data: ArrayBuffer, filename: string, mediaType: string) =>
       chatAttachmentCache.saveAttachment(chatId, Buffer.from(data), filename, mediaType)
   )
+  // 对话级 Git 文件变更：根据 workingDirectory 查询工作区状态（不依赖 baseBranch）。
+  ipcMain.handle('chats:changed-files', async (_event, workingDirectory?: string) => {
+    if (!workingDirectory) return []
+    try {
+      return await gitService.workingTreeStatus(workingDirectory)
+    } catch {
+      return []
+    }
+  })
+  // 单文件 diff：支持 untracked / modified / deleted 文件。
+  ipcMain.handle('chats:file-diff', async (_event, workingDirectory?: string, filePath?: string, status?: string) => {
+    if (!workingDirectory || !filePath) return ''
+    try {
+      return await gitService.diffFile(workingDirectory, filePath, status || 'M')
+    } catch {
+      return ''
+    }
+  })
+  // 单文件内容对比：返回原始（HEAD）和当前（工作区）内容，用于 CodeMirror MergeView。
+  ipcMain.handle(
+    'chats:file-diff-contents',
+    async (_event, workingDirectory?: string, filePath?: string, status?: string) => {
+      if (!workingDirectory || !filePath) return { original: '', current: '' }
+      try {
+        return await gitService.diffFileContents(workingDirectory, filePath, status || 'M')
+      } catch {
+        return { original: '', current: '' }
+      }
+    }
+  )
   // 纯目录选择(项目对话绑定用,不校验 git;repos:choose-folder 才校验仓库)。
   ipcMain.handle('dialog:choose-directory', async () => {
     if (!mainWindow) return undefined

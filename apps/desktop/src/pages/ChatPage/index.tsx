@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { LoaderIcon } from 'lucide-react'
+import { LoaderIcon, PanelRightCloseIcon, PanelRightOpenIcon } from 'lucide-react'
 import { ChatHistoryList } from './components/ChatHistoryList'
 import { ChatConversation } from './components/ChatConversation'
 import { ChatComposer } from './components/ChatComposer'
@@ -9,6 +9,7 @@ import { ChatMcpSelector } from './components/ChatMcpSelector'
 import { ChatSkillSelector } from './components/ChatSkillSelector'
 import { ChatAgentSelector } from './components/ChatAgentSelector'
 import { ChatWelcomeView } from './components/ChatWelcomeView'
+import { ChatSidePanel } from './components/ChatSidePanel'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
 import { TaskCreationTool } from './components/TaskCreationTool'
 import { ChatModeToggle } from './components/ChatModeToggle'
@@ -43,6 +44,8 @@ function ChatPageInner() {
   const [welcomeDraft, setWelcomeDraft] = useState('')
   // 工作区创建弹窗
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false)
+  // 右侧面板开关
+  const [sidePanelOpen, setSidePanelOpen] = useState(true)
 
   // 执行计划回调：切换 chatMode 为 normal 并发送执行指令
   const handleExecutePlan = useCallback(
@@ -145,12 +148,20 @@ function ChatPageInner() {
   const hasModel = chat.modelGroups.some((group) => group.models.length)
   // 欢迎页显示条件：没有活跃对话，或者正在从欢迎页过渡
   const isEmpty = !chat.activeId || isTransitioning
+  // 右侧面板显示条件：有活跃对话且绑定了工作目录且面板已打开
+  const showSidePanel = !isEmpty && Boolean(chat.conversation?.workingDirectory) && sidePanelOpen
   const headerSubtitle = isEmpty
     ? '输入消息即可自动创建新对话'
     : `${chat.messages.length} 条消息 · ${hasModel ? `${chat.modelGroups.length} 个 Provider` : '未配置模型'}`
 
   return (
-    <div className="grid h-full min-h-0 min-w-0 grid-cols-[288px_minmax(0,1fr)] bg-background">
+    <div
+      className={
+        showSidePanel
+          ? 'grid h-full min-h-0 min-w-0 grid-cols-[288px_minmax(0,1fr)_clamp(300px,26vw,420px)] bg-background'
+          : 'grid h-full min-h-0 min-w-0 grid-cols-[288px_minmax(0,1fr)] bg-background'
+      }
+    >
       <ChatHistoryList
         metas={chat.metas}
         groups={chat.groups}
@@ -222,7 +233,10 @@ function ChatPageInner() {
           />
         ) : (
           <>
-            <header className="flex shrink-0 items-center justify-between gap-3 border-b px-5 py-3">
+            <header
+              className="flex shrink-0 items-center justify-between gap-3 border-b px-5"
+              style={{ minHeight: '64px' }}
+            >
               <div className="min-w-0">
                 <h1 className="truncate text-sm font-semibold tracking-tight">
                   {chat.conversation?.title ?? '新建对话'}
@@ -235,6 +249,16 @@ function ChatPageInner() {
                     <span className="animate-caret-blink inline-block size-1.5 rounded-full bg-current" />
                     生成中
                   </span>
+                )}
+                {!chat.streaming && chat.conversation?.workingDirectory && (
+                  <button
+                    type="button"
+                    className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground/60 transition-colors hover:bg-muted hover:text-muted-foreground"
+                    onClick={() => setSidePanelOpen((v) => !v)}
+                    title={sidePanelOpen ? '关闭右侧面板' : '打开右侧面板'}
+                  >
+                    {sidePanelOpen ? <PanelRightCloseIcon size={16} /> : <PanelRightOpenIcon size={16} />}
+                  </button>
                 )}
               </div>
             </header>
@@ -384,6 +408,14 @@ function ChatPageInner() {
           </>
         )}
       </section>
+      {/* 右侧面板：文件变更等多 Tab 信息（仅绑定了工作目录的对话显示） */}
+      {showSidePanel && (
+        <ChatSidePanel
+          workingDirectory={chat.conversation?.workingDirectory}
+          streaming={chat.streaming}
+          onClose={() => setSidePanelOpen(false)}
+        />
+      )}
       {/* 工具调用 HITL：confirm 已内联到对话流（ChatConversation 卡片），
       UiRequestDialog 仅兆底 select/input/editor（对话板块不产生）与任务板块共用。 */}
       <UiRequestDialog />

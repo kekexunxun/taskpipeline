@@ -99,13 +99,20 @@ contextBridge.exposeInMainWorld('agentApi', {
   startChatStream: (input: unknown) => ipcRenderer.invoke('chats:start-stream', input),
   abortChat: (input: unknown) => ipcRenderer.invoke('chats:abort', input),
   /** 对话引导：在当前轮次注入引导消息，不打断对话。 */
-  injectChatGuidance: (chatId: string, text: string) =>
-    ipcRenderer.invoke('chats:inject-guidance', chatId, text),
+  injectChatGuidance: (chatId: string, text: string) => ipcRenderer.invoke('chats:inject-guidance', chatId, text),
   /** 保存附件到本地缓存（渲染进程 → 主进程写文件，返回本地路径）。 */
   saveChatAttachment: (chatId: string, data: ArrayBuffer, filename: string, mediaType: string) =>
     ipcRenderer.invoke('chats:save-attachment', chatId, data, filename, mediaType),
   chooseDirectory: () => ipcRenderer.invoke('dialog:choose-directory'),
   chooseDirectories: () => ipcRenderer.invoke('dialog:choose-directories'),
+  /** 对话级 Git 文件变更（根据 workingDirectory 查询工作区状态）。 */
+  getChatChangedFiles: (workingDirectory?: string) => ipcRenderer.invoke('chats:changed-files', workingDirectory),
+  /** 单文件 diff（支持 untracked / modified / deleted）。 */
+  getFileDiff: (workingDirectory?: string, filePath?: string, status?: string) =>
+    ipcRenderer.invoke('chats:file-diff', workingDirectory, filePath, status),
+  /** 单文件内容对比（返回原始和当前内容，用于 CodeMirror MergeView）。 */
+  getFileDiffContents: (workingDirectory?: string, filePath?: string, status?: string) =>
+    ipcRenderer.invoke('chats:file-diff-contents', workingDirectory, filePath, status),
   // === Chat 分组(工作区 CRUD) ==================================================
   createChatWorkspace: (name: string, directories: string[]) =>
     ipcRenderer.invoke('chat-groups:create-workspace', name, directories),
