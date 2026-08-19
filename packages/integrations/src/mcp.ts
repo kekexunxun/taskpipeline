@@ -26,9 +26,12 @@ export class McpClient {
       if (!this.profile.command) throw new Error('MCP stdio command is required')
       let child: ChildProcessWithoutNullStreams
       try {
+        // Windows 上 uvx / npx 等命令实际为 .cmd 批处理，spawn 默认不做扩展名解析，
+        // 需要 shell: true 让系统 shell 负责查找，否则 ENOENT。
         child = spawn(this.profile.command, this.profile.args ?? [], {
           stdio: 'pipe',
-          env: { ...this.env, ...(this.profile.env ?? {}) }
+          env: { ...this.env, ...(this.profile.env ?? {}) },
+          ...(process.platform === 'win32' ? { shell: true } : {})
         })
       } catch (error) {
         throw new Error(
