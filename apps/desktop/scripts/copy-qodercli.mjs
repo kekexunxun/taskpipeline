@@ -18,7 +18,7 @@
 // 该步骤必须早于 electron-builder 运行:在 prepackage 阶段触发。
 
 import { chmodSync, copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs'
-import { execSync } from 'node:child_process'
+import { execFileSync, execSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -34,7 +34,15 @@ const destDir = join(import.meta.dirname, '..', 'qoder-bin')
 const dest = join(destDir, binaryName)
 
 if (!existsSync(source)) {
-  throw new Error(`[copy-qodercli] missing source binary: ${source}`)
+  // CI 可能缓存了 node_modules 导致 SDK postinstall 未重新执行,二进制缺失。
+  // 主动调用根仓库的引导脚本来下载,确保构建不中断。
+  console.warn(`[copy-qodercli] source binary not found at ${source}, attempting download...`)
+  const repoRoot = join(import.meta.dirname, '..', '..', '..')
+  const bootstrap = join(repoRoot, 'scripts', 'postinstall-bundled-cli.cjs')
+  execFileSync(process.execPath, [bootstrap], { stdio: 'inherit' })
+  if (!existsSync(source)) {
+    throw new Error(`[copy-qodercli] source binary still missing after download: ${source}`)
+  }
 }
 
 mkdirSync(destDir, { recursive: true })
