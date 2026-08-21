@@ -409,10 +409,11 @@ function ChatPageInner() {
           </>
         )}
       </section>
-      {/* 右侧面板：文件变更等多 Tab 信息（仅绑定了工作目录的对话显示） */}
+      {/* 右侧面板：对话变更 / 工作区变更等多 Tab 信息（仅绑定了工作目录的对话显示） */}
       {showSidePanel && (
         <ChatSidePanel
           workingDirectory={chat.conversation?.workingDirectory}
+          messages={chat.messages}
           streaming={chat.streaming}
           onClose={() => setSidePanelOpen(false)}
         />

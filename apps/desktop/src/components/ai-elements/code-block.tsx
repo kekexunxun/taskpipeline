@@ -234,10 +234,10 @@ const CodeBlockBody = memo(
 
     return (
       <pre
-        className={cn('m-0 p-4 text-sm dark:!bg-[var(--shiki-dark-bg)] dark:!text-[var(--shiki-dark)]', className)}
+        className={cn('m-0 p-4 dark:!bg-[var(--shiki-dark-bg)] dark:!text-[var(--shiki-dark)]', className)}
         style={preStyle}
       >
-        <code className={cn('font-mono text-sm', showLineNumbers && '[counter-increment:line_0] [counter-reset:line]')}>
+        <code className={cn('font-mono', showLineNumbers && '[counter-increment:line_0] [counter-reset:line]')}>
           {keyedLines.map((keyedLine) => (
             <LineSpan key={keyedLine.key} keyedLine={keyedLine} showLineNumbers={showLineNumbers} />
           ))}

@@ -20,6 +20,7 @@ import {
   TerminalIcon
 } from 'lucide-react'
 import { useState, type ComponentType } from 'react'
+import { getInputField } from '../../conversation-changes'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -33,13 +34,6 @@ function stringifyOutput(value: unknown): string {
   } catch {
     return String(value)
   }
-}
-
-/** 从工具 input 提取指定字符串字段。 */
-function getInputField(input: unknown, field: string): string | undefined {
-  if (!input || typeof input !== 'object') return undefined
-  const value = (input as Record<string, unknown>)[field]
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
 /** 从文件路径提取文件名（兼容 Unix `/` 与 Windows `\` 分隔符）。 */

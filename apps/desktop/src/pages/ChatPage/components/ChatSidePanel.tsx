@@ -4,44 +4,50 @@ import {
   FilePlusIcon,
   FileXIcon,
   GitBranchIcon,
+  HistoryIcon,
   Loader2Icon,
   RefreshCwIcon,
   XIcon
 } from 'lucide-react'
-import type { CSSProperties } from 'react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { BundledLanguage, ThemedToken } from 'shiki'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { BundledLanguage } from 'shiki'
 import { useChatChangedFiles } from '../hooks/useChatChangedFiles'
+import {
+  changeOperationKind,
+  useConversationChanges,
+  type ConversationChangeFile,
+  type ConversationChangeOperation
+} from '../conversation-changes'
+import { DeleteToolBlock, EditToolBlock, WriteToolBlock } from '../drivers/parts/ToolBlocks'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { api } from '@/api'
-import { highlightCode } from '@/components/ai-elements/code-block'
+import { api, type StoredMessage } from '@/api'
+import { CodeBlockContent } from '@/components/ai-elements/code-block'
 
 type ChangedFile = { path: string; status: string }
 type DiffContents = { original: string; current: string }
 
-// Shiki uses bitflags for font styles
-// oxlint-disable-next-line eslint(no-bitwise)
-const isItalic = (fontStyle: number | undefined) => fontStyle && fontStyle & 1
-// oxlint-disable-next-line eslint(no-bitwise)
-const isBold = (fontStyle: number | undefined) => fontStyle && fontStyle & 2
-
 /**
  * 对话右侧面板：多 Tab 展示。
- * 第一个 Tab「文件变更」基于当前对话 workingDirectory 的 git status。
+ * - 「对话变更」：从消息 parts 纯推导本次对话的文件变更（conversation-changes）；
+ * - 「工作区变更」：基于当前对话 workingDirectory 的 git status。
  */
 export function ChatSidePanel({
   workingDirectory,
+  messages,
   streaming,
   onClose
 }: {
   workingDirectory?: string
+  /** 当前对话的消息列表（「对话变更」Tab 纯推导用）。 */
+  messages: StoredMessage[]
   streaming?: boolean
   onClose?: () => void
 }) {
-  const [activeTab, setActiveTab] = useState('changes')
+  const [activeTab, setActiveTab] = useState('conversation')
+  const conversationFiles = useConversationChanges(messages, workingDirectory)
   const { files, loading, refresh } = useChatChangedFiles(workingDirectory, streaming)
 
   return (
@@ -49,9 +55,18 @@ export function ChatSidePanel({
       <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 flex-1 flex-col gap-0">
         <div className="flex shrink-0 items-center justify-between border-b px-3" style={{ minHeight: '64px' }}>
           <TabsList className="h-auto w-auto shrink-0 justify-start gap-0 rounded-none bg-transparent p-0">
+            <TabsTrigger value="conversation" className="gap-1.5 text-xs!">
+              <HistoryIcon size={12} />
+              对话变更
+              {conversationFiles.length > 0 && (
+                <Badge variant="secondary" className="h-4 min-w-4 px-1 text-[10px]">
+                  {conversationFiles.length}
+                </Badge>
+              )}
+            </TabsTrigger>
             <TabsTrigger value="changes" className="gap-1.5 text-xs!">
               <FileDiffIcon size={12} />
-              文件变更
+              工作区变更
               {files.length > 0 && (
                 <Badge variant="secondary" className="h-4 min-w-4 px-1 text-[10px]">
                   {files.length}
@@ -72,6 +87,10 @@ export function ChatSidePanel({
           )}
         </div>
 
+        <TabsContent value="conversation" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+          <ConversationChangesContent files={conversationFiles} />
+        </TabsContent>
+
         <TabsContent value="changes" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
           <ChangedFilesContent
             files={files}
@@ -83,6 +102,109 @@ export function ChatSidePanel({
       </Tabs>
     </section>
   )
+}
+
+/**
+ * 「对话变更」Tab 内容：同一文件只出现一行（操作次数徽标），
+ * 下方按时间序合并渲染操作序列（复用对话流 ToolBlocks）。
+ * 数据由消息 parts 纯推导，无 IPC / 存储依赖，流式中天然跟随增长。
+ */
+function ConversationChangesContent({ files }: { files: ConversationChangeFile[] }) {
+  const [selectedPath, setSelectedPath] = useState<string | null>(null)
+  // 选中项不存在时回退首个文件，避免流式新增/消失后出现空白态
+  const selected = files.find((f) => f.path === selectedPath) ?? files[0] ?? null
+
+  if (!files.length) {
+    return <div className="py-4 text-center text-xs text-muted-foreground/50">本次对话暂无文件变更</div>
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/* 文件列表：文件去重，操作合并展示 */}
+      <div className="thin-scrollbar max-h-[40%] min-h-[72px] shrink-0 overflow-y-auto px-2 py-2">
+        <div className="space-y-0.5">
+          {files.map((file) => (
+            <ChangeFileItem
+              key={file.path}
+              file={file}
+              selected={selected?.path === file.path}
+              onClick={() => setSelectedPath(file.path)}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* 操作序列：按时间序展示该文件的全部变更操作 */}
+      {selected && (
+        <div className="flex min-h-0 flex-1 flex-col border-t">
+          <div className="flex shrink-0 items-center border-b bg-muted/30 px-3 py-1.5">
+            <span className="truncate font-mono text-xs text-muted-foreground" title={selected.displayPath}>
+              {selected.displayPath}
+            </span>
+          </div>
+          <div className="thin-scrollbar min-h-0 flex-1 space-y-1.5 overflow-y-auto px-2 py-2">
+            {selected.operations
+              .filter((op) => op.status !== 'error')
+              .map((op) => (
+                <OperationBlock key={op.toolCallId} op={op} />
+              ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 「对话变更」列表行：图标按最后一次操作类型着色，行内展示各类操作次数。 */
+function ChangeFileItem({
+  file,
+  selected,
+  onClick
+}: {
+  file: ConversationChangeFile
+  selected: boolean
+  onClick: () => void
+}) {
+  const counts = { write: 0, edit: 0, delete: 0 }
+  for (const op of file.operations) {
+    if (op.status === 'error') continue
+    counts[changeOperationKind(op.tool)] += 1
+  }
+  const nonErrorOps = file.operations.filter((op) => op.status !== 'error')
+  const lastKind = nonErrorOps.length > 0 ? changeOperationKind(nonErrorOps[nonErrorOps.length - 1]!.tool) : 'edit'
+  const Icon = lastKind === 'delete' ? FileXIcon : lastKind === 'write' ? FilePlusIcon : FileEditIcon
+  const iconColor = lastKind === 'delete' ? 'text-red-400' : lastKind === 'write' ? 'text-emerald-500' : 'text-blue-400'
+
+  return (
+    <button
+      type="button"
+      className={cn(
+        'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors',
+        'hover:bg-muted/40',
+        selected && 'bg-muted/60'
+      )}
+      onClick={onClick}
+    >
+      <Icon size={13} className={cn('shrink-0', iconColor)} />
+      <span className="min-w-0 flex-1 truncate text-xs text-foreground/80" title={file.displayPath}>
+        {file.displayPath}
+      </span>
+      <span className="flex shrink-0 items-center gap-1 font-mono text-[10px] text-muted-foreground/70">
+        {counts.write > 0 && <span className="text-emerald-500">写{counts.write}</span>}
+        {counts.edit > 0 && <span className="text-blue-400">改{counts.edit}</span>}
+        {counts.delete > 0 && <span className="text-red-400">删{counts.delete}</span>}
+      </span>
+    </button>
+  )
+}
+
+/** 单条操作渲染：pending 映射为 running（展示进行中），复用对话流 ToolBlocks 视觉。 */
+function OperationBlock({ op }: { op: ConversationChangeOperation }) {
+  const status = op.status === 'pending' ? ('running' as const) : op.status
+  const kind = changeOperationKind(op.tool)
+  if (kind === 'write') return <WriteToolBlock input={op.input} output={op.output} status={status} />
+  if (kind === 'delete') return <DeleteToolBlock input={op.input} status={status} />
+  return <EditToolBlock input={op.input} output={op.output} status={status} />
 }
 
 function ChangedFilesContent({
@@ -183,7 +305,7 @@ function ChangedFilesContent({
         <div className="flex min-h-0 flex-1 flex-col border-t">
           <div className="flex shrink-0 items-center justify-between border-b bg-muted/30 px-3 py-1.5">
             <span className="truncate font-mono text-xs text-muted-foreground" title={selectedFile.path}>
-              {extractFilename(selectedFile.path)}
+              {selectedFile.path}
             </span>
             <Button
               variant="ghost"
@@ -333,99 +455,84 @@ function computeLineChanges(original: string, current: string): Map<number, 'add
   return changes
 }
 
+// 固定代码区行高，便于 gutter 和 gradient 精确对齐
+const CODE_LINE_HEIGHT = 18
+
 function ShikiDiffView({ original, current, filePath }: { original: string; current: string; filePath: string }) {
   const language = useMemo(() => detectLanguage(filePath), [filePath])
   const lineChanges = useMemo(() => computeLineChanges(original, current), [original, current])
+  const lines = useMemo(() => current.split('\n'), [current])
 
-  // 使用 Shiki 高亮当前内容
-  const rawTokens = useMemo(
-    () => current.split('\n').map((line) => (line === '' ? [] : [{ color: 'inherit', content: line } as ThemedToken])),
-    [current]
-  )
+  // 测量 <code> 相对于 overlay 父容器（relative div）的实际顶部偏移
+  const codeAreaRef = useRef<HTMLDivElement>(null)
+  const [prePadding, setPrePadding] = useState(16)
 
-  const [asyncTokens, setAsyncTokens] = useState<{ tokens: ThemedToken[][]; fg: string; bg: string } | null>(null)
-  const prevCodeRef = useRef(current)
-
-  // 当内容变化时重置
-  if (prevCodeRef.current !== current) {
-    prevCodeRef.current = current
-    setAsyncTokens(null)
-  }
-
-  useEffect(() => {
-    let cancelled = false
-    const result = highlightCode(current, language, (res) => {
-      if (!cancelled) {
-        setAsyncTokens({ tokens: res.tokens, fg: res.fg, bg: res.bg })
-      }
-    })
-    // 同步缓存命中
-    if (result) {
-      setAsyncTokens({ tokens: result.tokens, fg: result.fg, bg: result.bg })
-    }
-    return () => {
-      cancelled = true
+  useLayoutEffect(() => {
+    const el = codeAreaRef.current
+    if (!el) return
+    const codeEl = el.querySelector('code')
+    const relativeDiv = el.firstElementChild as HTMLElement | null
+    if (codeEl && relativeDiv) {
+      const codeTop = codeEl.getBoundingClientRect().top
+      const containerTop = relativeDiv.getBoundingClientRect().top
+      setPrePadding(codeTop - containerTop)
     }
   }, [current, language])
 
-  const tokens = asyncTokens?.tokens ?? rawTokens
+  // 构建逐行 gradient：固定行高 + 实际 padding → 精确对齐
+  const gradientStops = lines
+    .map((_, i) => {
+      const changeType = lineChanges.get(i)
+      if (!changeType) return null
+      const color = changeType === 'added' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(251, 191, 36, 0.15)'
+      const top = prePadding + i * CODE_LINE_HEIGHT
+      return `${color} ${top}px, ${color} ${top + CODE_LINE_HEIGHT}px`
+    })
+    .filter(Boolean)
+    .join(', ')
+  const overlayBg = gradientStops
+    ? `linear-gradient(to bottom, transparent ${prePadding}px, ${gradientStops}, transparent ${prePadding + lines.length * CODE_LINE_HEIGHT}px)`
+    : undefined
 
   return (
-    <div className="flex font-mono text-[11px] leading-4">
+    <div className="flex font-mono text-[10px]!">
       {/* 左侧固定列：gutter + 行号 */}
-      <div className="sticky left-0 z-10 shrink-0" style={{ backgroundColor: 'var(--muted)' }}>
-        {tokens.map((_, lineIdx) => {
+      <div className="sticky left-0 z-10 shrink-0" style={{ backgroundColor: 'var(--muted)', paddingTop: prePadding }}>
+        {lines.map((_, lineIdx) => {
           const changeType = lineChanges.get(lineIdx)
           const lineBg =
             changeType === 'added'
-              ? 'rgba(34, 197, 94, 0.08)'
+              ? 'rgba(34, 197, 94, 0.15)'
               : changeType === 'modified'
-                ? 'rgba(251, 191, 36, 0.08)'
+                ? 'rgba(251, 191, 36, 0.15)'
                 : undefined
+          const borderColor = changeType === 'added' ? '#22c55e' : changeType === 'modified' ? '#f59e0b' : 'transparent'
           return (
-            <div key={lineIdx} className="flex" style={{ backgroundColor: lineBg }}>
+            <div
+              key={lineIdx}
+              className="flex"
+              style={{ height: CODE_LINE_HEIGHT, backgroundColor: lineBg, borderLeft: `2px solid ${borderColor}` }}
+            >
               <span className="flex w-5 items-center justify-center select-none">
-                {changeType === 'added' && <span className="text-[10px] leading-none text-emerald-500">+</span>}
-                {changeType === 'modified' && <span className="text-[10px] leading-none text-amber-400">~</span>}
+                {changeType === 'added' && <span className="font-bold text-emerald-500">+</span>}
+                {changeType === 'modified' && <span className="font-bold text-amber-400">~</span>}
               </span>
-              <span className="w-10 pr-2 text-right text-muted-foreground/40 select-none">{lineIdx + 1}</span>
+              <span
+                className="w-10 pr-2 text-right text-muted-foreground/40 select-none"
+                style={{ height: CODE_LINE_HEIGHT, lineHeight: `${CODE_LINE_HEIGHT}px` }}
+              >
+                {lineIdx + 1}
+              </span>
             </div>
           )
         })}
       </div>
-      {/* 右侧代码区：可横向滚动 */}
-      <div className="thin-scrollbar min-w-0 flex-1 overflow-x-auto">
-        {tokens.map((line, lineIdx) => {
-          const changeType = lineChanges.get(lineIdx)
-          const lineBg =
-            changeType === 'added'
-              ? 'rgba(34, 197, 94, 0.08)'
-              : changeType === 'modified'
-                ? 'rgba(251, 191, 36, 0.08)'
-                : undefined
-          return (
-            <div key={lineIdx} className="whitespace-pre" style={{ backgroundColor: lineBg }}>
-              <span className="pr-3 pl-1">
-                {line.length === 0
-                  ? '\n'
-                  : line.map((token, tokenIdx) => (
-                      <span
-                        key={tokenIdx}
-                        style={
-                          {
-                            color: token.color,
-                            fontStyle: isItalic(token.fontStyle) ? 'italic' : undefined,
-                            fontWeight: isBold(token.fontStyle) ? 'bold' : undefined
-                          } as CSSProperties
-                        }
-                      >
-                        {token.content}
-                      </span>
-                    ))}
-              </span>
-            </div>
-          )
-        })}
+      {/* 右侧代码区：固定行高 + CodeBlockContent 语法高亮 + gradient overlay diff 背景色 */}
+      <div ref={codeAreaRef} className="thin-scrollbar min-w-0 flex-1 overflow-auto leading-[18px]">
+        <div className="relative">
+          <CodeBlockContent code={current} language={language} />
+          {overlayBg && <div className="pointer-events-none absolute inset-0" style={{ background: overlayBg }} />}
+        </div>
       </div>
     </div>
   )
