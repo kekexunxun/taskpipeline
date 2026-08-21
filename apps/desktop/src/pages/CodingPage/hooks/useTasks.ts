@@ -379,8 +379,8 @@ export type CodingPageState = {
   run(action: () => Promise<unknown>): Promise<void>
   /** 推送一个 HITL 确认请求（按 taskId 归属，缺省挂当前选中任务）。 */
   pushApproval(taskId: string | undefined, request: ChatApprovalRequest): void
-  /** 响应确认请求（允许/拒绝），并从对应任务队列移除。 */
-  respondApproval(id: string, confirmed: boolean): Promise<void>
+  /** 响应确认请求（允许/拒绝/回答），并从对应任务队列移除。 */
+  respondApproval(id: string, response: { confirmed: boolean } | { value: string | string[] }): Promise<void>
 }
 
 export function useTasks(): CodingPageState {
@@ -443,24 +443,27 @@ export function useTasks(): CodingPageState {
     setPendingApprovals((current) => ({ ...current, [id]: [...(current[id] ?? []), request] }))
   }, [])
 
-  const respondApproval = useCallback(async (id: string, confirmed: boolean) => {
-    // 乐观移除：先清卡片再响应（IPC 失败时主进程超时兜底默认拒绝，卡片不残留误导）。
-    setPendingApprovals((current) => {
-      let changed = false
-      const next: Record<string, ChatApprovalRequest[]> = {}
-      for (const [taskId, list] of Object.entries(current)) {
-        const filtered = list.filter((approval) => approval.id !== id)
-        if (filtered.length !== list.length) changed = true
-        if (filtered.length) next[taskId] = filtered
+  const respondApproval = useCallback(
+    async (id: string, response: { confirmed: boolean } | { value: string | string[] }) => {
+      // 乐观移除：先清卡片再响应（IPC 失败时主进程超时兜底默认拒绝，卡片不残留误导）。
+      setPendingApprovals((current) => {
+        let changed = false
+        const next: Record<string, ChatApprovalRequest[]> = {}
+        for (const [taskId, list] of Object.entries(current)) {
+          const filtered = list.filter((approval) => approval.id !== id)
+          if (filtered.length !== list.length) changed = true
+          if (filtered.length) next[taskId] = filtered
+        }
+        return changed ? next : current
+      })
+      try {
+        await api.respondTaskUi({ id, ...response })
+      } catch {
+        /* 主进程超时/会话关闭后响应为 no-op，忽略 */
       }
-      return changed ? next : current
-    })
-    try {
-      await api.respondTaskUi({ id, confirmed })
-    } catch {
-      /* 主进程超时/会话关闭后响应为 no-op，忽略 */
-    }
-  }, [])
+    },
+    []
+  )
 
   /** 任务会话结束时未确认的请求默认拒绝（安全兜底，替代原全局模态清除语义）。 */
   const flushApprovals = useCallback((taskId: string) => {
@@ -510,13 +513,15 @@ export function useTasks(): CodingPageState {
   // 任务事件订阅（与原 App.tsx 一致）
   useEffect(() => {
     let changeTimer: number | undefined
-    const off = api.onTaskEvent((event) => {
+    // API 签名为 (event: unknown) => void，实际 IPC 事件始终携带结构化字段
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const off = api.onTaskEvent((event: any) => {
       if (event.type === 'extension_ui_request') {
-        if (event.method === 'confirm') {
-          // confirm 内联到任务执行流（按 taskId 归属，并行任务各自展示确认卡片）
-          pushApproval(event.taskId, event)
-        } else if (['select', 'input', 'editor', 'ask-user'].includes(event.method)) {
-          // 其余方法（信任项目配置 / AskUserQuestion 等）保留 UiRequestDialog 模态兜底
+        if (event.method === 'confirm' || event.method === 'ask-user') {
+          // confirm / ask-user 内联到任务执行流（按 taskId 归属，并行任务各自展示确认卡片）
+          pushApproval(event.taskId, event as ChatApprovalRequest)
+        } else if (['select', 'input', 'editor'].includes(event.method)) {
+          // 其余方法（信任项目配置等）保留 UiRequestDialog 模态兜底
           window.dispatchEvent(new CustomEvent('task:ui-request', { detail: event }))
         }
       }

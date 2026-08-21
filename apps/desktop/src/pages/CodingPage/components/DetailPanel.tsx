@@ -29,7 +29,7 @@ import { EditPlanDialog } from './EditPlanDialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { ToolApprovalCard, type ChatApprovalRequest } from '@/components/ToolApprovalCard'
+import { ToolApprovalCard, AskUserQuestionCard, type ChatApprovalRequest } from '@/components/ToolApprovalCard'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -52,7 +52,7 @@ type Props = {
   parts: DriverPart[]
   /** 当前任务待确认的 HITL 请求（内联卡片，渲染在 activity 执行流底部）。 */
   approvals?: ChatApprovalRequest[]
-  onRespondApproval?(id: string, confirmed: boolean): void
+  onRespondApproval?(id: string, response: { confirmed: boolean } | { value: string | string[] }): void
   prompt: string
   running: boolean
   sending: boolean
@@ -300,13 +300,21 @@ export function DetailPanel({
       固定不随消息滚动，避免停在 plan/files 等 Tab 时确认不可见导致任务挂起。 */}
       {approvals?.length ? (
         <div className="shrink-0 space-y-2 border-t bg-background/95 px-3 py-2.5">
-          {approvals.map((approval) => (
-            <ToolApprovalCard
-              key={approval.id}
-              approval={approval}
-              onRespond={(confirmed) => onRespondApproval?.(approval.id, confirmed)}
-            />
-          ))}
+          {approvals.map((approval) =>
+            approval.method === 'ask-user' ? (
+              <AskUserQuestionCard
+                key={approval.id}
+                approval={approval}
+                onRespond={(value) => onRespondApproval?.(approval.id, { value })}
+              />
+            ) : (
+              <ToolApprovalCard
+                key={approval.id}
+                approval={approval}
+                onRespond={(confirmed) => onRespondApproval?.(approval.id, { confirmed })}
+              />
+            )
+          )}
         </div>
       ) : null}
       {task.state === 'awaiting_plan_approval' && activeTab === 'plan' && (

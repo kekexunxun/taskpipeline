@@ -125,7 +125,7 @@ export default function CodingPage() {
             detail={tasks.detail}
             parts={tasks.parts}
             approvals={tasks.approvals}
-            onRespondApproval={(id, confirmed) => void tasks.respondApproval(id, confirmed)}
+            onRespondApproval={(id, response) => void tasks.respondApproval(id, response)}
             prompt={tasks.prompt}
             running={tasks.running}
             sending={tasks.sending}
