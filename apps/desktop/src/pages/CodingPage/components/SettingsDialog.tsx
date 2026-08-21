@@ -1201,32 +1201,6 @@ export function SettingsDialog({
               </TabsList>
               <div className="thin-scrollbar min-h-0 space-y-5 overflow-y-auto p-6">
                 <TabsContent value="general" className="space-y-5">
-                  <Section title="Qoder" description="使用 Qoder Agent SDK 执行任务和生成对话。">
-                    <FieldGroup className="gap-2.5">
-                      <SettingField label="Qoder Token">
-                        <SecretInput
-                          aria-label="Qoder Token"
-                          value={settings.qoderToken}
-                          onChange={(event) => update('qoderToken', event.target.value)}
-                          placeholder="Qoder Token"
-                        />
-                      </SettingField>
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        className="w-fit"
-                        disabled={savingKey !== null}
-                        onClick={() => void saveToken('qoderToken', { refreshQoder: true })}
-                      >
-                        {savingKey === 'qoderToken' ? (
-                          <Loader2Icon className="animate-spin-slow" size={11} />
-                        ) : (
-                          <KeyRoundIcon size={11} />
-                        )}
-                        {savingKey === 'qoderToken' ? '保存中' : '保存'}
-                      </Button>
-                    </FieldGroup>
-                  </Section>
                   <Section title="任务自动化" description="控制实现完成后的 Review / 测试用例生成 / MR 提交流程。">
                     <div className="space-y-2.5">
                       <div className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
@@ -1730,6 +1704,32 @@ export function SettingsDialog({
                   <MemorySearchProbe repositories={repositories} />
                 </TabsContent>
                 <TabsContent value="model" className="space-y-5">
+                  <Section title="Qoder" description="使用 Qoder Agent SDK 执行任务和生成对话。">
+                    <FieldGroup className="gap-2.5">
+                      <SettingField label="Qoder Token">
+                        <SecretInput
+                          aria-label="Qoder Token"
+                          value={settings.qoderToken}
+                          onChange={(event) => update('qoderToken', event.target.value)}
+                          placeholder="Qoder Token"
+                        />
+                      </SettingField>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="w-fit"
+                        disabled={savingKey !== null}
+                        onClick={() => void saveToken('qoderToken', { refreshQoder: true })}
+                      >
+                        {savingKey === 'qoderToken' ? (
+                          <Loader2Icon className="animate-spin-slow" size={11} />
+                        ) : (
+                          <KeyRoundIcon size={11} />
+                        )}
+                        {savingKey === 'qoderToken' ? '保存中' : '保存'}
+                      </Button>
+                    </FieldGroup>
+                  </Section>
                   <Section title="Qoder 模型" description="可用模型由 Qoder 连接状态提供，徽章与对话面板保持一致。">
                     <FieldGroup className="gap-2.5">
                       {qoder?.usage?.isQuotaExceeded && (
