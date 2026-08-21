@@ -120,7 +120,7 @@ function Controlled({
         accept={modelSupportsVision ? 'image/*' : undefined}
         multiple={modelSupportsVision}
         className={cn(
-          'w-full rounded-lg border border-border/60 bg-card/60 transition-colors focus-within:border-border/60',
+          'w-full rounded-lg bg-card/60 transition-colors focus-within:border-border/60',
           (disabled || busy) && 'opacity-90',
           className
         )}

@@ -112,7 +112,7 @@ function StatusBadge({ test }: { test: McpTestState }) {
 export function McpSettingsTab() {
   const { showError, showSuccess } = useFeedback()
   const [servers, setServers] = useState<McpServerEntry[]>([])
-  const [filePath, setFilePath] = useState('')
+  // const [filePath, setFilePath] = useState('')
   const [loading, setLoading] = useState(true)
   const [tests, setTests] = useState<Record<string, McpTestState>>({})
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
@@ -123,7 +123,7 @@ export function McpSettingsTab() {
     try {
       const result = await api.listMcpServers()
       setServers(result.servers)
-      setFilePath(result.filePath)
+      // setFilePath(result.filePath)
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -200,9 +200,9 @@ export function McpSettingsTab() {
       <div className="flex items-start justify-between gap-3">
         <div className="space-y-0.5">
           <h3 className="text-sm font-semibold text-foreground">MCP 服务</h3>
-          <p className="text-[11px] leading-5 text-muted-foreground">
+          {/* <p className="text-[11px] leading-5 text-muted-foreground">
             统一配置文件：{filePath || '…/data/mcp.json'}。内置服务仅可启停，自定义服务支持弹窗编辑。
-          </p>
+          </p> */}
         </div>
         <Button size="sm" variant="secondary" onClick={() => setEditor({ open: true })}>
           <PlusIcon size={11} />

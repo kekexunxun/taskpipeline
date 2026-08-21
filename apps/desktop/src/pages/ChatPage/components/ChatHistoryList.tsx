@@ -130,7 +130,7 @@ export function ChatHistoryList({
         <div className="px-3 pb-2">
           <Button
             variant="outline"
-            className="flex h-8 w-full items-center justify-center gap-2"
+            className="flex h-8 w-full items-center justify-center gap-2 shadow-none"
             onClick={onShowWelcome}
           >
             <PlusIcon size={16} />
