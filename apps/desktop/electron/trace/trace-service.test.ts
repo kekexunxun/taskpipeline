@@ -67,14 +67,14 @@ describe('spansToAgentEvents（看板执行 Tab 适配）', () => {
     expect(payloadOf(events.find((e) => payloadOf(e)?.phase === 'result')!)?.isError).toBe(true)
   })
 
-  it('subtask.run → status 带 subtaskId/parentTaskId/sdkSubtype，其内 llm/tool 继承 parentTaskId', () => {
+  it('subtask.run → start/end 双事件，其内 llm/tool 继承 parentTaskId', () => {
     const events = spansToAgentEvents([
       span({
         spanId: 's1',
         type: 'subtask.run',
         name: '实现登录',
         status: 'completed',
-        meta: { taskId: 'sub1', sdkSubtype: 'task_started', summary: '完成', toolUseId: 'tc-delegate' },
+        meta: { taskId: 'sub1', sdkSubtype: 'task_notification', summary: '完成', toolUseId: 'tc-delegate' },
         sequence: 1
       }),
       span({
@@ -94,15 +94,95 @@ describe('spansToAgentEvents（看板执行 Tab 适配）', () => {
         sequence: 3
       })
     ])
-    const sub = events.find((e) => payloadOf(e)?.subtaskId === 'sub1')!
-    expect(sub.kind).toBe('status')
-    expect(payloadOf(sub)?.sdkSubtype).toBe('task_started')
-    expect(payloadOf(sub)?.summary).toBe('完成')
+    // start 事件：组 header（task_started + 原始标题 + 委派 callId）
+    const start = events.find((e) => payloadOf(e)?.subtaskId === 'sub1' && payloadOf(e)?.sdkSubtype === 'task_started')!
+    expect(start.kind).toBe('status')
+    expect(payloadOf(start)?.description).toBe('实现登录')
     // 委派工具 callId 透传:Timeline 据此把主流程发起调用「吸收」进子任务卡(避免平级)
-    expect(payloadOf(sub)?.toolUseId).toBe('tc-delegate')
+    expect(payloadOf(start)?.toolUseId).toBe('tc-delegate')
+    // end 事件：收尾状态徽章
+    const end = events.find(
+      (e) => payloadOf(e)?.subtaskId === 'sub1' && payloadOf(e)?.sdkSubtype === 'task_notification'
+    )!
+    expect(payloadOf(end)?.summary).toBe('完成')
+    expect(payloadOf(end)?.status).toBe('completed')
     const llm = events.find((e) => e.title === 'LLM 调用')!
     expect(payloadOf(llm)?.parentTaskId).toBe('sub1')
     expect(payloadOf(events.find((e) => payloadOf(e)?.toolUseId === 'tc1')!)?.parentTaskId).toBe('sub1')
+  })
+
+  it('subtask.run 终值 sdkSubtype=task_notification 仍拆出 start（阶段嵌套与标题不被过程态覆盖）', () => {
+    // 复现 trace 35c40d04：Explore 子 Agent 的 span meta 被 task_progress 覆盖 description、
+    // 终值 sdkSubtype=task_notification —— start 事件必须保留委派时标题 / stageId / toolUseId。
+    const events = spansToAgentEvents([
+      span({ spanId: 'st', type: 'task.run', name: '任务执行', sequence: 1 }),
+      span({
+        spanId: 'sg',
+        type: 'agent.run',
+        name: 'Agent planning',
+        status: 'completed',
+        parentSpanId: 'st',
+        meta: { phase: 'planning' },
+        sequence: 2
+      }),
+      span({
+        spanId: 'sd',
+        type: 'tool.execute',
+        name: 'Agent',
+        parentSpanId: 'sg',
+        input: { description: 'Explore remote payment code' },
+        meta: { toolCallId: 'call-7' },
+        sequence: 3
+      }),
+      span({
+        spanId: 'ss',
+        type: 'subtask.run',
+        name: 'Explore remote payment code',
+        status: 'completed',
+        parentSpanId: 'sd',
+        meta: {
+          taskId: 'sub-ex',
+          sdkSubtype: 'task_notification',
+          description: 'vite-solidjs/.../AppContext.tsx',
+          toolUseId: 'call-7',
+          summary: '探索完成'
+        },
+        sequence: 4
+      })
+    ])
+    const start = events.find(
+      (e) => payloadOf(e)?.subtaskId === 'sub-ex' && payloadOf(e)?.sdkSubtype === 'task_started'
+    )!
+    expect(start).toBeDefined()
+    // 标题取委派时原始描述，不被 task_progress 过程态文本覆盖
+    expect(payloadOf(start)?.description).toBe('Explore remote payment code')
+    // stageId 指向 planning 阶段组 + toolUseId 指向委派工具 → 前端嵌套 + 吸收
+    expect(payloadOf(start)?.stageId).toBe('sg')
+    expect(payloadOf(start)?.toolUseId).toBe('call-7')
+    const end = events.find(
+      (e) => payloadOf(e)?.subtaskId === 'sub-ex' && payloadOf(e)?.sdkSubtype === 'task_notification'
+    )!
+    expect(payloadOf(end)?.status).toBe('completed')
+    expect(payloadOf(end)?.summary).toBe('探索完成')
+    // 时序：start 用 span 创建时间，end 用收尾时间 —— 否则前端按 createdAt 排序时
+    // end 紧跟 start，子任务内部事件全部排在「收尾」之后，时序错乱。
+    expect(start.createdAt).toBe('2026-01-01T00:00:00.000Z')
+    expect(end.createdAt).toBe(new Date(2000).toISOString())
+  })
+
+  it('subtask.run 未收尾（running）只发 start 事件', () => {
+    const events = spansToAgentEvents([
+      span({
+        spanId: 's1',
+        type: 'subtask.run',
+        name: '探索中',
+        status: 'running',
+        meta: { taskId: 'sub1', sdkSubtype: 'task_progress' },
+        sequence: 1
+      })
+    ])
+    expect(events).toHaveLength(1)
+    expect(payloadOf(events[0]!)?.sdkSubtype).toBe('task_started')
   })
 
   it('llm.generate error → message + error 事件', () => {

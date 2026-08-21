@@ -118,6 +118,50 @@ describe('PartRenderer', () => {
     expect(screen.queryByText('正在搜索')).toBeNull()
   })
 
+  it('嵌套子组按出现时间穿插进阶段卡（不一律沉到卡片末尾）', () => {
+    render(
+      <PartRenderer
+        parts={[
+          {
+            driverId: 'qoder',
+            type: 'qoder.subtask-start',
+            taskId: 'stage-1',
+            parentTaskId: 'stage-1',
+            description: 'Agent planning'
+          },
+          { driverId: 'qoder', type: 'text', text: '阶段前段', parentTaskId: 'stage-1' },
+          // 阶段中途委派的子任务：stageId 指向阶段组 → 嵌套
+          {
+            driverId: 'qoder',
+            type: 'qoder.subtask-start',
+            taskId: 'sub-1',
+            parentTaskId: 'sub-1',
+            stageId: 'stage-1',
+            description: 'Explore'
+          },
+          { driverId: 'qoder', type: 'text', text: '子任务内', parentTaskId: 'sub-1' },
+          { driverId: 'qoder', type: 'qoder.subtask-end', taskId: 'sub-1', parentTaskId: 'sub-1', status: 'completed' },
+          { driverId: 'qoder', type: 'text', text: '阶段后段', parentTaskId: 'stage-1' },
+          {
+            driverId: 'qoder',
+            type: 'qoder.subtask-end',
+            taskId: 'stage-1',
+            parentTaskId: 'stage-1',
+            status: 'completed'
+          }
+        ]}
+      />
+    )
+    // 展开阶段卡：嵌套 Explore 卡应夹在「阶段前段」与「阶段后段」之间，
+    // 而非沉到「阶段后段」之后（否则发生在阶段中段的子任务视觉时序倒挂）。
+    fireEvent.click(getSubtaskTrigger('stage-1'))
+    const before = screen.getByText('阶段前段')
+    const nested = getSubtaskTrigger('sub-1')
+    const after = screen.getByText('阶段后段')
+    expect(before.compareDocumentPosition(nested) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(nested.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
   it('expands a subtask on header click and reveals in-task parts', () => {
     render(
       <PartRenderer

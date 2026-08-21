@@ -359,6 +359,27 @@ export function PartRenderer({
     // 没有可见子项且没有吸收输出时不展示该 Agent 卡片。
     if (visibleChildren.length === 0 && !absorbed && (!block.nested || block.nested.length === 0)) return null
 
+    // 子项与嵌套子组按时间线穿插排列（以各自在 parentedList 中的位置为准）：
+    // 嵌套子组不再一律沉到卡片末尾，否则发生在阶段中段的子任务（如 planning 中途
+    // 委派的 Explore）会显示在该阶段后续操作之后，视觉上时序倒挂。
+    const partIndexOf = (part: DriverPart) => mergedParts.indexOf(part)
+    const blockIndexOf = (b: (typeof blocks)[number]): number => {
+      if (b.kind === 'group') {
+        if (b.header) return parentedList.indexOf(b.header)
+        const first = b.children[0]
+        if (first) return parentedList.indexOf(first)
+      }
+      return Number.MAX_SAFE_INTEGER
+    }
+    const entries: Array<{ index: number; node: ReactNode }> = [
+      ...visibleChildren.map((part) => {
+        const idx = partIndexOf(part)
+        return { index: idx, node: renderSinglePart(part, `p-${idx}`) }
+      }),
+      ...(block.nested ?? []).map((nested, ni) => ({ index: blockIndexOf(nested), node: renderBlock(nested, ni) }))
+    ]
+    entries.sort((a, b) => a.index - b.index)
+
     return (
       <SubTaskGroup
         key={`g-${block.taskId}-${index}`}
@@ -375,8 +396,7 @@ export function PartRenderer({
         }
       >
         <SubTaskProgressSummary aggregate={aggregate} running={status === 'running'} />
-        {visibleChildren.map((part, i) => renderSinglePart(part, `${block.taskId}-${i}`))}
-        {block.nested?.map((nested, ni) => renderBlock(nested, ni))}
+        {entries.map((e) => e.node)}
         <SubTaskResultBlock output={absorbed?.output} isError={absorbed?.isError} />
       </SubTaskGroup>
     )

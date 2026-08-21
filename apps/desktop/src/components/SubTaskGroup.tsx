@@ -644,16 +644,23 @@ export function hasToolUse<T>(pairs: Map<string, ToolCallPair<T>>, callId: strin
 /**
  * 构建 spawner 吸收上下文(三界面统一):
  *
- * 1. 遍历 blocks,从 group header 提取 toolUseId(发起子任务的那条工具调用)。
+ * 1. 递归遍历 blocks(含 nested 嵌套组),从 group header 提取 toolUseId(发起子任务的那条工具调用)。
  * 2. 建立 callId → taskId 映射(spawnerTaskByCallId)。
  * 3. 反查工具配对,把被吸收调用的 result 输出收集为 taskId → { output, isError }
  *    (absorbedOutputByTaskId),供 SubTaskResultBlock 展示。
  *
+ * 注意:子任务组可嵌套在阶段组内(stageId 嵌套),必须递归 nested,否则嵌套组的
+ * 委派工具行不会被吸收,会以「Tools - Agent」独立行残留在父组里。
+ *
  * - `getHeaderToolUseId`: 从 block header 提取发起调用的 toolUseId。
  * - `getResultOutput`:   从配对的 resultItem 提取 { output, isError }。
  */
+type SpawnerBlock<THeader> =
+  | { kind: 'main' }
+  | { kind: 'group'; taskId: string; header: THeader | undefined; nested?: SpawnerBlock<THeader>[] }
+
 export function buildSpawnerContext<THeader, TResultItem>(
-  blocks: Array<{ kind: 'main' } | { kind: 'group'; taskId: string; header: THeader | undefined }>,
+  blocks: Array<SpawnerBlock<THeader>>,
   toolPairs: Map<string, ToolCallPair<TResultItem>>,
   getHeaderToolUseId: (header: THeader) => string | undefined,
   getResultOutput: (resultItem: TResultItem) => { output?: unknown; isError?: boolean } | undefined
@@ -662,11 +669,15 @@ export function buildSpawnerContext<THeader, TResultItem>(
   absorbedOutputByTaskId: Map<string, { output?: unknown; isError?: boolean }>
 } {
   const spawnerTaskByCallId = new Map<string, string>()
-  for (const block of blocks) {
-    if (block.kind !== 'group') continue
-    const toolUseId = block.header ? getHeaderToolUseId(block.header) : undefined
-    if (toolUseId) spawnerTaskByCallId.set(toolUseId, block.taskId)
+  const collect = (blks: Array<SpawnerBlock<THeader>>) => {
+    for (const block of blks) {
+      if (block.kind !== 'group') continue
+      const toolUseId = block.header ? getHeaderToolUseId(block.header) : undefined
+      if (toolUseId) spawnerTaskByCallId.set(toolUseId, block.taskId)
+      if (block.nested?.length) collect(block.nested)
+    }
   }
+  collect(blocks)
 
   const absorbedOutputByTaskId = new Map<string, { output?: unknown; isError?: boolean }>()
   for (const [callId, taskId] of spawnerTaskByCallId) {

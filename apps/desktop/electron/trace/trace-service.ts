@@ -184,26 +184,55 @@ export function spansToAgentEvents(spans: AgentSpan[]): AgentEvent[] {
           const groupId = resolveGroup(span)
           if (groupId && stageOf.has(groupId)) stageId = groupId
         }
+        // subtask.run span 的 meta.sdkSubtype 会被 task_progress / task_notification 顺序覆盖，
+        // 落盘终值几乎总是 task_notification；若按终值单发事件，前端只会收到「收尾」事件，
+        // 丢 task_started header（stageId / toolUseId / 委派时原始标题），子 Agent 卡会被提到
+        // 顶层、委派工具行也无法吸收。这里按 SDK 消息语义拆成 start + end 两条事件：
+        // - start：sdkSubtype=task_started，description 取 span.name（委派时原始描述，
+        //   不被 task_progress 的过程态文本覆盖），携带 toolUseId / stageId，
+        //   供前端做组 header、阶段嵌套与委派工具行吸收；
+        // - end：span 已收尾时才发，sdkSubtype=task_notification，携带 status / summary 驱动状态徽章。
+        const subtaskId = typeof meta.taskId === 'string' ? meta.taskId : span.spanId
+        const parentId = typeof meta.parentTaskId === 'string' ? meta.parentTaskId : subtaskId
         events.push({
           ...base,
           kind: 'status',
           title: span.name,
           payload: {
             ...spanRef,
-            subtaskId: meta.taskId ?? span.spanId,
-            parentTaskId: meta.parentTaskId ?? meta.taskId ?? span.spanId,
-            sdkSubtype: meta.sdkSubtype,
+            subtaskId,
+            parentTaskId: parentId,
+            sdkSubtype: 'task_started',
+            description: span.name,
             ...(typeof meta.taskType === 'string' ? { taskType: meta.taskType } : {}),
             ...(typeof meta.subagentType === 'string' ? { subagentType: meta.subagentType } : {}),
-            ...(typeof meta.description === 'string' ? { description: meta.description } : {}),
-            ...(typeof meta.summary === 'string' ? { summary: meta.summary } : {}),
-            ...(typeof meta.lastToolName === 'string' ? { lastToolName: meta.lastToolName } : {}),
             // 委派工具 callId：Timeline 用它把发起调用的工具行吸收进子任务卡（不平级展示）。
             ...(typeof meta.toolUseId === 'string' ? { toolUseId: meta.toolUseId } : {}),
-            ...(stageId ? { stageId } : {}),
-            status: span.status
+            ...(stageId ? { stageId } : {})
           }
         })
+        if (span.status !== 'started' && span.status !== 'running') {
+          events.push({
+            ...base,
+            id: `${span.spanId}-end`,
+            // createdAt 取 span 收尾时间（而非 base 的 span.createdAt）：前端按 createdAt 排序，
+            // 若用创建时间，end 会紧跟 start，子任务内部事件全部排在「收尾」之后，时序错乱。
+            createdAt: typeof span.endedAt === 'number' ? new Date(span.endedAt).toISOString() : base.createdAt,
+            kind: 'status',
+            title: span.name,
+            payload: {
+              ...spanRef,
+              subtaskId,
+              parentTaskId: parentId,
+              sdkSubtype: 'task_notification',
+              ...(typeof meta.summary === 'string' ? { summary: meta.summary } : {}),
+              ...(typeof meta.lastToolName === 'string' ? { lastToolName: meta.lastToolName } : {}),
+              ...(stageId ? { stageId } : {}),
+              // 与 agent.run 一致的状态映射：error→failed / cancelled→stopped，避免徽章误判「执行中」
+              status: span.status === 'error' ? 'failed' : span.status === 'cancelled' ? 'stopped' : span.status
+            }
+          })
+        }
         break
       }
       case 'agent.run':
