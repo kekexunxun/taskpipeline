@@ -175,6 +175,8 @@ export type DriverPart =
       description?: string
       toolUseId?: string
       stageId?: string
+      /** pipeline 阶段卡标记（agent.run 阶段容器）：渲染层不挂 Agent 标签，区别于委派子 Agent。 */
+      isStage?: boolean
     }
   | {
       driverId: 'qoder'

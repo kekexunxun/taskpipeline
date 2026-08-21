@@ -135,7 +135,9 @@ function eventsToDriverParts(events: AgentEvent[]): DriverPart[] {
         subagentType: meta.subagentType,
         description: meta.description,
         toolUseId: meta.toolUseId,
-        stageId: meta.stageId
+        stageId: meta.stageId,
+        // pipeline 阶段卡（agent.run 容器）标记：渲染层不挂 Agent 标签
+        isStage: payload?.stage === true
       })
       continue
     }

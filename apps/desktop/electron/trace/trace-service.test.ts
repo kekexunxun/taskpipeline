@@ -251,13 +251,17 @@ describe('spansToAgentEvents（看板执行 Tab 适配）', () => {
       })
     ])
     // 阶段容器自身：自指分组 + 阶段名徽章 + 状态（Timeline 据此折叠成卡）
+    // sdkSubtype=task_started 走标准 subtask-start 路径；stage 标记让前端阶段卡不挂 Agent 标签；
+    // description 取 agentStageLabel 中文映射（不再回退 span 原始名 Agent planning）。
     const stage = events.find((e) => e.title === 'Agent planning')!
     expect(payloadOf(stage)).toMatchObject({
       subtaskId: 's2',
       parentTaskId: 's2',
       taskType: 'planning',
-      description: 'Agent planning',
-      status: 'completed'
+      description: '计划生成',
+      status: 'completed',
+      sdkSubtype: 'task_started',
+      stage: true
     })
     // 阶段内 llm/tool（无 subtask 祖先）继承阶段 id（llm 事件标题带模型名）
     expect(payloadOf(events.find((e) => e.title === 'LLM 调用 · qoder-lite')!)?.parentTaskId).toBe('s2')

@@ -265,33 +265,61 @@ export class QoderTraceBuilder {
     this.thinkingBuf = []
   }
 
-  /** 追加文本并去重：assistant 全量消息与流式 delta 相同内容只落一次。 */
+  /** 流式 delta 追加（碎片）。 */
   private appendText(text: string): void {
-    this.mergeText(this.textBuf, text)
+    this.appendDelta(this.textBuf, text)
   }
 
   private appendThinking(text: string): void {
-    this.mergeText(this.thinkingBuf, text)
+    this.appendDelta(this.thinkingBuf, text)
+  }
+
+  /** assistant 全量快照合并。 */
+  private mergeSnapshotText(text: string): void {
+    this.appendSnapshot(this.textBuf, text)
+  }
+
+  private mergeSnapshotThinking(text: string): void {
+    this.appendSnapshot(this.thinkingBuf, text)
   }
 
   /**
-   * 流式 delta 与全量消息的文本合并：
-   * - 全量是已累积内容的子集 → 跳过（去重）；
-   * - 全量包含已累积内容 → 整体替换（流式碎片被完整快照覆盖，避免重复拼接）。
+   * 流式 delta 追加：仅「缓冲尾部即本碎片」时去重（SDK 偶发重递同一片段）。
+   * 不能用 `includes`：正文里此前出现过的合法片段（如 `INAUMS_U`）会被误判为
+   * 重复重递而整段吞掉（真实缺陷：`CHINAUMS_UIS` 被压成 `CHIS`、`~L367-378` 变 `~L367378`）。
    */
-  private mergeText(buf: string[], full: string): void {
+  private appendDelta(buf: string[], text: string): void {
+    if (!text) return
+    const last = buf[buf.length - 1]
+    if (last !== undefined && last.endsWith(text)) return
+    buf.push(text)
+  }
+
+  /**
+   * 全量快照（assistant 消息）合并：
+   * - 已累积内容包含快照 → 跳过（去重）；
+   * - 快照包含已累积内容 → 整体替换（流式碎片被完整快照覆盖）；
+   * - 部分交叠 → 找最长「joined 后缀 = 快照前缀」重叠，只补差异尾部，避免重复拼接。
+   */
+  private appendSnapshot(buf: string[], full: string): void {
     if (!full) return
     const joined = buf.join('')
     if (!joined) {
       buf.push(full)
-    } else if (joined.includes(full)) {
-      /* 全量是子集：已存在，跳过 */
-    } else if (full.includes(joined)) {
+      return
+    }
+    if (joined.includes(full)) return
+    if (full.includes(joined)) {
       buf.length = 0
       buf.push(full)
-    } else {
-      buf.push(full)
+      return
     }
+    const max = Math.min(joined.length, full.length, 4096)
+    let overlap = 0
+    for (let len = 1; len <= max; len++) {
+      if (joined[joined.length - len] === full[0] && joined.endsWith(full.slice(0, len))) overlap = len
+    }
+    buf.push(full.slice(overlap))
   }
 
   // === 工具 =================================================================
@@ -502,8 +530,8 @@ export class QoderTraceBuilder {
     // 纯文本/thinking 消息不 endLlm，增量累积进同一 llm span —— 输入/thinking/输出同 span 展示；
     // 仅含 tool_use/tool_result 的消息是 step 边界：先收尾 llm（工具 span 挂刚收尾的 llm）。
     for (const block of content) {
-      if (block.type === 'text' && block.text) this.appendText(block.text)
-      else if (block.type === 'thinking' && block.thinking) this.appendThinking(block.thinking)
+      if (block.type === 'text' && block.text) this.mergeSnapshotText(block.text)
+      else if (block.type === 'thinking' && block.thinking) this.mergeSnapshotThinking(block.thinking)
     }
     if (hasToolBlocks) {
       this.endLlm({ usage: usageToSpanUsage(message.message?.usage) })

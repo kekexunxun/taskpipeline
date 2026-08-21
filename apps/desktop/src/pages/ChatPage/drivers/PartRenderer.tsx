@@ -392,6 +392,9 @@ export function PartRenderer({
             subagentType={startPart?.subagentType}
             childCount={visibleChildren.length}
             status={status}
+            // pipeline 阶段卡（coding 页执行 Tab 的 计划生成/代码实现 等）不挂 Agent 标签，
+            // 该标签仅用于常规委派子 Agent 的渲染数据。
+            showAgentTag={!startPart?.isStage}
           />
         }
       >

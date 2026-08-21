@@ -355,6 +355,30 @@ describe('QoderTaskAgentDriver', () => {
     expect(texts.some((t) => t.includes('调整意见') && t.includes('第二版要更详细'))).toBe(true)
   })
 
+  it('second plan run resets the phase buffer (collectResult 只含本回合文本)', async () => {
+    // 回归：缓冲此前跨回合累积，第二次 plan 解析「旧+新」拼接文本，
+    // 兜底正则先匹配旧计划 → 两版计划内容完全相同。
+    sdkMock.__pushQueryScript({
+      messages: [
+        assistantMsg('第一版计划', 'sess-1'),
+        resultMsg('{"outcome":"changes_required","plan":"v1"}', 'sess-1')
+      ]
+    })
+    const { driver: d } = driver()
+    await d.runPlan({ task: fakeTask(), repos: fakeRepos() })
+    expect(d.collectResult('task-1', 'plan').responseTexts.some((t) => t.includes('第一版计划'))).toBe(true)
+    sdkMock.__pushQueryScript({
+      messages: [
+        assistantMsg('第二版计划', 'sess-1'),
+        resultMsg('{"outcome":"changes_required","plan":"v2"}', 'sess-1')
+      ]
+    })
+    await d.runPlan({ task: fakeTask(), repos: fakeRepos(), feedback: '更详细' })
+    const texts = d.collectResult('task-1', 'plan').responseTexts
+    expect(texts.some((t) => t.includes('第二版计划'))).toBe(true)
+    expect(texts.some((t) => t.includes('第一版计划'))).toBe(false)
+  })
+
   it('keeps appending to the resident session even without feedback (重新生成也追加消息)', async () => {
     sdkMock.__pushQueryScript({
       messages: [
@@ -516,7 +540,7 @@ describe('QoderTaskAgentDriver', () => {
   it('rejects an unknown collectResult phase gracefully (returns empty)', () => {
     const { driver: d } = driver()
     // @ts-expect-error 故意传入错误 phase 验证 driver 不抛
-    const result = d.collectResult('task-1', 'invalid-phase' as never)
+    const result = d.collectResult('task-1', 'invalid-phase')
     expect(result.responseTexts).toEqual([])
   })
 

@@ -204,7 +204,7 @@ export function Waterfall({
     const isTaskToolSpan = taskToolMeta.isTaskTool
     const input = toolInputOf(span)
     const color = delegated ? TYPE_COLORS['agent.run'] : isTaskToolSpan ? TASK_TOOL_COLOR : TYPE_COLORS[span.type]
-    // agent.run 阶段容器的类型标签按 meta.phase（及 trigger/round）显示阶段名（Plan/Exec/CodeReview…），
+    // agent.run 阶段容器的类型标签按 meta.phase（及 trigger/round）显示阶段名（计划生成/代码实现/代码审查…），
     // 不再是笼统的 Agent；共享映射与执行 Tab 阶段卡一致。
     const stageLabel = agentStageLabel(span)
     const typeLabel = delegated ? 'Agent' : isTaskToolSpan ? '任务' : (stageLabel ?? TYPE_LABELS[span.type])

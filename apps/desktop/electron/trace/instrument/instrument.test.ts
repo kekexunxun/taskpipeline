@@ -356,6 +356,34 @@ describe('QoderTraceBuilder', () => {
     expect(llm.output).toBe('正在分析代码')
   })
 
+  it('流式 delta 片段在正文重复出现不被去重吞掉（回归 CHINAUMS_UIS→CHIS 丢字）', async () => {
+    pipeline.beginTrace({ traceId: 'q12', kind: 'chat', title: 'x', source: 'qoder' })
+    pipeline.startSpan('q12', { type: 'session.start', name: '会话' })
+    const builder = new QoderTraceBuilder(pipeline, 'q12', 'chat')
+    builder.onMessage({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        delta: { type: 'text_delta', text: '`CHINAUMS_UIS_COLLECTION` 固定值 `CH' }
+      }
+    })
+    // 该片段是已累积正文的子串：旧 `includes` 去重会整段吞掉，产出 `CHIS`。
+    builder.onMessage({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'INAUMS_U' } }
+    })
+    builder.onMessage({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'IS`' } }
+    })
+    builder.onMessage({ type: 'result' })
+    pipeline.endTrace('q12')
+
+    const spans = await storage.getTrace('q12')
+    const llm = spans!.find((s) => s.type === 'llm.generate')!
+    expect(llm.output).toBe('`CHINAUMS_UIS_COLLECTION` 固定值 `CHINAUMS_UIS`')
+  })
+
   it('task_started 滞后：内部 span 不改写 parentSpanId，meta.parentToolUseId 原样落盘（渲染层重定向）', async () => {
     pipeline.beginTrace({ traceId: 'q7', kind: 'task', title: '任务', source: 'qoder' })
     pipeline.startSpan('q7', { type: 'task.run', name: '任务' })

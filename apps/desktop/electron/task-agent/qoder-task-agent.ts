@@ -575,6 +575,10 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
   }): Promise<void> {
     const { task, repos, phase, prompt, signal, resume, recordText, hardTimeoutMs, trigger, round } = options
     const buffers = this.ensureBuffers(task.id, phase)
+    // 阶段产物按回合重置：collectResult 只应拿到本回合文本。缓冲此前只增不清，
+    // 第二次 plan（feedback 修订）会解析「旧+新」拼接文本，兜底正则先匹配到旧计划的
+    // "plan" 字段，导致新版计划内容与旧版完全相同。
+    buffers.responseTexts.length = 0
     const session = this.ensureSession(task, repos, resume)
 
     // abort 预检必须在 emit agent_start 之前:signal 已中止时直接失败,

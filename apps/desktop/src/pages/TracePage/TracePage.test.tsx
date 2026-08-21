@@ -520,9 +520,9 @@ describe('TracePage 组件（v2）', () => {
       />
     )
     // 类型列显示阶段名而非笼统的 Agent
-    expect(screen.getByText('Plan')).toBeTruthy()
+    expect(screen.getByText('计划生成')).toBeTruthy()
     expect(screen.getByText('执行（续接）')).toBeTruthy()
-    expect(screen.getByText('CodeReview')).toBeTruthy()
+    expect(screen.getByText('代码审查')).toBeTruthy()
     expect(screen.queryByText('Agent')).toBeNull()
   })
 

@@ -417,7 +417,8 @@ export function SubTaskHeader({
   // taskType,
   // subagentType,
   childCount,
-  status
+  status,
+  showAgentTag = true
 }: {
   description?: string
   taskType?: string
@@ -425,12 +426,16 @@ export function SubTaskHeader({
   /** 可见子操作数量,提供后在 description 后追加「已处理 n个操作」。 */
   childCount?: number
   status: SubTaskStatus
+  /** 是否展示 Agent 标签：常规委派子 Agent 展示；pipeline 阶段卡不展示。 */
+  showAgentTag?: boolean
 }) {
   return (
     <span className="inline-flex w-full min-w-0 items-center gap-1.5">
-      <Badge variant="outline" className="shrink-0 px-1 py-0 text-[10px] text-muted-foreground">
-        Agent
-      </Badge>
+      {showAgentTag && (
+        <Badge variant="outline" className="shrink-0 px-1 py-0 text-[10px] text-muted-foreground">
+          Agent
+        </Badge>
+      )}
       <span className="min-w-0 truncate text-xs font-medium text-foreground/80">{description || '子任务'}</span>
       {/* {subagentType && (
         <Badge variant="outline" className="shrink-0 px-1 py-0 font-mono text-[10px]">

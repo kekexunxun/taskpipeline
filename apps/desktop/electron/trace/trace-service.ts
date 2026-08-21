@@ -6,7 +6,7 @@
  */
 
 import type { AgentEvent, AgentSpan, TraceDashboardStats, TraceStorage, TraceSummary } from '@task-pipeline/core'
-import { JsonlTraceStorage, buildSpanOwnershipIndex, ownerSubtaskOf } from '@task-pipeline/core'
+import { JsonlTraceStorage, agentStageLabel, buildSpanOwnershipIndex, ownerSubtaskOf } from '@task-pipeline/core'
 
 export class TraceService {
   private readonly storage: TraceStorage
@@ -238,7 +238,10 @@ export function spansToAgentEvents(spans: AgentSpan[]): AgentEvent[] {
       case 'agent.run':
         // 阶段容器：自身事件作 header（parentTaskId/subtaskId 自指，interleaveTimeline 据此折叠成卡），
         // 阶段内步骤（llm/tool，无 subtask 祖先时）已由 resolveGroup 打上 parentTaskId。
-        // 阶段名（planning/implementing/...）作 taskType 徽章，description 直接展示 span 名；
+        // sdkSubtype=task_started 让前端走标准 subtask-start 路径（携带阶段标记字段）；
+        // stage 标记告知渲染层这是 pipeline 阶段卡（非委派子 Agent），不挂 Agent 标签；
+        // description 取阶段显示名（与 Trace 瀑布图共用 agentStageLabel 映射，如 计划生成/代码审查），
+        // 不回退 span 原始名（Agent planning 等英文）；
         // error 状态映射成 failed，让卡片状态徽章显示「失败」而非误判「执行中」。
         events.push({
           ...base,
@@ -248,8 +251,10 @@ export function spansToAgentEvents(spans: AgentSpan[]): AgentEvent[] {
             ...spanRef,
             subtaskId: span.spanId,
             parentTaskId: span.spanId,
+            sdkSubtype: 'task_started',
+            stage: true,
             status: span.status === 'error' ? 'failed' : span.status,
-            description: span.name,
+            description: agentStageLabel(span) ?? span.name,
             ...(typeof meta.phase === 'string' && meta.phase ? { taskType: meta.phase } : {})
           }
         })
