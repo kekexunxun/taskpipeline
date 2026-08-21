@@ -10,6 +10,7 @@ import {
   ownerSubtaskOf
 } from '@task-pipeline/core/dist/trace/span-ownership.js'
 import { agentStageLabel } from '@task-pipeline/core/dist/trace/stage-label.js'
+import { parseTaskToolMeta } from '@task-pipeline/core/dist/trace/task-tool-meta.js'
 import { cn } from '@/lib/utils'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
@@ -31,6 +32,9 @@ const TYPE_LABELS: Record<SpanType, string> = {
   'tool.execute': '工具',
   'subtask.run': '子任务'
 }
+
+/** 任务工具（TaskCreate/TaskUpdate）专用色：与委派 Agent 同族但降低饱和度，以示区别。 */
+const TASK_TOOL_COLOR = { bar: 'bg-violet-400/60', label: 'text-violet-400' } as const
 
 /**
  * 固定列模板（头部标尺与数据行共用，保证时间轴列在所有行对齐）：
@@ -195,13 +199,29 @@ export function Waterfall({
     const isCancelled = span.status === 'cancelled'
     // 委派子 Agent 的工具行按 Agent 语义展示：violet 色 + input.description 名称 + subagent_type 徽章。
     const delegated = isDelegatedAgent(span)
+    // 任务工具（TaskCreate/TaskUpdate）语义解析。
+    const taskToolMeta = parseTaskToolMeta(span.name, span.output)
+    const isTaskToolSpan = taskToolMeta.isTaskTool
     const input = toolInputOf(span)
-    const color = delegated ? TYPE_COLORS['agent.run'] : TYPE_COLORS[span.type]
+    const color = delegated ? TYPE_COLORS['agent.run'] : isTaskToolSpan ? TASK_TOOL_COLOR : TYPE_COLORS[span.type]
     // agent.run 阶段容器的类型标签按 meta.phase（及 trigger/round）显示阶段名（Plan/Exec/CodeReview…），
     // 不再是笼统的 Agent；共享映射与执行 Tab 阶段卡一致。
     const stageLabel = agentStageLabel(span)
-    const typeLabel = delegated ? 'Agent' : (stageLabel ?? TYPE_LABELS[span.type])
-    const displayName = delegated ? String(input!.description) : span.name
+    const typeLabel = delegated ? 'Agent' : isTaskToolSpan ? '任务' : (stageLabel ?? TYPE_LABELS[span.type])
+    let displayName: string
+    if (delegated) {
+      displayName = String(input!.description)
+    } else if (isTaskToolSpan) {
+      if (taskToolMeta.action === 'create') {
+        displayName = `创建 · ${taskToolMeta.subject ?? `#${taskToolMeta.taskId}`}`
+      } else if (taskToolMeta.action === 'update') {
+        displayName = `更新 #${taskToolMeta.taskId}` + (taskToolMeta.status ? ` → ${taskToolMeta.status}` : '')
+      } else {
+        displayName = span.name
+      }
+    } else {
+      displayName = span.name
+    }
     const leftPct = ((span.startedAt - timeAxis.start) / timeAxis.total) * 100
     const widthPct = Math.max(1.5, (((span.endedAt ?? span.startedAt + 1) - span.startedAt) / timeAxis.total) * 100)
     const durationMs = span.durationMs ?? (span.endedAt !== undefined ? span.endedAt - span.startedAt : undefined)
@@ -241,6 +261,11 @@ export function Waterfall({
               {delegated && typeof input!.subagent_type === 'string' && (
                 <span className="ml-1.5 rounded border border-violet-400/40 bg-violet-400/10 px-1 py-px align-middle text-[9px] text-violet-400">
                   {input!.subagent_type}
+                </span>
+              )}
+              {isTaskToolSpan && (
+                <span className="ml-1.5 rounded border border-violet-400/30 bg-violet-400/8 px-1 py-px align-middle text-[9px] text-violet-400">
+                  {taskToolMeta.action}
                 </span>
               )}
             </span>

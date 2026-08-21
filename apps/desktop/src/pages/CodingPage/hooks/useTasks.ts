@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { AgentEvent, Task, TaskCard } from '@task-pipeline/core'
+import { TASK_TOOL_NAMES, parseTaskToolMeta } from '@task-pipeline/core/dist/trace/task-tool-meta.js'
+import type { AgentEvent, Task, TaskCard } from '@task-pipeline/core/dist/types.js'
 import { api, type DriverPart, type TaskDetail } from '../../../api'
 import { useFeedback } from '../../../hooks/useGlobalFeedback'
 import { isPlanningEvent } from '../components/planningEvent'
@@ -47,6 +48,67 @@ function eventsToDriverParts(events: AgentEvent[]): DriverPart[] {
       })
     }
   }
+
+  // 预扫描：收集 TaskCreate 产出全量任务条目 + TaskUpdate 最终状态
+  interface TaskItem {
+    taskId: string
+    subject: string
+  }
+  const taskItems: TaskItem[] = []
+  // 主循环中按时间流逐次推进，不预扫描完成状态
+  const completedTasks = new Set<string>()
+  const prescanInputByCallId = new Map<string, { taskId: string; status: string }>()
+  /** 预扫描：taskId → 该 task 的 TaskUpdate 最终是否为 completed。 */
+  const taskCompletedInUpdate = new Set<string>()
+  for (const event of sorted) {
+    if (event.kind !== 'tool') continue
+    const p =
+      event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+        ? (event.payload as Record<string, unknown>)
+        : undefined
+    if (!p) continue
+    const toolName = p.toolName as string | undefined
+    if (!toolName || !TASK_TOOL_NAMES.includes(toolName as (typeof TASK_TOOL_NAMES)[number])) continue
+    const phase = p.phase as string | undefined
+    const output = phase === 'result' ? (p.output ?? event.detail) : undefined
+    if (toolName === 'TaskCreate') {
+      const meta = parseTaskToolMeta(toolName, output)
+      if (meta.taskId && meta.subject && !taskItems.some((item) => item.taskId === meta.taskId)) {
+        taskItems.push({ taskId: meta.taskId, subject: meta.subject })
+      }
+    }
+    // 预扫描 TaskUpdate 最终状态（判断 in_progress 卡是否应展示）
+    if (toolName === 'TaskUpdate') {
+      const pCallId = p.toolUseId as string | undefined
+      if (phase === 'use') {
+        const pInput = (p.input ?? {}) as Record<string, unknown>
+        const pTaskId = String(pInput.taskId ?? '')
+        const pStatus = String(pInput.status ?? '')
+        if (pCallId && (pTaskId || pStatus)) {
+          prescanInputByCallId.set(pCallId, { taskId: pTaskId, status: pStatus })
+        }
+      }
+      if (phase === 'result') {
+        let taskId = ''
+        let status = ''
+        const cached = pCallId ? prescanInputByCallId.get(pCallId) : undefined
+        if (cached) {
+          taskId = cached.taskId
+          status = cached.status
+        } else {
+          const meta = parseTaskToolMeta(toolName, output)
+          taskId = meta.taskId ?? ''
+          status = meta.status ?? ''
+        }
+        if (status === 'completed' && taskId) {
+          taskCompletedInUpdate.add(taskId)
+        }
+      }
+    }
+  }
+  let taskCardEmitted = false
+  // 跟踪 TaskUpdate use 阶段的输入参数（result 阶段 input 为空）
+  const taskUpdateInputByCallId = new Map<string, { taskId: string; status: string }>()
 
   for (const event of sorted) {
     if (isHiddenTimelineEvent(event.title)) continue
@@ -106,6 +168,92 @@ function eventsToDriverParts(events: AgentEvent[]): DriverPart[] {
       const phase = payload?.phase as string | undefined
       const toolUseId = payload?.toolUseId as string | undefined
       const toolName = payload?.toolName as string | undefined
+
+      // 任务工具拦截（TaskCreate 聚合为清单卡，TaskUpdate 展示为进度行）
+      if (toolName && TASK_TOOL_NAMES.includes(toolName as (typeof TASK_TOOL_NAMES)[number])) {
+        if (toolName === 'TaskCreate') {
+          if (!taskCardEmitted && taskItems.length > 0) {
+            parts.push({
+              driverId: 'qoder',
+              type: 'qoder.task-list',
+              header: '添加待办',
+              items: taskItems.map((item) => ({
+                taskId: item.taskId,
+                subject: item.subject
+              })),
+              parentTaskId
+            })
+            taskCardEmitted = true
+          }
+          continue // 不产出 tool-use / tool-result part
+        }
+        if (toolName === 'TaskUpdate') {
+          if (phase === 'use') {
+            // 缓存 use 阶段入参（result 阶段 payload.input 为空）
+            const input = (payload?.input ?? {}) as Record<string, unknown>
+            const taskId = String(input.taskId ?? '')
+            const status = String(input.status ?? '')
+            if (toolUseId && (taskId || status)) {
+              taskUpdateInputByCallId.set(toolUseId, { taskId, status })
+            }
+            // in_progress → 提前展示加载卡片（仅当该 task 最终状态不是 completed）
+            if (status === 'in_progress' && taskId && !taskCompletedInUpdate.has(taskId)) {
+              parts.push({
+                driverId: 'qoder',
+                type: 'qoder.task-update',
+                header: '完成待办',
+                items: taskItems.map((t) => ({
+                  taskId: t.taskId,
+                  subject: t.subject,
+                  completed: completedTasks.has(t.taskId)
+                })),
+                updatePhase: 'use',
+                updatedTaskId: taskId,
+                parentTaskId
+              })
+            }
+            continue
+          }
+          if (phase === 'result') {
+            // 优先从缓存的 use 入参读取，兜底从 output 解析
+            let updateTaskId = ''
+            let updateStatus = ''
+            const cached = toolUseId ? taskUpdateInputByCallId.get(toolUseId) : undefined
+            if (cached) {
+              updateTaskId = cached.taskId
+              updateStatus = cached.status
+            } else {
+              const output = (payload?.output ?? event.detail) as string | undefined
+              const meta = parseTaskToolMeta(toolName, output)
+              updateTaskId = meta.taskId ?? ''
+              updateStatus = meta.status ?? ''
+            }
+            // 仅 completed 产卡（in_progress 已在 use 阶段渲染加载卡，不再重复展示）
+            if (updateStatus === 'completed') {
+              completedTasks.add(updateTaskId)
+              parts.push({
+                driverId: 'qoder',
+                type: 'qoder.task-update',
+                header: '完成待办',
+                items: taskItems.map((t) => ({
+                  taskId: t.taskId,
+                  subject: t.subject,
+                  completed: completedTasks.has(t.taskId)
+                })),
+                updatePhase: 'result',
+                updatedTaskId: updateTaskId,
+                parentTaskId
+              })
+            }
+            continue
+          }
+          // 其他 phase：跳过
+          continue
+        }
+        // 其他任务工具或 TaskUpdate use phase：跳过
+        continue
+      }
+
       if (phase === 'use') {
         if (!toolUseId) {
           // 无 toolUseId 的老数据:降级为 text

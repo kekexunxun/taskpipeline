@@ -196,6 +196,42 @@ export type DriverPart =
       usage?: unknown
     }
   | {
+      driverId: 'qoder'
+      type: 'qoder.task-list'
+      /** 清单标题（「添加待办」）。 */
+      header: string
+      /** 全部任务条目。 */
+      items: Array<{
+        /** output 里的 #N。 */
+        taskId: string
+        /** create output 解析的任务主题。 */
+        subject: string
+        /** 是否已完成（TaskUpdate 跟踪）。 */
+        completed?: boolean
+      }>
+      parentTaskId?: string
+    }
+  | {
+      driverId: 'qoder'
+      type: 'qoder.task-update'
+      /** 清单标题（「添加待办」）。 */
+      header: string
+      /** 全部任务条目（含最新完成状态）。 */
+      items: Array<{
+        /** output 里的 #N。 */
+        taskId: string
+        /** create output 解析的任务主题。 */
+        subject: string
+        /** 是否已完成。 */
+        completed: boolean
+      }>
+      /** 本次更新事件阶段：use=进行中（加载动画），result=已确认（完成态）。 */
+      updatePhase: 'use' | 'result'
+      /** 本次更新的任务 #N。 */
+      updatedTaskId: string
+      parentTaskId?: string
+    }
+  | {
       driverId: 'openai'
       type: 'openai.tool-call'
       toolCallId: string

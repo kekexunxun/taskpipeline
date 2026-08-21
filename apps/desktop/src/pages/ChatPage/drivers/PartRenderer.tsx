@@ -12,6 +12,7 @@ import {
   McpToolBlock,
   WebFetchToolBlock
 } from './parts/ToolBlocks'
+import { TaskListCard } from './parts/TaskListCard'
 import type { ChatPlan, DriverPart } from '@/api'
 import { PlanCard } from '@/pages/ChatPage/components/PlanCard'
 import {
@@ -210,6 +211,9 @@ export function PartRenderer({
     if (part.type === 'qoder.session') {
       return <QoderSessionPart key={key} part={part} />
     }
+    if (part.type === 'qoder.task-list') {
+      return <TaskListCard key={key} header={part.header} items={part.items} />
+    }
     if (part.type === 'qoder.tool-use' || part.type === 'openai.tool-call') {
       if (spawnerTaskByCallId.has(part.toolCallId)) return null // 吸收进子任务卡
       const pair = toolPairs.get(part.toolCallId)
@@ -274,6 +278,17 @@ export function PartRenderer({
           output={part.output}
           status={'isError' in part && part.isError ? 'error' : 'done'}
           icon={WrenchIcon}
+        />
+      )
+    }
+    if (part.type === 'qoder.task-update') {
+      return (
+        <TaskListCard
+          key={key}
+          header={part.header}
+          items={part.items}
+          updatedTaskId={part.updatedTaskId}
+          updatePhase={part.updatePhase}
         />
       )
     }
