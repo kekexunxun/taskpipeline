@@ -1288,6 +1288,7 @@ export function SettingsDialog({
                   >
                     <SettingField label="全局默认模式">
                       <HitlModeSwitcher
+                        className="mt-1"
                         value={settings.hitlMode}
                         onChange={(mode: HitlMode) => {
                           update('hitlMode', mode)
@@ -1306,7 +1307,7 @@ export function SettingsDialog({
                         <Input
                           readOnly
                           value={pendingDataDir ?? dataDir}
-                          className="flex-1 text-xs"
+                          className="flex-1 text-xs!"
                           placeholder="当前数据目录"
                         />
                         <Button
@@ -1324,7 +1325,7 @@ export function SettingsDialog({
                           }}
                         >
                           <FolderOpenIcon size={11} className="mr-1" />
-                          浏览
+                          修改
                         </Button>
                       </div>
                       {pendingDataDir && pendingDataDir !== dataDir && (

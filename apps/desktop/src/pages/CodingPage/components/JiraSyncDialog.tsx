@@ -83,8 +83,18 @@ export function JiraSyncDialog({
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="w-[min(640px,calc(100vw-48px))]">
+      <Dialog
+        open={open}
+        onOpenChange={(v) => {
+          if (busy) return
+          onOpenChange(v)
+        }}
+      >
+        <DialogContent
+          className="w-[min(640px,calc(100vw-48px))]"
+          onPointerDownOutside={(e) => busy && e.preventDefault()}
+          onEscapeKeyDown={(e) => busy && e.preventDefault()}
+        >
           <DialogHeader>
             <DialogTitle>同步 Jira 任务</DialogTitle>
             <DialogDescription>勾选需要导入的任务。</DialogDescription>
@@ -149,8 +159,8 @@ export function JiraSyncDialog({
               </Button>
             </DialogClose>
             <Button size="sm" disabled={busy || selected.size === 0} onClick={onImportClick}>
-              <RefreshCwIcon size={11} />
-              导入 {selected.size} 项
+              {busy ? <Loader2Icon className="animate-spin-slow" size={11} /> : <RefreshCwIcon size={11} />}
+              {busy ? '导入中…' : `导入 ${selected.size} 项`}
             </Button>
           </DialogFooter>
         </DialogContent>

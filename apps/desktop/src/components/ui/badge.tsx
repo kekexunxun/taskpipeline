@@ -14,7 +14,7 @@ const badgeVariants = cva(
         destructive: 'border-transparent bg-destructive/15 text-destructive',
         outline: 'text-foreground',
         success: 'border-transparent bg-emerald-500/15 text-emerald-400',
-        warning: 'border-transparent bg-amber-500/15 text-amber-300',
+        warning: 'border-transparent bg-amber-500/15 text-amber-600 dark:text-amber-300',
         muted: 'border-transparent bg-muted text-muted-foreground'
       }
     },
@@ -30,4 +30,5 @@ function Badge({ className, variant, ...props }: BadgeProps) {
   return <div className={cn(badgeVariants({ variant }), className)} {...props} />
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export { Badge, badgeVariants }

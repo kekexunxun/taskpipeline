@@ -36,7 +36,7 @@ function SourceBadge({ source, taskKey, sourceUrl }: { source: Task['source']; t
         <TooltipTrigger asChild>
           <button
             type="button"
-            className="inline-flex items-center gap-1 rounded border border-border/70 bg-foreground/3 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground transition-colors hover:border-ring hover:bg-foreground/5 hover:text-foreground focus-visible:outline-none"
+            className="inline-flex items-center gap-1 rounded border border-border/70 bg-foreground/3 px-1.5 py-0.5 font-mono text-[10px]! font-semibold text-muted-foreground transition-colors hover:border-ring hover:bg-foreground/5 hover:text-foreground focus-visible:outline-none"
             onClick={() => {
               api.openExternal(sourceUrl).catch(() => {
                 /* 失败由调用方处理 */

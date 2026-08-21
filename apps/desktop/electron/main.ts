@@ -54,6 +54,7 @@ import {
   fetchJiraTasks,
   GitService,
   importJiraIssue,
+  jiraKeyFrom,
   MergeStatusRefresher,
   openTaskEditor,
   OpenCodeReviewService,
@@ -1726,10 +1727,12 @@ function handleAskUserQuestion(
   toolInput: Record<string, unknown>,
   options: { signal?: AbortSignal; conversationId?: string; taskId?: string }
 ): Promise<string[] | undefined> {
-  const questions = (toolInput as any).questions
+  const questions = (
+    toolInput as { questions?: { header?: string; question?: string; options?: { label: string }[] }[] }
+  ).questions
   if (!Array.isArray(questions) || questions.length === 0) return Promise.resolve(undefined)
   // 标准化所有问题（单/多问题统一形态）
-  const allQuestions = questions.map((q: any) => ({
+  const allQuestions = questions.map((q) => ({
     header: (q.header as string) ?? '问题',
     question: (q.question as string) ?? '',
     options: Array.isArray(q.options) ? q.options : []
@@ -1745,7 +1748,7 @@ function handleAskUserQuestion(
             return {
               title: q.header,
               message: q.question,
-              options: q.options.map((o: any) => o.label),
+              options: q.options.map((o) => o.label),
               optionDetails: q.options
             }
           })()
@@ -2981,6 +2984,19 @@ function registerIpc(): void {
   ipcMain.handle('jira:import', async (_event, keyOrUrl: string) =>
     safeAtlassianCall('导入 Jira Issue', () => importJiraIssue(atlassianFactory.create('jira'), keyOrUrl, store))
   )
+  ipcMain.handle('jira:check-exists', (_event, keyOrUrl: string) => {
+    try {
+      const key = jiraKeyFrom(keyOrUrl)
+      if (!key) return { existing: false, conflict: false }
+      const existing = store.getTaskBySourceKey('jira', key)
+      return {
+        existing: Boolean(existing),
+        conflict: Boolean(existing && boardColumnFor(existing.state) !== 'todo')
+      }
+    } catch {
+      return { existing: false, conflict: false }
+    }
+  })
   ipcMain.handle('jira:sync', async () =>
     safeAtlassianCall('同步 Jira 任务', async () => {
       const candidates = await fetchJiraTasks(atlassianFactory.create('jira'))

@@ -614,6 +614,7 @@ export type AgentApi = {
   refreshMergeStatus(): Promise<MergeStatusSummary[]>
   manualComplete(taskId: string): Promise<void>
   importJiraTask(keyOrUrl: string): Promise<Task>
+  checkJiraTaskExists(keyOrUrl: string): Promise<{ existing: boolean; conflict: boolean }>
   syncJiraTasks(): Promise<JiraTaskCandidate[]>
   importJiraTasks(candidates: JiraTaskCandidate[]): Promise<Task[]>
   testAtlassian(kind: 'jira' | 'confluence'): Promise<{ ok: boolean; message: string }>
@@ -648,7 +649,7 @@ export type AgentApi = {
   openExternal(url: string): Promise<void>
   getQoderStatus(): Promise<QoderStatus>
   respondTaskUi(response: unknown): Promise<void>
-  onTaskEvent(callback: (event: any) => void): () => void
+  onTaskEvent(callback: (event: unknown) => void): () => void
   // memory
   listMemories(filter?: MemoryListFilter): Promise<Memory[]>
   upsertMemory(input: MemoryInput): Promise<Memory>
@@ -1159,6 +1160,9 @@ export const api: AgentApi = window.agentApi ?? {
   async manualComplete() {},
   async importJiraTask() {
     return demoTasks[1]!
+  },
+  async checkJiraTaskExists() {
+    return { existing: false, conflict: false }
   },
   async syncJiraTasks() {
     return []

@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld('agentApi', {
   refreshMergeStatus: () => ipcRenderer.invoke('tasks:refresh-merge-status'),
   manualComplete: (taskId: string) => ipcRenderer.invoke('tasks:manual-complete', taskId),
   importJiraTask: (keyOrUrl: string) => ipcRenderer.invoke('jira:import', keyOrUrl),
+  checkJiraTaskExists: (keyOrUrl: string) => ipcRenderer.invoke('jira:check-exists', keyOrUrl),
   syncJiraTasks: () => ipcRenderer.invoke('jira:sync'),
   importJiraTasks: (candidates: unknown[]) => ipcRenderer.invoke('jira:import-many', candidates),
   testAtlassian: (kind: 'jira' | 'confluence') => ipcRenderer.invoke('atlassian:test', kind),
