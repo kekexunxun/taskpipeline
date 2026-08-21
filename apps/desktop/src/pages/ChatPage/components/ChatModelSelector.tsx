@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { CheckIcon, ChevronDownIcon, CpuIcon, SlidersHorizontalIcon, SparklesIcon } from 'lucide-react'
 import type { ChatModelGroup, ChatModelInfo, ModelCapability, ModelParams } from '@/api'
@@ -18,7 +18,7 @@ import {
 import { ModelBadges } from '@/components/ModelBadges'
 import { cn } from '@/lib/utils'
 import { MODEL_VENDORS } from '@/utils/model-vendors'
-import { pickSystemDefaultModel } from '@/utils/chat-models'
+import { resolveModelValue, saveLastSelectedModel } from '@/utils/last-model-cache'
 
 const CAPABILITY_LABEL: Record<ModelCapability['key'], string> = {
   reasoningEffort: '推理力度',
@@ -245,6 +245,7 @@ export function ChatModelSelector({
   groups,
   value,
   onChange,
+  onResolve,
   modelParams,
   onChangeParams,
   disabled
@@ -252,6 +253,8 @@ export function ChatModelSelector({
   groups: ChatModelGroup[]
   value?: string
   onChange(value: string | undefined): void
+  /** 解析出最终模型后通知调用方（value 为空 / 失效时触发，用于持久化同步）。 */
+  onResolve?(resolvedModel: string): void
   modelParams?: ModelParams
   onChangeParams?(params: ModelParams): void
   disabled?: boolean
@@ -267,16 +270,18 @@ export function ChatModelSelector({
     if (closeTimer.current) clearTimeout(closeTimer.current)
     closeTimer.current = setTimeout(() => setHoveredValue(undefined), 120)
   }
+  // ── 统一解析：value → cache → system default（唯一解析入口）──
   const flat = groups.flatMap((group) =>
     group.models.map((model) => ({ ...model, driverId: group.driverId, driverDisplayName: group.displayName }))
   )
-  // 严格受控：仅当 value 能匹配到模型时才有 current。
-  const current = value ? flat.find((model) => model.value === value) : undefined
-  // 未显式选择时，展示系统自动选择的结果（与对话/任务默认解析同一规则）。
-  // 只用于展示与下拉标记，不写回 value，保持调用方状态不变。
-  const autoModel = value ? undefined : pickSystemDefaultModel(groups)
-  const autoInfo = autoModel ? flat.find((model) => model.value === autoModel.model) : undefined
-  const displayName = current?.displayName ?? autoInfo?.displayName ?? value ?? 'Auto'
+  const resolved = resolveModelValue(value, groups)
+  const resolvedInfo = resolved ? flat.find((m) => m.value === resolved) : undefined
+  const displayName = resolvedInfo?.displayName ?? value ?? 'Auto'
+
+  // 解析结果与传入值不一致时通知调用方（用于持久化到 task / conversation）
+  useEffect(() => {
+    if (resolved && resolved !== value) onResolve?.(resolved)
+  }, [resolved, value, onResolve])
   const hasModels = flat.length > 0
   const hoveredModel = hoveredValue ? flat.find((m) => m.value === hoveredValue) : undefined
   // 浮层上修改参数：先切换选中（切换模型会清空旧 params，语义归属选中模型），再写入新值。
@@ -286,7 +291,7 @@ export function ChatModelSelector({
   }
   // 单个模型条目，含 hover 事件 wrapper。
   const renderModel = (model: ChatModelInfo) => {
-    const isAuto = Boolean(autoInfo && model.value === autoInfo.value)
+    const isAuto = Boolean(resolvedInfo && model.value === resolvedInfo.value)
     const isActive = model.value === value || isAuto
     const vendorName = vendorNameOf(model)
     return (
@@ -301,6 +306,8 @@ export function ChatModelSelector({
           className="py-1.5 text-[11px]"
           onSelect={() => {
             onChange(model.value)
+            // 仅用户主动选择时写入缓存，新建对话/切换任务优先使用此模型
+            saveLastSelectedModel(model.value)
             setOpen(false)
           }}
         >
@@ -331,10 +338,10 @@ export function ChatModelSelector({
         <span
           className="max-w-32 truncate"
           title={
-            current?.displayName
+            value === resolved
               ? undefined
-              : autoInfo
-                ? `未显式选择，系统自动选择：${autoInfo.displayName}`
+              : resolvedInfo
+                ? `未显式选择，系统自动选择：${resolvedInfo.displayName}`
                 : undefined
           }
         >

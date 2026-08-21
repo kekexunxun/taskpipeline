@@ -145,6 +145,7 @@ export function OpenAIProfileDialog({
             <Field label="厂商">
               <Select
                 value={vendor}
+                disabled={mode === 'edit'}
                 onValueChange={(value) => {
                   setVendor(value as ModelVendor)
                   // 切换厂商时自动填充默认 URL（仅当 URL 为空或还是旧厂商默认值时）

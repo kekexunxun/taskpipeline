@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIcon,
   FileDiffIcon,
@@ -15,7 +15,6 @@ import type { DriverPart, TaskDetail, ChangedFile } from '../../../api'
 import { ChatMcpSelector, type McpServiceId } from '../../ChatPage/components/ChatMcpSelector'
 import { ChatSkillSelector } from '../../ChatPage/components/ChatSkillSelector'
 import { useChatModels } from '../../../hooks/useChatModels'
-import { isModelAvailable, pickSystemDefaultModel } from '../../../utils/chat-models'
 import { inReviewStates } from '../../../utils/status'
 import { DetailHeader } from './DetailHeader'
 import { UsageSection } from './UsageSection'
@@ -143,12 +142,21 @@ export function DetailPanel({
   const [planFeedback, setPlanFeedback] = useState('')
   const [planEditOpen, setPlanEditOpen] = useState(false)
   const { modelGroups: allModelGroups } = useChatModels()
-  // 任务存储模型失效(profile 删除 / 模型下线)时展示系统默认,不动存储值(运行时由后端同样回落)。
-  const effectiveTaskModel = useMemo(() => {
-    const stored = task?.qoderModel
-    if (stored && isModelAvailable(allModelGroups, stored)) return stored
-    return pickSystemDefaultModel(allModelGroups)?.model ?? stored
-  }, [task?.qoderModel, allModelGroups])
+  // 选择器解析出的模型与 task 不一致时（task 无模型 / 模型失效），自动回写一次到后端。
+  // 用 ref 防止重复触发：同一个 task 只自动持久化一次，后续用户手动变更走 onChangeModel。
+  const resolvedPersistedRef = useRef<string | undefined>(undefined)
+  const handleResolveModel = useCallback(
+    (resolved: string) => {
+      if (!task?.id || resolvedPersistedRef.current === task.id) return
+      resolvedPersistedRef.current = task.id
+      onChangeModel(resolved)
+    },
+    [task?.id, onChangeModel]
+  )
+  // 切换任务时重置，使新任务也能触发一次自动持久化
+  useEffect(() => {
+    resolvedPersistedRef.current = undefined
+  }, [task?.id])
   const groups = useMemo(() => {
     const byRepo = new Map<string, { repositoryId: string; repositoryName: string; files: ChangedFile[] }>()
     for (const file of detail?.changedFiles ?? []) {
@@ -223,8 +231,9 @@ export function DetailPanel({
       <UsageSection
         task={task}
         card={card}
-        model={effectiveTaskModel}
+        model={task?.qoderModel}
         onChangeModel={onChangeModel}
+        onResolveModel={handleResolveModel}
         modelGroups={allModelGroups}
         running={running || starting}
       />

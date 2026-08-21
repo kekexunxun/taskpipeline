@@ -12,6 +12,7 @@ export function UsageSection({
   card,
   model,
   onChangeModel,
+  onResolveModel,
   modelGroups,
   running
 }: {
@@ -19,6 +20,7 @@ export function UsageSection({
   card?: TaskCard
   model?: string
   onChangeModel?(value: string | undefined): void
+  onResolveModel?(resolved: string): void
   modelGroups: ChatModelGroup[]
   running: boolean
 }) {
@@ -59,6 +61,7 @@ export function UsageSection({
             value={model}
             disabled={locked}
             onChange={(value) => onChangeModel?.(value)}
+            onResolve={onResolveModel}
           />
         </div>
       ) : model ? (

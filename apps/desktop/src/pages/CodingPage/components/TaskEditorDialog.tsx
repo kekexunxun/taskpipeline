@@ -1,13 +1,20 @@
-import { useEffect, useRef, useState } from "react";
-import { CheckIcon, ChevronDownIcon, Loader2Icon, PlayIcon, SaveIcon, SlidersHorizontalIcon, SparklesIcon, WandSparklesIcon } from "lucide-react";
-import type { AgentProfile, RepositoryProfile, Task, TaskRepository, TaskStartMode } from "@task-pipeline/core";
-// 与 packages/core/src/types.ts 的 AGENT_TASK_DISABLED 保持一致；
-// 前端不得 import core 运行值（会拖入 better-sqlite3，导致 vite 预打包在浏览器环境崩溃）
-const AGENT_TASK_DISABLED = "__disabled__";
-import { api, type RepositoryCommands, type StartTaskOptions } from "@/api";
-import { useFeedback } from "@/hooks/useGlobalFeedback";
-import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useEffect, useRef, useState } from 'react'
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  Loader2Icon,
+  PlayIcon,
+  SaveIcon,
+  SlidersHorizontalIcon,
+  SparklesIcon,
+  WandSparklesIcon
+} from 'lucide-react'
+import type { AgentProfile, RepositoryProfile, Task, TaskRepository, TaskStartMode } from '@task-pipeline/core'
+import { mergeRepositoryOptions, RepositoryPicker } from './RepositoryPicker'
+import { api, type RepositoryCommands, type StartTaskOptions } from '@/api'
+import { useFeedback } from '@/hooks/useGlobalFeedback'
+import { Button } from '@/components/ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import {
   Dialog,
   DialogClose,
@@ -16,13 +23,25 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle
-} from "@/components/ui/dialog";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { Field, FieldGroup } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { mergeRepositoryOptions, RepositoryPicker } from "./RepositoryPicker";
-import { cn } from "@/lib/utils";
+} from '@/components/ui/dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '@/components/ui/alert-dialog'
+import { Field, FieldGroup } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
+import { cn } from '@/lib/utils'
+import { getLastSelectedModel } from '@/utils/last-model-cache'
+// 与 packages/core/src/types.ts 的 AGENT_TASK_DISABLED 保持一致；
+// 前端不得 import core 运行值（会拖入 better-sqlite3，导致 vite 预打包在浏览器环境崩溃）
+const AGENT_TASK_DISABLED = '__disabled__'
 
 /**
  * 任务编辑/启动 统一弹窗。
@@ -40,7 +59,7 @@ import { cn } from "@/lib/utils";
  * 共享：宽度 720px、容器 max-h-[88vh] flex-col、正文 max-h-[58vh] overflow-y-auto；
  * 共享：DialogHeader / DialogFooter 排版；共享：仓库选择 + 取消按钮。
  */
-export type TaskEditorDialogMode = "edit" | "start";
+export type TaskEditorDialogMode = 'edit' | 'start'
 
 /**
  * 任务级自动化覆盖的三态值：
@@ -51,21 +70,21 @@ export type TaskEditorDialogMode = "edit" | "start";
  * 选中「沿用」会重置回 `undefined`；切换到「开启 / 关闭」会写入 task 字段。
  * 这里与 system setting 互相独立——用户改系统设置不会回写到已有任务。
  */
-type TaskOverride = boolean | undefined;
+type TaskOverride = boolean | undefined
 type Overrides = {
-  openCodeReviewEnabled: TaskOverride;
-  createTestCasesEnabled: TaskOverride;
-  autoCreateMergeRequests: TaskOverride;
-};
+  openCodeReviewEnabled: TaskOverride
+  createTestCasesEnabled: TaskOverride
+  autoCreateMergeRequests: TaskOverride
+}
 
 const SYSTEM_FLAG_KEYS = {
-  openCodeReviewEnabled: "openCodeReviewEnabled",
-  createTestCasesEnabled: "createTestCasesEnabled",
-  autoCreateMergeRequests: "autoCreateMergeRequests"
-} as const;
+  openCodeReviewEnabled: 'openCodeReviewEnabled',
+  createTestCasesEnabled: 'createTestCasesEnabled',
+  autoCreateMergeRequests: 'autoCreateMergeRequests'
+} as const
 
 function readSetting(key: keyof typeof SYSTEM_FLAG_KEYS): Promise<boolean> {
-  return api.getSetting(SYSTEM_FLAG_KEYS[key]).then((value) => value === "true");
+  return api.getSetting(SYSTEM_FLAG_KEYS[key]).then((value) => value === 'true')
 }
 
 /**
@@ -75,22 +94,16 @@ function readSetting(key: keyof typeof SYSTEM_FLAG_KEYS): Promise<boolean> {
  * icon + 标题 + 描述；选中态用 `border-primary` + `bg-primary/5` + `ring-1 ring-primary/30`
  * 强调，与页面里其它"主操作"区域在视觉权重上一致。
  */
-function StartModeCards({
-  value,
-  onChange
-}: {
-  value: TaskStartMode;
-  onChange(next: TaskStartMode): void;
-}) {
+function StartModeCards({ value, onChange }: { value: TaskStartMode; onChange(next: TaskStartMode): void }) {
   const options: Array<{ value: TaskStartMode; label: string; description: string; Icon: typeof PlayIcon }> = [
-    { value: "direct", label: "直接开始", description: "立即进入实现，跳过计划阶段。", Icon: PlayIcon },
-    { value: "plan", label: "先生成计划", description: "先输出执行计划，确认后再实现。", Icon: WandSparklesIcon }
-  ];
+    { value: 'direct', label: '直接开始', description: '立即进入实现，跳过计划阶段。', Icon: PlayIcon },
+    { value: 'plan', label: '先生成计划', description: '先输出执行计划，确认后再实现。', Icon: WandSparklesIcon }
+  ]
   return (
     <Field label="启动方式">
       <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="启动方式">
         {options.map((option) => {
-          const active = option.value === value;
+          const active = option.value === value
           return (
             <button
               key={option.value}
@@ -99,24 +112,26 @@ function StartModeCards({
               aria-checked={active}
               onClick={() => onChange(option.value)}
               className={cn(
-                "rounded-md border p-3 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                'rounded-md border p-3 text-left transition-all focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none',
                 active
-                  ? "border-primary/60 bg-primary/[0.06] ring-1 ring-primary/30"
-                  : "border-border/60 hover:border-foreground/30 hover:bg-foreground/[0.02]"
+                  ? 'border-primary/60 bg-primary/[0.06] ring-1 ring-primary/30'
+                  : 'border-border/60 hover:border-foreground/30 hover:bg-foreground/[0.02]'
               )}
             >
               <div className="flex items-center gap-1.5">
-                <option.Icon size={12} className={cn(active ? "text-primary" : "text-muted-foreground")} />
-                <span className={cn("text-xs font-medium", active ? "text-foreground" : "text-foreground/80")}>{option.label}</span>
+                <option.Icon size={12} className={cn(active ? 'text-primary' : 'text-muted-foreground')} />
+                <span className={cn('text-xs font-medium', active ? 'text-foreground' : 'text-foreground/80')}>
+                  {option.label}
+                </span>
                 {active && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />}
               </div>
               <p className="mt-1 text-[10.5px] leading-snug text-muted-foreground">{option.description}</p>
             </button>
-          );
+          )
         })}
       </div>
     </Field>
-  );
+  )
 }
 
 /**
@@ -135,31 +150,31 @@ function AutomationOverrideField({
   systemValue,
   onChange
 }: {
-  label: string;
-  helper: string;
-  value: TaskOverride;
-  systemValue: boolean;
-  onChange(next: TaskOverride): void;
+  label: string
+  helper: string
+  value: TaskOverride
+  systemValue: boolean
+  onChange(next: TaskOverride): void
 }) {
   const options: Array<{ value: TaskOverride; label: string }> = [
-    { value: undefined, label: "沿用" },
-    { value: true, label: "开启" },
-    { value: false, label: "关闭" }
-  ];
-  const effective = value ?? systemValue;
-  const source = value === undefined ? "沿用系统" : "任务独立配置";
+    { value: undefined, label: '沿用' },
+    { value: true, label: '开启' },
+    { value: false, label: '关闭' }
+  ]
+  const effective = value ?? systemValue
+  const source = value === undefined ? '沿用系统' : '任务独立配置'
   return (
     <Field label={<span className="text-xs font-medium">{label}</span>}>
       <div className="space-y-1.5">
         <div className="flex flex-wrap items-center gap-2">
           <div className="inline-flex h-7 items-center gap-0.5 rounded-md border bg-card/40 p-0.5 text-[11px]">
             {options.map((option) => {
-              const active = option.value === value;
+              const active = option.value === value
               return (
                 <Button
                   key={option.label}
                   type="button"
-                  variant={active ? "default" : "ghost"}
+                  variant={active ? 'default' : 'ghost'}
                   size="sm"
                   className="h-6 px-2"
                   onClick={() => onChange(option.value)}
@@ -167,23 +182,25 @@ function AutomationOverrideField({
                 >
                   {option.label}
                 </Button>
-              );
+              )
             })}
           </div>
           <span className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/30 px-1.5 py-0.5 text-[10px] text-muted-foreground">
             <span className="text-muted-foreground/70">系统默认</span>
-            <span className={cn("font-medium", systemValue ? "text-emerald-500" : "text-muted-foreground/80")}>
-              {systemValue ? "开" : "关"}
+            <span className={cn('font-medium', systemValue ? 'text-emerald-500' : 'text-muted-foreground/80')}>
+              {systemValue ? '开' : '关'}
             </span>
           </span>
         </div>
         <p className="text-[11px] leading-relaxed text-muted-foreground">
           {helper}
-          <span className="ml-1 text-foreground/70">实际生效：{effective ? "开启" : "关闭"}（{source}）</span>
+          <span className="ml-1 text-foreground/70">
+            实际生效：{effective ? '开启' : '关闭'}（{source}）
+          </span>
         </p>
       </div>
     </Field>
-  );
+  )
 }
 
 /**
@@ -198,14 +215,14 @@ function TaskAgentOverrideField({
   value,
   onChange
 }: {
-  agents: AgentProfile[];
-  value: string | undefined;
-  onChange(next: string | undefined): void;
+  agents: AgentProfile[]
+  value: string | undefined
+  onChange(next: string | undefined): void
 }) {
-  const choice = value === undefined ? "follow" : value === AGENT_TASK_DISABLED ? "disabled" : "custom";
+  const choice = value === undefined ? 'follow' : value === AGENT_TASK_DISABLED ? 'disabled' : 'custom'
   // 任务级指定：只允许选用户自建/自定义 Agent；系统 builtin Agent 由仓库白名单自动解析，不开放覆盖。
-  const selectableAgents = agents.filter((agent) => !agent.builtin);
-  const selected = selectableAgents.find((agent) => agent.id === value);
+  const selectableAgents = agents.filter((agent) => !agent.builtin)
+  const selected = selectableAgents.find((agent) => agent.id === value)
   return (
     <Field label={<span className="text-xs font-medium">执行 Agent</span>}>
       <div className="space-y-1.5">
@@ -213,37 +230,37 @@ function TaskAgentOverrideField({
           <div className="inline-flex h-7 items-center gap-0.5 rounded-md border bg-card/40 p-0.5 text-[11px]">
             <Button
               type="button"
-              variant={choice === "follow" ? "default" : "ghost"}
+              variant={choice === 'follow' ? 'default' : 'ghost'}
               size="sm"
               className="h-6 px-2"
               onClick={() => onChange(undefined)}
-              aria-pressed={choice === "follow"}
+              aria-pressed={choice === 'follow'}
             >
               跟随仓库
             </Button>
             <Button
               type="button"
-              variant={choice === "custom" ? "default" : "ghost"}
+              variant={choice === 'custom' ? 'default' : 'ghost'}
               size="sm"
               className="h-6 px-2"
               disabled={selectableAgents.length === 0}
               onClick={() => onChange(selectableAgents[0]?.id)}
-              aria-pressed={choice === "custom"}
+              aria-pressed={choice === 'custom'}
             >
               指定
             </Button>
             <Button
               type="button"
-              variant={choice === "disabled" ? "default" : "ghost"}
+              variant={choice === 'disabled' ? 'default' : 'ghost'}
               size="sm"
               className="h-6 px-2"
               onClick={() => onChange(AGENT_TASK_DISABLED)}
-              aria-pressed={choice === "disabled"}
+              aria-pressed={choice === 'disabled'}
             >
               禁用
             </Button>
           </div>
-          {choice === "custom" && (
+          {choice === 'custom' && (
             <Select value={value} onValueChange={(next) => onChange(next)}>
               <SelectTrigger className="h-7 w-44 text-xs" aria-label="指定执行 Agent">
                 <SelectValue placeholder="选择 Agent" />
@@ -260,13 +277,17 @@ function TaskAgentOverrideField({
         </div>
         <p className="text-[11px] leading-relaxed text-muted-foreground">
           任务执行时注入哪个 Agent 的指引并按其实例路由模型。
-          {choice === "custom" && selected && <span className="ml-1 text-foreground/70">实际生效：{selected.name}（任务独立指定）</span>}
-          {choice === "follow" && <span className="ml-1 text-foreground/70">实际生效：按仓库白名单解析</span>}
-          {choice === "disabled" && <span className="ml-1 text-foreground/70">实际生效：禁用注入，模型跟随系统设置</span>}
+          {choice === 'custom' && selected && (
+            <span className="ml-1 text-foreground/70">实际生效：{selected.name}（任务独立指定）</span>
+          )}
+          {choice === 'follow' && <span className="ml-1 text-foreground/70">实际生效：按仓库白名单解析</span>}
+          {choice === 'disabled' && (
+            <span className="ml-1 text-foreground/70">实际生效：禁用注入，模型跟随系统设置</span>
+          )}
         </p>
       </div>
     </Field>
-  );
+  )
 }
 
 /**
@@ -285,19 +306,20 @@ function TaskBodyFields({
   onKeywordsChange,
   onAcceptanceChange
 }: {
-  title: string;
-  description: string;
-  keywords: string;
-  acceptance: string;
-  onTitleChange(next: string): void;
-  onDescriptionChange(next: string): void;
-  onKeywordsChange(next: string): void;
-  onAcceptanceChange(next: string): void;
+  title: string
+  description: string
+  keywords: string
+  acceptance: string
+  onTitleChange(next: string): void
+  onDescriptionChange(next: string): void
+  onKeywordsChange(next: string): void
+  onAcceptanceChange(next: string): void
 }) {
   return (
     <FieldGroup className="grid-cols-1 gap-3">
       <Field label="标题">
         <Input
+          // eslint-disable-next-line jsx-a11y/no-autofocus -- 弹窗内首输入焦点，提升操作效率
           autoFocus
           value={title}
           onChange={(event) => onTitleChange(event.target.value)}
@@ -313,11 +335,7 @@ function TaskBodyFields({
         />
       </Field>
       <Field label="关键词（逗号分隔）">
-        <Input
-          value={keywords}
-          onChange={(event) => onKeywordsChange(event.target.value)}
-          placeholder="请输入关键词"
-        />
+        <Input value={keywords} onChange={(event) => onKeywordsChange(event.target.value)} placeholder="请输入关键词" />
       </Field>
       <Field label="验收标准（每行一条）">
         <Textarea
@@ -328,7 +346,7 @@ function TaskBodyFields({
         />
       </Field>
     </FieldGroup>
-  );
+  )
 }
 
 /**
@@ -348,15 +366,15 @@ function RepositoryCommandPanel({
   agents,
   onAgentChange
 }: {
-  profile: RepositoryProfile;
-  isNewlyAttached: boolean;
-  isOpen: boolean;
-  onToggle(): void;
-  commands: RepositoryCommands | undefined;
-  onChange(key: keyof RepositoryCommands, value: string): void;
-  agentId?: string;
-  agents: AgentProfile[];
-  onAgentChange(agentId: string | undefined): void;
+  profile: RepositoryProfile
+  isNewlyAttached: boolean
+  isOpen: boolean
+  onToggle(): void
+  commands: RepositoryCommands | undefined
+  onChange(key: keyof RepositoryCommands, value: string): void
+  agentId?: string
+  agents: AgentProfile[]
+  onAgentChange(agentId: string | undefined): void
 }) {
   return (
     <section className="overflow-hidden rounded-md border bg-card/40">
@@ -364,59 +382,66 @@ function RepositoryCommandPanel({
         type="button"
         onClick={onToggle}
         aria-expanded={isOpen}
-        className="flex w-full justify-between items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-foreground/[0.02] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition-colors hover:bg-foreground/[0.02] focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
       >
         <div className="flex items-center gap-1.5">
           <span className="text-xs font-medium">{profile.name}</span>
           {isNewlyAttached && <span className="text-[10.5px] text-muted-foreground/80">· 新关联</span>}
           <span className="mx-1 h-3 w-px bg-border/60" />
-          <Select value={agentId ?? "__none__"} onValueChange={(value) => onAgentChange(value === "__none__" ? undefined : value)}>
-            <SelectTrigger className="h-5 w-auto gap-0.5 border-0 bg-transparent p-0 text-[10.5px]! text-muted-foreground hover:text-foreground focus:ring-0 [&_svg]:h-3 [&_svg]:w-3" aria-label="选择执行 Agent">
+          <Select
+            value={agentId ?? '__none__'}
+            onValueChange={(value) => onAgentChange(value === '__none__' ? undefined : value)}
+          >
+            <SelectTrigger
+              className="h-5 w-auto gap-0.5 border-0 bg-transparent p-0 text-[10.5px]! text-muted-foreground hover:text-foreground focus:ring-0 [&_svg]:h-3 [&_svg]:w-3"
+              aria-label="选择执行 Agent"
+            >
               <SelectValue placeholder={<span className="text-muted-foreground/60">默认 Agent</span>} />
             </SelectTrigger>
             <SelectContent className="text-xs">
-              <SelectItem value="__none__" className="text-xs">默认 Agent（跟随仓库绑定）</SelectItem>
-              {agents.filter((agent) => !agent.builtin).map((agent) => (
-                <SelectItem key={agent.id} value={agent.id} className="text-xs">
-                  {agent.name}
-                </SelectItem>
-              ))}
+              <SelectItem value="__none__" className="text-xs">
+                默认 Agent（跟随仓库绑定）
+              </SelectItem>
+              {agents
+                .filter((agent) => !agent.builtin)
+                .map((agent) => (
+                  <SelectItem key={agent.id} value={agent.id} className="text-xs">
+                    {agent.name}
+                  </SelectItem>
+                ))}
             </SelectContent>
           </Select>
         </div>
-        <ChevronDownIcon
-          size={11}
-          className={cn("transition-transform duration-200", isOpen && "rotate-180")}
-        />
+        <ChevronDownIcon size={11} className={cn('transition-transform duration-200', isOpen && 'rotate-180')} />
       </button>
       {isOpen && (
         <div className="border-t p-3">
           <FieldGroup className="grid-cols-2 gap-2">
             <Field className="col-span-2" label="准备命令">
               <Textarea
-                value={commands?.setupCommand ?? ""}
-                onChange={(event) => onChange("setupCommand", event.target.value)}
+                value={commands?.setupCommand ?? ''}
+                onChange={(event) => onChange('setupCommand', event.target.value)}
                 placeholder="可选，例如 npm install"
               />
             </Field>
             <Field label="Lint">
               <Input
-                value={commands?.lintCommand ?? ""}
-                onChange={(event) => onChange("lintCommand", event.target.value)}
+                value={commands?.lintCommand ?? ''}
+                onChange={(event) => onChange('lintCommand', event.target.value)}
                 placeholder="例如 npm run lint"
               />
             </Field>
             <Field label="Test">
               <Input
-                value={commands?.testCommand ?? ""}
-                onChange={(event) => onChange("testCommand", event.target.value)}
+                value={commands?.testCommand ?? ''}
+                onChange={(event) => onChange('testCommand', event.target.value)}
                 placeholder="例如 npm test"
               />
             </Field>
             <Field className="col-span-2" label="Build">
               <Input
-                value={commands?.buildCommand ?? ""}
-                onChange={(event) => onChange("buildCommand", event.target.value)}
+                value={commands?.buildCommand ?? ''}
+                onChange={(event) => onChange('buildCommand', event.target.value)}
                 placeholder="例如 npm run build"
               />
             </Field>
@@ -424,7 +449,7 @@ function RepositoryCommandPanel({
         </div>
       )}
     </section>
-  );
+  )
 }
 
 export function TaskEditorDialog({
@@ -438,62 +463,70 @@ export function TaskEditorDialog({
   onStarting,
   onStarted
 }: {
-  mode: TaskEditorDialogMode;
-  task?: Task;
-  taskId?: string;
-  reimplement?: boolean;
-  open: boolean;
-  onOpenChange(open: boolean): void;
-  onSaved(task: Task): void | Promise<void>;
-  onStarting?(taskId: string): void;
-  onStarted?(): Promise<void>;
+  mode: TaskEditorDialogMode
+  task?: Task
+  taskId?: string
+  reimplement?: boolean
+  open: boolean
+  onOpenChange(open: boolean): void
+  onSaved(task: Task): void | Promise<void>
+  onStarting?(taskId: string): void
+  onStarted?(): Promise<void>
 }) {
   // === 任务正文（两种模式都可编辑） ===
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [keywords, setKeywords] = useState("");
-  const [acceptance, setAcceptance] = useState("");
+  const [title, setTitle] = useState('')
+  const [description, setDescription] = useState('')
+  const [keywords, setKeywords] = useState('')
+  const [acceptance, setAcceptance] = useState('')
 
   // === 共享：仓库选择 ===
-  const [repositories, setRepositories] = useState<RepositoryProfile[]>([]);
-  const [selectedRepoIds, setSelectedRepoIds] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(false);
-  const initialIdsRef = useRef<Set<string>>(new Set());
-  const { showError, showSuccess } = useFeedback();
+  const [repositories, setRepositories] = useState<RepositoryProfile[]>([])
+  const [selectedRepoIds, setSelectedRepoIds] = useState<Set<string>>(new Set())
+  const [loading, setLoading] = useState(false)
+  const initialIdsRef = useRef<Set<string>>(new Set())
+  const { showError, showSuccess } = useFeedback()
 
   // === 共享：高级设置（折叠面板） ===
-  const [overrides, setOverrides] = useState<Overrides>({ openCodeReviewEnabled: undefined, createTestCasesEnabled: undefined, autoCreateMergeRequests: undefined });
-  const [systemFlags, setSystemFlags] = useState<{ openCodeReviewEnabled: boolean; createTestCasesEnabled: boolean; autoCreateMergeRequests: boolean }>({ openCodeReviewEnabled: false, createTestCasesEnabled: false, autoCreateMergeRequests: false });
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [overrides, setOverrides] = useState<Overrides>({
+    openCodeReviewEnabled: undefined,
+    createTestCasesEnabled: undefined,
+    autoCreateMergeRequests: undefined
+  })
+  const [systemFlags, setSystemFlags] = useState<{
+    openCodeReviewEnabled: boolean
+    createTestCasesEnabled: boolean
+    autoCreateMergeRequests: boolean
+  }>({ openCodeReviewEnabled: false, createTestCasesEnabled: false, autoCreateMergeRequests: false })
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [saving, setSaving] = useState(false)
   // === 任务级 Agent 覆盖：undefined=跟随仓库 | AGENT_TASK_DISABLED=禁用 | 其它=指定 Agent id ===
-  const [agents, setAgents] = useState<AgentProfile[]>([]);
-  const [agentProfileId, setAgentProfileId] = useState<string | undefined>(undefined);
+  const [agents, setAgents] = useState<AgentProfile[]>([])
+  const [agentProfileId, setAgentProfileId] = useState<string | undefined>(undefined)
   // 逐仓库 Agent 覆盖
-  const [repoAgentIds, setRepoAgentIds] = useState<Record<string, string>>({});
+  const [repoAgentIds, setRepoAgentIds] = useState<Record<string, string>>({})
 
   // === start 专用：启动方式 / 仓库命令（默认折叠） / reimplement 标记 ===
-  const [startMode, setStartMode] = useState<TaskStartMode>("direct");
-  const [taskRepositories, setTaskRepositories] = useState<TaskRepository[]>([]);
-  const [commands, setCommands] = useState<Record<string, RepositoryCommands>>({});
-  const [commandPanelsOpen, setCommandPanelsOpen] = useState<Record<string, boolean>>({});
-  const [startSaving, setStartSaving] = useState(false);
-  const [confirmingAll, setConfirmingAll] = useState(false);
-  const reimplementedRef = useRef(false);
+  const [startMode, setStartMode] = useState<TaskStartMode>('direct')
+  const [taskRepositories, setTaskRepositories] = useState<TaskRepository[]>([])
+  const [commands, setCommands] = useState<Record<string, RepositoryCommands>>({})
+  const [commandPanelsOpen, setCommandPanelsOpen] = useState<Record<string, boolean>>({})
+  const [startSaving, setStartSaving] = useState(false)
+  const [confirmingAll, setConfirmingAll] = useState(false)
+  const reimplementedRef = useRef(false)
 
   // 依赖 key 用来在 open / mode / task.id 变化时统一重置状态
-  const sessionKey = `${mode}|${open ? "1" : "0"}|${task?.id ?? ""}|${taskId ?? ""}`;
+  const sessionKey = `${mode}|${open ? '1' : '0'}|${task?.id ?? ''}|${taskId ?? ''}`
 
   // 构造提交用的 task input：edit 和 start 共用一份 payload。
   const buildTaskInput = () => ({
     title: title.trim(),
     description: description.trim(),
     keywords: keywords
-      .split(",")
+      .split(',')
       .map((item) => item.trim())
       .filter(Boolean),
     acceptanceCriteria: acceptance
-      .split("\n")
+      .split('\n')
       .map((item) => item.trim())
       .filter(Boolean),
     // 任务级覆盖：显式 boolean 才写入 task 字段；undefined 视为"沿用系统设置"（后端 patch 会清掉字段）。
@@ -503,199 +536,215 @@ export function TaskEditorDialog({
     // 任务级 Agent：undefined=跟随仓库（不写入）；AGENT_TASK_DISABLED / id 为显式覆盖。
     agentProfileId,
     // 逐仓库 Agent 覆盖
-    repoAgentIds: Object.keys(repoAgentIds).length > 0 ? repoAgentIds : undefined
-  });
+    repoAgentIds: Object.keys(repoAgentIds).length > 0 ? repoAgentIds : undefined,
+    // 新建任务时继承 Chat 页面上次选择的模型，保证前后端一致
+    ...(!task && getLastSelectedModel() ? { qoderModel: getLastSelectedModel() } : {})
+  })
 
   // 同步仓库关联：edit / start 共用。
   const syncRepositories = async (targetTaskId: string, useAllRepositories: boolean) => {
     if (useAllRepositories) {
-      for (const id of initialIdsRef.current) await api.detachRepository(targetTaskId, id);
-      return;
+      for (const id of initialIdsRef.current) await api.detachRepository(targetTaskId, id)
+      return
     }
-    const desired = new Set(selectedRepoIds);
-    const current = new Set(initialIdsRef.current);
-    const toAttach = [...desired].filter((id) => !current.has(id));
-    const toDetach = [...current].filter((id) => !desired.has(id));
+    const desired = new Set(selectedRepoIds)
+    const current = new Set(initialIdsRef.current)
+    const toAttach = [...desired].filter((id) => !current.has(id))
+    const toDetach = [...current].filter((id) => !desired.has(id))
     for (const repoId of toAttach) {
-      await api.attachRepository(targetTaskId, repoId);
+      await api.attachRepository(targetTaskId, repoId)
     }
     for (const repoId of toDetach) {
-      await api.detachRepository(targetTaskId, repoId);
+      await api.detachRepository(targetTaskId, repoId)
     }
-  };
+  }
 
   useEffect(() => {
-    if (!open) return;
-    if (mode === "edit") {
-      setTitle(task?.title ?? "");
-      setDescription(task?.description ?? "");
-      setKeywords(task?.keywords.join(", ") ?? "");
-      setAcceptance(task?.acceptanceCriteria.join("\n") ?? "");
-      setAdvancedOpen(false);
-      setAgentProfileId(task?.agentProfileId ?? undefined);
+    if (!open) return
+    if (mode === 'edit') {
+      setTitle(task?.title ?? '')
+      setDescription(task?.description ?? '')
+      setKeywords(task?.keywords.join(', ') ?? '')
+      setAcceptance(task?.acceptanceCriteria.join('\n') ?? '')
+      setAdvancedOpen(false)
+      setAgentProfileId(task?.agentProfileId ?? undefined)
     } else {
       // start 模式：标题等数据由下面的 fetch effect 填充；这里只清 start 专用状态。
-      reimplementedRef.current = false;
-      setConfirmingAll(false);
-      setCommandPanelsOpen({});
+      reimplementedRef.current = false
+      setConfirmingAll(false)
+      setCommandPanelsOpen({})
     }
-  }, [sessionKey, mode, open, task?.title, task?.description, task?.keywords, task?.acceptanceCriteria, task]);
+  }, [sessionKey, mode, open, task?.title, task?.description, task?.keywords, task?.acceptanceCriteria, task])
 
   useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    setLoading(true);
+    if (!open) return
+    let cancelled = false
+    setLoading(true)
 
     const repoPromise = api.listRepositories().catch((reason) => {
-      showError(reason instanceof Error ? reason.message : String(reason));
-      return [] as RepositoryProfile[];
-    });
+      showError(reason instanceof Error ? reason.message : String(reason))
+      return [] as RepositoryProfile[]
+    })
 
     // 两种模式都根据 taskId / task.id 拉详情——start 模式要靠它填充正文与初始化仓库。
-    const detailTaskId = mode === "edit" ? task?.id : taskId;
+    const detailTaskId = mode === 'edit' ? task?.id : taskId
     const detailPromise = detailTaskId
       ? api.getTask(detailTaskId).catch((reason) => {
-        showError(reason instanceof Error ? reason.message : String(reason));
-        return undefined;
-      })
-      : Promise.resolve(undefined);
+          showError(reason instanceof Error ? reason.message : String(reason))
+          return undefined
+        })
+      : Promise.resolve(undefined)
 
     // 两种模式都需要读系统设置，让高级设置区显示真实"系统默认"。
     const systemFlagsPromise = Promise.all([
-      readSetting("openCodeReviewEnabled"),
-      readSetting("createTestCasesEnabled"),
-      readSetting("autoCreateMergeRequests")
-    ]);
+      readSetting('openCodeReviewEnabled'),
+      readSetting('createTestCasesEnabled'),
+      readSetting('autoCreateMergeRequests')
+    ])
 
     const agentsPromise = api.listAgents().catch((reason) => {
-      showError(reason instanceof Error ? reason.message : String(reason));
-      return [] as AgentProfile[];
-    });
+      showError(reason instanceof Error ? reason.message : String(reason))
+      return [] as AgentProfile[]
+    })
 
     Promise.all([repoPromise, detailPromise, systemFlagsPromise, agentsPromise])
       .then(([repos, detail, flags, agentList]) => {
-        if (cancelled) return;
-        setAgents(agentList);
-        const attached = detail?.repositories ?? [];
-        const merged = mergeRepositoryOptions(repos, attached);
-        setRepositories(merged);
-        const ids = attached.map((item) => item.repositoryId);
-        initialIdsRef.current = new Set(ids);
-        setSelectedRepoIds(new Set(ids));
+        if (cancelled) return
+        setAgents(agentList)
+        const attached = detail?.repositories ?? []
+        const merged = mergeRepositoryOptions(repos, attached)
+        setRepositories(merged)
+        const ids = attached.map((item) => item.repositoryId)
+        initialIdsRef.current = new Set(ids)
+        setSelectedRepoIds(new Set(ids))
         // 用详情填充正文 + overrides + 仓库命令（start 模式起始默认值）
         if (detail?.task) {
-          setTitle(detail.task.title);
-          setDescription(detail.task.description);
-          setKeywords(detail.task.keywords.join(", "));
-          setAcceptance(detail.task.acceptanceCriteria.join("\n"));
-          setAgentProfileId(detail.task.agentProfileId);
-          setRepoAgentIds(detail.task.repoAgentIds ?? {});
+          setTitle(detail.task.title)
+          setDescription(detail.task.description)
+          setKeywords(detail.task.keywords.join(', '))
+          setAcceptance(detail.task.acceptanceCriteria.join('\n'))
+          setAgentProfileId(detail.task.agentProfileId)
+          setRepoAgentIds(detail.task.repoAgentIds ?? {})
           setOverrides({
             openCodeReviewEnabled: detail.task.openCodeReviewEnabled,
             createTestCasesEnabled: detail.task.createTestCasesEnabled,
             autoCreateMergeRequests: detail.task.autoCreateMergeRequests
-          });
+          })
         } else if (task) {
-          setAgentProfileId(task.agentProfileId);
-          setRepoAgentIds(task.repoAgentIds ?? {});
+          setAgentProfileId(task.agentProfileId)
+          setRepoAgentIds(task.repoAgentIds ?? {})
           setOverrides({
             openCodeReviewEnabled: task.openCodeReviewEnabled,
             createTestCasesEnabled: task.createTestCasesEnabled,
             autoCreateMergeRequests: task.autoCreateMergeRequests
-          });
+          })
         }
-        setSystemFlags({ openCodeReviewEnabled: flags[0], createTestCasesEnabled: flags[1], autoCreateMergeRequests: flags[2] });
-        if (mode === "start") {
-          setStartMode(detail?.task?.state === "planning" ? "plan" : "direct");
+        setSystemFlags({
+          openCodeReviewEnabled: flags[0],
+          createTestCasesEnabled: flags[1],
+          autoCreateMergeRequests: flags[2]
+        })
+        if (mode === 'start') {
+          setStartMode(detail?.task?.state === 'planning' ? 'plan' : 'direct')
         }
-        setTaskRepositories(attached);
-        const byProfile = new Map(attached.map((repo) => [repo.repositoryId, repo]));
-        setCommands(Object.fromEntries(merged.map((profile) => {
-          const repo = byProfile.get(profile.id);
-          return [profile.id, {
-            setupCommand: repo?.setupCommand ?? profile.setupCommand,
-            lintCommand: repo?.lintCommand ?? profile.lintCommand,
-            testCommand: repo?.testCommand ?? profile.testCommand,
-            buildCommand: repo?.buildCommand ?? profile.buildCommand
-          }];
-        })));
+        setTaskRepositories(attached)
+        const byProfile = new Map(attached.map((repo) => [repo.repositoryId, repo]))
+        setCommands(
+          Object.fromEntries(
+            merged.map((profile) => {
+              const repo = byProfile.get(profile.id)
+              return [
+                profile.id,
+                {
+                  setupCommand: repo?.setupCommand ?? profile.setupCommand,
+                  lintCommand: repo?.lintCommand ?? profile.lintCommand,
+                  testCommand: repo?.testCommand ?? profile.testCommand,
+                  buildCommand: repo?.buildCommand ?? profile.buildCommand
+                }
+              ]
+            })
+          )
+        )
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+        if (!cancelled) setLoading(false)
+      })
     return () => {
-      cancelled = true;
-    };
+      cancelled = true
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionKey, mode, task?.id, taskId, showError]);
+  }, [sessionKey, mode, task?.id, taskId, showError])
 
   // === edit 提交：保存任务 + 同步仓库 + 持久化命令 + 关闭 ===
   const save = async () => {
-    setSaving(true);
+    setSaving(true)
     try {
-      const saved = task
-        ? await api.updateTask(task.id, buildTaskInput())
-        : await api.createTask(buildTaskInput());
-      await syncRepositories(saved.id, false);
+      const saved = task ? await api.updateTask(task.id, buildTaskInput()) : await api.createTask(buildTaskInput())
+      await syncRepositories(saved.id, false)
       // 持久化每个已选仓库的命令配置（setup / lint / test / build）。
       // 新关联的仓库在 syncRepositories 中已 attach，这里按 (taskId, repositoryId) 更新即可。
       for (const repoId of selectedRepoIds) {
-        const cmds = commands[repoId];
-        if (cmds) await api.updateTaskRepositoryCommands(saved.id, repoId, cmds);
+        const cmds = commands[repoId]
+        if (cmds) await api.updateTaskRepositoryCommands(saved.id, repoId, cmds)
       }
-      await onSaved(saved);
-      showSuccess(task ? "任务已更新" : "任务已创建");
-      onOpenChange(false);
+      await onSaved(saved)
+      showSuccess(task ? '任务已更新' : '任务已创建')
+      onOpenChange(false)
     } catch (reason) {
-      showError(reason instanceof Error ? reason.message : String(reason));
+      showError(reason instanceof Error ? reason.message : String(reason))
     } finally {
-      setSaving(false);
+      setSaving(false)
     }
-  };
+  }
 
   // === start 提交：先保存任务（让用户改的正文 / 自动化覆盖一起持久化），再启动 ===
   const startTask = async (useAllRepositories = false) => {
-    if (!taskId) return;
+    if (!taskId) return
     if (selectedRepoIds.size === 0 && !useAllRepositories) {
-      setConfirmingAll(true);
-      return;
+      setConfirmingAll(true)
+      return
     }
-    setStartSaving(true);
-    onStarting?.(taskId);
-    onOpenChange(false);
+    setStartSaving(true)
+    onStarting?.(taskId)
+    onOpenChange(false)
     try {
       // 1) 任务正文 + 自动化覆盖 与 仓库关联 一起持久化。
-      await api.updateTask(taskId, buildTaskInput());
-      await syncRepositories(taskId, useAllRepositories);
+      await api.updateTask(taskId, buildTaskInput())
+      await syncRepositories(taskId, useAllRepositories)
       // 2) 启动。
-      const repositoryCommands = Object.fromEntries([...selectedRepoIds].map((id) => [id, commands[id] ?? {}]));
+      const repositoryCommands = Object.fromEntries([...selectedRepoIds].map((id) => [id, commands[id] ?? {}]))
       if (reimplement && !reimplementedRef.current) {
-        await api.reimplementTask(taskId);
-        reimplementedRef.current = true;
+        await api.reimplementTask(taskId)
+        reimplementedRef.current = true
       }
-      const startOptions: StartTaskOptions = { mode: startMode, repositoryCommands, repoAgentIds: Object.keys(repoAgentIds).length > 0 ? repoAgentIds : undefined, ...(useAllRepositories ? { useAllRepositories: true } : {}) };
-      await api.startTask(taskId, startOptions);
-      await onStarted?.();
+      const startOptions: StartTaskOptions = {
+        mode: startMode,
+        repositoryCommands,
+        repoAgentIds: Object.keys(repoAgentIds).length > 0 ? repoAgentIds : undefined,
+        ...(useAllRepositories ? { useAllRepositories: true } : {})
+      }
+      await api.startTask(taskId, startOptions)
+      await onStarted?.()
     } catch (reason) {
-      await onStarted?.();
-      showError(reason instanceof Error ? reason.message : String(reason));
+      await onStarted?.()
+      showError(reason instanceof Error ? reason.message : String(reason))
     } finally {
-      setStartSaving(false);
+      setStartSaving(false)
     }
-  };
+  }
 
-  const creating = mode === "edit" && !task;
-  const selectedRepoProfiles = repositories.filter((repo) => selectedRepoIds.has(repo.id));
+  const creating = mode === 'edit' && !task
+  const selectedRepoProfiles = repositories.filter((repo) => selectedRepoIds.has(repo.id))
 
   // 启动按钮的文案 + 图标
   const startButtonLabel = startSaving
-    ? "启动中"
+    ? '启动中'
     : selectedRepoIds.size === 0
-      ? "使用全部 system 仓库启动"
-      : startMode === "plan"
-        ? "生成计划"
-        : "开始实现";
-  const StartIcon = startMode === "plan" ? SparklesIcon : PlayIcon;
+      ? '使用全部 system 仓库启动'
+      : startMode === 'plan'
+        ? '生成计划'
+        : '开始实现'
+  const StartIcon = startMode === 'plan' ? SparklesIcon : PlayIcon
 
   return (
     <>
@@ -703,20 +752,20 @@ export function TaskEditorDialog({
         <DialogContent className="flex max-h-[88vh] w-[min(720px,calc(100vw-32px))] flex-col gap-3 overflow-hidden p-5">
           <DialogHeader className="shrink-0">
             <DialogTitle>
-              {mode === "edit" ? (creating ? "新建任务" : "编辑任务") : reimplement ? "重新实现" : "开始任务"}
+              {mode === 'edit' ? (creating ? '新建任务' : '编辑任务') : reimplement ? '重新实现' : '开始任务'}
             </DialogTitle>
             <DialogDescription>
-              {mode === "edit"
+              {mode === 'edit'
                 ? creating
-                  ? "创建本地任务，并选择要关联的仓库。"
-                  : "调整标题、描述、关键词、验收标准与仓库关联。"
+                  ? '创建本地任务，并选择要关联的仓库。'
+                  : '调整标题、描述、关键词、验收标准与仓库关联。'
                 : reimplement
-                  ? "将基于现有任务重新实现。可直接修改任务正文，确认后启动会一并保存。"
-                  : "可直接修改任务正文与启动方式，确认后启动会一并保存任务。"}
+                  ? '将基于现有任务重新实现。可直接修改任务正文，确认后启动会一并保存。'
+                  : '可直接修改任务正文与启动方式，确认后启动会一并保存任务。'}
             </DialogDescription>
           </DialogHeader>
 
-          <FieldGroup className="thin-scrollbar grid-cols-1 max-h-[58vh] gap-3 overflow-y-auto px-1 py-1 pr-2">
+          <FieldGroup className="thin-scrollbar max-h-[58vh] grid-cols-1 gap-3 overflow-y-auto px-1 py-1 pr-2">
             <TaskBodyFields
               title={title}
               description={description}
@@ -728,7 +777,7 @@ export function TaskEditorDialog({
               onAcceptanceChange={setAcceptance}
             />
 
-            {mode === "start" && <StartModeCards value={startMode} onChange={setStartMode} />}
+            {mode === 'start' && <StartModeCards value={startMode} onChange={setStartMode} />}
 
             <Field
               label={
@@ -744,17 +793,19 @@ export function TaskEditorDialog({
                 repositories={repositories}
                 selectedIds={selectedRepoIds}
                 loading={loading}
-                onToggle={(id, checked) => setSelectedRepoIds((prev) => {
-                  const next = new Set(prev);
-                  if (checked) next.add(id);
-                  else next.delete(id);
-                  return next;
-                })}
+                onToggle={(id, checked) =>
+                  setSelectedRepoIds((prev) => {
+                    const next = new Set(prev)
+                    if (checked) next.add(id)
+                    else next.delete(id)
+                    return next
+                  })
+                }
               />
             </Field>
 
             {selectedRepoProfiles.map((profile) => {
-              const taskRepo = taskRepositories.find((repo) => repo.repositoryId === profile.id);
+              const taskRepo = taskRepositories.find((repo) => repo.repositoryId === profile.id)
               return (
                 <RepositoryCommandPanel
                   key={profile.id}
@@ -763,18 +814,20 @@ export function TaskEditorDialog({
                   isOpen={Boolean(commandPanelsOpen[profile.id])}
                   onToggle={() => setCommandPanelsOpen((prev) => ({ ...prev, [profile.id]: !prev[profile.id] }))}
                   commands={commands[profile.id]}
-                  onChange={(key, value) => setCommands((current) => ({ ...current, [profile.id]: { ...current[profile.id], [key]: value } }))}
+                  onChange={(key, value) =>
+                    setCommands((current) => ({ ...current, [profile.id]: { ...current[profile.id], [key]: value } }))
+                  }
                   agentId={repoAgentIds[profile.id]}
                   agents={agents}
-                  onAgentChange={(agentId) => setRepoAgentIds((prev) => ({ ...prev, [profile.id]: agentId ?? "" }))}
+                  onAgentChange={(agentId) => setRepoAgentIds((prev) => ({ ...prev, [profile.id]: agentId ?? '' }))}
                 />
-              );
+              )
             })}
 
             <fieldset className="overflow-hidden rounded-md border bg-card/40">
               <button
                 type="button"
-                className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[11px] font-semibold text-muted-foreground transition-colors hover:bg-foreground/[0.03] hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[11px] font-semibold text-muted-foreground transition-colors hover:bg-foreground/[0.03] hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
                 aria-expanded={advancedOpen}
                 aria-controls="task-advanced-section"
                 onClick={() => setAdvancedOpen((value) => !value)}
@@ -785,17 +838,15 @@ export function TaskEditorDialog({
                 </span>
                 <ChevronDownIcon
                   size={11}
-                  className={cn("transition-transform duration-200", advancedOpen && "rotate-180")}
+                  className={cn('transition-transform duration-200', advancedOpen && 'rotate-180')}
                 />
               </button>
               {advancedOpen && (
                 <div id="task-advanced-section" className="space-y-3 border-t p-3">
-                  <p className="text-[11px] text-muted-foreground">默认沿用系统设置；如需本任务独立配置，请选择「开启 / 关闭」。修改系统设置不会回写到已创建的任务。</p>
-                  <TaskAgentOverrideField
-                    agents={agents}
-                    value={agentProfileId}
-                    onChange={setAgentProfileId}
-                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    默认沿用系统设置；如需本任务独立配置，请选择「开启 / 关闭」。修改系统设置不会回写到已创建的任务。
+                  </p>
+                  <TaskAgentOverrideField agents={agents} value={agentProfileId} onChange={setAgentProfileId} />
                   <AutomationOverrideField
                     label="CodeReview"
                     helper="实现完成后是否自动跑 Review。"
@@ -828,30 +879,14 @@ export function TaskEditorDialog({
                 取消
               </Button>
             </DialogClose>
-            {mode === "edit" ? (
-              <Button
-                size="sm"
-                disabled={!title.trim() || saving || loading}
-                onClick={() => void save()}
-              >
-                {saving ? (
-                  <Loader2Icon className="animate-spin-slow" size={12} />
-                ) : (
-                  <SaveIcon size={12} />
-                )}
-                {creating ? "创建" : "保存"}
+            {mode === 'edit' ? (
+              <Button size="sm" disabled={!title.trim() || saving || loading} onClick={() => void save()}>
+                {saving ? <Loader2Icon className="animate-spin-slow" size={12} /> : <SaveIcon size={12} />}
+                {creating ? '创建' : '保存'}
               </Button>
             ) : (
-              <Button
-                size="sm"
-                disabled={startSaving || loading || !taskId}
-                onClick={() => void startTask(false)}
-              >
-                {startSaving ? (
-                  <Loader2Icon className="animate-spin-slow" size={12} />
-                ) : (
-                  <StartIcon size={12} />
-                )}
+              <Button size="sm" disabled={startSaving || loading || !taskId} onClick={() => void startTask(false)}>
+                {startSaving ? <Loader2Icon className="animate-spin-slow" size={12} /> : <StartIcon size={12} />}
                 {startButtonLabel}
               </Button>
             )}
@@ -859,7 +894,7 @@ export function TaskEditorDialog({
         </DialogContent>
       </Dialog>
 
-      {mode === "start" && (
+      {mode === 'start' && (
         <AlertDialog open={confirmingAll} onOpenChange={setConfirmingAll}>
           <AlertDialogContent>
             <AlertDialogHeader>
@@ -872,7 +907,12 @@ export function TaskEditorDialog({
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>返回选择</AlertDialogCancel>
-              <AlertDialogAction onClick={() => { setConfirmingAll(false); void startTask(true); }}>
+              <AlertDialogAction
+                onClick={() => {
+                  setConfirmingAll(false)
+                  void startTask(true)
+                }}
+              >
                 <CheckIcon size={11} />
                 确认启动
               </AlertDialogAction>
@@ -881,5 +921,5 @@ export function TaskEditorDialog({
         </AlertDialog>
       )}
     </>
-  );
+  )
 }

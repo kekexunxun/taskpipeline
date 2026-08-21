@@ -21,7 +21,8 @@ import {
 } from '@/api'
 import { useChatModels } from '@/hooks/useChatModels'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
-import { isModelAvailable, isOpenAIModelValue, pickSystemDefaultModel } from '@/utils/chat-models'
+import { isOpenAIModelValue } from '@/utils/chat-models'
+import { resolveModelValue } from '@/utils/last-model-cache'
 import type { ChatApprovalRequest, AnsweredApproval } from '@/components/ToolApprovalCard'
 
 // 兼容旧导入路径（ChatConversation / ChatPage 从 useChat import 该类型）。
@@ -216,15 +217,12 @@ export function useChat() {
       .catch(() => undefined)
   }, [refreshMetas, showError])
 
-  // 模型列表首次加载时,设置默认 driver 和 model。
-  // 系统默认规则:Qoder 分组优先(已连接且有模型),否则第一个分组;组内取 isDefault,无则第一个。
+  // 模型列表首次加载时，统一解析模型（cache → system default），确保 useChat.model 始终有值。
   useEffect(() => {
-    if (modelGroups.length === 0) return
-    const preferred = pickSystemDefaultModel(modelGroups)
-    if (!preferred) return
-    setDriverId((current) => current ?? preferred.driverId)
-    setModel((current) => current ?? preferred.model)
-  }, [modelGroups])
+    if (modelGroups.length === 0 || model) return
+    const resolved = resolveModelValue(undefined, modelGroups)
+    if (resolved) setModelAndDriver(resolved)
+  }, [modelGroups, model, setModelAndDriver])
 
   /** 拉取并缓存一个对话(消息 + 元信息)。返回元信息供 select 恢复配置。 */
   const loadConversation = useCallback(
@@ -259,16 +257,14 @@ export function useChat() {
       if (!conv) conv = await loadConversation(id)
       // 异步竞态:拉取期间用户又切走了,放弃恢复(避免覆盖当前视图)。
       if (activeIdRef.current !== id || !conv) return
-      // 存储模型失效(profile 删除 / 模型下线)时回落系统默认,不动存储值。
-      const stored = conv.model
-      const storedValid = Boolean(stored) && isModelAvailable(modelGroups, stored)
-      if (stored && storedValid) {
-        setModelAndDriver(stored)
+      // 统一解析：对话存储模型 → cache → 系统默认，确保 useChat.model 始终有值
+      const resolved = resolveModelValue(conv.model, modelGroups)
+      if (resolved) setModelAndDriver(resolved)
+      // 仅当解析结果与对话存储模型一致时，恢复该对话的 driver + params
+      if (conv.model && resolved === conv.model) {
         if (conv.driverId) setDriverId(conv.driverId)
         setModelParams(conv.modelParams)
       } else {
-        const fallback = pickSystemDefaultModel(modelGroups)
-        if (fallback) setModelAndDriver(fallback.model)
         setModelParams(undefined)
       }
       // MCP / Skill / Agent 选择态按落盘值恢复（切换对话不丢失）；agents 列表异步到达，
@@ -521,7 +517,7 @@ export function useChat() {
       }
 
       try {
-        await api.respondTaskUi({ id, ...(response as any) })
+        await api.respondTaskUi({ id, ...response })
       } catch {
         /* 主进程超时/会话关闭后响应为 no-op，忽略 */
       }
@@ -757,6 +753,8 @@ export function useChat() {
     [
       agentId,
       applyChunk,
+      chatModeByChat,
+      defaultChatMode,
       draftsByChat,
       driverId,
       flushApprovals,
