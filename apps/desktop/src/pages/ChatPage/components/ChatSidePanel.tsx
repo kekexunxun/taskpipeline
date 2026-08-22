@@ -1,8 +1,11 @@
 import {
+  ChevronRightIcon,
   FileDiffIcon,
   FileEditIcon,
   FilePlusIcon,
   FileXIcon,
+  FolderIcon,
+  FolderOpenIcon,
   GitBranchIcon,
   HistoryIcon,
   Loader2Icon,
@@ -104,8 +107,71 @@ export function ChatSidePanel({
   )
 }
 
+// ========== File Tree ==========
+
+type FileTreeNode = {
+  key: string
+  name: string
+  isFolder: boolean
+  depth: number
+  file?: ChangedFile
+  convFile?: ConversationChangeFile
+  children: FileTreeNode[]
+}
+
+/** 将扁平文件路径列表构建为树结构。 */
+function buildFileTree<T>(
+  files: T[],
+  getPath: (file: T) => string,
+  getFileNode: (file: T, depth: number) => FileTreeNode
+): FileTreeNode[] {
+  const root: FileTreeNode[] = []
+  const folderMap = new Map<string, FileTreeNode>()
+
+  for (const file of files) {
+    const fullPath = getPath(file)
+    const parts = fullPath.split('/').filter(Boolean)
+    if (parts.length === 0) continue
+
+    let currentPath = ''
+    let currentChildren = root
+
+    for (let i = 0; i < parts.length - 1; i++) {
+      currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i]!
+      let folder = folderMap.get(currentPath)
+      if (!folder) {
+        folder = {
+          key: currentPath,
+          name: parts[i]!,
+          isFolder: true,
+          depth: i,
+          children: []
+        }
+        folderMap.set(currentPath, folder)
+        currentChildren.push(folder)
+      }
+      currentChildren = folder.children
+    }
+
+    currentChildren.push(getFileNode(file, parts.length - 1))
+  }
+
+  const sortNodes = (nodes: FileTreeNode[]): void => {
+    nodes.sort((a, b) => {
+      if (a.isFolder !== b.isFolder) return a.isFolder ? -1 : 1
+      return a.name.localeCompare(b.name)
+    })
+    for (const node of nodes) {
+      if (node.isFolder) sortNodes(node.children)
+    }
+  }
+  sortNodes(root)
+
+  return root
+}
+
 /**
- * 「对话变更」Tab 内容：同一文件只出现一行，
+ * 「对话变更」Tab 内容：文件以树结构展示，
  * 下方优先展示 git diff 视图（HEAD vs 当前内容）；
  * 当 git 无原始数据时（新文件未提交/首次提交前等），回退展示对话操作记录（ToolBlocks）。
  * 文件列表由消息 parts 纯推导（标识「本次对话碰过哪些文件」）。
@@ -120,8 +186,49 @@ function ConversationChangesContent({
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
   const [diffContents, setDiffContents] = useState<DiffContents>({ original: '', current: '' })
   const [diffLoading, setDiffLoading] = useState(false)
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
   // 选中项不存在时回退首个文件，避免流式新增/消失后出现空白态
   const selected = files.find((f) => f.path === selectedPath) ?? files[0] ?? null
+
+  const treeNodes = useMemo(() => {
+    // 首次构建时默认展开所有文件夹
+    const nodes = buildFileTree(
+      files,
+      (f) => f.displayPath,
+      (f, depth) => ({
+        key: f.path,
+        name: f.displayPath.split('/').filter(Boolean).pop() || f.displayPath,
+        isFolder: false,
+        depth,
+        convFile: f,
+        children: []
+      })
+    )
+    const allFolders = new Set<string>()
+    const collect = (ns: FileTreeNode[]) => {
+      for (const n of ns) {
+        if (n.isFolder) {
+          allFolders.add(n.key)
+          collect(n.children)
+        }
+      }
+    }
+    collect(nodes)
+    setExpanded((prev) => {
+      if (prev.size === 0) return allFolders
+      return prev
+    })
+    return nodes
+  }, [files])
+
+  const toggleFolder = useCallback((key: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
 
   const loadDiff = useCallback(
     async (file: ConversationChangeFile) => {
@@ -153,18 +260,18 @@ function ConversationChangesContent({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* 文件列表：仅文件名 */}
-      <div className="thin-scrollbar max-h-[40%] min-h-[72px] shrink-0 overflow-y-auto px-2 py-2">
-        <div className="space-y-0.5">
-          {files.map((file) => (
-            <ChangeFileItem
-              key={file.path}
-              file={file}
-              selected={selected?.path === file.path}
-              onClick={() => setSelectedPath(file.path)}
-            />
-          ))}
-        </div>
+      {/* 文件树 */}
+      <div className="thin-scrollbar max-h-[40%] min-h-[72px] shrink-0 overflow-y-auto px-1 py-1">
+        {treeNodes.map((node) => (
+          <FileTreeNodeItem
+            key={node.key}
+            node={node}
+            selectedPath={selected?.path ?? null}
+            expanded={expanded}
+            onToggleFolder={toggleFolder}
+            onSelectFile={(path) => setSelectedPath(path)}
+          />
+        ))}
       </div>
 
       {/* Diff 视图 */}
@@ -209,37 +316,121 @@ function ConversationChangesContent({
   )
 }
 
-/** 「对话变更」列表行：图标按最后一次操作类型着色，仅展示文件名。 */
-function ChangeFileItem({
-  file,
-  selected,
-  onClick
+/** 递归渲染文件树节点（文件夹可折叠，文件可点击选中）。 */
+function FileTreeNodeItem({
+  node,
+  selectedPath,
+  expanded,
+  onToggleFolder,
+  onSelectFile
 }: {
-  file: ConversationChangeFile
-  selected: boolean
-  onClick: () => void
+  node: FileTreeNode
+  selectedPath: string | null
+  expanded: Set<string>
+  onToggleFolder: (key: string) => void
+  onSelectFile: (path: string) => void
 }) {
-  const nonErrorOps = file.operations.filter((op) => op.status !== 'error')
-  const lastKind = nonErrorOps.length > 0 ? changeOperationKind(nonErrorOps[nonErrorOps.length - 1]!.tool) : 'edit'
-  const Icon = lastKind === 'delete' ? FileXIcon : lastKind === 'write' ? FilePlusIcon : FileEditIcon
-  const iconColor = lastKind === 'delete' ? 'text-red-400' : lastKind === 'write' ? 'text-emerald-500' : 'text-blue-400'
+  if (node.isFolder) {
+    const isOpen = expanded.has(node.key)
+    return (
+      <div>
+        <button
+          type="button"
+          className="flex w-full items-center gap-1 rounded px-1 py-1 text-left transition-colors hover:bg-muted/40"
+          style={{ paddingLeft: `${node.depth * 12 + 4}px` }}
+          onClick={() => onToggleFolder(node.key)}
+        >
+          <ChevronRightIcon
+            size={12}
+            className={cn('shrink-0 text-muted-foreground/50 transition-transform', isOpen && 'rotate-90')}
+          />
+          {isOpen ? (
+            <FolderOpenIcon size={13} className="shrink-0 text-muted-foreground/70" />
+          ) : (
+            <FolderIcon size={13} className="shrink-0 text-muted-foreground/70" />
+          )}
+          <span className="min-w-0 flex-1 truncate text-xs text-foreground/70">{node.name}</span>
+        </button>
+        {isOpen && (
+          <div>
+            {node.children.map((child) => (
+              <FileTreeNodeItem
+                key={child.key}
+                node={child}
+                selectedPath={selectedPath}
+                expanded={expanded}
+                onToggleFolder={onToggleFolder}
+                onSelectFile={onSelectFile}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
 
-  return (
-    <button
-      type="button"
-      className={cn(
-        'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors',
-        'hover:bg-muted/40',
-        selected && 'bg-muted/60'
-      )}
-      onClick={onClick}
-    >
-      <Icon size={13} className={cn('shrink-0', iconColor)} />
-      <span className="min-w-0 flex-1 truncate text-xs text-foreground/80" title={file.displayPath}>
-        {extractFilename(file.displayPath)}
-      </span>
-    </button>
-  )
+  // 文件节点：对话变更
+  if (node.convFile) {
+    const file = node.convFile
+    const nonErrorOps = file.operations.filter((op) => op.status !== 'error')
+    const lastKind = nonErrorOps.length > 0 ? changeOperationKind(nonErrorOps[nonErrorOps.length - 1]!.tool) : 'edit'
+    const Icon = lastKind === 'delete' ? FileXIcon : lastKind === 'write' ? FilePlusIcon : FileEditIcon
+    const iconColor =
+      lastKind === 'delete' ? 'text-red-400' : lastKind === 'write' ? 'text-emerald-500' : 'text-blue-400'
+
+    return (
+      <button
+        type="button"
+        className={cn(
+          'flex w-full items-center gap-1.5 rounded px-1 py-1 text-left transition-colors hover:bg-muted/40',
+          selectedPath === file.path && 'bg-muted/60'
+        )}
+        style={{ paddingLeft: `${node.depth * 12 + 18}px` }}
+        onClick={() => onSelectFile(file.path)}
+      >
+        <Icon size={13} className={cn('shrink-0', iconColor)} />
+        <span className="min-w-0 flex-1 truncate text-xs text-foreground/80" title={file.displayPath}>
+          {node.name}
+        </span>
+      </button>
+    )
+  }
+
+  // 文件节点：工作区变更
+  if (node.file) {
+    const file = node.file
+    const isAdded = file.status.includes('?') || file.status.includes('A')
+    const isDeleted = file.status.includes('D')
+    const isModified = file.status.includes('M')
+    const FileIcon = isAdded ? FilePlusIcon : isDeleted ? FileXIcon : FileEditIcon
+    const iconColor = isAdded ? 'text-emerald-500' : isDeleted ? 'text-red-400' : 'text-blue-400'
+    const tagText = isAdded ? '新增' : isDeleted ? '删除' : isModified ? '修改' : changeStatusLabel(file.status)
+    const tagColor = isAdded
+      ? 'bg-emerald-500/10 text-emerald-500'
+      : isDeleted
+        ? 'bg-red-500/10 text-red-400'
+        : 'bg-blue-500/10 text-blue-400'
+
+    return (
+      <button
+        type="button"
+        className={cn(
+          'flex w-full items-center gap-1.5 rounded px-1 py-1 text-left transition-colors hover:bg-muted/40',
+          selectedPath === file.path && 'bg-muted/60'
+        )}
+        style={{ paddingLeft: `${node.depth * 12 + 18}px` }}
+        onClick={() => onSelectFile(file.path)}
+      >
+        <FileIcon size={13} className={cn('shrink-0', iconColor)} />
+        <span className="min-w-0 flex-1 truncate text-xs text-foreground/80" title={file.path}>
+          {node.name}
+        </span>
+        <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[10px]', tagColor)}>{tagText}</span>
+      </button>
+    )
+  }
+
+  return null
 }
 
 /** 单条操作渲染：pending 映射为 running，复用对话流 ToolBlocks 视觉。 */
@@ -265,6 +456,46 @@ function ChangedFilesContent({
   const [selectedFile, setSelectedFile] = useState<ChangedFile | null>(null)
   const [diffContents, setDiffContents] = useState<DiffContents>({ original: '', current: '' })
   const [diffLoading, setDiffLoading] = useState(false)
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+
+  const treeNodes = useMemo(() => {
+    const nodes = buildFileTree(
+      files,
+      (f) => f.path,
+      (f, depth) => ({
+        key: f.path,
+        name: f.path.split('/').filter(Boolean).pop() || f.path,
+        isFolder: false,
+        depth,
+        file: f,
+        children: []
+      })
+    )
+    const allFolders = new Set<string>()
+    const collect = (ns: FileTreeNode[]) => {
+      for (const n of ns) {
+        if (n.isFolder) {
+          allFolders.add(n.key)
+          collect(n.children)
+        }
+      }
+    }
+    collect(nodes)
+    setExpanded((prev) => {
+      if (prev.size === 0) return allFolders
+      return prev
+    })
+    return nodes
+  }, [files])
+
+  const toggleFolder = useCallback((key: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
 
   const loadDiff = useCallback(
     async (file: ChangedFile) => {
@@ -282,8 +513,10 @@ function ChangedFilesContent({
     [workingDirectory]
   )
 
-  const handleFileClick = useCallback(
-    (file: ChangedFile) => {
+  const handleFileSelect = useCallback(
+    (path: string) => {
+      const file = files.find((f) => f.path === path)
+      if (!file) return
       if (selectedFile?.path === file.path) {
         setSelectedFile(null)
         setDiffContents({ original: '', current: '' })
@@ -292,7 +525,7 @@ function ChangedFilesContent({
         loadDiff(file)
       }
     },
-    [selectedFile, loadDiff]
+    [selectedFile, loadDiff, files]
   )
 
   useEffect(() => {
@@ -321,8 +554,8 @@ function ChangedFilesContent({
         </Button>
       </div>
 
-      {/* 文件列表 */}
-      <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-2 py-2">
+      {/* 文件树 */}
+      <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-1 py-1">
         {loading && files.length === 0 ? (
           <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground/60">
             <Loader2Icon size={12} className="animate-spin" />
@@ -331,16 +564,16 @@ function ChangedFilesContent({
         ) : files.length === 0 ? (
           <div className="py-4 text-center text-xs text-muted-foreground/50">暂无文件变更</div>
         ) : (
-          <div className="space-y-0.5">
-            {files.map((file) => (
-              <FileItem
-                key={file.path}
-                file={file}
-                selected={selectedFile?.path === file.path}
-                onClick={() => handleFileClick(file)}
-              />
-            ))}
-          </div>
+          treeNodes.map((node) => (
+            <FileTreeNodeItem
+              key={node.key}
+              node={node}
+              selectedPath={selectedFile?.path ?? null}
+              expanded={expanded}
+              onToggleFolder={toggleFolder}
+              onSelectFile={handleFileSelect}
+            />
+          ))
         )}
       </div>
 
@@ -383,40 +616,6 @@ function ChangedFilesContent({
         </div>
       )}
     </div>
-  )
-}
-
-function FileItem({ file, selected, onClick }: { file: ChangedFile; selected: boolean; onClick: () => void }) {
-  const fileName = extractFilename(file.path)
-  const isAdded = file.status.includes('?') || file.status.includes('A')
-  const isDeleted = file.status.includes('D')
-  const isModified = file.status.includes('M')
-
-  const FileIcon = isAdded ? FilePlusIcon : isDeleted ? FileXIcon : FileEditIcon
-  const iconColor = isAdded ? 'text-emerald-500' : isDeleted ? 'text-red-400' : 'text-blue-400'
-  const tagText = isAdded ? '新增' : isDeleted ? '删除' : isModified ? '修改' : changeStatusLabel(file.status)
-  const tagColor = isAdded
-    ? 'bg-emerald-500/10 text-emerald-500'
-    : isDeleted
-      ? 'bg-red-500/10 text-red-400'
-      : 'bg-blue-500/10 text-blue-400'
-
-  return (
-    <button
-      type="button"
-      className={cn(
-        'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors',
-        'hover:bg-muted/40',
-        selected && 'bg-muted/60'
-      )}
-      onClick={onClick}
-    >
-      <FileIcon size={13} className={cn('shrink-0', iconColor)} />
-      <span className="min-w-0 flex-1 truncate text-xs text-foreground/80" title={file.path}>
-        {fileName}
-      </span>
-      <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[10px]', tagColor)}>{tagText}</span>
-    </button>
   )
 }
 
@@ -583,12 +782,6 @@ function ShikiDiffView({ original, current, filePath }: { original: string; curr
 }
 
 // ========== Utils ==========
-
-/** 从文件路径提取文件名。 */
-function extractFilename(filePath: string): string {
-  const idx = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
-  return idx >= 0 ? filePath.slice(idx + 1) : filePath
-}
 
 /** Git 状态码转中文标签。 */
 function changeStatusLabel(status: string): string {
