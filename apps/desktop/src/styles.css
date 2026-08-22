@@ -1,4 +1,5 @@
 @import 'tailwindcss';
+@import 'tw-animate-css';
 
 /* dark: variant 改为由 html.dark 类驱动（默认无类=暗色变量，加 .light 切亮色），
    与代码中 dark: 样式及 shiki 双主题联动保持一致。 */
@@ -44,18 +45,6 @@
   --text-lg--line-height: 1.5;
   --text-xl: 18px;
   --text-xl--line-height: 1.45;
-  --animate-fade-in: fade-in 180ms ease-out;
-  --animate-fade-out: fade-out 160ms ease-in;
-  --animate-zoom-in: zoom-in 180ms ease-out;
-  --animate-zoom-out: zoom-out 160ms ease-in;
-  --animate-slide-in-from-top: slide-in-from-top 220ms ease-out;
-  --animate-slide-in-from-bottom: slide-in-from-bottom 220ms ease-out;
-  --animate-slide-in-from-left: slide-in-from-left 220ms ease-out;
-  --animate-slide-in-from-right: slide-in-from-right 220ms ease-out;
-  --animate-slide-out-to-top: slide-out-to-top 160ms ease-in;
-  --animate-slide-out-to-bottom: slide-out-to-bottom 160ms ease-in;
-  --animate-slide-out-to-left: slide-out-to-left 160ms ease-in;
-  --animate-slide-out-to-right: slide-out-to-right 160ms ease-in;
   --animate-spin-slow: spin 800ms linear infinite;
   --animate-plan-shimmer: plan-shimmer 1.6s linear infinite;
   --animate-plan-breathe: plan-breathe 1.8s ease-in-out infinite;
@@ -199,122 +188,6 @@ textarea:focus-visible {
     transform: rotate(360deg);
   }
 }
-@keyframes fade-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-@keyframes fade-out {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0;
-  }
-}
-@keyframes zoom-in {
-  from {
-    opacity: 0;
-    transform: scale(0.95);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-@keyframes zoom-out {
-  from {
-    opacity: 1;
-    transform: scale(1);
-  }
-  to {
-    opacity: 0;
-    transform: scale(0.95);
-  }
-}
-@keyframes slide-in-from-top {
-  from {
-    opacity: 0;
-    transform: translateY(-8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-@keyframes slide-in-from-bottom {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-@keyframes slide-in-from-left {
-  from {
-    opacity: 0;
-    transform: translateX(-8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-@keyframes slide-in-from-right {
-  from {
-    opacity: 0;
-    transform: translateX(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-@keyframes slide-out-to-top {
-  from {
-    opacity: 1;
-    transform: translateY(0);
-  }
-  to {
-    opacity: 0;
-    transform: translateY(-8px);
-  }
-}
-@keyframes slide-out-to-bottom {
-  from {
-    opacity: 1;
-    transform: translateY(0);
-  }
-  to {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-}
-@keyframes slide-out-to-left {
-  from {
-    opacity: 1;
-    transform: translateX(0);
-  }
-  to {
-    opacity: 0;
-    transform: translateX(-8px);
-  }
-}
-@keyframes slide-out-to-right {
-  from {
-    opacity: 1;
-    transform: translateX(0);
-  }
-  to {
-    opacity: 0;
-    transform: translateX(8px);
-  }
-}
 @keyframes global-feedback-in {
   from {
     opacity: 0;
@@ -374,49 +247,6 @@ textarea:focus-visible {
   }
 }
 
-/* ---------- Animation utilities (compat with Radix/tailwindcss-animate) ---------- */
-.animate-in {
-  animation: var(--animate-fade-in);
-}
-.animate-out {
-  animation: var(--animate-fade-out);
-}
-.fade-in-0 {
-  --tw-enter-opacity: 0;
-}
-.fade-out-0 {
-  --tw-exit-opacity: 0;
-}
-.zoom-in-95 {
-  --tw-enter-scale: 0.95;
-}
-.zoom-out-95 {
-  --tw-exit-scale: 0.95;
-}
-.slide-in-from-top-2 {
-  --tw-enter-translate-y: -8px;
-}
-.slide-in-from-bottom-2 {
-  --tw-enter-translate-y: 8px;
-}
-.slide-in-from-left-2 {
-  --tw-enter-translate-x: -8px;
-}
-.slide-in-from-right-2 {
-  --tw-enter-translate-x: 8px;
-}
-.slide-out-to-top-2 {
-  --tw-exit-translate-y: -8px;
-}
-.slide-out-to-bottom-2 {
-  --tw-exit-translate-y: 8px;
-}
-.slide-out-to-left-2 {
-  --tw-exit-translate-x: -8px;
-}
-.slide-out-to-right-2 {
-  --tw-exit-translate-x: 8px;
-}
 .animate-spin-slow {
   animation: var(--animate-spin-slow);
 }
@@ -465,61 +295,6 @@ textarea:focus-visible {
 }
 .mask-fade-bottom-soft {
   mask-image: linear-gradient(to bottom, #000 75%, transparent 100%);
-}
-
-[data-state='open'].animate-in,
-[data-state='closed'].animate-out {
-  animation-fill-mode: both;
-}
-[data-state='open'].animate-in {
-  animation-name: var(--tw-enter-animation, fade-in);
-}
-[data-state='closed'].animate-out {
-  animation-name: var(--tw-exit-animation, fade-out);
-}
-.fade-in-0[data-state='open'] {
-  animation: var(--animate-fade-in);
-}
-.fade-out-0[data-state='closed'] {
-  animation: var(--animate-fade-out);
-}
-.zoom-in-95[data-state='open'] {
-  animation: var(--animate-zoom-in);
-}
-.zoom-out-95[data-state='closed'] {
-  animation: var(--animate-zoom-out);
-}
-.slide-in-from-top-2[data-state='open'] {
-  animation-name: slide-in-from-top !important;
-  animation-fill-mode: both !important;
-}
-.slide-in-from-bottom-2[data-state='open'] {
-  animation-name: slide-in-from-bottom !important;
-  animation-fill-mode: both !important;
-}
-.slide-in-from-left-2[data-state='open'] {
-  animation-name: slide-in-from-left !important;
-  animation-fill-mode: both !important;
-}
-.slide-in-from-right-2[data-state='open'] {
-  animation-name: slide-in-from-right !important;
-  animation-fill-mode: both !important;
-}
-.slide-out-to-top-2[data-state='closed'] {
-  animation-name: slide-out-to-top !important;
-  animation-fill-mode: both !important;
-}
-.slide-out-to-bottom-2[data-state='closed'] {
-  animation-name: slide-out-to-bottom !important;
-  animation-fill-mode: both !important;
-}
-.slide-out-to-left-2[data-state='closed'] {
-  animation-name: slide-out-to-left !important;
-  animation-fill-mode: both !important;
-}
-.slide-out-to-right-2[data-state='closed'] {
-  animation-name: slide-out-to-right !important;
-  animation-fill-mode: both !important;
 }
 
 /* ---------- Markdown content ---------- */

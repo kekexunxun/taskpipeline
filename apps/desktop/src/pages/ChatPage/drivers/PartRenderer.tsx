@@ -203,7 +203,10 @@ export function PartRenderer({
       return <TextPartOrDSML key={key} part={part} isAnimating={isStreaming} />
     }
     if (part.type === 'plan') {
-      return <PlanCard key={key} plan={part.plan} onExecute={onExecutePlan} disabled={isStreaming} />
+      // 对话已结束且计划未执行 → 标记为已取消
+      const plan =
+        !isStreaming && part.plan.status === 'pending' ? { ...part.plan, status: 'cancelled' as const } : part.plan
+      return <PlanCard key={key} plan={plan} onExecute={onExecutePlan} disabled={isStreaming} />
     }
     if (part.type === 'qoder.thinking' || part.type === 'openai.thinking') {
       return <ThinkingPart key={key} part={part} isStreaming={isStreaming} />
@@ -405,20 +408,22 @@ export function PartRenderer({
     )
   }
 
-  // 计划模式：将文本 parts 累积并渲染为 PlanCard（显示“计划生成中...”）
+  // 计划模式：将文本 parts 累积并渲染为 PlanCard（显示"计划生成中..."）
   if (isPlanMode) {
     const textContent = mergedParts
       .filter((p): p is Extract<DriverPart, { type: 'text' }> => p.type === 'text')
       .map((p) => p.text)
       .join('')
     if (textContent.trim()) {
+      // 对话已结束但计划仍在生成中 → 标记为已取消
+      const planStatus = !isStreaming ? ('cancelled' as const) : ('executing' as const)
       return (
         <PlanCard
           plan={{
             id: 'generating',
             chatId: '',
             createdAt: new Date().toISOString(),
-            status: 'executing',
+            status: planStatus,
             content: textContent,
             filePath: ''
           }}
