@@ -29,7 +29,7 @@ import type {
   StoredMessageRecord,
   UserFileAttachment
 } from '../chat-types.js'
-import type { McpServiceProfileResolver } from '../mcp-services.js'
+import type { McpServiceProfileResolver } from '../../mcp/mcp-services.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
 import type { ChatAttachmentCache } from '../chat-attachment-cache.js'
 import { createWebFetchAiTool } from '../web-fetch-tool.js'

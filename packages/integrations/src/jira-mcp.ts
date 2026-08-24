@@ -300,3 +300,17 @@ export async function testAtlassianConnection(
     client.close()
   }
 }
+
+/**
+ * Atlassian 调用包装：统一错误格式为中文友好消息。
+ * 用于 IPC handler 层，使前端能直接展示可读错误。
+ */
+export async function safeAtlassianCall<T>(action: string, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation()
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    console.error(`[atlassian] ${action} failed:`, error)
+    throw new Error(`${action}失败：${reason}`)
+  }
+}

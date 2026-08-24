@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { StoredMessage } from '../chat-types.js'
-import type { QoderToolPermissionHandler } from '../../qoder-extension/qoder-chat-driver.js'
+import type { QoderToolPermissionHandler } from '../../pi-extension/qoder/qoder-chat-driver.js'
 
 /**
  * 假 SDK:用 `vi.mock` 替换 `@qoder-ai/qoder-agent-sdk`,把 `query()` 接到一个可脚本化的
@@ -204,7 +204,7 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
 })
 
 // 必须在 vi.mock 之后 import driver
-const { QoderChatDriver } = await import('../../qoder-extension/qoder-chat-driver.js')
+const { QoderChatDriver } = await import('../../pi-extension/qoder/qoder-chat-driver.js')
 const sdkMock = (await import('@qoder-ai/qoder-agent-sdk')) as unknown as {
   __pushScript: (script: { messages: SdkMessage[] }) => void
   __getLastQueryOptions: () => Record<string, unknown> | undefined
