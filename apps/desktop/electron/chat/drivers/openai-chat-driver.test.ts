@@ -104,6 +104,7 @@ function fakeStoreProfiles(
     model: string
     displayName?: string
     isDefault?: boolean
+    isVl?: boolean
     capabilities?: string[]
   }>
 ): TaskStore {
@@ -131,6 +132,7 @@ function driverWithProfiles(
       model: string
       displayName?: string
       isDefault?: boolean
+      isVl?: boolean
       capabilities?: string[]
     }>
     apiKeyFor?: (profile?: { id?: string; isDefault?: boolean }) => string | undefined
@@ -385,7 +387,7 @@ describe('OpenAIChatDriver', () => {
     }
   })
 
-  it('moves system content from history and cwd into the system option (ai-sdk 7 requirement)', async () => {
+  it('moves system content from history into the system option (ai-sdk 7 requirement)', async () => {
     aiMock.__pushStreamScript({ chunks: [{ type: 'text-delta', text: 'hi' }] })
     const d = driver({ profile: { baseUrl: 'https://api.example.com', model: 'gpt-5' } })
     // 用 deserializeMessage 构造历史消息（与 ChatService 注入 memoryContext 后的真实路径一致）
@@ -409,14 +411,12 @@ describe('OpenAIChatDriver', () => {
         model: 'openai:default',
         history: [systemHistory, userHistory],
         userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
-        signal: new AbortController().signal,
-        cwd: '/Users/robin/proj'
+        signal: new AbortController().signal
       })
     )
     const opts = aiMock.__streamCalls.at(-1)!
     // messages 里不允许 system 角色,全部收敛到 system 选项
     expect(opts.messages.map((m) => m.role)).toEqual(['user', 'user'])
-    expect(opts.system).toContain('当前工作目录: /Users/robin/proj')
     expect(opts.system).toContain('记忆上下文: 用户偏好简洁回答')
   })
 
@@ -456,7 +456,13 @@ describe('OpenAIChatDriver', () => {
     // value 携带厂商前缀与真实模型名（`<vendor>:<model>`；example.com → openai-compatible），
     // displayName 保持用户配置的展示名
     expect(models).toEqual([
-      { value: 'openai-compatible:gpt-5', displayName: 'GPT-5', vendor: 'openai-compatible', isDefault: true }
+      {
+        value: 'openai-compatible:gpt-5',
+        displayName: 'GPT-5',
+        vendor: 'openai-compatible',
+        isDefault: true,
+        isVl: false
+      }
     ])
   })
 
@@ -478,7 +484,8 @@ describe('OpenAIChatDriver', () => {
         value: 'dashscope-token-plan:qwen3.8-max',
         displayName: 'Token Plan',
         vendor: 'dashscope-token-plan',
-        isDefault: true
+        isDefault: true,
+        isVl: false
       }
     ])
   })
@@ -501,13 +508,15 @@ describe('OpenAIChatDriver', () => {
         value: 'openai-compatible:DeepSeek-V4-Flash',
         displayName: 'HammerCloud',
         vendor: 'openai-compatible',
-        isDefault: true
+        isDefault: true,
+        isVl: false
       },
       {
         value: 'openai-compatible:gpt-4o',
         displayName: '公司网关',
         vendor: 'openai-compatible',
-        isDefault: false
+        isDefault: false,
+        isVl: true
       }
     ])
   })

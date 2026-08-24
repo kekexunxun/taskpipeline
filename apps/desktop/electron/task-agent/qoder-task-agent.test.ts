@@ -152,7 +152,7 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
 })
 
 // 必须在 vi.mock 之后 import driver
-const { QoderTaskAgentDriver, stripQoderModelPrefix } = await import('./qoder-task-agent.js')
+const { QoderTaskAgentDriver, stripQoderModelPrefix } = await import('../qoder-extension/qoder-task-agent.js')
 const sdkMock = (await import('@qoder-ai/qoder-agent-sdk')) as unknown as {
   __pushQueryScript: (s: { messages: SdkMessage[]; throwAfter?: number; throwWith?: unknown }) => void
   __queryCalls: unknown[]

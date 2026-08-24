@@ -24,7 +24,7 @@
  */
 
 import type { AgentSpan, SpanSource, TraceKind } from '@task-pipeline/core'
-import type { TracePipeline } from '../bus/trace-pipeline.js'
+import type { TracePipeline } from '../trace/bus/trace-pipeline.js'
 
 type QoderUsage = {
   input_tokens?: number | null

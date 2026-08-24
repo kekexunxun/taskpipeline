@@ -1,1 +1,1 @@
-export { QoderPlanModeProvider } from "./qoder-plan-mode.js";
+export { QoderPlanModeProvider } from '../../qoder-extension/qoder-plan-mode.js'

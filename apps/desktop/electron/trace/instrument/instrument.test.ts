@@ -3,9 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { JsonlTraceStorage } from '@task-pipeline/core'
+import { QoderTraceBuilder } from '../../qoder-extension/trace-builder.js'
 import { TracePipeline, type TraceLiveEvent } from '../bus/trace-pipeline.js'
 import { PiTraceBuilder } from './pi-trace-builder.js'
-import { QoderTraceBuilder } from './qoder-trace-builder.js'
 
 let root: string
 let storage: JsonlTraceStorage

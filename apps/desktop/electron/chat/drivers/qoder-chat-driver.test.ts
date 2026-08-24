@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { StoredMessage } from '../chat-types.js'
+import type { QoderToolPermissionHandler } from '../../qoder-extension/qoder-chat-driver.js'
 
 /**
  * 假 SDK:用 `vi.mock` 替换 `@qoder-ai/qoder-agent-sdk`,把 `query()` 接到一个可脚本化的
@@ -52,7 +53,7 @@ type SdkMessage = Record<string, unknown> & {
     usage?: unknown
     parent_tool_use_id?: string | null
   }
-  result?: string
+  result?: unknown
   error?: string
 }
 
@@ -203,7 +204,7 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
 })
 
 // 必须在 vi.mock 之后 import driver
-const { QoderChatDriver } = await import('./qoder-chat-driver.js')
+const { QoderChatDriver } = await import('../../qoder-extension/qoder-chat-driver.js')
 const sdkMock = (await import('@qoder-ai/qoder-agent-sdk')) as unknown as {
   __pushScript: (script: { messages: SdkMessage[] }) => void
   __getLastQueryOptions: () => Record<string, unknown> | undefined
@@ -831,10 +832,10 @@ describe('QoderChatDriver multi-turn history', () => {
     const second = await secondPromise
     const firstText = first
       .filter((e) => e.type === 'part' && e.part.type === 'text')
-      .map((e) => (e.type === 'part' ? e.part.text : ''))
+      .map((e) => (e.type === 'part' && e.part.type === 'text' ? e.part.text : ''))
     const secondText = second
       .filter((e) => e.type === 'part' && e.part.type === 'text')
-      .map((e) => (e.type === 'part' ? e.part.text : ''))
+      .map((e) => (e.type === 'part' && e.part.type === 'text' ? e.part.text : ''))
     expect(firstText.join('')).toContain('first answer')
     expect(secondText.join('')).toContain('second answer')
     // 两次 streamChat 复用同一会话:query 只创建一次(多轮由消息流驱动,不新建会话)。
@@ -868,7 +869,7 @@ describe('QoderChatDriver multi-turn history', () => {
     )
     const secondText = second
       .filter((e) => e.type === 'part' && e.part.type === 'text')
-      .map((e) => (e.type === 'part' ? e.part.text : ''))
+      .map((e) => (e.type === 'part' && e.part.type === 'text' ? e.part.text : ''))
     expect(secondText.join('')).toContain('after abort')
     // 复用同一会话:query 仍只创建一次。
     expect(sdkMock.__getQueryCallCount()).toBe(1)
@@ -1142,8 +1143,8 @@ describe('QoderChatDriver MCP 服务注入', () => {
 
   it('注入 onToolPermission 时透传 canUseTool 到 SDK(allow/deny 双向)', async () => {
     const decisions: Array<{ toolName: string; input: Record<string, unknown>; conversationId: string }> = []
-    const handler: Parameters<typeof QoderChatDriver>[4] = async (toolName, toolInput, { conversationId }) => {
-      decisions.push({ toolName, toolInput, conversationId })
+    const handler: QoderToolPermissionHandler = async (toolName, toolInput, { conversationId }) => {
+      decisions.push({ toolName, input: toolInput, conversationId })
       return toolName === 'mcp__jira__jira_get_issue' ? 'allow' : 'deny'
     }
     const d = new QoderChatDriver(
@@ -1212,7 +1213,7 @@ describe('QoderChatDriver MCP 服务注入', () => {
   })
 
   it('signal 已中止时 canUseTool 直接 deny 且不触发上层回调', async () => {
-    const handler: Parameters<typeof QoderChatDriver>[4] = vi.fn(async () => 'allow' as const)
+    const handler: QoderToolPermissionHandler = vi.fn(async () => 'allow' as const)
     const d = new QoderChatDriver(
       () => 'test-token',
       async () => ({

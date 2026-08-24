@@ -89,7 +89,7 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => ({
   }
 }))
 
-const { QoderPlanModeProvider } = await import('./qoder-plan-mode.js')
+const { QoderPlanModeProvider } = await import('../../qoder-extension/qoder-plan-mode.js')
 
 const TEST_CTX: PlanModeContext = {
   task: {

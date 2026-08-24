@@ -18,17 +18,15 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AgentSpan, AgentSpanUsage, Task, TaskState, TaskStore } from '@task-pipeline/core'
 import type { OpenAICompatReviewer, TaskWorkflow } from '@task-pipeline/integrations'
-import { query, accessToken } from '@qoder-ai/qoder-agent-sdk'
-import { recordQoderMessage } from './task-agent/log.js'
-import { QoderTraceBuilder } from './trace/instrument/qoder-trace-builder.js'
+import { stripQoderModelPrefix, QoderTraceBuilder } from './qoder-extension/index.js'
+import type { QoderOrchestrator } from './qoder-extension/index.js'
 import type { TracePipeline } from './trace/bus/trace-pipeline.js'
 import { implementationOutcomeInstruction } from './task-readiness.js'
 import { parsePlanDecision } from './plan-content.js'
 import { nextStepForPlan } from './task-readiness.js'
 import type { AgentService, OperationKind } from './agents/agent-service.js'
 import { formatRepoContext, type AgentGenerationRepository, type RepoContextEntry } from './agents/agent-generator.js'
-import { stripQoderModelPrefix } from './task-agent/qoder-task-agent.js'
-import type { QoderTaskAgentDriver } from './task-agent/qoder-task-agent.js'
+
 import type { ChatDriverId } from './chat/chat-types.js'
 import type { MemoryService } from './memory/memory-service.js'
 
@@ -42,7 +40,7 @@ interface TaskRunnerDeps {
   tracePipeline: TracePipeline
   openAIReviewer: OpenAICompatReviewer
   agentService: AgentService
-  qoderTaskAgent: QoderTaskAgentDriver
+  qoderOrchestrator: QoderOrchestrator
   memoryService: MemoryService
   taskWorkflow: TaskWorkflow
 
@@ -71,84 +69,7 @@ export function initTaskRunner(d: TaskRunnerDeps): void {
 
 // ── Review 实现 ──────────────────────────────────────────────────────────────
 
-async function callQoderReviewer(
-  prompt: string,
-  taskId: string,
-  model?: string,
-  signal?: AbortSignal,
-  onMessage?: (message: unknown) => void
-): Promise<string> {
-  const token = deps.protectedValue('qoderToken')
-  if (!token) throw new Error('请先配置 Qoder Token')
-  const abort = new AbortController()
-  const abortFromTask = () => abort.abort(signal?.reason)
-  signal?.throwIfAborted()
-  signal?.addEventListener('abort', abortFromTask, { once: true })
-  const q = query({
-    prompt,
-    options: {
-      auth: accessToken(token),
-      cwd: process.cwd(),
-      abortController: abort,
-      persistSession: false,
-      permissionMode: 'default',
-      controlRequestTimeoutMs: 15_000,
-      // 非流式 query 默认只发全量 assistant 消息（llm span 在消息到达时才创建即结束，
-      // 时序失真为 0~1ms）；开启流式增量让 trace 从首个 stream delta 开始计时。
-      includePartialMessages: true,
-      ...(model ? { model } : {})
-    }
-  })
-  const REVIEW_LLM_TIMEOUT_MS = 3 * 60_000
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      abort.abort(new Error(`qoder review 在 ${REVIEW_LLM_TIMEOUT_MS / 1000}s 内未返回,主动 abort`))
-      reject(new Error(`qoder review 在 ${REVIEW_LLM_TIMEOUT_MS / 1000}s 内未返回,主动 abort`))
-    }, REVIEW_LLM_TIMEOUT_MS)
-  })
-  try {
-    return await Promise.race([
-      (async () => {
-        let text = ''
-        for await (const message of q) {
-          // 哨兵 taskId（如 AI 生成 Agent 模板的 `__agent_generator__`）不挂任务 —— recordQoderMessage 内部
-          // 会识别（任务不存在时早返），不会触发 events 表 FK 异常或 updateTask 'Task not found' 异常。
-          recordQoderMessage(deps.store, taskId, message, {
-            recordText: true,
-            addTaskEvent: deps.addTaskEvent,
-            emitPi: deps.emitPi
-          })
-          // review 阶段 trace：消息透传给调用方的 QoderTraceBuilder（CodeReview 容器内产 llm/tool span）。
-          onMessage?.(message)
-          if (message.type === 'assistant') {
-            const content = (message as unknown as { message?: { content?: Array<{ type: string; text?: string }> } })
-              .message?.content
-            if (Array.isArray(content))
-              text += content
-                .filter((c) => c?.type === 'text' && c.text)
-                .map((c) => c.text)
-                .join('\n')
-          } else if (message.type === 'result') {
-            const result = (message as unknown as { result?: string }).result
-            if (result) text += result
-          }
-        }
-        return text
-      })(),
-      timeoutPromise
-    ])
-  } finally {
-    signal?.removeEventListener('abort', abortFromTask)
-    if (timer) clearTimeout(timer)
-    if (!abort.signal.aborted) abort.abort()
-    try {
-      await q.close()
-    } catch {
-      /* ignore */
-    }
-  }
-}
+// callQoderReviewer 已搬至 QoderOrchestrator.callReviewer()
 
 /**
  * 工作流阶段容器 span（review 等由 main.ts 工作流驱动的独立阶段）：
@@ -266,7 +187,7 @@ function callQoderOrOpenAIReviewer(
         }
       }
     : undefined
-  return callQoderReviewer(finalPrompt, taskId, model, signal, onMessage).finally(() => {
+  return deps.qoderOrchestrator.callReviewer(finalPrompt, taskId, model, signal, onMessage).finally(() => {
     try {
       builder?.finish()
     } catch {
@@ -284,84 +205,7 @@ function callQoderOrOpenAIReviewer(
 
 // ── AI Agent 生成 ────────────────────────────────────────────────────────────
 
-/**
- * 「AI 生成 Agent 模板」专用 Qoder 调用：与 `callQoderReviewer` 共享 token / abort 机制，
- * 但明显轻量化 —— 一次性返回 JSON，不需要 review 路径的 16 个工具栈 / 长超时。
- */
-const AGENT_GENERATION_TIMEOUT_MS = 120_000
-async function callQoderForAgentGeneration(
-  prompt: string,
-  model: string,
-  options: { additionalDirectories?: string[]; signal?: AbortSignal; onMessage?: (message: unknown) => void } = {}
-): Promise<string> {
-  const { additionalDirectories = [], signal, onMessage } = options
-  const token = deps.protectedValue('qoderToken')
-  if (!token) throw new Error('请先配置 Qoder Token')
-  const abort = new AbortController()
-  const abortFromTask = () => abort.abort(signal?.reason)
-  signal?.throwIfAborted()
-  signal?.addEventListener('abort', abortFromTask, { once: true })
-  const q = query({
-    prompt,
-    options: {
-      auth: accessToken(token),
-      cwd: process.cwd(),
-      abortController: abort,
-      persistSession: false,
-      permissionMode: 'default',
-      controlRequestTimeoutMs: 15_000,
-      includePartialMessages: true,
-      allowedTools: ['Read', 'Glob', 'Grep'],
-      maxTurns: 3,
-      ...(additionalDirectories.length > 0 ? { additionalDirectories } : {}),
-      ...(model ? { model } : {})
-    }
-  })
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      abort.abort(new Error(`qoder agent-generation 在 ${AGENT_GENERATION_TIMEOUT_MS / 1000}s 内未返回,主动 abort`))
-      reject(
-        new Error(
-          `Qoder 模型在 ${AGENT_GENERATION_TIMEOUT_MS / 1000}s 内未返回。可能原因：Qoder 后端拥塞 / 网络问题 / 当前模型不在线。建议：稍后重试，或在「模型」下拉中切到 OpenAI 兼容模型。`
-        )
-      )
-    }, AGENT_GENERATION_TIMEOUT_MS)
-  })
-  try {
-    return await Promise.race([
-      (async () => {
-        let text = ''
-        for await (const message of q) {
-          onMessage?.(message)
-          if (message.type === 'assistant') {
-            const content = (message as unknown as { message?: { content?: Array<{ type: string; text?: string }> } })
-              .message?.content
-            if (Array.isArray(content))
-              text += content
-                .filter((c) => c?.type === 'text' && c.text)
-                .map((c) => c.text)
-                .join('\n')
-          } else if (message.type === 'result') {
-            const result = (message as unknown as { result?: string }).result
-            if (result) text += result
-          }
-        }
-        return text
-      })(),
-      timeoutPromise
-    ])
-  } finally {
-    signal?.removeEventListener('abort', abortFromTask)
-    if (timer) clearTimeout(timer)
-    if (!abort.signal.aborted) abort.abort()
-    try {
-      await q.close()
-    } catch {
-      /* ignore */
-    }
-  }
-}
+// callQoderForAgentGeneration 已搬至 QoderOrchestrator.callForAgentGeneration()
 
 /**
  * 「AI 生成 Agent 模板」专用：把选中的仓库的本地背景（repowiki / agents.md / README.md）
@@ -667,10 +511,8 @@ async function savePlanDecision(taskId: string, texts: string[]): Promise<Task> 
 // ── 导出 ─────────────────────────────────────────────────────────────────────
 
 export {
-  callQoderReviewer,
   startTaskStageSpan,
   callQoderOrOpenAIReviewer,
-  callQoderForAgentGeneration,
   loadRepoContext,
   callOpenAIForPrompt,
   savePlanDecision,

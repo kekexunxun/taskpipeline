@@ -27,6 +27,8 @@ import {
   type PermissionResult,
   type SdkMcpToolDefinition
 } from '@qoder-ai/qoder-agent-sdk'
+import type { ChatAttachmentCache } from '../chat/chat-attachment-cache.js'
+import type { ChatDriver, StreamChatInput } from '../chat/drivers/chat-driver.js'
 import type {
   ChatModelInfo,
   ChatStreamChunk,
@@ -34,14 +36,12 @@ import type {
   StoredMessage,
   StoredMessageRecord,
   UserFileAttachment
-} from '../chat-types.js'
-import { QoderSession, QoderSessionRegistry } from '../../qoder/qoder-session.js'
-import type { ChatAttachmentCache } from '../chat-attachment-cache.js'
-import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
-import { QoderTraceBuilder } from '../../trace/instrument/qoder-trace-builder.js'
-import type { McpServiceProfileResolver } from '../mcp-services.js'
-import type { ChatDriver, StreamChatInput } from './chat-driver.js'
-import type { ToolSource } from './tool-source.js'
+} from '../chat/chat-types.js'
+import type { McpServiceProfileResolver } from '../chat/mcp-services.js'
+import type { ToolSource } from '../chat/drivers/tool-source.js'
+import type { TracePipeline } from '../trace/bus/trace-pipeline.js'
+import { QoderSession, QoderSessionRegistry } from './qoder-session.js'
+import { QoderTraceBuilder } from './trace-builder.js'
 
 type QoderStatus = {
   enabled: boolean

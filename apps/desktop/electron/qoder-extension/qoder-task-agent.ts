@@ -19,11 +19,8 @@
 import { QoderCliProcessError, type Query, type SDKMessage } from '@qoder-ai/qoder-agent-sdk'
 import type { HookCallback, HookCallbackMatcher, HookEvent, HookJSONOutput } from '@qoder-ai/qoder-agent-sdk'
 import type { Task, TaskRepository, TaskStore, AgentSpan } from '@task-pipeline/core'
-import { implementationOutcomeInstruction } from '../task-readiness.js'
-import { QoderSession, QoderSessionRegistry } from '../qoder/qoder-session.js'
 import type { DriverPart } from '../chat/chat-types.js'
 import type { TracePipeline } from '../trace/bus/trace-pipeline.js'
-import { QoderTraceBuilder } from '../trace/instrument/qoder-trace-builder.js'
 import type {
   TaskAgentDriver,
   TaskAgentDeps,
@@ -33,7 +30,10 @@ import type {
   RunPlanInput,
   RunImplementationInput,
   RunTestGenerationInput
-} from './task-agent-driver.js'
+} from '../task-agent/task-agent-driver.js'
+import { implementationOutcomeInstruction } from '../task-readiness.js'
+import { QoderSession, QoderSessionRegistry } from './qoder-session.js'
+import { QoderTraceBuilder } from './trace-builder.js'
 import { logQoderMessage, qoderLogFile, recordQoderMessage } from './log.js'
 
 /**

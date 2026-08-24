@@ -1,13 +1,13 @@
 /**
  * `recordQoderMessage` 的核心契约：必须对"任务不存在"的情况静默早返，
- * 否则上游调用（如 `agents:generate-content` 走 `callQoderReviewer` 哨兵路径）
+ * 否则上游调用（如 `agents:generate-content` 走 `qoderOrch.callReviewer` 哨兵路径）
  * 会被 events 表 FK 约束 / `updateTask` 的 'Task not found' 异常击穿。
  */
 
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionUsage, TaskStore } from '@task-pipeline/core'
 import type { SDKMessage } from '@qoder-ai/qoder-agent-sdk'
-import { recordQoderMessage } from './log.js'
+import { recordQoderMessage } from '../qoder-extension/log.js'
 
 function makeAssistantMessage(text: string): SDKMessage {
   return {
@@ -322,7 +322,14 @@ describe('recordQoderMessage — tool_use / tool_result 事件', () => {
       {
         type: 'assistant',
         message: {
-          content: [{ type: 'tool_use', id: 'toolu_edit', name: 'Edit', input: { file_path: '/tmp/a.ts', old_string: 'x', new_string: 'y' } }]
+          content: [
+            {
+              type: 'tool_use',
+              id: 'toolu_edit',
+              name: 'Edit',
+              input: { file_path: '/tmp/a.ts', old_string: 'x', new_string: 'y' }
+            }
+          ]
         }
       } as unknown as SDKMessage,
       {

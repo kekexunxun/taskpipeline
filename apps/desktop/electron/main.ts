@@ -67,26 +67,18 @@ import {
   asReviewer,
   type RepositoryCommandMap
 } from '@task-pipeline/integrations'
-import {
-  accessToken,
-  query,
-  QoderCliProcessError,
-  type AccountInfo,
-  type ModelInfo,
-  type Query,
-  type UsageInfo
-} from '@qoder-ai/qoder-agent-sdk'
+import { QoderOrchestrator } from './qoder-extension/index.js'
 import { initAutoUpdater, checkForUpdates, downloadUpdate, quitAndInstall, getUpdateStatus } from './auto-updater.js'
 import { TraceService } from './trace/trace-service.js'
 import { TracePipeline } from './trace/bus/trace-pipeline.js'
 import { PiTraceBuilder } from './trace/instrument/pi-trace-builder.js'
-import { QoderTraceBuilder } from './trace/instrument/qoder-trace-builder.js'
+import { QoderTraceBuilder } from './qoder-extension/index.js'
 import { resolveBundledOcrBinary, resolveOcrBinary, createOcrRunner } from './ocr.js'
 import { ChatService, type ChatTraceManager } from './chat/chat-service.js'
 import { ChatAttachmentCache } from './chat/chat-attachment-cache.js'
 import { LITE_MODEL_PATTERN } from './chat/system-default-model.js'
 import { ChatDriverRegistry } from './chat/drivers/driver-registry.js'
-import { QoderChatDriver } from './chat/drivers/qoder-chat-driver.js'
+import { QoderChatDriver } from './qoder-extension/index.js'
 import { OpenAIChatDriver } from './chat/drivers/openai-chat-driver.js'
 import { isOpenAIModelValue, prefixOfVendor, stripModelPrefix } from './chat/drivers/model-value.js'
 import { detectVendor } from './chat/drivers/model-providers.js'
@@ -125,10 +117,8 @@ import {
 } from './memory-context.js'
 import {
   initTaskRunner,
-  callQoderReviewer,
   startTaskStageSpan,
   callQoderOrOpenAIReviewer,
-  callQoderForAgentGeneration,
   loadRepoContext,
   callOpenAIForPrompt,
   savePlanDecision,
@@ -139,10 +129,8 @@ import {
   collectReviewComments,
   buildReviewFixPrompt
 } from './task-runner.js'
-import { QoderTaskAgentDriver } from './task-agent/qoder-task-agent.js'
+import { closeQoderQuerySafely } from './qoder-extension/index.js'
 import { describeToolAction, isBuiltinWriteTool, isDangerousTool, isWriteTool } from './task-agent/dangerous-tools.js'
-import { closeQoderQuerySafely } from './task-agent/log.js'
-import { parseTestCaseGeneration } from './task-agent/parsers/test-case-parser.js'
 import { AgentService, type OperationKind } from './agents/agent-service.js'
 import { AGENT_TEMPLATES } from './agents/templates.js'
 import {
@@ -256,7 +244,7 @@ const taskMemoryPending = new Map<string, Promise<void>>()
  * - TracePipeline.endTrace：聚合摘要 + 写 info 摘要文件，幂等（已结束的 trace 直接忽略）。
  */
 function finalizeTaskTrace(taskId: string): void {
-  qoderTaskAgent?.finishTrace(taskId)
+  qoderOrch?.taskAgent?.finishTrace(taskId)
   piTraceBuilders.delete(taskId)
   if (tracePipeline.isActive(taskId)) {
     const task = store.getTask(taskId)
@@ -292,10 +280,10 @@ const agentService = new AgentService(
   (model) => isModelValueAvailable(model)
 )
 let activeTaskId: string | undefined
-let activeQoderQuery: Query | undefined
-let activeQoderAbort: AbortController | undefined
 let activePlanningTaskId: string | undefined
 let activePlanText = ''
+// eslint-disable-next-line prefer-const -- 延迟至 app.whenReady() 初始化
+let qoderOrch!: QoderOrchestrator
 /** HITL 模式：ask=所有写操作需确认, auto=仅危险操作需确认, yolo=全部自动放行 */
 type HitlMode = 'ask' | 'auto' | 'yolo'
 /** 全局默认 HITL 模式（新对话/任务的初始值） */
@@ -399,20 +387,7 @@ function openAIApiKeyFor(profile: ModelProfile): string | undefined {
   if (profile.isDefault || !profile.id) return protectedValue('modelApiKey')
   return undefined
 }
-type QoderStatus = {
-  enabled: boolean
-  connected: boolean
-  running: boolean
-  account?: AccountInfo
-  usage?: UsageInfo | null
-  models: Array<
-    Pick<
-      ModelInfo,
-      'value' | 'displayName' | 'description' | 'isDefault' | 'isEnabled' | 'isReasoning' | 'isVl' | 'priceFactor'
-    >
-  >
-  error?: string
-}
+// QoderStatus 类型已搬至 qoder-orchestrator.ts，从 qoder-extension 导入
 
 const taskStateLabels: Record<Task['state'], string> = {
   draft: '待处理',
@@ -507,7 +482,7 @@ function updateState(task: Task, state: Task['state']): Task {
   // 任务进入终态:释放该任务常驻的 Qoder 会话(qodercli 进程),避免悬挂到应用退出。
   // Trace 收尾由 store.updateTask 包装统一处理（覆盖 workflow/completer/merge-refresher 等全部路径）。
   if (['failed', 'completed', 'cancelled'].includes(state)) {
-    qoderTaskAgent?.closeSession(task.id)
+    qoderOrch?.closeSession(task.id)
   }
   return updated
 }
@@ -783,7 +758,7 @@ initCredentialState({
   getWindow: () => mainWindow,
   store,
   protectedValue,
-  getQoderStatusForHealth,
+  getQoderStatusForHealth: () => qoderOrch.getStatusForHealth(),
   atlassianRestConfig: (kind) => atlassianFactory.restConfig(kind),
   testAtlassianRest: testAtlassianConnectionRest,
   mcpProfileResolver: chatMcpResolver
@@ -798,7 +773,7 @@ const chatDriverRegistry = new ChatDriverRegistry()
 chatDriverRegistry.register(
   new QoderChatDriver(
     () => protectedValue('qoderToken'),
-    getQoderStatus,
+    () => qoderOrch.getStatus(),
     tracePipeline,
     chatMcpResolver,
     // 工具调用 HITL：根据对话级 hitlMode 决定确认策略。
@@ -884,28 +859,7 @@ const keywordRewriter: KeywordRewriter = (query) => keywordRewriterWithTrace(que
  */
 async function resolveLiteModel(driverId: ChatDriverId): Promise<string> {
   if (driverId === 'qoder') {
-    try {
-      const status = await getQoderStatus()
-      const enabled = status.models.filter((m) => m.isEnabled !== false)
-      // 轻量任务直接用 lite 免费模型：Qoder 无 credit 时可用列表只剩 lite，
-      // 直接按名字找（不做 lite/haiku/flash/mini 多词匹配，避免 MiniMax 等误命中）。
-      const free = enabled.find((m) => {
-        const name = `${m.value} ${m.displayName ?? ''}`.toLowerCase()
-        return m.priceFactor === 0 || name.includes('lite')
-      })
-      if (free?.value) return free.value
-      // 没有 lite 模型时回落 Qoder 默认模型（isDefault 优先），避免硬编码。
-      const pick = enabled.find((m) => m.isDefault) ?? enabled[0]
-      if (pick?.value) return pick.value
-    } catch {
-      /* 静默回落到默认 */
-    }
-    const legacy = store.getSetting('defaultModel')
-    if (legacy) return legacy
-    // 兜底跟随系统默认解析（Qoder 段返回 `qoder:<model>`，这里去前缀保持裸模型形态）。
-    const system = syncSystemDefaultModel()
-    if (system?.provider === 'qoder') return system.model.replace(/^qoder:/, '')
-    return 'claude-sonnet-4.5'
+    return qoderOrch.resolveLiteModel()
   }
   return resolveOpenAIModelValue()
 }
@@ -939,7 +893,7 @@ function resolveOpenAIModelValue(): string {
  * AgentService / 任务路径的运行时回填用它，默认变更后自动跟随（不落盘）。
  */
 function syncSystemDefaultModel(): { provider: 'qoder' | 'openai'; model: string } | undefined {
-  const status = qoderStatusCache?.status
+  const status = qoderOrch?.getCachedStatus()
   if (status && status.enabled && status.connected && status.models.length > 0) {
     const enabled = status.models.filter((m) => m.isEnabled !== false)
     // Qoder 组内规则：isDefault → lite（priceFactor===0 或名字含 lite/haiku/flash/mini）→ 第一个。
@@ -975,7 +929,7 @@ function isModelValueAvailable(model: string): boolean {
       return prefixed === model || (p.id ? `${prefixed}@${p.id}` === model : false)
     })
   }
-  const status = qoderStatusCache?.status
+  const status = qoderOrch?.getCachedStatus()
   if (!status) return true
   if (!status.enabled || !status.connected) return false
   const raw = model.startsWith('qoder:') ? model.slice('qoder:'.length) : model
@@ -1148,111 +1102,7 @@ function sweepInterruptedTraces(): void {
   }
 }
 
-// Task agent driver — 负责"任务执行"路径(plan / implementation / test_generation)。
-// 当前只注册 Qoder；接口已经摆好，后续接入其它 agent 运行时仅需 add() 一行。
-function createQoderTaskAgent(): QoderTaskAgentDriver {
-  return new QoderTaskAgentDriver({
-    store,
-    qoderTokenProvider: () => protectedValue('qoderToken'),
-    dataDir,
-    addTaskEvent,
-    emitPi,
-    tracePipeline,
-    emit: (event) => {
-      // TaskAgentEvent 透传给 UI 通道(以及失败后续接 session id 持久化)。
-      if (event.type === 'agent_session') {
-        // 优先用事件自带的 taskId,不依赖全局 activeTaskId(任务串行切换/并发时避免写错任务)。
-        const taskId = event.taskId || activeTaskId
-        if (taskId) store.updateTask(taskId, { qoderSessionId: event.sessionId })
-      }
-      // agent_start / agent_end 仍走 emitPi,让 task:event 通道能识别阶段。
-      if (event.type === 'agent_start' || event.type === 'agent_end') {
-        emitPi({ type: event.type, provider: 'qoder', taskId: activeTaskId, phase: event.phase })
-        return
-      }
-      if (event.type === 'agent_text' && activeTaskId) {
-        addTaskEvent({ taskId: activeTaskId, kind: 'message', title: 'Qoder Agent', detail: event.text })
-        return
-      }
-      if (event.type === 'agent_error' && activeTaskId) {
-        addTaskEvent({ taskId: activeTaskId, kind: 'error', title: 'Qoder Agent 错误', detail: event.message })
-        return
-      }
-    },
-    resolveMemoryContext: taskMemoryContext,
-    // Agent 指引段：非 resume 场景注入 prompt 最前；Qoder 真实续接时由 runImplementation 不调用。
-    resolveAgentContext: async (task, repos) => {
-      const context = await agentService.resolveAgentContext(task, repos)
-      if (context.sections.length)
-        addTaskEvent({
-          taskId: task.id,
-          kind: 'status',
-          title: '注入 Agent 上下文',
-          detail: context.sections.join('\n\n')
-        })
-      return context
-    },
-    resolveModel: (task) => agentService.resolveModelForTask(task, store.listTaskRepositories(task.id)),
-    // 测试用例生成阶段注入 Test Writer Agent 角色定义 + 上下文
-    resolveTestContext: async (task, repos) => {
-      const { roleBody, contextBody } = agentService.resolveOperationAgent('test', task, repos)
-      const sections: string[] = []
-      if (roleBody) sections.push(roleBody)
-      if (contextBody) sections.push(contextBody)
-      if (sections.length)
-        addTaskEvent({ taskId: task.id, kind: 'status', title: '注入测试 Agent 上下文', detail: sections.join('\n\n') })
-      return { sections }
-    },
-    onQueryStarted: (q, abort) => {
-      // 把 driver 起的 query 暴露给顶层 abort 流程(stopTaskOperations 仍能 interrupt)。
-      activeQoderQuery = q
-      activeQoderAbort = abort
-    },
-    onQueryFinished: (q) => {
-      if (activeQoderQuery === q) activeQoderQuery = undefined
-      if (activeQoderAbort?.signal === undefined) activeQoderAbort = undefined
-    },
-    // 工具调用 HITL：根据任务级 hitlMode 决定确认策略。
-    // - ask/auto 模式：仅删除/重命名/移动等破坏性操作弹确认（任务面板原本就只拦截危险操作）；
-    // - yolo 模式：全部自动放行。
-    onPermissionRequest: async (taskId, toolName, toolInput, signal) => {
-      // AskUserQuestion：agent 主动向用户提问，强制等待用户回答（不受 HITL 模式限制）。
-      if (toolName === 'AskUserQuestion' && toolInput && typeof toolInput === 'object') {
-        const answers = await handleAskUserQuestion(toolInput as Record<string, unknown>, { signal, taskId })
-        if (answers && answers.length > 0) {
-          return { type: 'askUser' as const, answers }
-        }
-        return { type: 'deny' as const, message: '用户取消了问答，请选择其他方式继续任务' }
-      }
-      const hitlMode = getHitlModeForContext('task', taskId)
-      if (hitlMode === 'yolo') return 'allow'
-      if (!isDangerousTool(toolName, toolInput)) return 'allow'
-      const detail = describeToolAction(toolName, toolInput)
-      const task = store.getTask(taskId)
-      const approval = store.addApproval({ taskId, kind: 'permission', context: detail })
-      addTaskEvent({ taskId, kind: 'permission', title: `请求执行破坏性操作:${toolName}`, detail })
-      // 消息带任务标题，并行任务时确认框归属清晰。
-      const ok =
-        (await requestUi<boolean>(
-          'confirm',
-          {
-            title: `允许执行 ${toolName}?`,
-            message: `${task?.title ?? ''}\n\n${detail}`,
-            taskId,
-            toolName,
-            toolInput: typeof toolInput === 'object' && toolInput !== null ? toolInput : {}
-          },
-          { signal }
-        )) ?? false
-      store.resolveApproval(approval.id, ok ? 'approved' : 'rejected')
-      return ok ? 'allow' : 'deny'
-    }
-  })
-}
-
-// 任务 agent 单例:内部持有按 taskId 常驻的 Qoder 会话注册表,
-// plan / implementation / test_generation 三阶段共享同一会话(多轮执行引擎)。
-const qoderTaskAgent = createQoderTaskAgent()
+// createQoderTaskAgent + qoderTaskAgent 已搬至 QoderOrchestrator
 
 /**
  * 统一操作子 agent 执行器。
@@ -1279,105 +1129,9 @@ async function runOperationAgent(
   // MR 描述生成只是短文本 JSON 输出，Qoder 走 lite 模型节省 credits（与关键词提取同策略）；
   // 其它操作（review / test）仍尊重角色 Agent 的 preferredModel。
   const model = operation === 'mr' ? await resolveLiteModel('qoder') : roleAgent.preferredModel
-  return callQoderReviewer(prompt, taskId, model, signal)
+  return qoderOrch.callReviewer(prompt, taskId, model, signal)
 }
-async function runQoder(
-  taskId: string,
-  extraPrompt?: string,
-  signal?: AbortSignal,
-  resumeSessionId?: string,
-  /** 阶段 span 标记：trigger=恢复/续接来源，round=auto-fix 重跑轮次（渲染层区分 Exec/ReExec/续接）。 */
-  traceMark?: { trigger?: 'resume' | 'followup'; round?: number }
-): Promise<void> {
-  const task = await taskWorkflow.prepare(taskId, signal)
-  const repos = store.listTaskRepositories(task.id)
-  if (repos.length === 0) throw new Error('任务未关联代码仓库')
-  activeTaskId = task.id
-  signal?.throwIfAborted()
-  addTaskEvent({
-    taskId,
-    kind: 'status',
-    title: '执行环境:Qoder Agent SDK',
-    detail: '使用应用随附运行时,并在已配置仓库目录中执行'
-  })
-  try {
-    await qoderTaskAgent.runImplementation({
-      task,
-      repos,
-      signal,
-      ...(resumeSessionId ? { resumeSessionId } : {}),
-      ...(extraPrompt ? { extraPrompt } : {}),
-      ...(traceMark?.trigger ? { trigger: traceMark.trigger } : {}),
-      ...(traceMark?.round !== undefined ? { round: traceMark.round } : {})
-    })
-    const { responseTexts } = qoderTaskAgent.collectResult(taskId, 'implementation')
-    await finishImplementation(task.id, responseTexts, signal)
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    const current = store.getTask(task.id)
-    // 用户主动暂停（pauseTask）导致的中断不算执行失败：只保留 paused 状态，不写 error 事件。
-    if (current?.state === 'paused') return
-    addTaskEvent({ taskId, kind: 'error', title: 'Qoder 执行失败', detail })
-    if (['implementing', 'validating'].includes(current?.state ?? '')) updateState(current!, 'failed')
-    emitPi({ type: 'agent_error', taskId, message: detail })
-  }
-}
-
-type TestCaseGenerationResult = { files: string[]; commitSha?: string; summary: string }
-
-async function runQoderTestCases(taskId: string, signal?: AbortSignal): Promise<TestCaseGenerationResult> {
-  const task = store.getTask(taskId)
-  if (!task || task.state !== 'generating_tests') throw new Error('当前任务不能生成测试用例')
-  const repos = store.listTaskRepositories(task.id)
-  if (repos.length === 0) throw new Error('任务未关联代码仓库')
-  activeTaskId = task.id
-  addTaskEvent({ taskId, kind: 'status', title: '正在生成测试用例' })
-  signal?.throwIfAborted()
-  await qoderTaskAgent.runTestGeneration({ task, repos, signal })
-  const { responseTexts } = qoderTaskAgent.collectResult(taskId, 'test')
-  return parseTestCaseGeneration(responseTexts)
-}
-
-async function runQoderPlan(
-  taskId: string,
-  feedback?: string,
-  signal?: AbortSignal,
-  /** 恢复标记：resumeTask 计划失败重跑 Plan 时传 'resume'（阶段 span meta.trigger）。 */
-  trigger?: 'resume' | 'followup'
-): Promise<void> {
-  const task = store.getTask(taskId)
-  if (!task || task.state !== 'planning') throw new Error('当前任务不能生成计划')
-  const repos = store.listTaskRepositories(task.id)
-  if (repos.length === 0) throw new Error('任务未关联代码仓库')
-
-  activeTaskId = task.id
-  activePlanningTaskId = task.id
-  activePlanText = ''
-  signal?.throwIfAborted()
-  try {
-    await qoderTaskAgent.runPlan({
-      task,
-      repos,
-      signal,
-      ...(feedback ? { feedback } : {}),
-      ...(trigger ? { trigger } : {})
-    })
-    const { responseTexts } = qoderTaskAgent.collectResult(taskId, 'plan')
-    await savePlanDecision(taskId, responseTexts)
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    addTaskEvent({ taskId, kind: 'error', title: '计划生成失败', detail })
-    qoderTaskAgent.interruptSession(taskId)
-    const current = store.getTask(taskId)
-    if (current?.state === 'planning') {
-      store.updateTask(taskId, { failureStage: 'planning' })
-      updateState(current, 'failed')
-    }
-    throw error
-  } finally {
-    activePlanningTaskId = undefined
-  }
-}
+// runQoder / runQoderTestCases / runQoderPlan 已搬至 QoderOrchestrator
 
 /**
  * OpenAI 路径的计划生成（与 runQoderPlan 对齐的失败语义）。
@@ -1465,9 +1219,11 @@ async function runReviewWithAutoFix(taskId: string, signal?: AbortSignal): Promi
   // 嵌套会 abort 当前 operation 的 signal，导致修订后 review 通过时旧 advanceAfterValidation
   // 用已 abort 的 signal 调 submitMergeRequests，git 操作被立即取消、自动提交失败一次。
   if (runtimeProvider(task) === 'qoder') {
-    await runQoder(taskId, fixPrompt, signal, undefined, { round: used + 1 }).catch((error) =>
-      emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
-    )
+    await qoderOrch
+      .runAutoFix(taskId, fixPrompt, signal, used + 1)
+      .catch((error: unknown) =>
+        emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
+      )
     return
   }
   signal?.throwIfAborted()
@@ -1548,7 +1304,7 @@ async function finishImplementation(taskId: string, responseTexts: string[], sig
 async function runTestCaseGenerationThenValidate(taskId: string, signal?: AbortSignal): Promise<void> {
   try {
     taskWorkflow.beginTestCaseGeneration(taskId)
-    const result = await runQoderTestCases(taskId, signal)
+    const result = await qoderOrch.runTestCases(taskId, signal)
     taskWorkflow.finishTestCaseGeneration(taskId, result)
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
@@ -1979,7 +1735,7 @@ async function startTask(
   )
   if (mode === 'plan') {
     if (runtimeProvider(task) === 'qoder')
-      void runTaskOperation(taskId, (signal) => runQoderPlan(taskId, undefined, signal)).catch((error) =>
+      void runTaskOperation(taskId, (signal) => qoderOrch.runPlan(taskId, undefined, signal)).catch((error: unknown) =>
         emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
       )
     else {
@@ -2003,7 +1759,7 @@ async function startTask(
     return
   }
   if (runtimeProvider(task) === 'qoder') {
-    void runTaskOperation(taskId, (signal) => runQoder(taskId, undefined, signal)).catch((error) =>
+    void runTaskOperation(taskId, (signal) => qoderOrch.run(taskId, undefined, signal)).catch((error: unknown) =>
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     )
     return
@@ -2039,8 +1795,9 @@ async function resumeTask(taskId: string): Promise<void> {
   if (failedDuringPlanning) {
     const task = await runTaskOperation(taskId, (signal) => taskWorkflow.begin(taskId, 'plan', undefined, signal))
     if (runtimeProvider(task) === 'qoder') {
-      void runTaskOperation(taskId, (signal) => runQoderPlan(taskId, undefined, signal, 'resume')).catch((error) =>
-        emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
+      void runTaskOperation(taskId, (signal) => qoderOrch.runPlan(taskId, undefined, signal, 'resume')).catch(
+        (error: unknown) =>
+          emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
       )
       return
     }
@@ -2063,9 +1820,7 @@ async function resumeTask(taskId: string): Promise<void> {
   // 实现阶段失败:复用 prepare 的失败恢复路径(worktree 缺失时补建,已完整时直接回到 implementing,不重跑 setup 命令)。
   const task = await runTaskOperation(taskId, (signal) => taskWorkflow.prepare(taskId, signal))
   if (runtimeProvider(task) === 'qoder') {
-    void runTaskOperation(taskId, (signal) =>
-      runQoder(taskId, resumeImplementationInstruction, signal, task.qoderSessionId, { trigger: 'resume' })
-    ).catch((error) =>
+    void runTaskOperation(taskId, (signal) => qoderOrch.resume(taskId, signal)).catch((error: unknown) =>
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     )
     return
@@ -2098,8 +1853,7 @@ async function pauseTask(taskId: string): Promise<void> {
   operation?.controller.abort(new Error('任务已暂停'))
   if (activeTaskId === taskId) {
     // 常驻会话:只中断当前回复、保留会话(上下文不丢),恢复时直接续跑,无需 resume。
-    activeQoderAbort?.abort(new Error('任务已暂停'))
-    qoderTaskAgent.interruptSession(taskId)
+    qoderOrch.pause(taskId)
     await stopPi()
     activeTaskId = undefined
     store.setSetting('activeTaskId', '')
@@ -2150,7 +1904,7 @@ async function pauseTask(taskId: string): Promise<void> {
   void (async () => {
     try {
       await new Promise((resolve) => setTimeout(resolve, 2000))
-      const deniedIds = qoderTaskAgent.getDeniedCallIds(taskId)
+      const deniedIds = qoderOrch.taskAgent.getDeniedCallIds(taskId)
       if (deniedIds.size === 0) return
       const events = store.listEvents(taskId)
       // 按 toolUseId 收集 result 事件，检查是否已有 isError 标记。
@@ -2198,9 +1952,7 @@ async function resumePausedTask(taskId: string): Promise<void> {
   const task = updateState(current, 'implementing')
   addTaskEvent({ taskId, kind: 'status', title: '任务已恢复执行' })
   if (runtimeProvider(task) === 'qoder') {
-    void runTaskOperation(taskId, (signal) =>
-      runQoder(taskId, resumeImplementationInstruction, signal, task.qoderSessionId, { trigger: 'resume' })
-    ).catch((error) =>
+    void runTaskOperation(taskId, (signal) => qoderOrch.resumePaused(taskId, signal)).catch((error: unknown) =>
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     )
     return
@@ -2239,7 +1991,7 @@ async function approveTaskPlan(taskId: string): Promise<void> {
   store.resolveApproval(approval.id, 'approved')
   const task = await runTaskOperation(taskId, (signal) => taskWorkflow.approvePlan(taskId, signal))
   if (runtimeProvider(task) === 'qoder') {
-    void runTaskOperation(taskId, (signal) => runQoder(taskId, undefined, signal)).catch((error) =>
+    void runTaskOperation(taskId, (signal) => qoderOrch.approvePlan(taskId, signal)).catch((error: unknown) =>
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     )
     return
@@ -2262,7 +2014,7 @@ async function reviseTaskPlan(taskId: string, feedback: string): Promise<void> {
   addTaskEvent({ taskId, kind: 'message', title: '计划调整意见', detail: feedback })
   if (runtimeProvider(task) === 'qoder') {
     try {
-      await runTaskOperation(taskId, (signal) => runQoderPlan(taskId, feedback, signal))
+      await runTaskOperation(taskId, (signal) => qoderOrch.revisePlan(taskId, feedback, signal))
     } catch (error) {
       // 错误已在 runQoderPlan 内部写 event + 推 failed，这里只把消息转发给 UI 通道。
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
@@ -2319,9 +2071,7 @@ async function sendTaskMessage(taskId: string, message: string): Promise<void> {
   else if (task.state !== 'implementing') task = updateState(task, 'implementing')
   store.updateTask(task.id, { reviewStatus: 'pending' })
   if (runtimeProvider(task) === 'qoder') {
-    void runTaskOperation(taskId, (signal) =>
-      runQoder(taskId, message, signal, undefined, { trigger: 'followup' })
-    ).catch((error) =>
+    void runTaskOperation(taskId, (signal) => qoderOrch.sendMessage(taskId, message, signal)).catch((error) =>
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     )
     return
@@ -2343,16 +2093,15 @@ async function stopTaskOperations(taskId: string, markFailed: boolean): Promise<
   if (markFailed && task && ['planning', 'implementing', 'validating', 'generating_tests'].includes(task.state))
     updateState(task, 'failed')
   // 释放该任务常驻的 Qoder 会话(停止/删除都会走到这里;failed 分支 updateState 也会触发,幂等)。
-  qoderTaskAgent.closeSession(taskId)
+  qoderOrch.closeSession(taskId)
 
   if (activeTaskId === taskId) {
-    const qoderAbort = activeQoderAbort
-    const qoderQuery = activeQoderQuery
+    const result = await qoderOrch.stop(taskId, markFailed)
+    const qoderAbort = result.abortedController
+    const qoderQuery = result.abortedQuery
     activeTaskId = undefined
     activePlanningTaskId = undefined
     activePlanText = ''
-    activeQoderAbort = undefined
-    activeQoderQuery = undefined
     store.setSetting('activeTaskId', '')
 
     qoderAbort?.abort(new Error(markFailed ? '任务已停止' : '任务已删除'))
@@ -2363,6 +2112,7 @@ async function stopTaskOperations(taskId: string, markFailed: boolean): Promise<
     }
     // close 自身在 Qoder SDK 内部可能因为子进程/会话未释放而卡死，加 5s 超时。
     if (qoderQuery) await closeQoderQuerySafely(qoderQuery, 5_000)
+
     await stopPi()
   }
   try {
@@ -2625,140 +2375,8 @@ function resolveDefaultBackend(): TaskBackendId {
   return 'jira'
 }
 
-async function* holdQoderProbe(signal: AbortSignal): AsyncGenerator<never> {
-  if (signal.aborted) return
-  // 该生成器仅作为 query() 的占位 prompt 使用，目的是让 SDK 走 AsyncIterable 分支以保持会话在线，
-  // 供 getQoderStatus() 读取 initialization/usage/models，无需产生任何用户消息。
-  // `yield` 出一个 `never` 值（abort 后才解析），既满足 require-yield，又保持会话直到 abort。
-  yield (await new Promise<void>((resolve) =>
-    signal.addEventListener('abort', () => resolve(), { once: true })
-  )) as never
-}
-
-async function probeQoderStatus(): Promise<QoderStatus> {
-  const token = protectedValue('qoderToken')
-  if (!token) return { enabled: false, connected: false, running: false, models: [] }
-  const probeAbort = activeQoderQuery ? undefined : new AbortController()
-  const q =
-    activeQoderQuery ??
-    query({
-      prompt: holdQoderProbe(probeAbort!.signal),
-      options: {
-        auth: accessToken(token),
-        cwd: process.cwd(),
-        abortController: probeAbort,
-        persistSession: false,
-        controlRequestTimeoutMs: 15_000
-      }
-    })
-  try {
-    const initialization = await q.initializationResult()
-    const usage = await q.getUsageInfo()
-    let models = initialization.models
-    try {
-      models = await q.getAvailableModels({ fetchStrategy: 'cache' })
-    } catch {
-      /* Initialization models are a valid fallback for older runtimes. */
-    }
-    return {
-      enabled: true,
-      connected: true,
-      running: Boolean(activeQoderQuery),
-      account: initialization.account,
-      usage,
-      models: models
-        .filter((model) => model.isEnabled !== false)
-        .map(({ value, displayName, description, isDefault, isEnabled, isReasoning, isVl, priceFactor }) => ({
-          value,
-          displayName,
-          description,
-          isDefault,
-          isEnabled,
-          isReasoning,
-          isVl,
-          priceFactor
-        }))
-    }
-  } catch (error) {
-    console.error('[qoder:status] probe failed:', error instanceof Error ? error.message : String(error))
-    // qodercli 进程非 0 退出（常见 exit 42）时，SDK 抛 QoderCliProcessError，
-    // 其 .stderr 字段是 qodercli 输出的尾部日志。只取 error.message 会丢掉
-    // 真正原因，导致 UI 上「错误信息不全、不好判断」——与 task-agent / plan-mode
-    // 的增强写法保持一致，把 stderr 尾部拼进 error 一并上报。
-    const message =
-      error instanceof QoderCliProcessError && error.stderr
-        ? `${error.message}\n\nqodercli stderr (tail):\n${error.stderr.trim().slice(-2000)}`
-        : error instanceof Error
-          ? error.message
-          : String(error)
-    return {
-      enabled: true,
-      connected: false,
-      running: Boolean(activeQoderQuery),
-      models: [],
-      error: message
-    }
-  } finally {
-    if (probeAbort) {
-      probeAbort.abort()
-      try {
-        await q.close()
-      } catch {
-        /* The probe may already be closed after an initialization failure. */
-      }
-    }
-  }
-}
-
-// Qoder 探测并发去重 + 短效缓存：
-// 多个调用方（UI 轮询 / 保存后刷新 / 凭据健康检查）同时触发时会各自拉起 qodercli 探针进程，
-// 并发进程互相冲突曾导致 "Qoder CLI process exited with code 41" 误报已连接 Token 失效。
-let qoderStatusInflight: Promise<QoderStatus> | null = null
-let qoderStatusCache: { at: number; token: string; status: QoderStatus } | null = null
-
-async function getQoderStatus(): Promise<QoderStatus> {
-  const token = protectedValue('qoderToken')
-  if (!token) {
-    updateCredential('qoder', { status: 'skipped', message: '未配置', checkedAt: Date.now() })
-    // Token 被清除（或尚未配置）：如果之前探测过且连接可用，通知渲染进程刷新模型列表。
-    if (qoderStatusCache?.status && (qoderStatusCache.status.enabled || qoderStatusCache.status.connected))
-      sendTaskEvent({ type: 'qoder_status_changed' })
-    qoderStatusCache = {
-      at: Date.now(),
-      token: '',
-      status: { enabled: false, connected: false, running: false, models: [] }
-    }
-    return { enabled: false, connected: false, running: false, models: [] }
-  }
-  // 同 Token 且缓存 < 30s 时直接复用，避免 listModels 等高频调用方每次都拉起探针进程。
-  if (qoderStatusCache && qoderStatusCache.token === token && Date.now() - qoderStatusCache.at < 30_000) {
-    return qoderStatusCache.status
-  }
-  if (qoderStatusInflight) return qoderStatusInflight
-  qoderStatusInflight = probeQoderStatus().finally(() => {
-    qoderStatusInflight = null
-  })
-  const status = await qoderStatusInflight
-  // Qoder 连接/启用状态变化直接影响 listModels 结果（未连接时模型列表为空），
-  // 广播给渲染进程刷新模型选择栏，避免用户看到的模型列表一直停留在空态。
-  const prev = qoderStatusCache?.status
-  if (prev && (prev.connected !== status.connected || prev.enabled !== status.enabled))
-    sendTaskEvent({ type: 'qoder_status_changed' })
-  qoderStatusCache = { at: Date.now(), token, status }
-  // 回写全局凭据状态：UI 轮询 / 各处探测都会自动维持 qoder 项新鲜度。
-  updateCredential(
-    'qoder',
-    status.connected
-      ? { status: 'ok', message: undefined, checkedAt: Date.now() }
-      : { status: 'failed', message: status.error ?? '连接失败', checkedAt: Date.now() }
-  )
-  return status
-}
-
-/** 凭据健康检查专用：getQoderStatus 已内置 30s TTL 缓存，直接复用即可。 */
-function getQoderStatusForHealth(): Promise<QoderStatus> {
-  return getQoderStatus()
-}
+// holdQoderProbe / probeQoderStatus / getQoderStatus / getQoderStatusForHealth
+// 已搬至 QoderOrchestrator（getStatus / getStatusForHealth）
 
 // === 凭据全局状态 ============================================================
 // 凭据类型/状态/探测逻辑已提取至 credential-state.ts
@@ -2777,6 +2395,62 @@ async function submitMergeRequestsWithCredentialWatch(taskId: string, signal?: A
 // === Memory 任务上下文 =======================================================
 // Memory 检索/注入/整理逻辑已提取至 memory-context.ts
 
+// Qoder 编排器初始化（所有依赖在此处已就绪）
+qoderOrch = new QoderOrchestrator({
+  store,
+  dataDir,
+  taskWorkflow,
+  memoryService,
+  agentService,
+  tracePipeline,
+  openAIReviewer,
+  addTaskEvent: addTaskEvent as (event: { taskId: string; kind: string; title: string; detail?: string }) => void,
+  emitPi,
+  sendTaskEvent,
+  protectedValue,
+  updateCredential: (kind, state) => updateCredential(kind, state),
+  requestUi: <T>(method: string, payload: Record<string, unknown>, options?: { signal?: AbortSignal }) =>
+    requestUi<T>(method, payload, options),
+  handleAskUserQuestion,
+  updateState,
+  runTaskOperation,
+  runtimeProvider,
+  providerForTask,
+  resolveAgentContext: async (task, repos) => {
+    const context = await agentService.resolveAgentContext(task, repos)
+    if (context.sections.length)
+      addTaskEvent({
+        taskId: task.id,
+        kind: 'status',
+        title: '注入 Agent 上下文',
+        detail: context.sections.join('\n\n')
+      })
+    return context
+  },
+  resolveModel: (task) => agentService.resolveModelForTask(task, store.listTaskRepositories(task.id)),
+  resolveTestContext: async (task, repos) => {
+    const { roleBody, contextBody } = agentService.resolveOperationAgent('test', task, repos)
+    const sections: string[] = []
+    if (roleBody) sections.push(roleBody)
+    if (contextBody) sections.push(contextBody)
+    if (sections.length)
+      addTaskEvent({ taskId: task.id, kind: 'status', title: '注入测试 Agent 上下文', detail: sections.join('\n\n') })
+    return { sections }
+  },
+  resolveMemoryContext: taskMemoryContext,
+  getHitlMode: (contextType, contextId) => getHitlModeForContext(contextType, contextId),
+  getActiveTaskId: () => activeTaskId,
+  setActiveTaskId: (id) => {
+    activeTaskId = id
+  },
+  finishImplementation,
+  resolveOpenAIModelValue: () => resolveOpenAIModelValue(),
+  syncSystemDefaultModel: () => syncSystemDefaultModel(),
+  storeGetSetting: (key) => store.getSetting(key),
+  taskChangedFiles,
+  savePlanDecision
+})
+
 initTaskRunner({
   store,
   protectedValue,
@@ -2785,7 +2459,7 @@ initTaskRunner({
   tracePipeline,
   openAIReviewer,
   agentService,
-  qoderTaskAgent,
+  qoderOrchestrator: qoderOrch,
   memoryService,
   taskWorkflow,
   providerForTask,
@@ -2967,7 +2641,7 @@ function registerIpc(): void {
     shell.showItemInFolder(workspace)
   })
   ipcMain.handle('tasks:list-backends', () => listTaskBackends())
-  ipcMain.handle('qoder:status', () => getQoderStatus())
+  ipcMain.handle('qoder:status', () => qoderOrch.getStatus())
   // 用系统默认浏览器打开 URL(避免在 Electron 内嵌窗口中 target=_blank 开新 BrowserWindow)。
   // 只放行 http(s),防止被注入 file:// / 命令协议等本地 scheme。
   ipcMain.handle('shell:open-external', async (_event, url: string) => {
@@ -3237,7 +2911,7 @@ function registerIpc(): void {
           })
       try {
         const raw = isQoder
-          ? await callQoderForAgentGeneration(prompt, qoderModel, {
+          ? await qoderOrch.callForAgentGeneration(prompt, qoderModel, {
               additionalDirectories: repositories.map((repo) => repo.localPath),
               onMessage: (message) => {
                 try {
@@ -3294,7 +2968,7 @@ function registerIpc(): void {
     const groups = await chatService.listModels()
     // Qoder 无 credit（配额用尽 / 可用模型只剩免费）时给 qoder 分组打标，
     // 前端模型选择弹窗据此提示「当前仅 lite 免费模型可用」，避免用户困惑为何只有 lite。
-    const status = qoderStatusCache?.status
+    const status = qoderOrch?.getCachedStatus()
     if (status?.enabled && status.connected) {
       const enabled = status.models.filter((m) => m.isEnabled !== false)
       const quotaExhausted =

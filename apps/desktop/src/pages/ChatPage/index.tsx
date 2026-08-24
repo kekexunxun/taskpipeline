@@ -66,16 +66,15 @@ function ChatPageInner() {
   // - ask-user：AskUserQuestion 内联卡片（选项按钮），同样走 pushApproval 内联路径；
   // - select/input/editor：对话板块不会产生，保留 UiRequestDialog 作为兜底。
   useEffect(() => {
-    const off = api.onTaskEvent(
-      (event: { type?: string; method?: string; conversationId?: string } & ChatApprovalRequest) => {
-        if (event?.type !== 'extension_ui_request') return
-        if (event.method === 'confirm' || event.method === 'ask-user') {
-          pushApproval(event.conversationId, event)
-        } else if (['select', 'input', 'editor'].includes(event.method ?? '')) {
-          window.dispatchEvent(new CustomEvent('task:ui-request', { detail: event }))
-        }
+    const off = api.onTaskEvent((raw: unknown) => {
+      const event = raw as { type?: string; method?: string; conversationId?: string } & ChatApprovalRequest
+      if (event?.type !== 'extension_ui_request') return
+      if (event.method === 'confirm' || event.method === 'ask-user') {
+        pushApproval(event.conversationId, event)
+      } else if (['select', 'input', 'editor'].includes(event.method ?? '')) {
+        window.dispatchEvent(new CustomEvent('task:ui-request', { detail: event }))
       }
-    )
+    })
     return off
   }, [pushApproval])
 
@@ -247,7 +246,7 @@ function ChatPageInner() {
               <div className="flex shrink-0 items-center gap-1.5">
                 {chat.streaming && (
                   <span className="inline-flex items-center gap-1.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-300">
-                    <span className="animate-caret-blink inline-block size-1.5 rounded-full bg-current" />
+                    <span className="inline-block size-1.5 animate-caret-blink rounded-full bg-current" />
                     生成中
                   </span>
                 )}
