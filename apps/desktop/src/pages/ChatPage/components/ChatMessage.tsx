@@ -26,7 +26,8 @@ function ChatMessageImpl({
   hint,
   onExecuteJira,
   onExecutePlan,
-  turnIndex
+  turnIndex,
+  followingUserTexts
 }: {
   message: ChatMessage
   isAnimating?: boolean
@@ -37,6 +38,8 @@ function ChatMessageImpl({
   onExecutePlan?(plan: ChatPlan): void
   /** 轮次索引（user+agent 为一轮），用于右侧进度条定位 */
   turnIndex?: number
+  /** 本消息之后的用户消息文本：非空 = 对话已推进，pending 计划自动失效。 */
+  followingUserTexts?: string[]
 }) {
   const [executing, setExecuting] = useState(false)
   const isUser = message.role === 'user'
@@ -144,7 +147,12 @@ function ChatMessageImpl({
                 {/* 失败前已有产出(thinking / 正文 / 工具调用)时照常渲染,错误块追加在下方,
                     不再用错误块整体替换正文(Qoder 中途失败时避免"界面没有任何展示")。 */}
                 {message.parts.length > 0 && (
-                  <DriverMessageBody message={message} isAnimating={isStreaming} onExecutePlan={onExecutePlan} />
+                  <DriverMessageBody
+                    message={message}
+                    isAnimating={isStreaming}
+                    onExecutePlan={onExecutePlan}
+                    followingUserTexts={followingUserTexts}
+                  />
                 )}
                 {isError && (
                   <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-3.5 py-2.5 text-xs leading-5 break-words whitespace-pre-wrap text-destructive">
@@ -214,17 +222,34 @@ function UserBubble({ message }: { message: ChatMessage }) {
 function DriverMessageBody({
   message,
   isAnimating,
-  onExecutePlan
+  onExecutePlan,
+  followingUserTexts
 }: {
   message: ChatMessage
   isAnimating?: boolean
   onExecutePlan?: (plan: ChatPlan) => void
+  /** 本消息之后的用户消息文本：供 pending 计划失效判定。 */
+  followingUserTexts?: string[]
 }) {
   if (message.driverId === 'qoder') {
-    return <QoderMessageView message={message} isAnimating={isAnimating} onExecutePlan={onExecutePlan} />
+    return (
+      <QoderMessageView
+        message={message}
+        isAnimating={isAnimating}
+        onExecutePlan={onExecutePlan}
+        followingUserTexts={followingUserTexts}
+      />
+    )
   }
   if (message.driverId === 'openai') {
-    return <OpenAIMessageView message={message} isAnimating={isAnimating} onExecutePlan={onExecutePlan} />
+    return (
+      <OpenAIMessageView
+        message={message}
+        isAnimating={isAnimating}
+        onExecutePlan={onExecutePlan}
+        followingUserTexts={followingUserTexts}
+      />
+    )
   }
   // 未知 driver 兜底:把 parts 走 PartRenderer 的 fallback 分支
   return (

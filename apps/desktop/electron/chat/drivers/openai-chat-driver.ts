@@ -601,6 +601,8 @@ export class OpenAIChatDriver implements ChatDriver {
     // 流正常结束时 fullStream 一定会产出 finish chunk；若底层连接静默断开（无 error chunk、
     // 无异常），for-await 会直接结束。用 sawFinish 兜底检测，避免「半截回复 + 显示成功」。
     let sawFinish = false
+    // toolCallId → 调用发起时间戳：tool-result 到达时算耗时 durationMs 落 part。
+    const toolStartedAt = new Map<string, number>()
 
     // 对话 trace：对话级 traceId（一个对话 = 一个 Trace）。主对话由 ChatService 传 traceId（join），
     // 辅助 LLM 调用（关键词提取/记忆整理）也 join 同一回合；无 traceId 时自建独立 trace。
@@ -712,9 +714,12 @@ export class OpenAIChatDriver implements ChatDriver {
             type: 'openai.tool-call',
             toolCallId: tc.toolCallId,
             name: tc.toolName,
-            input: tc.input
+            input: tc.input,
+            createdAt: new Date().toISOString()
           }
           parts.push(part)
+          // 记录调用起点,tool-result 到达时算耗时 durationMs。
+          toolStartedAt.set(tc.toolCallId, Date.now())
           if (this.tracePipeline) {
             const toolSpan = this.tracePipeline.startSpan(traceId, {
               type: 'tool.execute',
@@ -730,11 +735,14 @@ export class OpenAIChatDriver implements ChatDriver {
           yield { type: 'part', part }
         } else if (chunk.type === 'tool-result') {
           const tr = chunk as unknown as { toolCallId: string; output: unknown }
+          const startedAt = toolStartedAt.get(tr.toolCallId)
+          toolStartedAt.delete(tr.toolCallId)
           const part: DriverPart = {
             driverId: 'openai',
             type: 'openai.tool-result',
             toolCallId: tr.toolCallId,
-            output: tr.output
+            output: tr.output,
+            ...(startedAt !== undefined ? { durationMs: Math.max(0, Date.now() - startedAt) } : {})
           }
           parts.push(part)
           if (this.tracePipeline) {

@@ -41,11 +41,14 @@ function getPlanDisplayName(plan: ChatPlan): string {
 export function PlanCard({
   plan,
   onExecute,
-  disabled
+  disabled,
+  statusText
 }: {
   plan: ChatPlan
   onExecute?: (plan: ChatPlan) => void
   disabled?: boolean
+  /** 状态文案覆盖（流式生成中的临时卡片用“生成中”，默认按 status 取文案）。 */
+  statusText?: string
 }) {
   const [sheetOpen, setSheetOpen] = useState(false)
   const statusConfig = getStatusConfig(plan.status)
@@ -65,7 +68,9 @@ export function PlanCard({
         className={cn(
           'group flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-[10px]! transition-colors',
           'hover:bg-muted/30',
-          plan.status === 'failed' ? 'border-red-500/20 bg-red-500/5' : 'border-border/40 bg-muted/20'
+          plan.status === 'failed' ? 'border-red-500/20 bg-red-500/5' : 'border-border/40 bg-muted/20',
+          // 已取消/已失效的计划弱化展示（对话已推进，旧计划不可再执行）。
+          plan.status === 'cancelled' && 'opacity-60'
         )}
         onClick={() => setSheetOpen(true)}
       >
@@ -78,7 +83,7 @@ export function PlanCard({
           )}
         >
           <StatusIcon className={cn('size-3', plan.status === 'executing' && 'animate-spin')} />
-          <span>{statusConfig.label}</span>
+          <span>{statusText ?? statusConfig.label}</span>
         </span>
         <ChevronRightIcon
           size={12}
@@ -96,7 +101,7 @@ export function PlanCard({
             </SheetTitle>
             <SheetDescription className="flex items-center gap-1.5">
               <StatusIcon className={cn('size-3', plan.status === 'executing' && 'animate-spin')} />
-              {statusConfig.label}
+              {statusText ?? statusConfig.label}
             </SheetDescription>
           </SheetHeader>
 
@@ -142,7 +147,7 @@ function getStatusConfig(status: ChatPlanStatus): {
     case 'executing':
       return {
         icon: Loader2Icon,
-        label: '生成中',
+        label: '执行中',
         className: 'bg-blue-500/15 text-blue-400'
       }
     case 'completed':

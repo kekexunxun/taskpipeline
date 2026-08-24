@@ -44,6 +44,8 @@ export type DriverPart =
       toolCallId: string
       name: string
       input: unknown
+      /** 工具调用落定时间（ISO，UI 展示用；旧数据可能缺失）。 */
+      createdAt?: string
       parentTaskId?: string
     }
   | {
@@ -52,6 +54,8 @@ export type DriverPart =
       toolCallId: string
       output: unknown
       isError?: boolean
+      /** 工具执行耗时（毫秒，调用发起 → 结果返回；旧数据可能缺失）。 */
+      durationMs?: number
       parentTaskId?: string
     }
   | {
@@ -89,9 +93,18 @@ export type DriverPart =
       toolCallId: string
       name: string
       input: unknown
+      /** 工具调用落定时间（ISO，UI 展示用；旧数据可能缺失）。 */
+      createdAt?: string
       parentTaskId?: string
     }
-  | { driverId: 'openai'; type: 'openai.tool-result'; toolCallId: string; output: unknown; parentTaskId?: string }
+  | {
+      driverId: 'openai'
+      type: 'openai.tool-result'
+      toolCallId: string
+      output: unknown
+      durationMs?: number
+      parentTaskId?: string
+    }
   | { driverId: 'openai'; type: 'openai.thinking'; text: string; parentTaskId?: string }
   | { driverId: ChatDriverId; type: 'text'; text: string; parentTaskId?: string }
   | {

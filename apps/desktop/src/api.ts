@@ -155,6 +155,8 @@ export type DriverPart =
       toolCallId: string
       name: string
       input: unknown
+      /** 工具调用落定时间（ISO，UI 展示用；旧数据可能缺失）。 */
+      createdAt?: string
       parentTaskId?: string
     }
   | {
@@ -163,6 +165,8 @@ export type DriverPart =
       toolCallId: string
       output: unknown
       isError?: boolean
+      /** 工具执行耗时（毫秒，调用发起 → 结果返回；旧数据可能缺失）。 */
+      durationMs?: number
       parentTaskId?: string
     }
   | {
@@ -239,9 +243,18 @@ export type DriverPart =
       toolCallId: string
       name: string
       input: unknown
+      /** 工具调用落定时间（ISO，UI 展示用；旧数据可能缺失）。 */
+      createdAt?: string
       parentTaskId?: string
     }
-  | { driverId: 'openai'; type: 'openai.tool-result'; toolCallId: string; output: unknown; parentTaskId?: string }
+  | {
+      driverId: 'openai'
+      type: 'openai.tool-result'
+      toolCallId: string
+      output: unknown
+      durationMs?: number
+      parentTaskId?: string
+    }
   | { driverId: 'openai'; type: 'openai.thinking'; text: string; parentTaskId?: string }
   | { driverId: ChatDriverId; type: 'text'; text: string; parentTaskId?: string }
   | {
@@ -337,6 +350,11 @@ export type ChatMessageMetadata = {
   errorMessage?: string
   /** 计划模式标记：为 true 时 PartRenderer 将文本内容渲染为 PlanCard（显示“计划生成中...”）。 */
   isPlanMode?: boolean
+  /**
+   * 计划等待标记（仅内存、不持久化）：plan-part 到达时置 true，表示对话正处于
+   * “等待用户处理计划”的存活态；会话重载/应用重启后标记丢失 = 对话已结束。
+   */
+  planWaiting?: boolean
 }
 
 export type ChatConversationMeta = {

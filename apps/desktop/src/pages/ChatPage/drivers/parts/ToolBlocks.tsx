@@ -9,6 +9,7 @@
  */
 
 import {
+  AlertTriangleIcon,
   ChevronRightIcon,
   FileEditIcon,
   FileIcon,
@@ -97,7 +98,11 @@ export function WriteToolBlock({
           open && 'rounded-b-none border-b-transparent'
         )}
       >
-        <FilePlus2Icon size={13} className={cn('shrink-0', isPending ? 'text-amber-500' : 'text-emerald-500')} />
+        {status === 'error' ? (
+          <AlertTriangleIcon size={13} className="shrink-0 text-red-400" />
+        ) : (
+          <FilePlus2Icon size={13} className={cn('shrink-0', isPending ? 'text-amber-500' : 'text-emerald-500')} />
+        )}
         <span className="min-w-0 flex-1 truncate font-medium text-muted-foreground/80">{fileName || '写入文件'}</span>
         <span className="shrink-0">
           {isPending ? (
@@ -217,7 +222,11 @@ export function EditToolBlock({
           open && 'rounded-b-none border-b-transparent'
         )}
       >
-        <FileEditIcon size={13} className={cn('shrink-0', isPending ? 'text-amber-500' : 'text-blue-500')} />
+        {status === 'error' ? (
+          <AlertTriangleIcon size={13} className="shrink-0 text-red-400" />
+        ) : (
+          <FileEditIcon size={13} className={cn('shrink-0', isPending ? 'text-amber-500' : 'text-blue-500')} />
+        )}
         <span className="min-w-0 flex-1 truncate font-medium text-muted-foreground/80">{fileName || '编辑文件'}</span>
         <span className="shrink-0">
           {isPending ? (
@@ -531,16 +540,26 @@ export function McpToolBlock({
 
 // === Bash 工具(终端卡片风格) ===
 
+/** 工具执行耗时格式化：<1s 显示毫秒，<60s 保留一位小数，再往上分秒。 */
+function formatDurationMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`
+}
+
 export function BashToolBlock({
   input,
   output,
   status,
+  durationMs,
   icon: Icon = TerminalIcon,
   onApprove
 }: {
   input?: unknown
   output?: unknown
   status: 'running' | 'done' | 'error' | 'pending'
+  /** 工具执行耗时（毫秒），展示在状态后方。 */
+  durationMs?: number
   icon?: ComponentType<{ size?: number; className?: string }>
   onApprove?: (confirmed: boolean) => void
 }) {
@@ -600,6 +619,9 @@ export function BashToolBlock({
               )}
               {status === 'done' && <span className="text-emerald-500/80">已完成</span>}
               {status === 'error' && <span className="text-red-400">失败</span>}
+              {durationMs !== undefined && (
+                <time className="ml-1.5 text-muted-foreground/50">{formatDurationMs(durationMs)}</time>
+              )}
             </>
           )}
         </span>
@@ -670,7 +692,7 @@ export function WebFetchToolBlock({
       >
         <GlobeIcon size={13} className="shrink-0 text-muted-foreground/60" />
         <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground/80">
-          {domain || url || '抓取网页'}
+          <span className="text-muted-foreground">WebFetch</span> - {domain || url || '抓取网页'}
         </span>
         <span className="shrink-0">
           {status === 'running' && (
@@ -690,12 +712,7 @@ export function WebFetchToolBlock({
       {(url || prompt || outputText) && (
         <CollapsibleContent className="overflow-hidden">
           <div className="max-h-[300px] overflow-y-auto rounded-b-md border border-t-0 border-border/40 bg-muted/10 px-4 py-2">
-            {url && (
-              <div className="mb-2 font-mono text-[10px] leading-4 text-muted-foreground">
-                <span className="select-none">$ </span>
-                {url}
-              </div>
-            )}
+            {url && <div className="mb-2 font-mono text-[10px] leading-4 text-muted-foreground">{url}</div>}
             {prompt && (
               <div className="mb-3">
                 <div className="mb-1 text-[10px]! font-medium text-muted-foreground/50">查询</div>
@@ -746,7 +763,11 @@ export function DeleteToolBlock({
           open && 'rounded-b-none border-b-transparent'
         )}
       >
-        <FileXIcon size={13} className={cn('shrink-0', isPending ? 'text-amber-500' : 'text-red-500')} />
+        {status === 'error' ? (
+          <AlertTriangleIcon size={13} className="shrink-0 text-red-400" />
+        ) : (
+          <FileXIcon size={13} className={cn('shrink-0', isPending ? 'text-amber-500' : 'text-red-500')} />
+        )}
         <span className="min-w-0 flex-1 truncate font-medium text-muted-foreground/80">{fileName || '删除文件'}</span>
         <span className="shrink-0">
           {isPending ? (

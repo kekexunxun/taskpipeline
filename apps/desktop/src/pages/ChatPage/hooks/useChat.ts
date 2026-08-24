@@ -416,8 +416,13 @@ export function useChat() {
           }
           if (chunk.type === 'plan-part') {
             // 计划完成：用新的 parts 替换所有 parts（文本 -> 计划卡片）
-            // 同时清除 isPlanMode 标记（plan part 已经包含完整计划）
-            const metadata = { ...(message.metadata ?? {}), isPlanMode: false } as ChatMessageMetadata
+            // 同时清除 isPlanMode 标记（plan part 已经包含完整计划），并置 planWaiting：
+            // 对话进入“等待用户处理”的存活态（仅内存，会话重载后丢失 = 对话已结束）。
+            const metadata = {
+              ...(message.metadata ?? {}),
+              isPlanMode: false,
+              planWaiting: true
+            } as ChatMessageMetadata
             return { ...message, parts: chunk.parts, metadata }
           }
           if (chunk.type === 'error') {
@@ -439,6 +444,17 @@ export function useChat() {
         })
       }
     })
+    if (chunk.type === 'plan-part') {
+      // 计划已生成：对话进入“等待用户处理”态（同 HITL 语义），退出计划模式。
+      // 后端已把 chatMode 落盘为 normal，这里同步内存态，保证下一条消息（含“执行”
+      // 类指令）不再走计划模式，避免反复生成计划；计划卡内联保留等待执行。
+      setChatModeByChat((current) => ({ ...current, [chatId]: 'normal' }))
+      setConversationsByChat((current) => {
+        const conv = current[chatId]
+        if (!conv || conv.chatMode === 'normal') return current
+        return { ...current, [chatId]: { ...conv, chatMode: 'normal' } }
+      })
+    }
     if (chunk.type === 'part') {
       // 收到第一个 part 时切换到 streaming 状态(让 UI 的流式动画启用)，并清掉阶段提示（正文开始）。
       setStreamingChatIds((current) => new Set(current).add(chatId))

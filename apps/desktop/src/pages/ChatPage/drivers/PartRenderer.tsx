@@ -13,7 +13,7 @@ import {
   WebFetchToolBlock
 } from './parts/ToolBlocks'
 import { TaskListCard } from './parts/TaskListCard'
-import type { ChatPlan, DriverPart } from '@/api'
+import type { ChatMessageStatus, ChatPlan, DriverPart } from '@/api'
 import { PlanCard } from '@/pages/ChatPage/components/PlanCard'
 import {
   SubTaskGroup,
@@ -67,11 +67,37 @@ function isSubtaskControlPart(part: DriverPart): boolean {
   )
 }
 
-/** tool-result part 的输出与错误标记(qoder / openai 两变体同构)。 */
-function resultPayloadOf(part: DriverPart | undefined): { output?: unknown; isError?: boolean } | undefined {
+/** tool-result part 的输出、错误标记与耗时(qoder / openai 两变体同构)。 */
+function resultPayloadOf(
+  part: DriverPart | undefined
+): { output?: unknown; isError?: boolean; durationMs?: number } | undefined {
   if (!part) return undefined
   if (part.type !== 'qoder.tool-result' && part.type !== 'openai.tool-result') return undefined
-  return { output: part.output, isError: 'isError' in part ? part.isError === true : undefined }
+  return {
+    output: part.output,
+    isError: 'isError' in part ? part.isError === true : undefined,
+    durationMs: part.durationMs
+  }
+}
+
+/**
+ * 计划展示状态推导（纯渲染层，旧数据无需迁移）。
+ *
+ * 规则（仅对 pending 计划生效，同 HITL 等待结束语义）：
+ *  - 计划后有用户消息：引用了计划文件（点“开始执行”发出的指令）→ 视为已在执行；
+ *    其它 → 对话已推进、计划未执行，失效为 cancelled（弱化展示、不可执行）；
+ *  - 计划是对话最后一步：仅当对话仍处于“等待处理”存活态（planWaiting，当前会话内
+ *    刚生成且未结束）才保持 pending（待执行）；对话已结束（历史加载/应用重启）→ cancelled。
+ */
+function resolvePlanDisplayStatus(plan: ChatPlan, followingUserTexts?: string[], planWaiting?: boolean): ChatPlan {
+  if (plan.status !== 'pending') return plan
+  if (followingUserTexts?.length) {
+    if (plan.filePath && followingUserTexts.some((text) => text.includes(plan.filePath))) {
+      return { ...plan, status: 'executing' }
+    }
+    return { ...plan, status: 'cancelled' }
+  }
+  return planWaiting ? plan : { ...plan, status: 'cancelled' }
 }
 
 /** text part 渲染入口：走流式 markdown。 */
@@ -99,12 +125,21 @@ export function PartRenderer({
   parts,
   isStreaming,
   isPlanMode,
+  messageStatus,
+  followingUserTexts,
+  planWaiting,
   onExecutePlan
 }: {
   parts: DriverPart[]
   isStreaming?: boolean
   /** 计划模式标记：为 true 时将文本内容渲染为 PlanCard（显示“计划生成中...”）。 */
   isPlanMode?: boolean
+  /** 所属消息状态：仅用于区分“用户主动中止”与“回合正常结束”，后者计划不应标为已取消。 */
+  messageStatus?: ChatMessageStatus
+  /** 本消息之后的用户消息文本：非空 = 对话已推进，pending 计划自动失效（同 HITL 等待结束语义）。 */
+  followingUserTexts?: string[]
+  /** 对话是否处于“等待处理计划”存活态：仅当前会话内刚生成且未结束时为 true。 */
+  planWaiting?: boolean
   onExecutePlan?: (plan: ChatPlan) => void
 }) {
   // 合并相邻的同类型流式增量 part:
@@ -203,9 +238,9 @@ export function PartRenderer({
       return <TextPartOrDSML key={key} part={part} isAnimating={isStreaming} />
     }
     if (part.type === 'plan') {
-      // 对话已结束且计划未执行 → 标记为已取消
-      const plan =
-        !isStreaming && part.plan.status === 'pending' ? { ...part.plan, status: 'cancelled' as const } : part.plan
+      // 计划模式本身就是“生成完计划即结束本轮”，回合结束后计划保持 pending 等待
+      // 用户执行；只有用户显式取消才算 cancelled，不能因流结束而降级。
+      const plan = resolvePlanDisplayStatus(part.plan, followingUserTexts, planWaiting)
       return <PlanCard key={key} plan={plan} onExecute={onExecutePlan} disabled={isStreaming} />
     }
     if (part.type === 'qoder.thinking' || part.type === 'openai.thinking') {
@@ -238,7 +273,15 @@ export function PartRenderer({
         return <GrepToolBlock key={key} input={part.input} output={result?.output} status={status} />
       }
       if (toolNameLower === 'bash') {
-        return <BashToolBlock key={key} input={part.input} output={result?.output} status={status} />
+        return (
+          <BashToolBlock
+            key={key}
+            input={part.input}
+            output={result?.output}
+            status={status}
+            durationMs={result?.durationMs}
+          />
+        )
       }
       if (toolNameLower === 'webfetch' || toolNameLower === 'web_fetch') {
         return <WebFetchToolBlock key={key} input={part.input} output={result?.output} status={status} />
@@ -415,8 +458,13 @@ export function PartRenderer({
       .map((p) => p.text)
       .join('')
     if (textContent.trim()) {
-      // 对话已结束但计划仍在生成中 → 标记为已取消
-      const planStatus = !isStreaming ? ('cancelled' as const) : ('executing' as const)
+      // 流式进行中 → 生成中；流结束后默认待执行（用户尚未操作，不能标为已取消），
+      // 仅当消息是被用户主动中止时才标为已取消。
+      const planStatus = isStreaming
+        ? ('executing' as const)
+        : messageStatus === 'aborted'
+          ? ('cancelled' as const)
+          : ('pending' as const)
       return (
         <PlanCard
           plan={{
@@ -429,6 +477,7 @@ export function PartRenderer({
           }}
           onExecute={onExecutePlan}
           disabled={true}
+          statusText="生成中"
         />
       )
     }

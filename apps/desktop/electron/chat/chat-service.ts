@@ -467,7 +467,7 @@ export class ChatService {
       // 解析实际生效的对话模式（前端指定 > 自动检测 > 对话持久化值 > 默认 normal）
       let effectiveChatMode: ChatConversationMode = input.chatMode ?? conversation.chatMode ?? 'normal'
       if (effectiveChatMode === 'normal') {
-        const autoDetected = detectPlanModeNeeded(input.message.text, history)
+        const autoDetected = detectPlanModeNeeded(input.message.text)
         if (autoDetected) {
           effectiveChatMode = 'plan'
           this.dispatch(effective, { type: 'status', text: '已自动切换到计划模式' })
@@ -567,6 +567,14 @@ export class ChatService {
             parts.push(...newParts)
             // 通知前端用 plan part 替换所有 parts
             this.dispatch(effective, { type: 'plan-part', parts: newParts })
+            // 计划生成后对话进入“等待用户处理”态（同 HITL 语义）：本轮结束但对话未完成。
+            // 立即退出计划模式：用户点计划卡“开始执行”或继续发普通消息；若停留在
+            // plan 模式，下一条消息（含“执行这个计划”）会再生成一份计划。
+            try {
+              await this.storage.updateMeta(input.chatId, { chatMode: 'normal' })
+            } catch {
+              /* 持久化失败不影响本轮 */
+            }
           } catch (error) {
             console.warn('[chat] failed to save plan:', error)
           }
@@ -766,40 +774,63 @@ function titleOf(text: string): string {
  * 自动检测是否需要切换到计划模式。
  *
  * 判定条件（任一命中即返回 true）：
- * 1. 消息过长（超过 500 字通常意味着复杂需求）
- * 2. 关键词命中：大规模修改意图（重构/重写/迁移等）
- * 3. 对话历史中已有计划内容（assistant 消息包含“实施计划”等标记）
+ * 1. 消息明确表达计划/方案意图（"出个计划"、"先做方案"等）
+ * 2. 消息很长（超过 1500 字）且包含大规模修改意图关键词。纯长文本
+ *    （粘贴错误日志、上下文等）不触发，避免误判。
+ *
+ * 旧规则（消息超 500 字 / 命中常见关键词 / 历史中已有计划）过于激进，导致：
+ * - 历史里出现过计划后，后续每一轮（含"执行计划"这类指令）都被自动切回
+ *   计划模式，反复生成异常计划；
+ * - 普通长消息或提到"重构/升级"的简单请求被误切到计划模式。
+ * 故收敛为：仅显式计划意图、或超长且复杂的请求才自动切换。
  */
-function detectPlanModeNeeded(messageText: string, history: StoredMessage[]): boolean {
-  // 1. 消息过长
-  if (messageText.length > 500) return true
-  // 2. 关键词：大规模修改意图
-  const complexityKeywords = [
-    '重构',
-    '重写',
-    '迁移',
-    '升级',
-    '架构',
-    '改造',
-    '全面',
-    '整体',
-    '系统性地',
-    '端到端',
-    'refactor',
-    'rewrite',
-    'migrate',
-    'redesign',
-    'overhaul'
+function detectPlanModeNeeded(messageText: string): boolean {
+  const text = messageText.toLowerCase()
+  // 1. 显式计划/方案意图
+  const planIntentKeywords = [
+    '制定计划',
+    '做个计划',
+    '出个计划',
+    '列个计划',
+    '先做计划',
+    '先规划',
+    '计划一下',
+    '出个方案',
+    '给个方案',
+    '做个方案',
+    '制定方案',
+    '设计方案',
+    '出方案',
+    '先别动手',
+    '先不要改代码',
+    '先分析',
+    'make a plan',
+    'create a plan',
+    'write a plan',
+    'draft a plan',
+    'plan first',
+    'propose a plan',
+    'give me a plan'
   ]
-  if (complexityKeywords.some((kw) => messageText.includes(kw))) return true
-  // 3. 对话历史中已有计划内容
-  const planIndicators = ['实施计划', '实现计划', 'implementation plan', 'approved plan']
-  const hasExistingPlan = history.some(
-    (m) =>
-      m.role === 'assistant' &&
-      m.parts.some((p) => p.type === 'text' && planIndicators.some((ind) => p.text.toLowerCase().includes(ind)))
-  )
-  if (hasExistingPlan) return true
+  if (planIntentKeywords.some((kw) => text.includes(kw))) return true
+  // 2. 超长消息 + 大规模修改意图：仅长文本（日志/上下文粘贴）不触发
+  if (messageText.length > 1500) {
+    const complexityKeywords = [
+      '重构',
+      '重写',
+      '迁移',
+      '升级',
+      '架构',
+      '改造',
+      '端到端',
+      'refactor',
+      'rewrite',
+      'migrate',
+      'redesign',
+      'overhaul'
+    ]
+    if (complexityKeywords.some((kw) => text.includes(kw))) return true
+  }
   return false
 }
 

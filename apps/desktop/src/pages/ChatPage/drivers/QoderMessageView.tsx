@@ -13,11 +13,14 @@ import type { ChatMessage, ChatPlan } from '@/api'
 export function QoderMessageView({
   message,
   isAnimating,
-  onExecutePlan
+  onExecutePlan,
+  followingUserTexts
 }: {
   message: ChatMessage
   isAnimating?: boolean
   onExecutePlan?: (plan: ChatPlan) => void
+  /** 本消息之后的用户消息文本：供 pending 计划失效判定。 */
+  followingUserTexts?: string[]
 }) {
   const isPlanMode = message.metadata?.isPlanMode === true
   return (
@@ -25,6 +28,9 @@ export function QoderMessageView({
       parts={message.parts}
       isStreaming={isAnimating}
       isPlanMode={isPlanMode}
+      messageStatus={message.metadata?.status}
+      followingUserTexts={followingUserTexts}
+      planWaiting={message.metadata?.planWaiting === true}
       onExecutePlan={onExecutePlan}
     />
   )

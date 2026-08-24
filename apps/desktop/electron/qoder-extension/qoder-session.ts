@@ -107,6 +107,8 @@ type ActiveTurn = {
   toolInputBuf: Map<string, string>
   /** callId → 已解析的完整工具入参(start 非空 input / 增量累积 / 快照 input)。 */
   toolUseInput: Map<string, unknown>
+  /** callId → 调用首次出现时间戳(tool_result 到达时算耗时 durationMs 用)。 */
+  toolStartedAt: Map<string, number>
   /** 回合内已 push 的 thinking 拼接(完整快照 ⊇ 增量碎片时去重,防思考重复展示)。 */
   thinkingBuffer: string
   /** 已 push 的完整 thinking 块(快照路径;碎片路径据此判断快照已覆盖本段,防重复追加)。 */
@@ -247,6 +249,7 @@ export class QoderSession {
       pushedToolUseIds: new Set(),
       toolInputBuf: new Map(),
       toolUseInput: new Map(),
+      toolStartedAt: new Map(),
       thinkingBuffer: '',
       thinkingSnapshots: [],
       toolSource: input.toolSource
@@ -529,7 +532,14 @@ export class QoderSession {
           : (turn.toolUseInput.get(callId) ?? input ?? {})
       turn.toolUseInput.delete(callId)
       turn.toolInputBuf.delete(callId)
-      pushPart({ driverId: 'qoder', type: 'qoder.tool-use', toolCallId: callId, name: finalName, input: finalInput })
+      pushPart({
+        driverId: 'qoder',
+        type: 'qoder.tool-use',
+        toolCallId: callId,
+        name: finalName,
+        input: finalInput,
+        createdAt: new Date().toISOString()
+      })
     }
 
     /** tool_result 处理(assistant 与 user 消息共用):配对 tool-use、产出输出、触发 task-created。 */
@@ -539,11 +549,15 @@ export class QoderSession {
       // 保证按 callId 配对不丢、输出能并入工具行展示。
       flushToolUse(toolCallId)
       const output = block.content
+      // 耗时:调用首次出现(content_block_start / 快照)→ 结果返回;无起点(如快照路径未见 start)则缺失。
+      const startedAt = turn.toolStartedAt.get(toolCallId)
+      turn.toolStartedAt.delete(toolCallId)
       const toolResultPart: DriverPart = {
         driverId: 'qoder',
         type: 'qoder.tool-result',
         toolCallId,
         output,
+        ...(startedAt !== undefined ? { durationMs: Math.max(0, Date.now() - startedAt) } : {}),
         ...(block.is_error ? { isError: true } : {}),
         // HITL 拒绝:canUseTool 返回 deny 时 SDK 不一定设 is_error,由 deniedCallIds 补标。
         ...(this.deniedCallIds.has(toolCallId) ? { isError: true } : {})
@@ -642,6 +656,8 @@ export class QoderSession {
           if (event.index !== undefined) turn.toolCallIdByIndex.set(event.index, toolCallId)
           turn.toolNameByCallId.set(toolCallId, block.name)
           turn.toolInputBuf.set(toolCallId, '')
+          // 调用首次出现即记起点(同 callId 不覆盖),tool_result 到达时算耗时。
+          if (!turn.toolStartedAt.has(toolCallId)) turn.toolStartedAt.set(toolCallId, Date.now())
           // 不在此 push:SDK 的 start 事件 input 常为空,真实入参由 input_json_delta 增量
           // 累积、assistant 完整快照定型 —— 提前 push 会让 ToolCallRow 只显示 {}。
           if (block.input && typeof block.input === 'object' && Object.keys(block.input as object).length > 0) {
@@ -674,6 +690,8 @@ export class QoderSession {
           }
         } else if (block.type === 'tool_use' && block.name) {
           const toolCallId = typeof block.id === 'string' ? block.id : `qoder-${turn.parts.length}`
+          // 非流式快照路径兜底记起点(stream 路径已在 content_block_start 记过,不覆盖)。
+          if (!turn.toolStartedAt.has(toolCallId)) turn.toolStartedAt.set(toolCallId, Date.now())
           // 完整快照带真实 input:与流式累积的同一 callId 合并定型(同 callId 只 push 一次)。
           flushToolUse(toolCallId, block.name, block.input)
         } else if (block.type === 'tool_result') {

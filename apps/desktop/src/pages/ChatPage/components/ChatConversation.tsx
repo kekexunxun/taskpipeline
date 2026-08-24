@@ -72,6 +72,24 @@ export function ChatConversation({
     return map
   }, [messages, turnMap])
 
+  // 每条消息之后的用户消息文本（后缀累积）：供 pending 计划失效判定——
+  // 计划生成后用户又发了新消息 = 对话已推进，旧计划自动失效（同 HITL 等待结束语义）。
+  const userTextAfter = useMemo(() => {
+    const texts: string[][] = new Array(messages.length)
+    let acc: string[] = []
+    for (let i = messages.length - 1; i >= 0; i--) {
+      texts[i] = acc
+      const msg = messages[i]!
+      if (msg.role !== 'user') continue
+      const text = msg.parts
+        .filter((p): p is Extract<(typeof msg.parts)[number], { type: 'text' }> => p.type === 'text')
+        .map((p) => p.text)
+        .join('\n')
+      if (text.trim()) acc = [...acc, text]
+    }
+    return texts
+  }, [messages])
+
   return (
     <Conversation className="min-h-0 flex-1 overflow-hidden">
       <ConversationContent className="mx-auto w-full max-w-3xl gap-5 px-5 py-5">
@@ -84,6 +102,7 @@ export function ChatConversation({
             onExecuteJira={onExecuteJira}
             onExecutePlan={onExecutePlan}
             turnIndex={turnMap.get(message.id)}
+            followingUserTexts={userTextAfter[index]}
           />
         ))}
         {approvals?.map((approval) =>
