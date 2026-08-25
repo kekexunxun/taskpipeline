@@ -19,7 +19,7 @@ const chatTurnSeq = new Map<string, number>()
 /** turnKey（`${chatId}:${seq}`）→ 当前阶段容器 agent.run span（endStage 收尾）。 */
 const chatStageSpans = new Map<string, AgentSpan>()
 /** chatId → 本回合 driver source（阶段容器 meta.source 用，与任务路径阶段同构）。 */
-const chatStageSources = new Map<string, 'qoder' | 'openai'>()
+const chatStageSources = new Map<string, string>()
 /** 对话阶段 phase → 阶段名（与 stage-label 的 agentStageLabel 映射保持一致）。 */
 const chatStageNames: Record<'keyword' | 'chat' | 'memory', string> = {
   keyword: '关键词提取并注入',

@@ -6,7 +6,7 @@ import { AgentService, createAgentDraft, generalAgent } from './agent-service.js
 function makeService(
   initial: Array<Record<string, unknown>> = [],
   listWikiDocs?: (repositoryId: string) => RepoWikiDoc[],
-  resolveSystemModel?: () => { provider: 'qoder' | 'openai'; model: string } | undefined,
+  resolveSystemModel?: () => { provider: string; model: string } | undefined,
   isModelAvailable?: (model: string) => boolean
 ) {
   let raw = initial.length ? JSON.stringify(initial) : undefined
@@ -246,11 +246,13 @@ describe('AgentService resolveRuntime', () => {
     expect(service.resolveModelForTask(task('openai:DeepSeek-V4-Flash'), [repo])).toBe('openai:DeepSeek-V4-Flash')
   })
 
-  it('routes vendor-prefixed task models (deepseek / openai-compatible) to the openai path', () => {
+  it('routes vendor-prefixed task models to their actual vendor provider', () => {
     const service = makeService()
-    expect(service.resolveRuntime(task('deepseek:deepseek-v4'), [repo]).provider).toBe('openai')
-    expect(service.resolveRuntime(task('openai-compatible:gpt-5.4-mini'), [repo]).provider).toBe('openai')
-    expect(service.resolveRuntime(task('dashscope-token-plan:qwen3.8-max'), [repo]).provider).toBe('openai')
+    expect(service.resolveRuntime(task('deepseek:deepseek-v4'), [repo]).provider).toBe('deepseek')
+    expect(service.resolveRuntime(task('openai-compatible:gpt-5.4-mini'), [repo]).provider).toBe('openai-compatible')
+    expect(service.resolveRuntime(task('dashscope-token-plan:qwen3.8-max'), [repo]).provider).toBe(
+      'dashscope-token-plan'
+    )
   })
 
   it('treats a legacy prefix-less task model as qoder', () => {

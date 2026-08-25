@@ -44,7 +44,7 @@ interface TaskRunnerDeps {
   taskWorkflow: TaskWorkflow
 
   // main.ts 函数
-  providerForTask: (taskId: string | undefined) => 'qoder' | 'openai'
+  providerForTask: (taskId: string | undefined) => string
   defaultOpenAIProfile: () =>
     | { baseUrl?: string; model?: string; vendor?: string; id?: string; isDefault?: boolean }
     | undefined

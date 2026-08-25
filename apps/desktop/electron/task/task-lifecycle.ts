@@ -84,9 +84,9 @@ interface TaskLifecycleDeps {
   openAIReviewer: OpenAICompatReviewer
   piTraceBuilders: Map<string, PiTraceBuilder>
   protectedValue: (key: string) => string | undefined
-  providerForTask: (taskId: string | undefined) => 'qoder' | 'openai'
-  runtimeProvider: (task: Task) => 'qoder' | 'openai'
-  modelProvider: () => 'qoder' | 'openai'
+  providerForTask: (taskId: string | undefined) => string
+  runtimeProvider: (task: Task) => string
+  modelProvider: () => string
   addTaskEvent: (event: Omit<AgentEvent, 'id' | 'createdAt'>) => void
   emitTaskChanged: (taskId: string) => void
   sendTaskEvent: (event: Record<string, unknown>) => void

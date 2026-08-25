@@ -38,7 +38,7 @@ interface PiSessionDeps {
   readOpenAIProfiles: () => ModelProfile[]
   defaultOpenAIProfile: () => ModelProfile | undefined
   openAIApiKeyFor: (profile: ModelProfile) => string | undefined
-  providerForTask: (taskId: string | undefined) => 'qoder' | 'openai'
+  providerForTask: (taskId: string | undefined) => string
   updatePiUsage: (taskId: string) => void
   emitTaskChanged: (taskId: string) => void
   sendTaskEvent: (event: Record<string, unknown>) => void

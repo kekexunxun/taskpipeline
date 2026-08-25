@@ -148,7 +148,7 @@ export function resolveOpenAIModelValue(): string {
  *  - 否则 OpenAI profiles 非空 → 取默认 profile，value 形如 `<厂商前缀>:<model>`；
  *  - 都没有 → undefined。
  */
-export function syncSystemDefaultModel(): { provider: 'qoder' | 'openai'; model: string } | undefined {
+export function syncSystemDefaultModel(): { provider: string; model: string } | undefined {
   const status = d().getQoderCachedStatus()
   if (status && status.enabled && status.connected && status.models.length > 0) {
     const enabled = status.models.filter((m) => m.isEnabled !== false)
@@ -159,11 +159,13 @@ export function syncSystemDefaultModel(): { provider: 'qoder' | 'openai'; model:
     if (pick?.value) return { provider: 'qoder', model: `qoder:${pick.value}` }
   }
   const profile = defaultOpenAIProfile()
-  if (profile?.model)
+  if (profile?.model) {
+    const vendor = profile.vendor ?? detectVendor(profile.baseUrl)
     return {
-      provider: 'openai',
-      model: `${prefixOfVendor(profile.vendor ?? detectVendor(profile.baseUrl))}:${profile.model}`
+      provider: vendor,
+      model: `${prefixOfVendor(vendor)}:${profile.model}`
     }
+  }
   return undefined
 }
 

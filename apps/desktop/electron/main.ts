@@ -65,6 +65,7 @@ import {
   resolveLiteModel
 } from './chat/model-profile.js'
 import { initChatTraceManager } from './trace/chat-trace-manager.js'
+import { detectVendor } from './chat/drivers/model-providers.js'
 import {
   initPiSession,
   emitPi,
@@ -156,14 +157,16 @@ function updatePiUsage(taskId: string): void {
   })
   emitTaskChanged(taskId)
 }
-function modelProvider(): 'qoder' | 'openai' {
-  return protectedValue('qoderToken') ? 'qoder' : 'openai'
+function modelProvider(): string {
+  if (protectedValue('qoderToken')) return 'qoder'
+  const profile = defaultOpenAIProfile()
+  return profile ? (profile.vendor ?? detectVendor(profile.baseUrl)) : 'openai'
 }
-function runtimeProvider(task: Task): 'qoder' | 'openai' {
+function runtimeProvider(task: Task): string {
   const runtime = agentService.resolveRuntime(task, store.listTaskRepositories(task.id))
   return runtime.provider ?? modelProvider()
 }
-function providerForTask(taskId: string | undefined): 'qoder' | 'openai' {
+function providerForTask(taskId: string | undefined): string {
   const task = taskId ? store.getTask(taskId) : undefined
   return task ? runtimeProvider(task) : modelProvider()
 }

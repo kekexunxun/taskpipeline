@@ -55,9 +55,9 @@ export interface ChatSystemDeps {
   memoryService: MemoryService
   agentService: AgentService
   atlassianFactory: AtlassianClientFactory
-  providerForTask: (taskId: string | undefined) => 'qoder' | 'openai'
-  modelProvider: () => 'qoder' | 'openai'
-  runtimeProvider: (task: Task) => 'qoder' | 'openai'
+  providerForTask: (taskId: string | undefined) => string
+  modelProvider: () => string
+  runtimeProvider: (task: Task) => string
   desktopResolver: SettingResolver
   addTaskEvent: (event: Omit<AgentEvent, 'id' | 'createdAt'>) => void
   getQoderStatusForHealth: () => unknown

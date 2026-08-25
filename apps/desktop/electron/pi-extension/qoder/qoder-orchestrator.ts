@@ -87,8 +87,8 @@ export interface QoderOrchestratorDeps {
   runTaskOperation: <T>(taskId: string, action: (signal: AbortSignal) => Promise<T>) => Promise<T>
 
   // 路由
-  runtimeProvider: (task: Task) => 'qoder' | 'openai'
-  providerForTask: (taskId: string | undefined) => 'qoder' | 'openai'
+  runtimeProvider: (task: Task) => string
+  providerForTask: (taskId: string | undefined) => string
 
   // Agent 上下文
   resolveAgentContext: QoderTaskAgentDeps['resolveAgentContext']

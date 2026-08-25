@@ -63,10 +63,10 @@ interface MemoryContextDeps {
     endTrace(taskId: string): void
   }
   addTaskEvent: (event: Omit<AgentEvent, 'id' | 'createdAt'>) => void
-  runtimeProvider: (task: Task) => 'qoder' | 'openai'
-  modelProvider: () => 'qoder' | 'openai'
+  runtimeProvider: (task: Task) => string
+  modelProvider: () => string
   resolveOpenAIModelValue: () => string
-  syncSystemDefaultModel: () => { provider: 'qoder' | 'openai'; model: string } | undefined
+  syncSystemDefaultModel: () => { provider: string; model: string } | undefined
   isModelValueAvailable: (model: string) => boolean
   resolveLiteModel: (driverId: ChatDriverId) => Promise<string>
   startTaskStageSpan: (task: Task | undefined, taskId: string, name: string, phase: string) => AgentSpan | undefined
@@ -94,10 +94,11 @@ function d(): MemoryContextDeps {
  */
 export async function resolveTaskChatModel(task?: Task): Promise<{ driverId: ChatDriverId; model: string }> {
   const provider = task ? d().runtimeProvider(task) : d().modelProvider()
+  // 先判 qoder：非 qoder 一律走 OpenAI 兼容 driver（DeepSeek / DashScope 等均走 openai 协议）
   const primary =
-    provider === 'openai'
-      ? ({ driverId: 'openai', model: d().resolveOpenAIModelValue() } as const)
-      : ({ driverId: 'qoder', model: d().store.getSetting('defaultModel') ?? 'claude-sonnet-4.5' } as const)
+    provider === 'qoder'
+      ? ({ driverId: 'qoder', model: d().store.getSetting('defaultModel') ?? 'claude-sonnet-4.5' } as const)
+      : ({ driverId: 'openai', model: d().resolveOpenAIModelValue() } as const)
   // 存储值失效（profile 删除 / 模型下线）时回落系统默认，可能换 driver。
   if (d().isModelValueAvailable(primary.model)) return primary
   const fallback = d().syncSystemDefaultModel()

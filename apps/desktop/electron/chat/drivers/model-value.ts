@@ -43,3 +43,22 @@ export function stripModelPrefix(value: string): string {
   const idx = value.indexOf(':')
   return idx >= 0 ? value.slice(idx + 1) : value
 }
+
+/**
+ * 从 model value 前缀提取实际厂商标识（用于 AgentRuntime.provider 等需要精确厂商身份的场景）。
+ * - `qoder:xxx` → `'qoder'`
+ * - `deepseek:xxx` → `'deepseek'`
+ * - `openai:xxx` → `'openai'`
+ * - `dashscope-token-plan:xxx` → `'dashscope-token-plan'`
+ * - `openai-compatible:xxx` → `'openai-compatible'`
+ * - 无前缀 → `'qoder'`（无前缀默认走 qoder）
+ */
+export function resolveProviderFromModel(value: string): string {
+  if (value.startsWith('qoder:')) return 'qoder'
+  // OpenAI 兼容组：按已知前缀提取厂商
+  for (const prefix of VENDOR_PREFIXES) {
+    if (value === prefix || value.startsWith(`${prefix}:`)) return prefix
+  }
+  // 无前缀 = qoder 裸模型名
+  return 'qoder'
+}

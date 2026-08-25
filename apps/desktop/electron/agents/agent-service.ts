@@ -11,7 +11,7 @@
  *  - 配置存 settings key `agentProfiles`（JSON 数组），与 modelProfile 同模式，不新增表；
  *  - **仓库单一归属**：save() 保存时，本 Agent 勾选的仓库自动从其他 Agent 解绑
  *    （一个仓库只属于一个 Agent）；importAll 走 save() 自动获得同一约束；
- *  - `resolveRuntime(task, repos)`：计算任务执行路径（qoder / openai）与模型，
+ *  - `resolveRuntime(task, repos)`：计算任务执行路径（qoder / 其它厂商）与模型，
  *    优先级链：任务显式 task.qoderModel > primary 仓库 Agent 的 preferredProvider+preferredModel
  *    > 系统默认模型（运行时动态回填，不落盘；失效模型经 isModelAvailable 校验后回落）；
  *  - `resolveAgentContext(task, repos)`：为每个仓库组装「Agent 指引」段（带仓库名前缀），
@@ -32,14 +32,14 @@ import {
   type Task,
   type TaskRepository
 } from '@task-pipeline/core'
-import { isOpenAIModelValue } from '../chat/drivers/model-value.js'
+import { isOpenAIModelValue, resolveProviderFromModel } from '../chat/drivers/model-value.js'
 
 const SETTINGS_KEY = 'agentProfiles'
 /** Agent 指引段总长上限；截断优先级 systemPrompt > engineeringGuidelines > wiki 全文。 */
 const SECTION_LIMIT = 12_000
 
 export type AgentRuntime = {
-  provider?: 'qoder' | 'openai'
+  provider?: string
   model?: string
   agent?: AgentProfile
 }
@@ -148,7 +148,7 @@ export class AgentService {
      * 让系统内置角色 Agent（审查 / 测试 / MR）自动跟随系统默认模型；
      * 未注入或返回 undefined 时保持旧行为（provider/model 为 undefined，调用方自行回退）。
      */
-    private readonly resolveSystemModel?: () => { provider: 'qoder' | 'openai'; model: string } | undefined,
+    private readonly resolveSystemModel?: () => { provider: string; model: string } | undefined,
     /**
      * 模型存在性校验（可选）：存储的模型 value 可能已失效（profile 删除 / 模型下线），
      * 校验不通过时 resolveRuntime 会丢弃该值并回落到系统默认，避免把失效模型传给执行器。
@@ -256,9 +256,9 @@ export class AgentService {
    * 计算任务执行路径与模型。
    *
    * 优先级链：
-   *  1. 任务显式指定 task.qoderModel → 按 value 前缀路由（OpenAI 兼容组前缀
-   *     `deepseek:` / `openai:` / `openai-compatible:` → OpenAI 路径；`qoder:` 或无前缀 →
-   *     Qoder 路径）。模型选择器统一产出 `qoder:xxx` / `<厂商前缀>:<model>` 两种 value，
+   *  1. 任务显式指定 task.qoderModel → 先判 qoder（无前缀 / qoder: 前缀 → Qoder 路径），
+   *     非 qoder 则按前缀识别实际厂商（deepseek / openai / dashscope-token-plan 等 → OpenAI 兼容路径）。
+   *     模型选择器统一产出 `qoder:xxx` / `<厂商前缀>:<model>` 两种 value，
    *     必须按前缀识别 provider，否则用户选了 OpenAI 模型也会被当成
    *     Qoder 模型传给 qodercli（报 `Invalid model`）。
    *  2. primary 仓库 Agent 配置了 preferredProvider + preferredModel → 按 Agent 路由；
@@ -274,12 +274,15 @@ export class AgentService {
     )
     const available = (model: string) => !this.isModelAvailable || this.isModelAvailable(model)
     if (task.qoderModel && available(task.qoderModel)) {
-      if (isOpenAIModelValue(task.qoderModel)) return { provider: 'openai', model: task.qoderModel, agent }
-      return { provider: 'qoder', model: task.qoderModel, agent }
+      // 先判 qoder：非 OpenAI 兼容前缀（无前缀 / qoder: 前缀）→ Qoder 路径
+      if (!isOpenAIModelValue(task.qoderModel)) return { provider: 'qoder', model: task.qoderModel, agent }
+      // OpenAI 兼容组：按实际厂商前缀标识 provider（deepseek / openai / dashscope-token-plan 等）
+      return { provider: resolveProviderFromModel(task.qoderModel), model: task.qoderModel, agent }
     }
     if (agent?.preferredProvider && agent.preferredModel && available(agent.preferredModel)) {
+      // 保留实际厂商值：qoder 走 qoder 路径，其它厂商走 OpenAI 兼容路径
       return {
-        provider: agent.preferredProvider === 'qoder' ? 'qoder' : 'openai',
+        provider: agent.preferredProvider === 'qoder' ? 'qoder' : agent.preferredProvider,
         model: agent.preferredModel,
         agent
       }
