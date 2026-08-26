@@ -4,7 +4,8 @@
 // - 其他平台无 swift 环境，直接拷贝原图（Windows/Linux 无 Dock 网格约定，铺满即可）
 // - public/icon.png（favicon）始终取归一化后的副本
 // 生成物均见 .gitignore，替换 build/icon.png 后下次 dev/build/package 自动同步。
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { platform } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -14,10 +15,23 @@ const appRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const source = join(appRoot, 'build/icon.png')
 const normalized = join(appRoot, 'build/icon.normalized.png')
 const favicon = join(appRoot, 'public/icon.png')
+const hashFile = join(appRoot, 'build/.icon-hash')
 
 if (!existsSync(source)) {
   throw new Error(`[sync-icon] 缺少图标源文件: ${source}`)
 }
+
+// 快速跳过：源文件未变且产物均存在
+const srcHash = createHash('sha256').update(readFileSync(source)).digest('hex')
+if (
+  existsSync(normalized) &&
+  existsSync(favicon) &&
+  existsSync(hashFile) &&
+  readFileSync(hashFile, 'utf8') === srcHash
+) {
+  process.exit(0)
+}
+
 mkdirSync(join(appRoot, 'public'), { recursive: true })
 
 if (platform() === 'darwin') {
@@ -26,4 +40,5 @@ if (platform() === 'darwin') {
   copyFileSync(source, normalized)
 }
 copyFileSync(normalized, favicon)
+writeFileSync(hashFile, srcHash)
 console.log('[sync-icon] build/icon.png -> build/icon.normalized.png + public/icon.png')
