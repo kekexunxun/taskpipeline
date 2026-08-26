@@ -27,6 +27,7 @@ import {
   type PermissionResult,
   type SdkMcpToolDefinition
 } from '@qoder-ai/qoder-agent-sdk'
+import type { McpServerConfig as CodegraphMcpConfig } from '@task-pipeline/codegraph'
 import type { ChatAttachmentCache } from '../../chat/chat-attachment-cache.js'
 import type { ChatDriver, StreamChatInput } from '../../chat/drivers/chat-driver.js'
 import type {
@@ -166,6 +167,19 @@ function extractLastSessionId(history: StoredMessage[]): string | undefined {
   return undefined
 }
 
+/** codegraph MCP 已激活时，注入代码图谱使用指引。 */
+function codegraphSystemHint(): string {
+  return [
+    '<codegraph_instructions>',
+    '当前工作区已启用代码图谱（Codegraph）索引，你可以通过 MCP 工具查询代码结构信息：',
+    '- 符号搜索：按名称查找函数、类、变量等符号定义',
+    '- 依赖分析：查看文件/模块间的引用关系',
+    '- 代码导航：快速定位符号的定义位置和引用点',
+    '遇到代码相关问题时，优先使用 codegraph 工具获取精确的代码结构信息，而非仅依赖文本搜索。',
+    '</codegraph_instructions>'
+  ].join('\n')
+}
+
 /**
  * Qoder Chat Driver(常驻会话版)。
  */
@@ -196,7 +210,9 @@ export class QoderChatDriver implements ChatDriver {
      */
     private readonly skillsConfigRoot?: string,
     /** 附件缓存（用于读取本地文件内容，构建多模态消息）。 */
-    private readonly attachmentCache?: ChatAttachmentCache
+    private readonly attachmentCache?: ChatAttachmentCache,
+    /** codegraph MCP 配置解析器（按仓库路径返回 MCP 配置，无索引则返回 null）。 */
+    private readonly codegraphMcpResolver?: (localPath: string) => CodegraphMcpConfig | null
   ) {
     if (!tokenProvider) throw new Error('QoderChatDriver requires a token provider')
     if (!statusProvider) throw new Error('QoderChatDriver requires a status provider')
@@ -275,7 +291,12 @@ export class QoderChatDriver implements ChatDriver {
     // mcpServers 在会话创建时固化:本轮 MCP 选择与会话创建时不一致则关闭重建
     // (上下文经 resume 恢复),保证勾选变化真正生效。
     // chatMode 通过系统提示注入，每次请求都生效，不需要重建会话。
-    const mcpKey = [...(input.mcpServices ?? [])].sort().join(',')
+    const mcpKey = [
+      ...(input.mcpServices ?? []),
+      ...(input.cwd && this.codegraphMcpResolver?.(input.cwd) ? ['codegraph'] : [])
+    ]
+      .sort()
+      .join(',')
     let session = this.sessions.get(input.conversationId)
     if (session && this.sessionMcpKeys.get(input.conversationId) !== mcpKey) {
       this.closeSession(input.conversationId)
@@ -400,7 +421,19 @@ export class QoderChatDriver implements ChatDriver {
         ...(profile.env && Object.keys(profile.env).length ? { env: profile.env } : {})
       }
     }
+    // codegraph MCP：按工作目录自动注入（无需用户手动选择）
+    if (input.cwd && this.codegraphMcpResolver) {
+      const cgConfig = this.codegraphMcpResolver(input.cwd)
+      if (cgConfig) {
+        mcpServers.codegraph = {
+          type: 'stdio',
+          command: cgConfig.command,
+          args: cgConfig.args
+        }
+      }
+    }
     const serverNames = Object.keys(mcpServers)
+    const hasCodegraph = 'codegraph' in mcpServers
     // 构建系统提示：任务指令 + 工作区上下文（project_instructions + agents_instructions）
     // Qoder SDK 内部管理会话历史，不会处理 history 中的 system 消息，需显式注入。
     const systemParts: string[] = []
@@ -409,6 +442,10 @@ export class QoderChatDriver implements ChatDriver {
     }
     if (input.workspaceContext) {
       systemParts.push(input.workspaceContext)
+    }
+    // codegraph MCP 已激活时，注入代码图谱使用指引
+    if (hasCodegraph) {
+      systemParts.push(codegraphSystemHint())
     }
     const baseSystemPrompt = systemParts.length > 0 ? systemParts.join('\n\n') : undefined
     // 计划模式：追加共享指令模板，让 LLM 只读分析并输出计划

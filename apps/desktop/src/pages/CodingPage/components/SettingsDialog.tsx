@@ -23,10 +23,18 @@ import { MemoryDialog } from './MemoryDialog'
 import { OpenAIProfileDialog, type OpenAIProfile } from './OpenAIProfileDialog'
 import { McpSettingsTab } from './McpSettingsTab'
 import { SkillSettingsTab } from './SkillSettingsTab'
+import type { ChatConversationMeta, PathRegistryEntry } from '@/api'
 import { ModelBadges } from '@/components/ModelBadges'
 import { HitlModeSwitcher, type HitlMode } from '@/components/HitlModeSwitcher'
 import { detectVendor, MODEL_VENDORS, type ModelVendor } from '@/utils/model-vendors'
-import { api, type CapabilityKey, type MemorySearchResult, type SystemDefaultModel, type UpdateStatus } from '@/api'
+import {
+  api,
+  type CapabilityKey,
+  type CodegraphIndexStatus,
+  type MemorySearchResult,
+  type SystemDefaultModel,
+  type UpdateStatus
+} from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
 import { useAgents } from '@/hooks/useAgents'
 import { cn } from '@/lib/utils'
@@ -54,6 +62,7 @@ import {
 import { Field, FieldGroup } from '@/components/ui/field'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Input } from '@/components/ui/input'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { SecretInput } from '@/components/ui/secret-input'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -143,7 +152,7 @@ const ordinaryKeys = [
   'hitlMode'
 ] as const
 const secretKeys = ['qoderToken', 'gitlabToken', 'jiraToken', 'confluenceToken', 'modelApiKey'] as const
-const MANAGED_MEMORY_SCOPES: MemoryScope[] = ['user', 'repo']
+const MANAGED_MEMORY_SCOPES: MemoryScope[] = ['user', 'repo', 'conversation']
 /** 系统内置角色 Agent 的固定 id，用于 Tab 分类。 */
 const ROLE_AGENT_IDS = ['builtin-reviewer', 'builtin-test-writer', 'builtin-mr-writer']
 
@@ -753,14 +762,18 @@ export function SettingsDialog({
   }>({ open: false })
   const [deleteRepository, setDeleteRepository] = useState<RepositoryProfile | undefined>(undefined)
   const [memories, setMemories] = useState<Memory[]>([])
-  const [wikiCounts, setWikiCounts] = useState<Record<string, number>>({})
   const [memoryDialog, setMemoryDialog] = useState<{ open: boolean; initial?: Partial<Memory> & { id?: string } }>({
     open: false
   })
   const [deleteMemory, setDeleteMemory] = useState<Memory | undefined>(undefined)
   const [rebuildingWiki, setRebuildingWiki] = useState<string | undefined>(undefined)
+  const [codegraphStatuses, setCodegraphStatuses] = useState<Record<string, CodegraphIndexStatus>>({})
+  // codegraphStatuses key = normalized localPath（路径去重后与仓库/对话共享同一索引）
+  const [buildingCodegraph, setBuildingCodegraph] = useState<string | undefined>(undefined)
   const [activeMemoryTab, setActiveMemoryTab] = useState<string>('user')
   const [expandedMemoryId, setExpandedMemoryId] = useState<string | undefined>(undefined)
+  const [conversations, setConversations] = useState<ChatConversationMeta[]>([])
+  const [pathEntries, setPathEntries] = useState<PathRegistryEntry[]>([])
   const { agents, refresh: refreshAgents } = useAgents()
   const [agentTab, setAgentTab] = useState<'system' | 'custom'>('system')
   const [agentTemplates, setAgentTemplates] = useState<AgentTemplate[]>([])
@@ -798,12 +811,24 @@ export function SettingsDialog({
       const repositoryList = await api.listRepositories()
       setRepositories(repositoryList)
       setMemories(await api.listMemories({ scopes: MANAGED_MEMORY_SCOPES }))
+      const [convList, , pathEntryList] = await Promise.all([
+        api.listChats(),
+        api.listChatGroups(),
+        api.listPathRegistry()
+      ])
+      setConversations(convList)
+      setPathEntries(pathEntryList)
       await refreshAgents()
       setAgentTemplates(await api.listAgentTemplates())
-      const counts: Record<string, number> = {}
-      for (const repository of repositoryList)
-        counts[repository.id] = (await api.listRepoWikiDocs(repository.id)).length
-      setWikiCounts(counts)
+      // 加载 codegraph 索引状态（按路径查询，与对话共享索引）
+      const cgMap: Record<string, CodegraphIndexStatus> = {}
+      await Promise.all(
+        repositoryList.map(async (repo) => {
+          const cg = await api.codegraphStatusForPath(repo.localPath)
+          if (cg) cgMap[repo.localPath] = cg
+        })
+      )
+      setCodegraphStatuses(cgMap)
       const profilesRaw = await api.getSetting('modelProfiles')
       if (profilesRaw) {
         try {
@@ -1064,6 +1089,13 @@ export function SettingsDialog({
   const refreshMemories = async () => {
     try {
       setMemories(await api.listMemories({ scopes: MANAGED_MEMORY_SCOPES }))
+      const [convList, , pathEntryList] = await Promise.all([
+        api.listChats(),
+        api.listChatGroups(),
+        api.listPathRegistry()
+      ])
+      setConversations(convList)
+      setPathEntries(pathEntryList)
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason))
     }
@@ -1124,13 +1156,29 @@ export function SettingsDialog({
     setRebuildingWiki(repositoryId)
     try {
       const result = await api.indexRepoWiki(repositoryId)
-      const docs = await api.listRepoWikiDocs(repositoryId)
-      setWikiCounts((current) => ({ ...current, [repositoryId]: docs.length }))
+      // 刷新 pathEntries 以更新 wikiDocCount
+      setPathEntries(await api.listPathRegistry())
       showSuccess(`索引完成：新增 ${result.indexed}，移除 ${result.removed}`)
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason))
     } finally {
       setRebuildingWiki(undefined)
+    }
+  }
+  const rebuildCodegraph = async (localPath: string) => {
+    console.log('[SettingsDialog] rebuildCodegraph called with:', localPath)
+    setBuildingCodegraph(localPath)
+    try {
+      console.log('[SettingsDialog] calling api.codegraphRebuildForPath...')
+      const status = await api.codegraphRebuildForPath(localPath)
+      console.log('[SettingsDialog] got status:', status)
+      setCodegraphStatuses((prev) => ({ ...prev, [localPath]: status }))
+      showSuccess('Codegraph 索引构建完成')
+    } catch (reason) {
+      console.error('[SettingsDialog] rebuildCodegraph error:', reason)
+      showError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setBuildingCodegraph(undefined)
     }
   }
   const userMemories = memories.filter((memory) => memory.scope === 'user')
@@ -1604,86 +1652,88 @@ export function SettingsDialog({
                     </TabsContent>
                   </Tabs>
                 </TabsContent>
-                <TabsContent value="memory" className="space-y-5">
+                <TabsContent value="memory" className="flex flex-col gap-5">
+                  <MemorySearchProbe repositories={repositories} />
                   <Section
                     title="记忆管理"
-                    description="用户级与仓库级长期记忆会注入到对话与任务执行上下文，可在此新增、修正或删除。"
+                    description="用户级、仓库级与对话级长期记忆会注入到对话与任务执行上下文，可在此新增、修正或删除。"
                   >
                     <div className="flex items-start justify-between gap-2.5">
                       <div>
                         <h3 className="text-xs font-semibold">记忆</h3>
                         <p className="mt-0.5 text-xs text-muted-foreground">共 {memories.length} 条</p>
                       </div>
-                      {/* <Button size="sm" onClick={openMemoryCreate}>
-                        <PlusIcon size={11} />
-                        新增记忆
-                      </Button> */}
                     </div>
-                    <Tabs value={activeMemoryTab} onValueChange={setActiveMemoryTab}>
-                      <TabsList className="h-7 justify-start gap-0.5 rounded-md border bg-card/40 p-0.5">
-                        <TabsTrigger value="user" className="h-6 px-2.5 text-xs!">
-                          用户
-                        </TabsTrigger>
-                        {repositories.map((repository) => (
-                          <TabsTrigger
-                            key={repository.id}
-                            value={repository.id}
-                            className="h-6 max-w-36 px-2.5 text-xs!"
+                    <div className="flex gap-3" style={{ minHeight: 320 }}>
+                      {/* 左侧：范围列表（基于 pathEntries 统一展示） */}
+                      <ScrollArea className="shrink-0 rounded-md border bg-card/40">
+                        <div className="flex flex-col gap-0.5 p-1.5">
+                          <button
+                            type="button"
+                            className={cn(
+                              'flex items-center gap-1.5 rounded-sm px-2 py-1.5 text-left text-xs! transition-colors',
+                              activeMemoryTab === 'user'
+                                ? 'bg-primary/10 font-medium text-primary'
+                                : 'text-muted-foreground hover:bg-muted'
+                            )}
+                            onClick={() => setActiveMemoryTab('user')}
                           >
-                            <span className="truncate">{repository.name}</span>
-                          </TabsTrigger>
-                        ))}
-                      </TabsList>
-                      <TabsContent value="user" className="mt-2.5 space-y-1.5">
-                        {userMemories.length ? (
-                          userMemories.map((memory) => (
-                            <MemoryCard
-                              key={memory.id}
-                              memory={memory}
-                              expanded={expandedMemoryId === memory.id}
-                              onToggle={() =>
-                                setExpandedMemoryId((current) => (current === memory.id ? undefined : memory.id))
-                              }
-                              onEdit={() => setMemoryDialog({ open: true, initial: memory })}
-                              onDelete={() => setDeleteMemory(memory)}
-                            />
-                          ))
-                        ) : (
-                          <div className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
-                            还没有用户级记忆
-                          </div>
-                        )}
-                      </TabsContent>
-                      {repositories.map((repository) => {
-                        const repoMemories = memories.filter(
-                          (memory) => memory.scope === 'repo' && memory.repositoryId === repository.id
-                        )
-                        return (
-                          <TabsContent key={repository.id} value={repository.id} className="mt-2.5 space-y-1.5">
-                            <div className="flex items-center justify-between rounded-md border bg-card/40 px-3 py-2">
-                              <p className="text-[11px] text-muted-foreground">
-                                repowiki 索引 {wikiCounts[repository.id] ?? 0} 篇
-                              </p>
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                disabled={rebuildingWiki === repository.id}
-                                onClick={() => void rebuildRepoWiki(repository.id)}
-                              >
-                                {rebuildingWiki === repository.id ? (
-                                  <Loader2Icon className="animate-spin-slow" size={11} />
-                                ) : (
-                                  <RefreshCwIcon size={11} />
+                            <span className="truncate">用户</span>
+                            <span className="ml-auto text-[10px] tabular-nums opacity-60">{userMemories.length}</span>
+                          </button>
+                          {pathEntries.map((entry) => {
+                            // 聚合记忆数：repo 级 + 对话级
+                            const repoCount =
+                              entry.hasRepo && entry.repositoryId
+                                ? memories.filter((m) => m.scope === 'repo' && m.repositoryId === entry.repositoryId)
+                                    .length
+                                : 0
+                            const dirConvIds = new Set(
+                              conversations.filter((c) => c.workingDirectory === entry.path).map((c) => c.id)
+                            )
+                            const convCount = entry.hasConversation
+                              ? memories.filter(
+                                  (m) =>
+                                    m.scope === 'conversation' && m.conversationId && dirConvIds.has(m.conversationId)
+                                ).length
+                              : 0
+                            const count = repoCount + convCount
+                            return (
+                              <button
+                                key={entry.path}
+                                type="button"
+                                className={cn(
+                                  'flex items-center gap-1.5 rounded-sm px-2 py-1.5 text-left text-xs! transition-colors',
+                                  activeMemoryTab === entry.path
+                                    ? 'bg-primary/10 font-medium text-primary'
+                                    : 'text-muted-foreground hover:bg-muted'
                                 )}
-                                {rebuildingWiki === repository.id ? '索引中' : '重建索引'}
-                              </Button>
-                            </div>
-                            {repoMemories.length ? (
-                              repoMemories.map((memory) => (
+                                onClick={() => setActiveMemoryTab(entry.path)}
+                                title={entry.path}
+                              >
+                                {entry.hasRepo ? (
+                                  <GitBranchIcon size={10} className="shrink-0" />
+                                ) : (
+                                  <FolderOpenIcon size={10} className="shrink-0" />
+                                )}
+                                <span className="truncate">{entry.name}</span>
+                                {count > 0 && (
+                                  <span className="ml-auto text-[10px] tabular-nums opacity-60">{count}</span>
+                                )}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </ScrollArea>
+                      {/* 右侧：内容区 */}
+                      <div className="min-w-0 flex-1 space-y-1.5 overflow-y-auto">
+                        {activeMemoryTab === 'user' && (
+                          <>
+                            {userMemories.length ? (
+                              userMemories.map((memory) => (
                                 <MemoryCard
                                   key={memory.id}
                                   memory={memory}
-                                  repository={repository}
                                   expanded={expandedMemoryId === memory.id}
                                   onToggle={() =>
                                     setExpandedMemoryId((current) => (current === memory.id ? undefined : memory.id))
@@ -1694,15 +1744,155 @@ export function SettingsDialog({
                               ))
                             ) : (
                               <div className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
-                                该仓库还没有记忆
+                                还没有用户级记忆
                               </div>
                             )}
-                          </TabsContent>
-                        )
-                      })}
-                    </Tabs>
+                          </>
+                        )}
+                        {pathEntries.map((entry) => {
+                          if (activeMemoryTab !== entry.path) return null
+                          const repository = entry.hasRepo
+                            ? repositories.find((r) => r.id === entry.repositoryId)
+                            : undefined
+                          const dirConvIds = new Set(
+                            conversations.filter((c) => c.workingDirectory === entry.path).map((c) => c.id)
+                          )
+                          const repoMemories =
+                            entry.hasRepo && entry.repositoryId
+                              ? memories.filter((m) => m.scope === 'repo' && m.repositoryId === entry.repositoryId)
+                              : []
+                          const convMemories = entry.hasConversation
+                            ? memories.filter(
+                                (m) =>
+                                  m.scope === 'conversation' && m.conversationId && dirConvIds.has(m.conversationId)
+                              )
+                            : []
+                          return (
+                            <div key={entry.path} className="space-y-1.5">
+                              {/* 仓库索引信息（hasRepo 时展示） */}
+                              {entry.hasRepo && repository && (
+                                <>
+                                  <div className="flex items-center justify-between rounded-md border bg-card/40 px-3 py-2">
+                                    <p className="text-[11px] text-muted-foreground">
+                                      repowiki 索引 {entry.wikiDocCount} 篇
+                                    </p>
+                                    <Button
+                                      variant="secondary"
+                                      size="sm"
+                                      disabled={rebuildingWiki === entry.repositoryId}
+                                      onClick={() => void rebuildRepoWiki(entry.repositoryId!)}
+                                    >
+                                      {rebuildingWiki === entry.repositoryId ? (
+                                        <Loader2Icon className="animate-spin-slow" size={11} />
+                                      ) : (
+                                        <RefreshCwIcon size={11} />
+                                      )}
+                                      {rebuildingWiki === entry.repositoryId ? '索引中' : '重建索引'}
+                                    </Button>
+                                  </div>
+                                  <div className="flex items-center justify-between rounded-md border bg-card/40 px-3 py-2">
+                                    {(() => {
+                                      const cg = codegraphStatuses[entry.path]
+                                      const statusLabel =
+                                        !cg || cg.status === 'not_indexed'
+                                          ? '未索引'
+                                          : cg.status === 'indexing'
+                                            ? '索引中'
+                                            : cg.status === 'error'
+                                              ? '异常'
+                                              : `已索引（${cg.fileCount ?? 0} 文件 · ${cg.nodeCount ?? 0} 节点 · ${cg.edgeCount ?? 0} 边）`
+                                      return (
+                                        <>
+                                          <p className="text-[11px] text-muted-foreground">
+                                            codegraph {statusLabel}
+                                            {cg?.error ? ` · ${cg.error}` : ''}
+                                          </p>
+                                          <Button
+                                            variant="secondary"
+                                            size="sm"
+                                            disabled={buildingCodegraph === entry.path || cg?.status === 'indexing'}
+                                            onClick={() => void rebuildCodegraph(entry.path)}
+                                          >
+                                            {buildingCodegraph === entry.path || cg?.status === 'indexing' ? (
+                                              <Loader2Icon className="animate-spin-slow" size={11} />
+                                            ) : (
+                                              <RefreshCwIcon size={11} />
+                                            )}
+                                            {buildingCodegraph === entry.path || cg?.status === 'indexing'
+                                              ? '构建中'
+                                              : !cg || cg.status === 'not_indexed'
+                                                ? '构建索引'
+                                                : '重建索引'}
+                                          </Button>
+                                        </>
+                                      )
+                                    })()}
+                                  </div>
+                                </>
+                              )}
+                              {/* 对话文件夹信息（hasConversation 时展示） */}
+                              {/* {entry.hasConversation && (
+                                <div className="rounded-md border bg-card/40 px-3 py-2">
+                                  <p className="text-[11px] text-muted-foreground" title={entry.path}>
+                                    对话文件夹 · {entry.path} · {dirConvIds.size} 个对话
+                                  </p>
+                                </div>
+                              )} */}
+                              {/* 仓库级记忆 */}
+                              {repoMemories.length > 0 && (
+                                <>
+                                  {repoMemories.map((memory) => (
+                                    <MemoryCard
+                                      key={memory.id}
+                                      memory={memory}
+                                      repository={repository}
+                                      expanded={expandedMemoryId === memory.id}
+                                      onToggle={() =>
+                                        setExpandedMemoryId((current) =>
+                                          current === memory.id ? undefined : memory.id
+                                        )
+                                      }
+                                      onEdit={() => setMemoryDialog({ open: true, initial: memory })}
+                                      onDelete={() => setDeleteMemory(memory)}
+                                    />
+                                  ))}
+                                </>
+                              )}
+                              {/* 对话级记忆 */}
+                              {convMemories.length > 0 && (
+                                <>
+                                  {convMemories.map((memory) => (
+                                    <MemoryCard
+                                      key={memory.id}
+                                      memory={memory}
+                                      expanded={expandedMemoryId === memory.id}
+                                      onToggle={() =>
+                                        setExpandedMemoryId((current) =>
+                                          current === memory.id ? undefined : memory.id
+                                        )
+                                      }
+                                      onEdit={() => setMemoryDialog({ open: true, initial: memory })}
+                                      onDelete={() => setDeleteMemory(memory)}
+                                    />
+                                  ))}
+                                </>
+                              )}
+                              {/* 无记忆时的空状态 */}
+                              {repoMemories.length === 0 && convMemories.length === 0 && (
+                                <div className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
+                                  {entry.hasRepo && entry.hasConversation
+                                    ? '该路径下没有记忆'
+                                    : entry.hasRepo
+                                      ? '该仓库还没有记忆'
+                                      : '该文件夹下没有对话记忆'}
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
                   </Section>
-                  <MemorySearchProbe repositories={repositories} />
                 </TabsContent>
                 <TabsContent value="model" className="space-y-5">
                   <Section title="Qoder" description="使用 Qoder Agent SDK 执行任务和生成对话。">

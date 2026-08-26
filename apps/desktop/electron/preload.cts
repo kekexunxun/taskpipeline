@@ -79,6 +79,18 @@ contextBridge.exposeInMainWorld('agentApi', {
   indexRepoWiki: (repositoryId: string) => ipcRenderer.invoke('repowiki:index', repositoryId),
   listRepoWikiDocs: (repositoryId: string) => ipcRenderer.invoke('repowiki:list', repositoryId),
   searchRepoWiki: (repositoryId: string, query: string) => ipcRenderer.invoke('repowiki:search', repositoryId, query),
+  // === PathRegistry 路径索引注册表 ==========================================
+  listPathRegistry: () => ipcRenderer.invoke('path-registry:list'),
+  // === Codegraph 代码图谱索引 ==============================================
+  codegraphList: () => ipcRenderer.invoke('codegraph:list'),
+  codegraphStatus: (repositoryId: string) => ipcRenderer.invoke('codegraph:status', repositoryId),
+  codegraphBuild: (repositoryId: string) => ipcRenderer.invoke('codegraph:build', repositoryId),
+  codegraphRebuild: (repositoryId: string) => ipcRenderer.invoke('codegraph:rebuild', repositoryId),
+  codegraphDelete: (repositoryId: string) => ipcRenderer.invoke('codegraph:delete', repositoryId),
+  codegraphUpdate: (repositoryId: string) => ipcRenderer.invoke('codegraph:update', repositoryId),
+  codegraphStatusForPath: (localPath: string) => ipcRenderer.invoke('codegraph:status-for-path', localPath),
+  codegraphBuildForPath: (localPath: string) => ipcRenderer.invoke('codegraph:build-for-path', localPath),
+  codegraphRebuildForPath: (localPath: string) => ipcRenderer.invoke('codegraph:rebuild-for-path', localPath),
   // === Agent 配置 ==================================================
   listAgents: () => ipcRenderer.invoke('agents:list'),
   saveAgent: (profile: unknown) => ipcRenderer.invoke('agents:save', profile),

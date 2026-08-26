@@ -19,6 +19,7 @@
 import { QoderCliProcessError, type Query, type SDKMessage } from '@qoder-ai/qoder-agent-sdk'
 import type { HookCallback, HookCallbackMatcher, HookEvent, HookJSONOutput } from '@qoder-ai/qoder-agent-sdk'
 import type { Task, TaskRepository, TaskStore, AgentSpan } from '@task-pipeline/core'
+import type { McpServerConfig as CodegraphMcpConfig } from '@task-pipeline/codegraph'
 import type { DriverPart } from '../../chat/chat-types.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
 import type {
@@ -83,6 +84,8 @@ export type QoderTaskAgentDeps = TaskAgentDeps & {
   resolveTestContext?: (task: Task, repos: TaskRepository[]) => Promise<{ sections: string[] }>
   /** 埋点管线：任务路径 span 采集（可选）。一次任务执行 = 一个 Trace（traceId = task.id）。 */
   tracePipeline?: TracePipeline
+  /** codegraph MCP 配置解析器（按仓库路径返回 MCP 配置，无索引则返回 null）。 */
+  codegraphMcpResolver?: (localPath: string) => CodegraphMcpConfig | null
 }
 
 const TEST_CASE_GENERATION_PROMPT = [
@@ -100,6 +103,19 @@ const TEST_CASE_GENERATION_PROMPT = [
 ].join('\n')
 
 const PLAN_TIMEOUT_MS = 5 * 60_000
+
+/** codegraph MCP 已激活时，注入代码图谱使用指引。 */
+function codegraphSystemHint(): string {
+  return [
+    '<codegraph_instructions>',
+    '当前工作区已启用代码图谱（Codegraph）索引，你可以通过 MCP 工具查询代码结构信息：',
+    '- 符号搜索：按名称查找函数、类、变量等符号定义',
+    '- 依赖分析：查看文件/模块间的引用关系',
+    '- 代码导航：快速定位符号的定义位置和引用点',
+    '遇到代码相关问题时，优先使用 codegraph 工具获取精确的代码结构信息，而非仅依赖文本搜索。',
+    '</codegraph_instructions>'
+  ].join('\n')
+}
 
 /** 去掉 model value 上的 `qoder:` provider 前缀,让 qodercli 能识别。 */
 export function stripQoderModelPrefix(model: string | undefined): string | undefined {
@@ -507,6 +523,21 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     const permissionHooks = this.deps.onPermissionRequest
       ? buildPermissionHooks(this.deps.onPermissionRequest, task.id, deniedCallIds)
       : undefined
+    // codegraph MCP：按主仓库路径自动注入
+    const primaryPath = primary.worktreePath ?? primary.localPath
+    const codegraphConfig = this.deps.codegraphMcpResolver?.(primaryPath)
+    const mcpServers = codegraphConfig
+      ? {
+          codegraph: {
+            type: 'stdio' as const,
+            command: codegraphConfig.command,
+            args: codegraphConfig.args
+          }
+        }
+      : undefined
+    const allowedMcpServerNames = mcpServers ? ['codegraph'] : undefined
+    // codegraph 系统提示：MCP 激活时注入代码图谱使用指引
+    const systemPrompt = mcpServers ? codegraphSystemHint() : undefined
     const session = new QoderSession(task.id, {
       token,
       cwd: primary.worktreePath ?? primary.localPath,
@@ -517,6 +548,8 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
       // 预授权 Agent 工具:让模型可委派内置子代理(Plan 等);不限制其它默认工具。
       allowedTools: ['Agent'],
       ...(permissionHooks ? { hooks: permissionHooks } : {}),
+      ...(mcpServers ? { mcpServers, allowedMcpServerNames } : {}),
+      ...(systemPrompt ? { systemPrompt } : {}),
       onMessage: (message) => {
         // HITL 拒绝补标:hooks deny 时 SDK 不一定设 is_error,由 deniedCallIds 补标。
         // 在 recordQoderMessage 之前修改,保证 task event 带 isError: true。

@@ -74,6 +74,12 @@ export class TaskStore {
         id TEXT PRIMARY KEY, category TEXT NOT NULL, sub_type TEXT NOT NULL,
         title TEXT NOT NULL, detail TEXT, payload TEXT, created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS path_registry (
+        path TEXT PRIMARY KEY, name TEXT NOT NULL,
+        has_repo INTEGER NOT NULL DEFAULT 0, has_conversation INTEGER NOT NULL DEFAULT 0,
+        repository_id TEXT, repository_name TEXT, default_branch TEXT,
+        wiki_doc_count INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
+      );
     `)
     try {
       this.db.exec('ALTER TABLE repository_profiles ADD COLUMN gitlab_project_id TEXT')

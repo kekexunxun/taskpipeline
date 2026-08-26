@@ -17,6 +17,7 @@ import {
 } from '@task-pipeline/integrations'
 import type { Task, TaskRepository, TaskStartMode, Memory, AgentProfile } from '@task-pipeline/core'
 import type { RepositoryCommandMap } from '@task-pipeline/integrations'
+import type { CodegraphManager } from '@task-pipeline/codegraph'
 import type { QoderOrchestrator } from '../pi-extension/qoder/index.js'
 import type { ChatService } from '../chat/chat-service.js'
 import type { ChatAttachmentCache } from '../chat/chat-attachment-cache.js'
@@ -30,6 +31,8 @@ import type { AgentGenerationRepository } from '../agents/agent-generator.js'
 import type { TaskBackendId } from '../chat/task-backends/index.js'
 import type { HitlMode } from '../task/hitl-mode.js'
 import type { TaskRemovalMode } from '../task/task-lifecycle.js'
+import type { PathRegistry } from '../path-registry.js'
+import { checkForUpdates, downloadUpdate as updaterDownload, quitAndInstall, getUpdateStatus } from '../auto-updater.js'
 
 /** IPC handler 所需的全部依赖，由 main.ts 组装后传入。 */
 export interface IpcDeps {
@@ -147,6 +150,12 @@ export interface IpcDeps {
   syncPiModelConfig: () => void
   keywordRewriter: (query: string) => Promise<string[]>
 
+  // Codegraph
+  codegraphManager: CodegraphManager
+
+  // PathRegistry
+  pathRegistry: PathRegistry
+
   // 数据目录
   writeCustomDataDir: (dir: string) => void
 }
@@ -246,8 +255,27 @@ export function registerIpc(d: IpcDeps): void {
     syncPiModelConfig,
     keywordRewriter,
     QoderTraceBuilder: QoderTraceBuilderCtor,
-    AGENT_GENERATOR_TASK_ID
+    AGENT_GENERATOR_TASK_ID,
+    codegraphManager,
+    pathRegistry
   } = d
+
+  /** 全量重建 path_registry 表（仓库 + 对话文件夹）。 */
+  async function refreshPathRegistry(): Promise<void> {
+    const repos = store.listRepositoryProfiles() as unknown as Array<{
+      id: string
+      name: string
+      localPath: string
+      defaultBranch: string
+    }>
+    const allGroups = await chatService.listGroups()
+    const dirGroups = allGroups.filter((g) => g.chatType === 'directory')
+    const wikiCounts: Record<string, number> = {}
+    for (const repo of repos) {
+      wikiCounts[repo.id] = memoryService.listRepoWikiDocs(repo.id).length
+    }
+    pathRegistry.refresh(repos, dirGroups, wikiCounts)
+  }
 
   // === Trace 页面（v2）=====================================================
   ipcMain.handle('trace:list', () => traceService.listSummaries())
@@ -289,11 +317,19 @@ export function registerIpc(d: IpcDeps): void {
     } catch (error) {
       console.warn('[repowiki] index failed:', error)
     }
+    // codegraph 索引：异步触发，不阻塞保存操作
+    codegraphManager.ensureIndex(profile.id, profile.localPath).catch((error) => {
+      console.warn('[codegraph] index failed:', error)
+    })
+    await refreshPathRegistry()
   })
-  ipcMain.handle('repos:delete', (_event, id: string) => {
+  ipcMain.handle('repos:delete', async (_event, id: string) => {
+    const profile = store.listRepositoryProfiles().find((r) => r.id === id)
     store.deleteRepositoryProfile(id)
     memoryService.deleteRepoMemories(id)
+    codegraphManager.deleteIndex(id)
     const removedAgents = agentService.detachRepository(id)
+    if (profile) pathRegistry.removeRepo(profile.localPath)
     return { removedAgents }
   })
   ipcMain.handle('repos:choose-folder', async () => {
@@ -578,7 +614,11 @@ export function registerIpc(d: IpcDeps): void {
   ipcMain.handle('repowiki:index', async (_event, repositoryId: string) => {
     const profile = store.listRepositoryProfiles().find((repo) => repo.id === repositoryId)
     if (!profile) throw new Error('仓库不存在')
-    return memoryService.refreshRepoWiki(profile.id, profile.localPath)
+    const result = await memoryService.refreshRepoWiki(profile.id, profile.localPath)
+    // 更新 path_registry 中的 wiki 文档数
+    const wikiDocs = memoryService.listRepoWikiDocs(repositoryId)
+    pathRegistry.updateWikiCount(profile.localPath, wikiDocs.length)
+    return result
   })
   ipcMain.handle('repowiki:list', (_event, repositoryId: string) => memoryService.listRepoWikiDocs(repositoryId))
   ipcMain.handle('repowiki:search', (_event, repositoryId: string, query: string) =>
@@ -703,9 +743,16 @@ export function registerIpc(d: IpcDeps): void {
     memoryService.deleteConversationMemories(id)
     chatAttachmentCache.deleteAttachments(id)
   })
-  ipcMain.handle('chats:set-directory', async (_event, id: string, workingDirectory?: string) =>
-    chatService.setChatWorkingDirectory(id, workingDirectory)
-  )
+  ipcMain.handle('chats:set-directory', async (_event, id: string, workingDirectory?: string) => {
+    const result = await chatService.setChatWorkingDirectory(id, workingDirectory)
+    // 绑定工作目录时触发 codegraph 索引（异步不阻塞）
+    if (workingDirectory) {
+      codegraphManager.ensureIndex(`chat:${id}`, workingDirectory).catch((error) => {
+        console.warn('[codegraph] chat directory index failed:', error)
+      })
+    }
+    return result
+  })
   ipcMain.handle('chats:list-models', async () => {
     const groups = await chatService.listModels()
     const status = qoderOrch?.getCachedStatus()
@@ -770,10 +817,54 @@ export function registerIpc(d: IpcDeps): void {
     const result = await dialog.showOpenDialog(getWindow()!, { properties: ['openDirectory', 'multiSelections'] })
     return result.filePaths
   })
-  ipcMain.handle('chat-groups:create-workspace', (_event, name: string, directories: string[]) =>
-    chatService.createWorkspaceGroup(name, directories)
+  ipcMain.handle('chat-groups:create-workspace', async (_event, name: string, directories: string[]) => {
+    const result = await chatService.createWorkspaceGroup(name, directories)
+    await refreshPathRegistry()
+    return result
+  })
+  ipcMain.handle('chat-groups:delete', async (_event, id: string) => {
+    await chatService.deleteGroup(id)
+    await refreshPathRegistry()
+  })
+
+  // === PathRegistry ==========================================================
+  ipcMain.handle('path-registry:list', () => pathRegistry.listEntries())
+
+  // === Codegraph =============================================================
+  ipcMain.handle('codegraph:list', () => codegraphManager.listAll())
+  ipcMain.handle('codegraph:status', (_event, repositoryId: string) => codegraphManager.getStatus(repositoryId))
+  ipcMain.handle('codegraph:status-for-path', (_event, localPath: string) =>
+    codegraphManager.getStatusByPath(localPath)
   )
-  ipcMain.handle('chat-groups:delete', (_event, id: string) => chatService.deleteGroup(id))
+  ipcMain.handle('codegraph:build', async (_event, repositoryId: string) => {
+    const profile = store.listRepositoryProfiles().find((repo) => repo.id === repositoryId)
+    if (!profile) throw new Error('仓库不存在')
+    await codegraphManager.ensureIndex(repositoryId, profile.localPath)
+    return codegraphManager.getStatusByPath(profile.localPath)
+  })
+  ipcMain.handle('codegraph:rebuild', async (_event, repositoryId: string) => {
+    const profile = store.listRepositoryProfiles().find((repo) => repo.id === repositoryId)
+    if (!profile) throw new Error('仓库不存在')
+    await codegraphManager.forceRebuild(repositoryId, profile.localPath)
+    return codegraphManager.getStatusByPath(profile.localPath)
+  })
+  ipcMain.handle('codegraph:delete', (_event, repositoryId: string) => {
+    codegraphManager.deleteIndex(repositoryId)
+  })
+  ipcMain.handle('codegraph:update', async (_event, repositoryId: string) => {
+    const profile = store.listRepositoryProfiles().find((repo) => repo.id === repositoryId)
+    if (!profile) throw new Error('仓库不存在')
+    await codegraphManager.updateIndex(repositoryId, profile.localPath)
+    return codegraphManager.getStatusByPath(profile.localPath)
+  })
+  ipcMain.handle('codegraph:build-for-path', async (_event, localPath: string) => {
+    await codegraphManager.ensureIndex(`path:${localPath}`, localPath)
+    return codegraphManager.getStatusByPath(localPath)
+  })
+  ipcMain.handle('codegraph:rebuild-for-path', async (_event, localPath: string) => {
+    await codegraphManager.forceRebuild(`path:${localPath}`, localPath)
+    return codegraphManager.getStatusByPath(localPath)
+  })
 
   // === 自动更新 ==============================================================
   ipcMain.handle('app:version', () => app.getVersion())
@@ -809,4 +900,10 @@ export function registerIpc(d: IpcDeps): void {
     app.relaunch()
     app.exit(0)
   })
+
+  // === 自动更新 =============================================================
+  ipcMain.handle('updater:check', () => checkForUpdates())
+  ipcMain.handle('updater:download', () => updaterDownload())
+  ipcMain.handle('updater:install', () => quitAndInstall())
+  ipcMain.handle('updater:status', () => getUpdateStatus())
 }

@@ -22,6 +22,7 @@ import {
   type SettingResolver
 } from '@task-pipeline/core'
 import { redactSecrets, testAtlassianConnectionRest } from '@task-pipeline/integrations'
+import { CodegraphManager } from '@task-pipeline/codegraph'
 import { QoderOrchestrator, QoderTraceBuilder } from './pi-extension/qoder/index.js'
 import { initAutoUpdater } from './auto-updater.js'
 import { TracePipeline } from './trace/bus/trace-pipeline.js'
@@ -30,6 +31,7 @@ import { resolveBundledOcrBinary } from './init/ocr-binary.js'
 import { loadMcpServers, saveMcpServers, validateMcpServerEntry, BUILTIN_MCP_IDS } from './mcp/mcp-config.js'
 import { listSkills, importSkillZip, importSkillFolder, deleteSkill } from './skill/skill-store.js'
 import { MemoryService } from './memory/memory-service.js'
+import { PathRegistry } from './path-registry.js'
 import {
   updateCredential,
   credentialStateSnapshot,
@@ -207,6 +209,8 @@ initModelProfile({
   resolveLiteModelFromQoder: () => qoderOrch.resolveLiteModel()
 })
 const memoryService = new MemoryService(store)
+const pathRegistry = new PathRegistry(store.db)
+const codegraphManager = new CodegraphManager({ dataDir })
 const agentService = new AgentService(
   (key) => store.getSetting(key),
   (key, value) => store.setSetting(key, value),
@@ -282,7 +286,8 @@ const { chatService, chatAttachmentCache } = createChatSystem({
   addTaskEvent,
   getQoderStatusForHealth: () => qoderOrch.getStatusForHealth(),
   atlassianRestConfig: (kind: string) => atlassianFactory.restConfig(kind as 'jira' | 'confluence'),
-  testAtlassianRest: testAtlassianConnectionRest
+  testAtlassianRest: testAtlassianConnectionRest,
+  codegraphManager
 })
 
 // ── Qoder Orchestrator + Task Runner 初始化 ──────────────────────────────────
@@ -339,7 +344,8 @@ qoderOrch = new QoderOrchestrator({
   syncSystemDefaultModel: () => syncSystemDefaultModel(),
   storeGetSetting: (key) => store.getSetting(key),
   taskChangedFiles,
-  savePlanDecision
+  savePlanDecision,
+  codegraphMcpResolver: (localPath: string) => codegraphManager.resolveMcpConfig(localPath)
 })
 initTaskLifecycle({
   store,
@@ -475,7 +481,9 @@ registerIpc({
   syncPiModelConfig,
   keywordRewriter,
   QoderTraceBuilder,
-  AGENT_GENERATOR_TASK_ID
+  AGENT_GENERATOR_TASK_ID,
+  codegraphManager,
+  pathRegistry
 })
 
 // ── 窗口创建 ─────────────────────────────────────────────────────────────────
@@ -528,6 +536,32 @@ app.whenReady().then(() => {
       .refreshRepoWiki(repo.id, repo.localPath)
       .catch((error) => console.warn('[repowiki] startup index failed:', error))
   }
+  // 初始化 path_registry + codegraph 启动验证
+  void (async () => {
+    try {
+      const repos = store.listRepositoryProfiles()
+      const allGroups = await chatService.listGroups()
+      const dirGroups = allGroups.filter((g) => g.chatType === 'directory')
+      const wikiCounts: Record<string, number> = {}
+      for (const repo of repos) {
+        wikiCounts[repo.id] = memoryService.listRepoWikiDocs(repo.id).length
+      }
+      pathRegistry.refresh(repos, dirGroups, wikiCounts)
+
+      // 收集所有目录（仓库 + 对话文件夹）交给 codegraph 统一校验 + 首次构建
+      const allDirs: Array<{ id: string; localPath: string }> = [
+        ...repos.map((r) => ({ id: r.id, localPath: r.localPath })),
+        ...dirGroups.flatMap((g) => g.directories.map((d) => ({ id: `chat:${g.id}`, localPath: d })))
+      ]
+      await codegraphManager
+        .validateStartup(allDirs)
+        .catch((error) => console.warn('[codegraph] startup validate failed:', error))
+      // 启动验证完成后，为所有已索引目录启动 watch 进程（实时增量更新）
+      codegraphManager.startAllWatches()
+    } catch (error) {
+      console.warn('[path-registry] startup refresh failed:', error)
+    }
+  })()
   const mergeTimer = setInterval(() => {
     void mergeRefresher.refresh()
   }, 60_000)
@@ -537,6 +571,7 @@ app.whenReady().then(() => {
   })
 })
 app.on('window-all-closed', () => {
+  codegraphManager.stopAllWatches()
   if (process.platform !== 'darwin') app.quit()
 })
 app.on('activate', () => {
