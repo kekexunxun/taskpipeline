@@ -91,7 +91,7 @@ export function markCredentialFailed(key: CredentialKey, message: string): void 
 
 // ── 工具函数 ─────────────────────────────────────────────────────────────────
 
-/** Promise 超时包装：MCP 探测（uvx 冷启动）可能长时间挂起，需要兜底超时。 */
+/** Promise 超时包装：MCP 探测（npx 冷启动）可能长时间挂起，需要兜底超时。 */
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(message)), ms)
@@ -143,7 +143,7 @@ export async function testMcpConnectionById(
   if (!profile) return { ok: false, tools: [], message: '未找到该服务，或未启用 / 凭据缺失' }
   const client = new McpClient(profile)
   try {
-    // npx/uvx 冷启动可能需下载包，超时放宽到 30s（与 McpClient 内部 request 超时一致）。
+    // npx 冷启动可能需下载包，超时放宽到 30s（与 McpClient 内部 request 超时一致）。
     const tools = await withTimeout(client.listTools(), 30_000, 'MCP 连接超时（30s）')
     const infos = tools
       .map((tool) => {
@@ -227,7 +227,7 @@ export async function checkCredentialHealth(): Promise<CredentialState[]> {
     start('gitlab', checkGitLabCredential(gitlabToken))
   }
 
-  // Jira / Confluence：走 REST API 直接验权（/myself 等），秒级返回，不拉 MCP / uvx。
+  // Jira / Confluence：走 REST API 直接验权（/myself 等），秒级返回，不拉 MCP。
   for (const kind of ['jira', 'confluence'] as const) {
     const rest = d().atlassianRestConfig(kind)
     if (!rest) {

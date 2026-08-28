@@ -51,14 +51,14 @@ export class AtlassianClientFactory {
     if (!url || !token) throw new Error(`请先配置 ${kind === 'jira' ? 'Jira' : 'Confluence'} URL 与 Token`)
     return new McpClient({
       id: 'atlassian',
-      name: 'mcp-atlassian',
+      name: '@alexbuzo/jira-mcp',
       transport: 'stdio',
-      command: 'uvx',
-      args: ['mcp-atlassian'],
+      command: 'npx',
+      args: ['@alexbuzo/jira-mcp'],
       env:
         kind === 'jira'
-          ? { JIRA_URL: url, JIRA_PERSONAL_TOKEN: token }
-          : { CONFLUENCE_URL: url, CONFLUENCE_PERSONAL_TOKEN: token },
+          ? { JIRA_BASE_URL: url, JIRA_BEARER_TOKEN: token }
+          : { CONFLUENCE_BASE_URL: url, CONFLUENCE_BEARER_TOKEN: token, CONFLUENCE_API_PREFIX: '/rest/api' },
       tools: {}
     } as McpProfile)
   }
@@ -77,7 +77,7 @@ export class AtlassianClientFactory {
 export type AtlassianRestConfig = { url: string; email?: string; token: string }
 
 /**
- * 走 REST API 直接校验 Atlassian Token（不拉起 MCP / uvx，秒级返回）。
+ * 走 REST API 直接校验 Atlassian Token（不拉起 MCP，秒级返回）。
  * - Jira：GET /rest/api/2/myself（Cloud / Server / DC 同路径）；
  * - Confluence：GET /rest/api/user/current（Cloud 实例 REST v1 挂在 /wiki 前缀下）。
  * 鉴权方式：配置了 email 用 Basic(email:token)（Cloud API Token），否则 Bearer（PAT）。
@@ -132,7 +132,7 @@ export async function importJiraIssue(client: McpClient, keyOrUrl: string, store
   try {
     const result = await client.callTool('jira_get_issue', { issue_key: key })
     const payload = mcpPayload(result)
-    // 部分版本 mcp-atlassian 失败时不抛错也不置 isError，而是把错误文案当普通 text 返回。
+    // 部分版本 @alexbuzo/jira-mcp 失败时不抛错也不置 isError，而是把错误文案当普通 text 返回。
     // 不在此拦截，401/404 文案会被当作 description 落库，导入一条标题为 key 的脏任务。
     const errorText = typeof payload?.text === 'string' ? payload.text : ''
     if ((result as { isError?: boolean } | undefined)?.isError || errorText) {
@@ -171,7 +171,7 @@ export async function importJiraIssue(client: McpClient, keyOrUrl: string, store
  * 只读取 Jira 任务候选项，不写入本地 store。
  *
  * 分页策略:
- * - 优先用 `next_page_token`(mcp-atlassian 现代接口)
+ * - 优先用 `next_page_token`(@alexbuzo/jira-mcp 现代接口)
  * - 没有时退回 `start_at` + `total` 传统分页
  * - 最多 100 页,每页 50 条
  */
@@ -182,7 +182,7 @@ export async function fetchJiraTasks(client: McpClient, jql?: string): Promise<J
     let pageToken: string | undefined
     const finalJql = jql ?? 'assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC'
     for (let page = 0; page < 100; page += 1) {
-      const result = await client.callTool('jira_search', {
+      const result = await client.callTool('jira_search_issues', {
         jql: finalJql,
         fields: 'summary,description,labels,status',
         limit: 50,
@@ -244,7 +244,7 @@ function looksLikeNotFoundError(message: string): boolean {
 /**
  * 探测结果是否具有预期的成功形态。
  * 白名单式判定：只有真正拿到数据结构才算直接通过。
- * 部分版本的 mcp-atlassian 工具失败时不置 `isError`，而是把错误文案当普通 text 返回，
+ * 部分版本的 @alexbuzo/jira-mcp 工具失败时不置 `isError`，而是把错误文案当普通 text 返回，
  * 只看标志位会把错误 Token 误判为通过，必须以数据形态为准。
  */
 function probeHasExpectedShape(payload: unknown, kind: 'jira' | 'confluence'): boolean {
@@ -264,7 +264,7 @@ function probeHasExpectedShape(payload: unknown, kind: 'jira' | 'confluence'): b
  * 1. listTools 验证 MCP 握手;
  * 2. 调必然鉴权的只读工具(jira_get_issue / confluence_get_page + 假 key)验证 Token：
  *    401/未授权 → 失效；404/不存在 → 凭据有效；拿到数据形态 → 有效。
- *    部分版本 mcp-atlassian 失败时不置 isError，而是把错误文案当普通 text 返回，
+ *    部分版本 @alexbuzo/jira-mcp 失败时不置 isError，而是把错误文案当普通 text 返回，
  *    因此判定以文案特征 + 数据形态为准。
  */
 export async function testAtlassianConnection(
@@ -277,7 +277,7 @@ export async function testAtlassianConnection(
     const probe = ATLASSIAN_PROBES[kind]
     const names = new Set(tools.map((tool) => (tool as { name?: string } | undefined)?.name ?? ''))
     const tool = probe.candidates.find((name) => names.has(name))
-    // 未知版本的 mcp-atlassian 找不到探测工具时退回握手结果,不误报失效。
+    // 未知版本的 @alexbuzo/jira-mcp 找不到探测工具时退回握手结果,不误报失效。
     if (!tool) return { ok: true, message: `连接成功,可用工具 ${tools.length} 个` }
     const result = (await client.callTool(tool, probe.args)) as { isError?: boolean; content?: unknown } | undefined
     const payload = mcpPayload(result)

@@ -50,22 +50,22 @@ export const BUILTIN_MCP_SERVERS: McpServerEntry[] = [
   {
     id: 'jira',
     name: 'Jira MCP',
-    description: '通过 MCP 协议让 AI 访问 Jira 数据（uvx mcp-atlassian）。',
+    description: '通过 MCP 协议让 AI 访问 Jira 数据（npx @alexbuzo/jira-mcp）。',
     builtin: true,
     enabled: true,
     transport: 'stdio',
-    command: 'uvx',
-    args: ['mcp-atlassian']
+    command: 'npx',
+    args: ['@alexbuzo/jira-mcp']
   },
   {
     id: 'confluence',
     name: 'Confluence MCP',
-    description: '通过 MCP 协议让 AI 访问 Confluence 数据（uvx mcp-atlassian）。',
+    description: '通过 MCP 协议让 AI 访问 Confluence 数据（npx @alexbuzo/jira-mcp）。',
     builtin: true,
     enabled: true,
     transport: 'stdio',
-    command: 'uvx',
-    args: ['mcp-atlassian']
+    command: 'npx',
+    args: ['@alexbuzo/jira-mcp']
   }
 ]
 

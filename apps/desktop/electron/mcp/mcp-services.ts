@@ -76,20 +76,20 @@ function resolveBuiltinProfile(
       tools: {}
     }
   }
-  // jira / confluence：同一 uvx mcp-atlassian，按 id 注入不同环境变量。
+  // jira / confluence：同一 npx @alexbuzo/jira-mcp，按 id 注入不同环境变量。
   const url = credentials.getSetting(`${entry.id}Url`)?.trim()
   const token = credentials.getSecret(`${entry.id}Token`)
   if (!url || !token) return undefined
   const env: Record<string, string> =
     entry.id === 'jira'
-      ? { JIRA_URL: url, JIRA_PERSONAL_TOKEN: token }
-      : { CONFLUENCE_URL: url, CONFLUENCE_PERSONAL_TOKEN: token }
+      ? { JIRA_BASE_URL: url, JIRA_BEARER_TOKEN: token }
+      : { CONFLUENCE_BASE_URL: url, CONFLUENCE_BEARER_TOKEN: token, CONFLUENCE_API_PREFIX: '/rest/api' }
   return {
     id: entry.id,
     name: entry.name,
     transport: 'stdio',
-    command: entry.command ?? 'uvx',
-    args: entry.args ?? ['mcp-atlassian'],
+    command: entry.command ?? 'npx',
+    args: entry.args ?? ['@alexbuzo/jira-mcp'],
     env,
     tools: {}
   }

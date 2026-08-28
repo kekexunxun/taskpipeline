@@ -1198,7 +1198,7 @@ describe('QoderChatDriver MCP 服务注入', () => {
     sdkMock.__pushScript({ messages: [textDelta('ok', 'sess-nohitl'), resultMessage('ok', 'sess-nohitl')] })
     await collect(
       driverWithMcp((id) =>
-        id === 'jira' ? { transport: 'stdio' as const, command: 'uvx', args: ['mcp-atlassian'] } : undefined
+        id === 'jira' ? { transport: 'stdio' as const, command: 'npx', args: ['@alexbuzo/jira-mcp'] } : undefined
       ).streamChat({
         conversationId: 'c-nohitl',
         model: 'qoder:claude-sonnet-4.5',

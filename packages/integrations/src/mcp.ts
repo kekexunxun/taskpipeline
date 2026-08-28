@@ -85,11 +85,7 @@ export class McpClient {
     }
     if (this.profile.transport === 'stdio' && /MCP request timeout/.test(message)) {
       const stderr = this.stderrTail.trim() ? `\n子进程输出：${this.stderrTail.trim()}` : ''
-      const hint =
-        /not found|ENOENT|No such file|Cannot find/i.test(this.stderrTail) || !this.stderrTail.trim()
-          ? '请确认 uvx 已安装并可在 PATH 中访问，且 mcp-atlassian 包可被 uvx 拉起。'
-          : ''
-      return new Error(`${message}（方法：${method}）${stderr}${hint ? `\n${hint}` : ''}`)
+      return new Error(`${message}（方法：${method}）${stderr}`)
     }
     return error instanceof Error ? error : new Error(message)
   }
