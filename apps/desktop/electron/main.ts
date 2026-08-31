@@ -39,7 +39,7 @@ import {
   testMcpConnectionById
 } from './credential/credential-state.js'
 import { initTaskRunner, loadRepoContext, callOpenAIForPrompt, savePlanDecision } from './task/task-runner.js'
-import { keywordRewriterWithTrace, taskMemoryContext } from './memory/memory-context.js'
+import { taskMemoryContext } from './memory/memory-context.js'
 import { AgentService } from './agents/agent-service.js'
 import { AGENT_TEMPLATES } from './agents/templates.js'
 import { buildAgentGenerationPrompt, parseAgentGenerationResult } from './agents/agent-generator.js'
@@ -209,6 +209,23 @@ initModelProfile({
   resolveLiteModelFromQoder: () => qoderOrch.resolveLiteModel()
 })
 const memoryService = new MemoryService(store)
+// 启动迁移：检测旧 memories / repo_wiki_docs 表，有数据则迁移到新 MemoryEngine
+try {
+  memoryService.runLegacyMigration()
+} catch (error) {
+  console.warn('[memory] legacy migration failed:', error)
+}
+// 启动时执行一次生命周期维护（过期 candidate / 标记 stale / 归档旧节点）
+try {
+  const retention = memoryService.runRetention()
+  if (retention.expired + retention.stale + retention.archived > 0) {
+    console.info(
+      `[memory] startup retention: ${retention.expired} expired, ${retention.stale} stale, ${retention.archived} archived`
+    )
+  }
+} catch (error) {
+  console.warn('[memory] startup retention failed:', error)
+}
 const pathRegistry = new PathRegistry(store.db)
 const codegraphManager = new CodegraphManager({ dataDir })
 const agentService = new AgentService(
@@ -400,8 +417,6 @@ initTaskRunner({
   runOperationAgent
 })
 
-const keywordRewriter = (query: string) => keywordRewriterWithTrace(query)
-
 // ── IPC 路由 ─────────────────────────────────────────────────────────────────
 
 function listTaskBackends(): Array<{ id: TaskBackendId; displayName: string; configured: boolean }> {
@@ -479,7 +494,6 @@ registerIpc({
   listTaskBackends,
   writeCustomDataDir,
   syncPiModelConfig,
-  keywordRewriter,
   QoderTraceBuilder,
   AGENT_GENERATOR_TASK_ID,
   codegraphManager,
@@ -566,6 +580,18 @@ app.whenReady().then(() => {
     void mergeRefresher.refresh()
   }, 60_000)
   mergeTimer.unref()
+  // 每 6 小时执行一次记忆生命周期维护（过期 / stale / 归档）
+  const retentionTimer = setInterval(
+    () => {
+      try {
+        memoryService.runRetention()
+      } catch (error) {
+        console.warn('[memory] periodic retention failed:', error)
+      }
+    },
+    6 * 60 * 60 * 1000
+  )
+  retentionTimer.unref()
   app.on('browser-window-focus', () => {
     void mergeRefresher.refresh()
   })

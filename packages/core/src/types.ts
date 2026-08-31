@@ -323,6 +323,12 @@ export type Memory = {
   source: MemorySource
   createdAt: string
   updatedAt: string
+  /** MemoryEngine 节点类型（新系统字段，旧数据可能无此字段） */
+  nodeType?: string
+  /** MemoryEngine 节点状态：active / candidate / stale / superseded / archived / compacted / expired */
+  status?: string
+  /** MemoryEngine 置信度 0~1 */
+  confidence?: number
 }
 
 export type RepoWikiDoc = {

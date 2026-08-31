@@ -14,7 +14,8 @@ import {
   SearchIcon,
   Trash2Icon,
   UploadIcon,
-  InfoIcon
+  InfoIcon,
+  ArchiveIcon
 } from 'lucide-react'
 import type { AgentProfile, Memory, MemoryScope, RepositoryProfile } from '@task-pipeline/core'
 import { RepositoryDialog, TestButton, type RepoDraft } from './RepositoryDialog'
@@ -226,9 +227,30 @@ function RepositoryCard({
   )
 }
 
+/** nodeType → 中文标签映射 */
+const NODE_TYPE_LABELS: Record<string, string> = {
+  constraint: '约束',
+  architecture: '架构',
+  decision: '决策',
+  incident: '事件',
+  procedure: '流程',
+  module: '模块',
+  security_rule: '安全'
+}
+const STATUS_LABELS: Record<string, { label: string; className: string }> = {
+  active: { label: '已确认', className: 'bg-emerald-500' },
+  candidate: { label: '待确认', className: 'bg-amber-500' },
+  stale: { label: '陈旧', className: 'bg-zinc-400' },
+  superseded: { label: '已替代', className: 'bg-zinc-300' },
+  archived: { label: '已归档', className: 'bg-zinc-300' },
+  compacted: { label: '已压缩', className: 'bg-zinc-400' },
+  expired: { label: '已过期', className: 'bg-red-400' }
+}
+
 /**
  * 记忆卡片：标题可点击展开内容，操作按钮靠右悬浮。
  * 展开后按 范围 / 关键词 / 内容 三段式结构化展示。
+ * 标题行显示 nodeType 标签 + 状态指示点。
  */
 function MemoryCard({
   memory,
@@ -236,7 +258,8 @@ function MemoryCard({
   expanded,
   onToggle,
   onEdit,
-  onDelete
+  onDelete,
+  onArchive
 }: {
   memory: Memory
   repository?: RepositoryProfile
@@ -244,8 +267,9 @@ function MemoryCard({
   onToggle(): void
   onEdit(): void
   onDelete(): void
+  onArchive(): void
 }) {
-  // const scopeValue = memory.scope === 'user' ? '用户级' : repository?.localPath || repository?.name || '—'
+  const statusInfo = memory.status ? STATUS_LABELS[memory.status] : undefined
   return (
     <article className="group rounded-md border bg-card">
       <div className="flex items-center gap-1.5 px-2.5 py-2">
@@ -266,6 +290,17 @@ function MemoryCard({
                   置顶
                 </Badge>
               )}
+              {memory.nodeType && (
+                <Badge variant="muted" className="text-[9px]">
+                  {NODE_TYPE_LABELS[memory.nodeType] ?? memory.nodeType}
+                </Badge>
+              )}
+              {statusInfo && (
+                <span
+                  className={cn('inline-block h-1.5 w-1.5 shrink-0 rounded-full', statusInfo.className)}
+                  title={statusInfo.label}
+                />
+              )}
               <h4 className="truncate text-xs font-semibold text-foreground">{memory.title}</h4>
             </div>
           </div>
@@ -274,6 +309,11 @@ function MemoryCard({
           <Button variant="ghost" size="icon-sm" aria-label={`编辑记忆 ${memory.title}`} onClick={onEdit}>
             <PencilIcon size={11} />
           </Button>
+          {memory.status !== 'archived' && (
+            <Button variant="ghost" size="icon-sm" aria-label={`归档记忆 ${memory.title}`} onClick={onArchive}>
+              <ArchiveIcon size={11} />
+            </Button>
+          )}
           <Button variant="ghost" size="icon-sm" aria-label={`删除记忆 ${memory.title}`} onClick={onDelete}>
             <Trash2Icon size={11} />
           </Button>
@@ -291,6 +331,27 @@ function MemoryCard({
             <p className="text-[10px] leading-4 text-muted-foreground/70">内容</p>
             <p className="text-[11px] leading-5 whitespace-pre-wrap text-muted-foreground">{memory.content}</p>
           </div>
+          {memory.confidence != null && (
+            <div className="flex items-center gap-2">
+              <p className="text-[10px] leading-4 text-muted-foreground/70">置信度</p>
+              <div className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
+                <div
+                  className={cn(
+                    'h-full rounded-full transition-all',
+                    memory.confidence >= 0.7
+                      ? 'bg-emerald-500'
+                      : memory.confidence >= 0.4
+                        ? 'bg-amber-500'
+                        : 'bg-red-400'
+                  )}
+                  style={{ width: `${Math.round(memory.confidence * 100)}%` }}
+                />
+              </div>
+              <span className="text-[10px] text-muted-foreground tabular-nums">
+                {Math.round(memory.confidence * 100)}%
+              </span>
+            </div>
+          )}
         </div>
       )}
     </article>
@@ -1110,6 +1171,14 @@ export function SettingsDialog({
       showError(reason instanceof Error ? reason.message : String(reason))
     }
   }
+  const archiveMemory = async (memory: Memory) => {
+    try {
+      await api.updateMemory(memory.id, { status: 'archived' })
+      await refreshMemories()
+    } catch (reason) {
+      showError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }
   const toggleAgentEnabled = async (agent: AgentProfile, enabled: boolean) => {
     try {
       await api.saveAgent({ ...agent, enabled, updatedAt: new Date().toISOString() })
@@ -1166,12 +1235,12 @@ export function SettingsDialog({
     }
   }
   const rebuildCodegraph = async (localPath: string) => {
-    console.log('[SettingsDialog] rebuildCodegraph called with:', localPath)
+    console.info('[SettingsDialog] rebuildCodegraph called with:', localPath)
     setBuildingCodegraph(localPath)
     try {
-      console.log('[SettingsDialog] calling api.codegraphRebuildForPath...')
+      console.info('[SettingsDialog] calling api.codegraphRebuildForPath...')
       const status = await api.codegraphRebuildForPath(localPath)
-      console.log('[SettingsDialog] got status:', status)
+      console.info('[SettingsDialog] got status:', status)
       setCodegraphStatuses((prev) => ({ ...prev, [localPath]: status }))
       showSuccess('Codegraph 索引构建完成')
     } catch (reason) {
@@ -1740,6 +1809,7 @@ export function SettingsDialog({
                                   }
                                   onEdit={() => setMemoryDialog({ open: true, initial: memory })}
                                   onDelete={() => setDeleteMemory(memory)}
+                                  onArchive={() => void archiveMemory(memory)}
                                 />
                               ))
                             ) : (
@@ -1854,6 +1924,7 @@ export function SettingsDialog({
                                       }
                                       onEdit={() => setMemoryDialog({ open: true, initial: memory })}
                                       onDelete={() => setDeleteMemory(memory)}
+                                      onArchive={() => void archiveMemory(memory)}
                                     />
                                   ))}
                                 </>
@@ -1873,6 +1944,7 @@ export function SettingsDialog({
                                       }
                                       onEdit={() => setMemoryDialog({ open: true, initial: memory })}
                                       onDelete={() => setDeleteMemory(memory)}
+                                      onArchive={() => void archiveMemory(memory)}
                                     />
                                   ))}
                                 </>

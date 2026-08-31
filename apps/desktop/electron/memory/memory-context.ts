@@ -16,10 +16,8 @@ import type {
 } from '@task-pipeline/core'
 import type { ChatDriverId } from '../chat/chat-types.js'
 import type { ChatConversation } from '../chat/chat-types.js'
-import type { KeywordRewriter } from './memory-service.js'
 import { renderMemoryContext } from './memory-service.js'
 import { extractMemories } from './memory-extractor.js'
-import { extractKeywords } from './memory-keyword-extractor.js'
 
 // ── 依赖注入（main.ts 初始化时传入） ─────────────────────────────────────────
 
@@ -37,7 +35,6 @@ interface MemoryContextDeps {
       repositoryIds?: string[]
       conversationId?: string
       query: string
-      keywordRewriter?: KeywordRewriter
     }): Promise<{ memories: MemorySearchHit[]; wikiDocs: RepoWikiSearchHit[]; keywords: string[] }>
     ensureUserId(): string
     consolidateMemories(
@@ -107,69 +104,25 @@ export async function resolveTaskChatModel(task?: Task): Promise<{ driverId: Cha
   return { driverId: 'openai', model: fallback.model }
 }
 
-// ── 关键词提取 ───────────────────────────────────────────────────────────────
-
-/**
- * 带 trace 归属的关键词提取：辅助 LLM 调用显式 join 所属回合/任务 trace
- * （一次用户提问 = 一个 Trace），避免关键词提取产生独立 trace 记录。
- * 传 task 时模型驱动跟随任务 runtime provider（Qoder 任务走 qoder-lite，不跟全局 OpenAI profile）。
- */
-export async function keywordRewriterWithTrace(query: string, traceId?: string, task?: Task): Promise<string[]> {
-  const { driverId } = await resolveTaskChatModel(task)
-  const driver = d().chatDriverRegistry.tryGet(driverId)
-  if (!driver) return []
-  const model = await d().resolveLiteModel(driverId)
-  return extractKeywords({ driver: driver as never, driverId, model, text: query, traceId })
-}
-
 // ── 任务记忆检索 ─────────────────────────────────────────────────────────────
 
 export async function taskMemoryContext(task: Task, repos: TaskRepository[]): Promise<string | undefined> {
   try {
-    // 关键词提取走 LLM 同步起调用(Qoder 跳 lite,OpenAI 跟随),需要把这一步单独记
-    // 到 trace 里:模型、返回的关键词数组、耗时。生产环境调 OpenAI 关键词提取本身
-    // 一次几百毫秒 ~ 几秒,不记会让用户看到"检索"却不知道背后是 LLM 调用,trace 会误导。
-    // 驱动跟随任务 runtime provider（Qoder 任务即使全局配了 OpenAI profile 也走 qoder-lite）。
-    const { driverId } = await resolveTaskChatModel(task)
-    const keywordModel = await d().resolveLiteModel(driverId)
-    const tracedRewriter: KeywordRewriter = async (query) => {
-      const start = Date.now()
-      try {
-        const kw = await keywordRewriterWithTrace(query, task.id, task)
-        const ms = Date.now() - start
-        d().addTaskEvent({
-          taskId: task.id,
-          kind: 'status',
-          title: 'LLM 提取检索关键词',
-          detail: `模型：${keywordModel}\n驱动：${driverId}\n关键词：${kw.length ? kw.join('、') : '（空，已回退到 fallbackKeywords）'}\n耗时：${ms} ms`
-        })
-        return kw
-      } catch (error) {
-        const ms = Date.now() - start
-        d().addTaskEvent({
-          taskId: task.id,
-          kind: 'error',
-          title: 'LLM 提取检索关键词失败',
-          detail: `模型：${keywordModel}\n驱动：${driverId}\n耗时：${ms} ms\n${error instanceof Error ? error.message : String(error)}`
-        })
-        throw error
-      }
-    }
+    // 新 MemoryEngine 检索路径零 LLM：直接 tokenize 走 FTS5 + RRF 融合，
+    // 不再需要 LLM 关键词提取。trace 记录检索结果（命中数、关键词）供调试。
     const searchResult = await d().memoryService.search({
       userId: d().memoryService.ensureUserId(),
       repositoryIds: repos.map((repo) => repo.repositoryId),
       conversationId: `task:${task.id}`,
-      query: `${task.title}\n${task.description}`,
-      keywordRewriter: tracedRewriter
+      query: `${task.title}\n${task.description}`
     })
     const { memories, wikiDocs, keywords } = searchResult
     d().addTaskEvent({
       taskId: task.id,
       kind: 'status',
       title: '检索记忆上下文',
-      // 顶部拼接驱动 + 模型,跟「LLM 提取检索关键词」一致 —— 记忆检索只走 FTS5,
-      // 但 FTS5 喂什么词是 LLM 决定的,用户要能看到这条线索。
-      detail: formatMemorySearchDetail(memories, wikiDocs, keywords, { driverId, model: keywordModel })
+      // 零 LLM 检索：直接 tokenize + FTS5，记录关键词（fallbackKeywords 提取）和命中数。
+      detail: formatMemorySearchDetail(memories, wikiDocs, keywords)
     })
     const memoryContext = renderMemoryContext(memories, wikiDocs)
     // 独立发一条「注入记忆上下文」:与「注入 Agent 上下文」对称,验证检索出的内容真的
@@ -199,17 +152,16 @@ export async function taskMemoryContext(task: Task, repos: TaskRepository[]): Pr
  * 把 memoryService.search 返回结果格式化为可读的 trace detail。
  * - 按 scope 分组列出（用户 / 仓库 / 对话 / repowiki）；
  * - 每条带标题 + score + 200 字预览；
- * - 顶部拼接驱动 + 模型（与「LLM 提取检索关键词」对齐 + 备注命中总数 / 关键词）。
+ * - 顶部拼接命中总数 + 关键词（零 LLM 检索，直接 tokenize + FTS5）。
  */
 function formatMemorySearchDetail(
   memories: MemorySearchHit[],
   wikiDocs: RepoWikiSearchHit[],
-  keywords: string[],
-  meta: { driverId: string; model: string }
+  keywords: string[]
 ): string {
   const scopeLabel: Record<MemoryScope, string> = { user: '用户', repo: '仓库', conversation: '对话' }
   const total = memories.length + wikiDocs.length
-  const header = [`驱动：${meta.driverId}`, `模型：${meta.model}`, `命中：${total} 条`]
+  const header = [`检索引擎：MemoryEngine (FTS5 + RRF)`, `命中：${total} 条`]
   if (total === 0) {
     return [
       ...header,

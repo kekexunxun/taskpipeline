@@ -2,11 +2,31 @@ import { randomUUID } from 'node:crypto'
 import type { ChatDriver } from '../chat/drivers/chat-driver.js'
 import type { ChatDriverId, StoredMessage } from '../chat/chat-types.js'
 
+/**
+ * TODO(LLM 写入路径增强):
+ *
+ * 当前 extractMemories 通过 prompt 让 LLM 提炼记忆草稿，存在以下已知缺陷：
+ *
+ * 1. 无置信度评分 —— LLM 不给自己输出打分，consolidateMemories 统一写死
+ *    confidence: 0.5。改进方向：prompt 要求 LLM 对每条记忆输出 confidence 字段
+ *    （0~1），ExtractedMemoryDraft 增加 confidence?: number，下游透传给
+ *    MemoryNode.confidence，反思晋升时据此加权。
+ *
+ * 2. 无作用域后验证 —— prompt 里写了 repo vs user 判定规则，但没有后验证。
+ *    改进方向：对 LLM 分配的 scope 做简单启发式检查（如内容含项目名/技术栈
+ *    但 scope=user → 警告或自动修正为 repo）。
+ *
+ * 3. 验重仅限同 scope —— consolidateMemories 只在同一 scope 内做 Jaccard 验重，
+ *    不跨 scope。一条 repo 记忆和一条 user 记忆内容相同不会互斥。
+ *    改进方向：验重时同时检查所有 scope 的已有节点。
+ */
 export type ExtractedMemoryDraft = {
   scope: 'user' | 'repo' | 'conversation'
   title: string
   content: string
   tags: string[]
+  /** LLM 自评置信度 0~1（可选，未实现时下游默认 0.5） */
+  confidence?: number
 }
 
 const MAX_TRANSCRIPT_CHARS = 12_000

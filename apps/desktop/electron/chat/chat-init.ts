@@ -21,7 +21,7 @@ import { loadMcpServers } from '../mcp/mcp-config.js'
 import { createMcpServiceResolver } from '../mcp/mcp-services.js'
 import { renderMemoryContext } from '../memory/memory-service.js'
 import type { MemoryService } from '../memory/memory-service.js'
-import { initMemoryContext, keywordRewriterWithTrace, consolidateChatMemory } from '../memory/memory-context.js'
+import { initMemoryContext, consolidateChatMemory } from '../memory/memory-context.js'
 import { QoderChatDriver } from '../pi-extension/qoder/index.js'
 import type { QoderOrchestrator } from '../pi-extension/qoder/index.js'
 import { readSkillContent } from '../skill/skill-store.js'
@@ -229,8 +229,7 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
         userId: memoryService.ensureUserId(),
         repositoryIds: repositoryIds.length ? repositoryIds : undefined,
         conversationId,
-        query,
-        keywordRewriter: (q: string) => keywordRewriterWithTrace(q, turnTraceId)
+        query
       })
       if (turnTraceId && tracePipeline.isActive(turnTraceId)) {
         const span = tracePipeline.startSpan(turnTraceId, {

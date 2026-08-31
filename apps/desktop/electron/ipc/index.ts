@@ -148,7 +148,6 @@ export interface IpcDeps {
   // 工具
   listTaskBackends: () => Array<{ id: TaskBackendId; displayName: string; configured: boolean }>
   syncPiModelConfig: () => void
-  keywordRewriter: (query: string) => Promise<string[]>
 
   // Codegraph
   codegraphManager: CodegraphManager
@@ -253,7 +252,6 @@ export function registerIpc(d: IpcDeps): void {
     listTaskBackends,
     writeCustomDataDir,
     syncPiModelConfig,
-    keywordRewriter,
     QoderTraceBuilder: QoderTraceBuilderCtor,
     AGENT_GENERATOR_TASK_ID,
     codegraphManager,
@@ -609,7 +607,7 @@ export function registerIpc(d: IpcDeps): void {
       _event,
       query: string,
       options?: { repositoryIds?: string[]; conversationId?: string; limit?: number; traceSource?: 'dev-probe' }
-    ) => memoryService.search({ userId: memoryService.ensureUserId(), query, keywordRewriter, ...options })
+    ) => memoryService.search({ userId: memoryService.ensureUserId(), query, ...options })
   )
   ipcMain.handle('repowiki:index', async (_event, repositoryId: string) => {
     const profile = store.listRepositoryProfiles().find((repo) => repo.id === repositoryId)
