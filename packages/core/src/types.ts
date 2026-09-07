@@ -183,7 +183,16 @@ export type RepositoryProfile = {
 export type McpProfile = {
   id: string
   name: string
-  transport: 'stdio' | 'sse' | 'streamable-http'
+  /**
+   * 传输方式：
+   * - 'stdio'：本地子进程（行为不变）
+   * - 'sse'：老 SSE 传输（行为不变）
+   * - 'streamable-http'：MCP 2025-03-26 协议（先 initialize 握手 + httpSend，行为不变）
+   * - 'stateless-http'（MCP 2026-07-28）：无状态协议，去掉 initialize 握手，每个 HTTP 请求
+   *   params._meta 必填 io.modelcontextprotocol/{protocolVersion,clientInfo,clientCapabilities}；
+   *   tools/list 响应按 _meta.ttlMs 缓存。
+   */
+  transport: 'stdio' | 'sse' | 'streamable-http' | 'stateless-http'
   command?: string
   args?: string[]
   url?: string

@@ -129,24 +129,27 @@ export async function runStats(
 /**
  * 启动 codegraph watch 长驻进程，监听文件变更并增量更新 graph.db。
  *
- * 返回 stop 函数用于优雅终止进程。
+ * watch 命令不支持 -d 参数，所有输出（graph.db、change-events.ndjson、changes.journal）
+ * 固定写入 <cwd>/.codegraph/。通过设置 cwd 为集中存储的 hash 目录，
+ * 使副作用文件写入集中存储而非项目目录。
  *
  * @param dir 监听目录
- * @param dbPath 集中存储的 graph.db 路径（通过 -d 指定）
+ * @param cwd 子进程工作目录（应设为 dirIndexDir，即集中存储的 per-repo 目录）
  * @param options CLI 选项
  */
 export function runWatch(
   dir: string,
-  dbPath: string,
+  cwd: string,
   options: Pick<CodegraphCliOptions, 'engine'>
 ): { process: ChildProcess; stop: () => void } {
   const { engine } = options
-  // --engine 是全局选项，放在子命令前面
-  const args = ['@optave/codegraph', '--engine', engine, 'watch', dir, '-d', dbPath]
+  // watch 不支持 -d 参数，输出固定写入 <cwd>/.codegraph/
+  const args = ['@optave/codegraph', '--engine', engine, 'watch', dir]
 
-  console.info('[codegraph] starting watch:', args.join(' '))
+  console.info('[codegraph] starting watch:', args.join(' '), 'cwd:', cwd)
 
   const child = spawn('npx', args, {
+    cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false
   })

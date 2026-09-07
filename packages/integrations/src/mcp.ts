@@ -14,12 +14,21 @@ export class McpClient {
   private sseAbort?: AbortController
   private stderrTail = ''
   private exitReason?: { code: number | null; signal: NodeJS.Signals | null; reason: string }
+  // MCP 2026-07-28 stateless 协议专属：
+  // - 只对 transport === 'stateless-http' 生效，老 transport (stdio / sse / streamable-http) 行为不变。
+  // - 由 profile.transport 驱动，不带独立 protocolVersion 字段。
+  private readonly isStatelessHttp: boolean
+  private readonly clientInfo = { name: 'task-pipeline', version: '1.0.0' }
+  private readonly clientCapabilities: Record<string, unknown> = {}
+  private toolsCache?: { tools: unknown[]; expiresAt: number }
 
   constructor(
     private readonly profile: McpProfile,
     private readonly env: NodeJS.ProcessEnv = process.env,
     private readonly fetcher: typeof fetch = fetch
-  ) {}
+  ) {
+    this.isStatelessHttp = profile.transport === 'stateless-http'
+  }
 
   async connect(): Promise<void> {
     if (this.profile.transport === 'stdio') {
@@ -66,12 +75,17 @@ export class McpClient {
       throw new Error('MCP HTTP URL is required')
     }
     if (this.profile.transport === 'sse') await this.connectLegacySse()
-    await this.request('initialize', {
-      protocolVersion: '2025-03-26',
-      capabilities: {},
-      clientInfo: { name: 'task-pipeline', version: '1.0.0' }
-    })
-    this.notify('notifications/initialized', {})
+    // MCP 2026-07-28 stateless 协议完全去掉了 initialize 握手；只有 stateless-http 跳过。
+    // 其他 HTTP transport（streamable-http / sse）保持原 2025-03-26 握手行为。
+    // stdio 走子进程不需要额外握手。
+    if (!this.isStatelessHttp && this.profile.transport !== 'stdio') {
+      await this.request('initialize', {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: this.clientInfo
+      })
+      this.notify('notifications/initialized', {})
+    }
     this.initialized = true
   }
 
@@ -98,8 +112,14 @@ export class McpClient {
   private notify(method: string, params: unknown): void {
     if (this.profile.transport === 'stdio')
       this.child?.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`)
-    else if (this.profile.transport === 'sse') void this.legacySseSend({ jsonrpc: '2.0', method, params })
-    else void this.httpSend({ jsonrpc: '2.0', method, params })
+    else if (this.profile.transport === 'sse')
+      void this.legacySseSend({ jsonrpc: '2.0', method, params }).catch(() => {
+        /* notification failures are non-fatal */
+      })
+    else
+      void this.httpSend({ jsonrpc: '2.0', method, params }).catch(() => {
+        /* notification failures are non-fatal */
+      })
   }
   private request(method: string, params: unknown): Promise<McpResponse> {
     const id = this.nextId++
@@ -233,6 +253,21 @@ export class McpClient {
   }
 
   private async httpSend(payload: Record<string, unknown>): Promise<McpResponse> {
+    // MCP 2026-07-28 stateless：每个请求 params._meta 必填两个 reserved key
+    // （io.modelcontextprotocol/protocolVersion 与 io.modelcontextprotocol/clientCapabilities）。
+    // 只对 stateless-http 注入；老 transport（streamable-http / sse）走 2025-03-26 协议不注入，行为完全不变。
+    // spec: https://modelcontextprotocol.io/specification/2026-07-28/basic#_meta
+    if (this.isStatelessHttp) {
+      const params = (payload.params ?? {}) as Record<string, unknown>
+      const existingMeta = (params._meta ?? {}) as Record<string, unknown>
+      params._meta = {
+        'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+        'io.modelcontextprotocol/clientInfo': this.clientInfo,
+        'io.modelcontextprotocol/clientCapabilities': this.clientCapabilities,
+        ...existingMeta // 保留上层可能塞的 progressToken / traceparent
+      }
+      payload = { ...payload, params }
+    }
     const headers = this.headers()
     const response = await this.fetcher(this.profile.url!, { method: 'POST', headers, body: JSON.stringify(payload) })
     if (!response.ok) throw new Error(`MCP HTTP error ${response.status}: ${await response.text()}`)
@@ -251,8 +286,27 @@ export class McpClient {
 
   async listTools(): Promise<unknown[]> {
     if (!this.initialized) await this.connect()
-    const result = (await this.runRequest('tools/list', {})) as { tools?: unknown[] } | undefined
-    return result?.tools ?? []
+    // 只对 stateless-http 启用缓存：spec 2026-07-28 由 _meta.ttlMs 声明缓存窗口
+    // 老 transport（streamable-http / sse / stdio）行为完全不变，每次都拉新
+    if (!this.isStatelessHttp) {
+      const result = (await this.runRequest('tools/list', {})) as { tools?: unknown[] } | undefined
+      return result?.tools ?? []
+    }
+    if (this.toolsCache && this.toolsCache.expiresAt > Date.now()) {
+      return this.toolsCache.tools
+    }
+    const result = (await this.runRequest('tools/list', {})) as
+      | { tools?: unknown[]; _meta?: { ttlMs?: number } }
+      | undefined
+    const tools = result?.tools ?? []
+    const ttlMs = result?._meta?.ttlMs
+    if (typeof ttlMs === 'number' && ttlMs > 0) {
+      this.toolsCache = { tools, expiresAt: Date.now() + ttlMs }
+    } else {
+      // 服务端没声明 ttlMs：不缓存（保守，每次拿新的）
+      this.toolsCache = undefined
+    }
+    return tools
   }
   async callTool(name: string, arguments_: Record<string, unknown>): Promise<unknown> {
     if (!this.initialized) await this.connect()
@@ -275,5 +329,6 @@ export class McpClient {
     this.sseEndpoint = undefined
     for (const id of this.pending.keys()) this.settle(id, { error: { message: 'MCP client closed' } })
     this.initialized = false
+    this.toolsCache = undefined
   }
 }

@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
-export type McpServerTransport = 'stdio' | 'sse' | 'streamable-http'
+export type McpServerTransport = 'stdio' | 'sse' | 'streamable-http' | 'stateless-http'
 
 export type McpServerEntry = {
   id: string
@@ -132,8 +132,13 @@ export function validateMcpServerEntry(
     return null
   }
   if (!input.name?.trim()) return '名称不能为空'
-  if (input.transport !== 'stdio' && input.transport !== 'sse' && input.transport !== 'streamable-http')
-    return 'transport 必须是 stdio / sse / streamable-http'
+  if (
+    input.transport !== 'stdio' &&
+    input.transport !== 'sse' &&
+    input.transport !== 'streamable-http' &&
+    input.transport !== 'stateless-http'
+  )
+    return 'transport 必须是 stdio / sse / streamable-http / stateless-http'
   if (input.transport === 'stdio' && !input.command?.trim()) return 'stdio 传输需要填写 command'
   if (input.transport !== 'stdio' && !input.url?.trim()) return 'sse / http 传输需要填写 url'
   return null

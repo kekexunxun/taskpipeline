@@ -14,7 +14,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, copyFileSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { buildMcpArgs, runBuild, runStats, runWatch } from './codegraph-cli.js'
 import { loadMeta, loadAllMeta, saveMeta } from './codegraph-meta.js'
@@ -67,9 +67,9 @@ export class CodegraphManager {
     return join(this.indexRoot, this.dirHash(localPath))
   }
 
-  /** 获取 graph.db 路径 */
+  /** 获取 graph.db 路径（watch 命令固定写入 <cwd>/.codegraph/graph.db） */
   dirDbPath(localPath: string): string {
-    return join(this.dirIndexDir(localPath), 'graph.db')
+    return join(this.dirIndexDir(localPath), '.codegraph', 'graph.db')
   }
 
   // ─── 生命周期 ─────────────────────────────────────────────────────────────
@@ -445,40 +445,67 @@ export class CodegraphManager {
 
   /**
    * 为指定目录启动 watch 进程。
+   *
+   * watch 命令不支持 -d 参数，所有输出固定写入 <cwd>/.codegraph/。
+   * 将 cwd 设为集中存储的 per-repo 目录（dirIndexDir），使输出写入集中存储。
+   * 启动前清理项目目录下可能残留的 .codegraph/（历史遗留）。
    */
   private startWatch(key: string, localPath: string): void {
     const dbPath = this.dirDbPath(localPath)
     if (!existsSync(dbPath)) return
 
-    const { stop } = runWatch(localPath, dbPath, { engine: this.engine })
+    this.cleanLocalCodegraphDir(localPath)
+
+    const indexDir = this.dirIndexDir(localPath)
+    const { stop } = runWatch(localPath, indexDir, { engine: this.engine })
     this.activeWatches.set(key, stop)
     console.info('[codegraph] watch started for:', localPath)
   }
 
   /**
-   * 停止指定目录的 watch 进程。
+   * 停止指定目录的 watch 进程，并清理本地 .codegraph/ 残留。
    */
   private stopWatch(key: string): void {
     const stop = this.activeWatches.get(key)
     if (stop) {
       stop()
       this.activeWatches.delete(key)
+      // key 即 normalizePath(localPath)，可直接作为路径使用
+      this.cleanLocalCodegraphDir(key)
     }
   }
 
   /**
-   * 将 CLI 输出的本地 .codegraph 目录移动到集中存储位置。
+   * 清理 watch 命令在监听目录下产生的 .codegraph/ 残留。
+   *
+   * codegraph CLI 的 watch 模式会在 <localPath>/.codegraph/ 下写入
+   * change-events.ndjson、changes.journal 等文件（不受 -d 参数控制），
+   * 需要在启动前 / 停止后主动清理，避免污染项目目录。
+   */
+  private cleanLocalCodegraphDir(localPath: string): void {
+    const localCgDir = join(localPath, '.codegraph')
+    if (existsSync(localCgDir)) {
+      rmSync(localCgDir, { recursive: true, force: true })
+      console.info('[codegraph] cleaned local .codegraph dir:', localCgDir)
+    }
+  }
+
+  /**
+   * 将 CLI 输出的本地 .codegraph 中的 graph.db 复制到集中存储位置。
    *
    * codegraph CLI build 子命令固定输出到 <repoPath>/.codegraph/，
-   * 构建完成后移动到 dataDir/codegraph/<hash>/ 统一管理。
+   * 构建完成后将 graph.db 复制到 dataDir/codegraph/<hash>/.codegraph/ 统一管理。
+   * 不再移动整个 .codegraph 目录，以保持与 watch 命令相同的目录结构。
    */
   private moveToCentral(localCgDir: string, localPath: string): void {
-    if (!existsSync(localCgDir)) return
-    const targetDir = this.dirIndexDir(localPath)
-    // 清理目标目录（可能来自上次残留）
-    if (existsSync(targetDir)) rmSync(targetDir, { recursive: true, force: true })
-    mkdirSync(targetDir, { recursive: true })
-    renameSync(localCgDir, targetDir)
+    const localDb = join(localCgDir, 'graph.db')
+    if (!existsSync(localDb)) return
+    const centralDb = this.dirDbPath(localPath)
+    const centralDir = this.dirIndexDir(localPath)
+    mkdirSync(centralDir, { recursive: true })
+    copyFileSync(localDb, centralDb)
+    // 清理项目本地的 .codegraph 目录
+    rmSync(localCgDir, { recursive: true, force: true })
   }
 
   /**

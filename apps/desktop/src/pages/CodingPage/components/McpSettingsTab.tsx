@@ -308,6 +308,11 @@ function McpServerCard({
                   自定义
                 </Badge>
               )}
+              {server.transport === 'stateless-http' && (
+                <Badge variant="outline" className="text-[9px]">
+                  无状态
+                </Badge>
+              )}
             </div>
             {server.description && (
               <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{server.description}</p>
@@ -493,7 +498,8 @@ function McpServerEditorDialog({
               >
                 <option value="stdio">stdio（本地命令）</option>
                 <option value="sse">sse（远程 URL）</option>
-                <option value="streamable-http">streamable-http（远程 URL）</option>
+                <option value="streamable-http">streamable-http（远程 URL，2025-03-26）</option>
+                <option value="stateless-http">无状态 HTTP（远程 URL，2026-07-28）</option>
               </select>
             </Field>
             {transport === 'stdio' ? (
@@ -518,15 +524,23 @@ function McpServerEditorDialog({
                 </Field>
               </div>
             ) : (
-              <Field className="gap-1" label="URL">
-                <Input
-                  value={url}
-                  onChange={(event) => setUrl(event.target.value)}
-                  disabled={isBuiltinEdit}
-                  placeholder="https://…"
-                  className="font-mono text-xs"
-                />
-              </Field>
+              <>
+                <Field className="gap-1" label="URL">
+                  <Input
+                    value={url}
+                    onChange={(event) => setUrl(event.target.value)}
+                    disabled={isBuiltinEdit}
+                    placeholder="https://…"
+                    className="font-mono text-xs"
+                  />
+                </Field>
+                {transport === 'stateless-http' && (
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    MCP 2026-07-28 无状态协议：每个请求会附带 <code className="font-mono">_meta</code> 元数据， 不会发送{' '}
+                    <code className="font-mono">initialize</code> 握手。
+                  </p>
+                )}
+              </>
             )}
             <Field className="gap-1" label="环境变量（每行 KEY=VALUE，可选）">
               <Textarea

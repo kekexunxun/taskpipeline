@@ -581,7 +581,7 @@ export type AgentGenerationResult = {
   engineeringGuidelines: string
 }
 
-export type McpServerTransport = 'stdio' | 'sse' | 'streamable-http'
+export type McpServerTransport = 'stdio' | 'sse' | 'streamable-http' | 'stateless-http'
 
 /** 统一 mcp.json 中的单个 MCP 服务条目（与主进程 chat/mcp-config.ts 同构）。 */
 export type McpServerEntry = {
