@@ -9,7 +9,6 @@ import { basename, join } from 'node:path'
 import type { BrowserWindow } from 'electron'
 import type { TaskStore, AgentEvent, SettingResolver, Task } from '@task-pipeline/core'
 import type { AtlassianClientFactory } from '@task-pipeline/integrations'
-import type { CodegraphManager } from '@task-pipeline/codegraph'
 import {
   describeToolAction,
   isDangerousTool,
@@ -62,7 +61,6 @@ export interface ChatSystemDeps {
   desktopResolver: SettingResolver
   addTaskEvent: (event: Omit<AgentEvent, 'id' | 'createdAt'>) => void
   getQoderStatusForHealth: () => unknown
-  codegraphManager: CodegraphManager
 }
 
 export interface ChatSystem {
@@ -86,8 +84,7 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
     atlassianFactory,
     modelProvider,
     runtimeProvider,
-    desktopResolver,
-    codegraphManager
+    desktopResolver
   } = deps
 
   // ── MCP Resolver ──────────────────────────────────────────────────────────
@@ -157,8 +154,7 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
         return ok ? 'allow' : 'deny'
       },
       dataDir,
-      chatAttachmentCache,
-      (localPath: string) => codegraphManager.resolveMcpConfig(localPath)
+      chatAttachmentCache
     )
   )
 

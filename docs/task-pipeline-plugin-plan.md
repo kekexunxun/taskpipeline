@@ -2,7 +2,7 @@
 
 ## 背景与目标
 
-TaskPipeline 当前是 Electron 桌面端 Coding Agent 工作台（Monorepo：desktop → pi-package → integrations → core）。本方案评估将 **Task 任务板块**（不含 Chat / Trace / Memory / CodeGraph 等周边能力）交付为 Qoder / CodeBuddy 插件，供用户在 CLI/IDE 环境中直接使用任务流水线能力。
+TaskPipeline 当前是 Electron 桌面端 Coding Agent 工作台（Monorepo：desktop → pi-package → integrations → core）。本方案评估将 **Task 任务板块**（不含 Chat / Trace / Memory 等周边能力）交付为 Qoder / CodeBuddy 插件，供用户在 CLI/IDE 环境中直接使用任务流水线能力。
 
 结论先行：
 
@@ -177,18 +177,18 @@ maxTurns: 30
 
 ## 五、与桌面端的能力差距
 
-| 能力                             | 桌面端                       | 插件                      | 差距判定                    |
-| -------------------------------- | ---------------------------- | ------------------------- | --------------------------- |
-| 任务状态机                       | SQLite 持久化                | JSON 文件                 | 单用户场景无差异            |
-| 计划生成                         | pi session / Qoder SDK       | Agent 提示词驱动          | 等价                        |
-| 实现 + outcome 判定              | 正则解析 + 文件变更交叉验证  | Agent 提示词协议          | 交叉验证需 git-ops MCP 支撑 |
-| Review                           | 多轮自动修订 + 阻断判定      | Agent 提示词 + 手动再触发 | 自动修订闭环弱化            |
-| 测试生成                         | LLM 驱动 + 自动 commit       | Agent 提示词驱动          | 等价                        |
-| Git worktree                     | 自动创建 / 清理              | userConfig 可选           | 降级为当前目录分支模式      |
-| MR 提交 + 合并跟踪               | GitLab API + 轮询 + 自动完成 | 可选 MCP                  | 降级为手动                  |
-| 看板 UI                          | React 实时看板               | `get_board` 文本输出      | 无 UI，数据可用             |
-| Trace 回溯                       | 完整瀑布图                   | 无                        | 放弃                        |
-| 对话 / HITL / Memory / CodeGraph | 完整能力                     | 无                        | 放弃（CLI 自身能力兜底）    |
+| 能力                 | 桌面端                       | 插件                      | 差距判定                    |
+| -------------------- | ---------------------------- | ------------------------- | --------------------------- |
+| 任务状态机           | SQLite 持久化                | JSON 文件                 | 单用户场景无差异            |
+| 计划生成             | pi session / Qoder SDK       | Agent 提示词驱动          | 等价                        |
+| 实现 + outcome 判定  | 正则解析 + 文件变更交叉验证  | Agent 提示词协议          | 交叉验证需 git-ops MCP 支撑 |
+| Review               | 多轮自动修订 + 阻断判定      | Agent 提示词 + 手动再触发 | 自动修订闭环弱化            |
+| 测试生成             | LLM 驱动 + 自动 commit       | Agent 提示词驱动          | 等价                        |
+| Git worktree         | 自动创建 / 清理              | userConfig 可选           | 降级为当前目录分支模式      |
+| MR 提交 + 合并跟踪   | GitLab API + 轮询 + 自动完成 | 可选 MCP                  | 降级为手动                  |
+| 看板 UI              | React 实时看板               | `get_board` 文本输出      | 无 UI，数据可用             |
+| Trace 回溯           | 完整瀑布图                   | 无                        | 放弃                        |
+| 对话 / HITL / Memory | 完整能力                     | 无                        | 放弃（CLI 自身能力兜底）    |
 
 ## 六、工作量估算
 

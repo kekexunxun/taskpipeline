@@ -22,7 +22,6 @@ import {
   type SettingResolver
 } from '@task-pipeline/core'
 import { redactSecrets } from '@task-pipeline/integrations'
-import { CodegraphManager } from '@task-pipeline/codegraph'
 import { QoderOrchestrator, QoderTraceBuilder } from './pi-extension/qoder/index.js'
 import { initAutoUpdater } from './auto-updater.js'
 import { TracePipeline } from './trace/bus/trace-pipeline.js'
@@ -45,7 +44,6 @@ import { AGENT_TEMPLATES } from './agents/templates.js'
 import { buildAgentGenerationPrompt, parseAgentGenerationResult } from './agents/agent-generator.js'
 // ── 提取模块 ─────────────────────────────────────────────────────────────────
 import { resolveQodercliPath } from './init/qodercli-path.js'
-import { resolveCodegraphCliRuntime } from './init/codegraph-runtime.js'
 import { resolveDataDir, writeCustomDataDir, createAppStores } from './init/data-dir.js'
 import { createReviewDeliveryPipeline } from './services/review-delivery.js'
 import { createChatSystem } from './chat/chat-init.js'
@@ -230,12 +228,6 @@ try {
   console.warn('[memory] startup retention failed:', error)
 }
 const pathRegistry = new PathRegistry(store.db)
-// codegraph CLI 走随应用分发的自带资源 + Electron 作为 Node 运行时，不依赖宿主 PATH
-const codegraphCli = resolveCodegraphCliRuntime()
-const codegraphManager = new CodegraphManager({
-  dataDir,
-  ...(codegraphCli ? { cli: codegraphCli } : {})
-})
 const agentService = new AgentService(
   (key) => store.getSetting(key),
   (key, value) => store.setSetting(key, value),
@@ -309,8 +301,7 @@ const { chatService, chatAttachmentCache } = createChatSystem({
   runtimeProvider,
   desktopResolver,
   addTaskEvent,
-  getQoderStatusForHealth: () => qoderOrch.getStatusForHealth(),
-  codegraphManager
+  getQoderStatusForHealth: () => qoderOrch.getStatusForHealth()
 })
 
 // ── Qoder Orchestrator + Task Runner 初始化 ──────────────────────────────────
@@ -366,8 +357,7 @@ qoderOrch = new QoderOrchestrator({
   syncSystemDefaultModel: () => syncSystemDefaultModel(),
   storeGetSetting: (key) => store.getSetting(key),
   taskChangedFiles,
-  savePlanDecision,
-  codegraphMcpResolver: (localPath: string) => codegraphManager.resolveMcpConfig(localPath)
+  savePlanDecision
 })
 initTaskLifecycle({
   store,
@@ -502,7 +492,6 @@ registerIpc({
   syncPiModelConfig,
   QoderTraceBuilder,
   AGENT_GENERATOR_TASK_ID,
-  codegraphManager,
   pathRegistry
 })
 
@@ -556,7 +545,7 @@ app.whenReady().then(() => {
       .refreshRepoWiki(repo.id, repo.localPath)
       .catch((error) => console.warn('[repowiki] startup index failed:', error))
   }
-  // 初始化 path_registry + codegraph 启动验证
+  // 初始化 path_registry
   void (async () => {
     try {
       const repos = store.listRepositoryProfiles()
@@ -567,17 +556,6 @@ app.whenReady().then(() => {
         wikiCounts[repo.id] = memoryService.listRepoWikiDocs(repo.id).length
       }
       pathRegistry.refresh(repos, dirGroups, wikiCounts)
-
-      // 收集所有目录（仓库 + 对话文件夹）交给 codegraph 统一校验 + 首次构建
-      const allDirs: Array<{ id: string; localPath: string }> = [
-        ...repos.map((r) => ({ id: r.id, localPath: r.localPath })),
-        ...dirGroups.flatMap((g) => g.directories.map((d) => ({ id: `chat:${g.id}`, localPath: d })))
-      ]
-      await codegraphManager
-        .validateStartup(allDirs)
-        .catch((error) => console.warn('[codegraph] startup validate failed:', error))
-      // 启动验证完成后，为所有已索引目录启动 watch 进程（实时增量更新）
-      codegraphManager.startAllWatches()
     } catch (error) {
       console.warn('[path-registry] startup refresh failed:', error)
     }
@@ -603,7 +581,6 @@ app.whenReady().then(() => {
   })
 })
 app.on('window-all-closed', () => {
-  codegraphManager.stopAllWatches()
   if (process.platform !== 'darwin') app.quit()
 })
 app.on('activate', () => {

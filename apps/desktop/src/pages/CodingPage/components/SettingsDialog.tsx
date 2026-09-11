@@ -28,14 +28,7 @@ import type { ChatConversationMeta, PathRegistryEntry } from '@/api'
 import { ModelBadges } from '@/components/ModelBadges'
 import { HitlModeSwitcher, type HitlMode } from '@/components/HitlModeSwitcher'
 import { detectVendor, MODEL_VENDORS, type ModelVendor } from '@/utils/model-vendors'
-import {
-  api,
-  type CapabilityKey,
-  type CodegraphIndexStatus,
-  type MemorySearchResult,
-  type SystemDefaultModel,
-  type UpdateStatus
-} from '@/api'
+import { api, type CapabilityKey, type MemorySearchResult, type SystemDefaultModel, type UpdateStatus } from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
 import { useAgents } from '@/hooks/useAgents'
 import { cn } from '@/lib/utils'
@@ -827,9 +820,6 @@ export function SettingsDialog({
   })
   const [deleteMemory, setDeleteMemory] = useState<Memory | undefined>(undefined)
   const [rebuildingWiki, setRebuildingWiki] = useState<string | undefined>(undefined)
-  const [codegraphStatuses, setCodegraphStatuses] = useState<Record<string, CodegraphIndexStatus>>({})
-  // codegraphStatuses key = normalized localPath（路径去重后与仓库/对话共享同一索引）
-  const [buildingCodegraph, setBuildingCodegraph] = useState<string | undefined>(undefined)
   const [activeMemoryTab, setActiveMemoryTab] = useState<string>('user')
   const [expandedMemoryId, setExpandedMemoryId] = useState<string | undefined>(undefined)
   const [conversations, setConversations] = useState<ChatConversationMeta[]>([])
@@ -880,15 +870,6 @@ export function SettingsDialog({
       setPathEntries(pathEntryList)
       await refreshAgents()
       setAgentTemplates(await api.listAgentTemplates())
-      // 加载 codegraph 索引状态（按路径查询，与对话共享索引）
-      const cgMap: Record<string, CodegraphIndexStatus> = {}
-      await Promise.all(
-        repositoryList.map(async (repo) => {
-          const cg = await api.codegraphStatusForPath(repo.localPath)
-          if (cg) cgMap[repo.localPath] = cg
-        })
-      )
-      setCodegraphStatuses(cgMap)
       const profilesRaw = await api.getSetting('modelProfiles')
       if (profilesRaw) {
         try {
@@ -1228,22 +1209,6 @@ export function SettingsDialog({
       showError(reason instanceof Error ? reason.message : String(reason))
     } finally {
       setRebuildingWiki(undefined)
-    }
-  }
-  const rebuildCodegraph = async (localPath: string) => {
-    console.info('[SettingsDialog] rebuildCodegraph called with:', localPath)
-    setBuildingCodegraph(localPath)
-    try {
-      console.info('[SettingsDialog] calling api.codegraphRebuildForPath...')
-      const status = await api.codegraphRebuildForPath(localPath)
-      console.info('[SettingsDialog] got status:', status)
-      setCodegraphStatuses((prev) => ({ ...prev, [localPath]: status }))
-      showSuccess('Codegraph 索引构建完成')
-    } catch (reason) {
-      console.error('[SettingsDialog] rebuildCodegraph error:', reason)
-      showError(reason instanceof Error ? reason.message : String(reason))
-    } finally {
-      setBuildingCodegraph(undefined)
     }
   }
   const userMemories = memories.filter((memory) => memory.scope === 'user')
@@ -1861,44 +1826,6 @@ export function SettingsDialog({
                                       )}
                                       {rebuildingWiki === entry.repositoryId ? '索引中' : '重建索引'}
                                     </Button>
-                                  </div>
-                                  <div className="flex items-center justify-between rounded-md border bg-card/40 px-3 py-2">
-                                    {(() => {
-                                      const cg = codegraphStatuses[entry.path]
-                                      const statusLabel =
-                                        !cg || cg.status === 'not_indexed'
-                                          ? '未索引'
-                                          : cg.status === 'indexing'
-                                            ? '索引中'
-                                            : cg.status === 'error'
-                                              ? '异常'
-                                              : `已索引（${cg.fileCount ?? 0} 文件 · ${cg.nodeCount ?? 0} 节点 · ${cg.edgeCount ?? 0} 边）`
-                                      return (
-                                        <>
-                                          <p className="text-[11px] text-muted-foreground">
-                                            codegraph {statusLabel}
-                                            {cg?.error ? ` · ${cg.error}` : ''}
-                                          </p>
-                                          <Button
-                                            variant="secondary"
-                                            size="sm"
-                                            disabled={buildingCodegraph === entry.path || cg?.status === 'indexing'}
-                                            onClick={() => void rebuildCodegraph(entry.path)}
-                                          >
-                                            {buildingCodegraph === entry.path || cg?.status === 'indexing' ? (
-                                              <Loader2Icon className="animate-spin-slow" size={11} />
-                                            ) : (
-                                              <RefreshCwIcon size={11} />
-                                            )}
-                                            {buildingCodegraph === entry.path || cg?.status === 'indexing'
-                                              ? '构建中'
-                                              : !cg || cg.status === 'not_indexed'
-                                                ? '构建索引'
-                                                : '重建索引'}
-                                          </Button>
-                                        </>
-                                      )
-                                    })()}
                                   </div>
                                 </>
                               )}

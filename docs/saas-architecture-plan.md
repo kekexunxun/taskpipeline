@@ -12,7 +12,7 @@ TaskPipeline 当前以 Electron 桌面应用形态交付：
 - **后端**：Electron 主进程承载全部业务逻辑（`apps/desktop/electron/`），约 120 个 IPC handler
 - **通信**：Electron IPC（`contextBridge` + `ipcRenderer.invoke`），事件走 `webContents.send`
 - **存储**：better-sqlite3 本地数据库 + JSONL Trace 文件
-- **原生能力**：本地 Git worktree、CodeGraph 索引、OCR、MCP/Skill 子进程
+- **原生能力**：本地 Git worktree、OCR、MCP/Skill 子进程
 
 关键结构事实：
 
@@ -336,7 +336,6 @@ SaaS:           凭据入库加密（AES-256 或 Vault），按 tenant 隔离
 | 容器资源成本           | 每 Task 一容器，并发高时成本飙升          | 租户并发配额 + 同仓库连续 Task 复用容器                                    |
 | 长时任务               | 单 Task 可达 10-30min                     | 容器不设超时，用租户月度计算时长配额约束                                   |
 | Agent 文件操作适配     | Qoder SDK / pi Agent 直接操作本地 FS      | FS 操作经 ExecutionBackend 代理到容器                                      |
-| CodeGraph 容器化       | 当前为本地子进程                          | 容器内运行，或通过 volume 共享索引                                         |
 
 ## 9. 实施路线
 

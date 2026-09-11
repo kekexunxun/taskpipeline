@@ -922,7 +922,7 @@ TaskWorkflow / QoderOrchestrator（业务逻辑，不感知执行位置）
 
       <h3>3.6 原生能力反过来锁死了迁移</h3>
       <p>
-        CodeGraph 索引、OCR、MCP / Skill 子进程都按「本地子进程」形态实现，Qoder 引擎的文件读写发生在 qodercli
+        OCR、MCP / Skill 子进程都按「本地子进程」形态实现，Qoder 引擎的文件读写发生在 qodercli
         子进程内部（只有进程级控制粒度），这些在架构上假设了「能碰到用户本机」，是后续云端化必须逐一适配的债务。
       </p>
 
@@ -1108,7 +1108,7 @@ TaskWorkflow / QoderOrchestrator（业务逻辑，不感知执行位置）
         </li>
         <li>
           <strong>Agent 执行链路适配面大</strong>：Qoder SDK / Pi Agent 的文件操作要经
-          <code>ExecutionBackend</code> 代理进容器；CodeGraph、OCR、MCP / Skill 子进程都要容器化或另想办法。
+          <code>ExecutionBackend</code> 代理进容器；OCR、MCP / Skill 子进程都要容器化或另想办法。
         </li>
       </ul>
 

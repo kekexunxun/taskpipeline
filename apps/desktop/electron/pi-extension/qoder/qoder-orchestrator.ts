@@ -23,7 +23,6 @@ import {
 import type { Task, TaskState, TaskStore, AgentEvent } from '@task-pipeline/core'
 import { evaluateExecutionPermission, taskRoots } from '@task-pipeline/core'
 import type { TaskWorkflow, OpenAICompatReviewer } from '@task-pipeline/integrations'
-import type { McpServerConfig as CodegraphMcpConfig } from '@task-pipeline/codegraph'
 import { describeToolAction } from '../../agents/task-agent/dangerous-tools.js'
 import { parseTestCaseGeneration } from '../../agents/task-agent/parsers/test-case-parser.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
@@ -118,9 +117,6 @@ export interface QoderOrchestratorDeps {
     taskId: string,
     excludeUnchanged?: boolean
   ) => Promise<Array<{ path: string; status: string; repositoryName: string }>>
-
-  // codegraph MCP
-  codegraphMcpResolver?: (localPath: string) => CodegraphMcpConfig | null
 }
 
 // ── 编排器类 ─────────────────────────────────────────────────────────────────
@@ -222,7 +218,6 @@ export class QoderOrchestrator {
       resolveAgentContext,
       resolveModel,
       resolveTestContext,
-      codegraphMcpResolver: this.deps.codegraphMcpResolver,
       onQueryStarted: (q, abort) => {
         this._activeQuery = q
         this._activeAbort = abort

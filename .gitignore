@@ -16,7 +16,6 @@ apps/desktop/main.js
 .reasonix/
 reasonix.toml
 apps/desktop/qoder-bin/
-apps/desktop/codegraph-cli/
 
-# codegraph 索引产物（集中存储在 dataDir，仓库内仅为 watch 退出时的瞬时残留）
+# codegraph 集成已下线，此条仅为手动运行 codegraph CLI 时防止索引产物误提交兜底
 .codegraph/

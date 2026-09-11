@@ -530,19 +530,6 @@ export type MemorySearchOptions = {
 export type MemorySearchResult = { memories: MemorySearchHit[]; wikiDocs: RepoWikiSearchHit[]; keywords: string[] }
 export type RepoWikiIndexResult = { indexed: number; removed: number }
 
-/** Codegraph 索引状态（主进程 CodegraphManager 的 RepoIndexMeta 镜像） */
-export type CodegraphIndexStatus = {
-  repositoryId: string
-  localPath: string
-  status: 'idle' | 'indexing' | 'error' | 'not_indexed'
-  engine: 'native' | 'wasm'
-  lastIndexedAt?: string
-  fileCount?: number
-  nodeCount?: number
-  edgeCount?: number
-  error?: string
-}
-
 /** 路径注册表条目（主进程 PathRegistry 的镜像形态） */
 export type PathRegistryEntry = {
   path: string
@@ -732,16 +719,6 @@ export type AgentApi = {
   indexRepoWiki(repositoryId: string): Promise<RepoWikiIndexResult>
   listRepoWikiDocs(repositoryId: string): Promise<RepoWikiDoc[]>
   searchRepoWiki(repositoryId: string, query: string): Promise<RepoWikiSearchHit[]>
-  // codegraph
-  codegraphList(): Promise<CodegraphIndexStatus[]>
-  codegraphStatus(repositoryId: string): Promise<CodegraphIndexStatus | undefined>
-  codegraphBuild(repositoryId: string): Promise<CodegraphIndexStatus>
-  codegraphRebuild(repositoryId: string): Promise<CodegraphIndexStatus>
-  codegraphDelete(repositoryId: string): Promise<void>
-  codegraphUpdate(repositoryId: string): Promise<CodegraphIndexStatus>
-  codegraphStatusForPath(localPath: string): Promise<CodegraphIndexStatus | undefined>
-  codegraphBuildForPath(localPath: string): Promise<CodegraphIndexStatus>
-  codegraphRebuildForPath(localPath: string): Promise<CodegraphIndexStatus>
   // path-registry
   listPathRegistry(): Promise<PathRegistryEntry[]>
   // agents
@@ -1334,33 +1311,6 @@ export const api: AgentApi = window.agentApi ?? {
   },
   async searchRepoWiki() {
     return []
-  },
-
-  // Codegraph mock（浏览器回退：空数据）
-  async codegraphList() {
-    return []
-  },
-  async codegraphStatus() {
-    return undefined
-  },
-  async codegraphBuild() {
-    return { repositoryId: '', localPath: '', status: 'idle' as const, engine: 'wasm' as const }
-  },
-  async codegraphRebuild() {
-    return { repositoryId: '', localPath: '', status: 'idle' as const, engine: 'wasm' as const }
-  },
-  async codegraphDelete() {},
-  async codegraphUpdate() {
-    return { repositoryId: '', localPath: '', status: 'idle' as const, engine: 'wasm' as const }
-  },
-  async codegraphStatusForPath() {
-    return undefined
-  },
-  async codegraphBuildForPath() {
-    return { repositoryId: '', localPath: '', status: 'idle' as const, engine: 'wasm' as const }
-  },
-  async codegraphRebuildForPath() {
-    return { repositoryId: '', localPath: '', status: 'idle' as const, engine: 'wasm' as const }
   },
 
   // PathRegistry mock（浏览器回退：空数据）

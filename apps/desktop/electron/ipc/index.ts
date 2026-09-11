@@ -17,7 +17,6 @@ import {
 } from '@task-pipeline/integrations'
 import type { Task, TaskRepository, Memory, AgentProfile, AgentEvent, TaskDraftFieldKey } from '@task-pipeline/core'
 import type { RepositoryCommandMap } from '@task-pipeline/integrations'
-import type { CodegraphManager } from '@task-pipeline/codegraph'
 import type { QoderOrchestrator } from '../pi-extension/qoder/index.js'
 import type { ChatService } from '../chat/chat-service.js'
 import type { ChatAttachmentCache } from '../chat/chat-attachment-cache.js'
@@ -156,9 +155,6 @@ export interface IpcDeps {
   listTaskBackends: () => Array<{ id: TaskBackendId; displayName: string; configured: boolean }>
   syncPiModelConfig: () => void
 
-  // Codegraph
-  codegraphManager: CodegraphManager
-
   // PathRegistry
   pathRegistry: PathRegistry
 
@@ -265,7 +261,6 @@ export function registerIpc(d: IpcDeps): void {
     syncPiModelConfig,
     QoderTraceBuilder: QoderTraceBuilderCtor,
     AGENT_GENERATOR_TASK_ID,
-    codegraphManager,
     pathRegistry
   } = d
 
@@ -328,17 +323,12 @@ export function registerIpc(d: IpcDeps): void {
     } catch (error) {
       console.warn('[repowiki] index failed:', error)
     }
-    // codegraph 索引：异步触发，不阻塞保存操作
-    codegraphManager.ensureIndex(profile.id, profile.localPath).catch((error) => {
-      console.warn('[codegraph] index failed:', error)
-    })
     await refreshPathRegistry()
   })
   ipcMain.handle('repos:delete', async (_event, id: string) => {
     const profile = store.listRepositoryProfiles().find((r) => r.id === id)
     store.deleteRepositoryProfile(id)
     memoryService.deleteRepoMemories(id)
-    codegraphManager.deleteIndex(id)
     const removedAgents = agentService.detachRepository(id)
     if (profile) pathRegistry.removeRepo(profile.localPath)
     return { removedAgents }
@@ -763,14 +753,7 @@ export function registerIpc(d: IpcDeps): void {
     chatAttachmentCache.deleteAttachments(id)
   })
   ipcMain.handle('chats:set-directory', async (_event, id: string, workingDirectory?: string) => {
-    const result = await chatService.setChatWorkingDirectory(id, workingDirectory)
-    // 绑定工作目录时触发 codegraph 索引（异步不阻塞）
-    if (workingDirectory) {
-      codegraphManager.ensureIndex(`chat:${id}`, workingDirectory).catch((error) => {
-        console.warn('[codegraph] chat directory index failed:', error)
-      })
-    }
-    return result
+    return chatService.setChatWorkingDirectory(id, workingDirectory)
   })
   ipcMain.handle('chats:list-models', async () => {
     const groups = await chatService.listModels()
@@ -848,42 +831,6 @@ export function registerIpc(d: IpcDeps): void {
 
   // === PathRegistry ==========================================================
   ipcMain.handle('path-registry:list', () => pathRegistry.listEntries())
-
-  // === Codegraph =============================================================
-  ipcMain.handle('codegraph:list', () => codegraphManager.listAll())
-  ipcMain.handle('codegraph:status', (_event, repositoryId: string) => codegraphManager.getStatus(repositoryId))
-  ipcMain.handle('codegraph:status-for-path', (_event, localPath: string) =>
-    codegraphManager.getStatusByPath(localPath)
-  )
-  ipcMain.handle('codegraph:build', async (_event, repositoryId: string) => {
-    const profile = store.listRepositoryProfiles().find((repo) => repo.id === repositoryId)
-    if (!profile) throw new Error('仓库不存在')
-    await codegraphManager.ensureIndex(repositoryId, profile.localPath)
-    return codegraphManager.getStatusByPath(profile.localPath)
-  })
-  ipcMain.handle('codegraph:rebuild', async (_event, repositoryId: string) => {
-    const profile = store.listRepositoryProfiles().find((repo) => repo.id === repositoryId)
-    if (!profile) throw new Error('仓库不存在')
-    await codegraphManager.forceRebuild(repositoryId, profile.localPath)
-    return codegraphManager.getStatusByPath(profile.localPath)
-  })
-  ipcMain.handle('codegraph:delete', (_event, repositoryId: string) => {
-    codegraphManager.deleteIndex(repositoryId)
-  })
-  ipcMain.handle('codegraph:update', async (_event, repositoryId: string) => {
-    const profile = store.listRepositoryProfiles().find((repo) => repo.id === repositoryId)
-    if (!profile) throw new Error('仓库不存在')
-    await codegraphManager.updateIndex(repositoryId, profile.localPath)
-    return codegraphManager.getStatusByPath(profile.localPath)
-  })
-  ipcMain.handle('codegraph:build-for-path', async (_event, localPath: string) => {
-    await codegraphManager.ensureIndex(`path:${localPath}`, localPath)
-    return codegraphManager.getStatusByPath(localPath)
-  })
-  ipcMain.handle('codegraph:rebuild-for-path', async (_event, localPath: string) => {
-    await codegraphManager.forceRebuild(`path:${localPath}`, localPath)
-    return codegraphManager.getStatusByPath(localPath)
-  })
 
   // === 自动更新 ==============================================================
   ipcMain.handle('app:version', () => app.getVersion())

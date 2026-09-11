@@ -8,13 +8,13 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @task-pipeline/core && npm run build -w @task-pipeline/memory && npm run build -w @task-pipeline/integrations && npm run build -w @task-pipeline/codegraph && npm run build -w @task-pipeline/pi-package && npm run build -w @task-pipeline/desktop",
+    "build": "npm run build -w @task-pipeline/core && npm run build -w @task-pipeline/memory && npm run build -w @task-pipeline/integrations && npm run build -w @task-pipeline/pi-package && npm run build -w @task-pipeline/desktop",
     "package": "npm run build && npm run package -w @task-pipeline/desktop",
     "package:dir": "npm run build && npm run package:dir -w @task-pipeline/desktop",
     "package:mac": "npm run build && npm run package:mac -w @task-pipeline/desktop",
     "package:win": "npm run build && npm run package:win -w @task-pipeline/desktop",
     "package:linux": "npm run build && npm run package:linux -w @task-pipeline/desktop",
-    "dev": "npm run rebuild:electron && node scripts/rebuild-codegraph-sqlite.mjs && npm run dev --workspace @task-pipeline/desktop",
+    "dev": "npm run rebuild:electron && npm run dev --workspace @task-pipeline/desktop",
     "rebuild:node": "npm rebuild better-sqlite3",
     "rebuild:electron": "npx --yes @electron/rebuild -f -w better-sqlite3 --build-from-source && node -e \"const fs=require('fs'),p=require('path'),src=p.join('node_modules/better-sqlite3/bin',process.platform+'-'+process.arch+'-136','better-sqlite3.node'),dst='node_modules/better-sqlite3/build/Release/better_sqlite3.node';if(fs.existsSync(src))fs.copyFileSync(src,dst)\"",
     "test": "npm run rebuild:node && npm run test -ws --if-present",
@@ -59,8 +59,5 @@
     "stylelint-config-recess-order": "6.0.0",
     "stylelint-config-standard": "36.0.1",
     "typescript-eslint": "8.20.0"
-  },
-  "dependencies": {
-    "@optave/codegraph": "3.17.0"
   }
 }
