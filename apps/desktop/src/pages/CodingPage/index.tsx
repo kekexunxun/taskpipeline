@@ -249,6 +249,8 @@ export default function CodingPage() {
             }}
             onPrompt={tasks.setPrompt}
             onSend={() => tasks.send()}
+            onSendIntake={(message) => void tasks.sendIntake(message)}
+            onResolveSuggestion={(eventId, action, keys) => void tasks.resolveSuggestion(eventId, action, keys)}
             onOpenUrl={(url) =>
               api
                 .openExternal(url)

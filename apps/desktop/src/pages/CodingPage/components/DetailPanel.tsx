@@ -10,7 +10,7 @@ import {
   SquareIcon,
   SquareTerminalIcon
 } from 'lucide-react'
-import type { TaskCard, TaskRepository } from '@task-pipeline/core'
+import type { TaskCard, TaskDraftFieldKey, TaskRepository } from '@task-pipeline/core'
 import type { DriverPart, TaskDetail, ChangedFile } from '../../../api'
 import { ChatMcpSelector, type McpServiceId } from '../../ChatPage/components/ChatMcpSelector'
 import { ChatSkillSelector } from '../../ChatPage/components/ChatSkillSelector'
@@ -23,6 +23,8 @@ import { MergeRequestsSection } from './MergeRequestsSection'
 import { ApprovalsSection } from './ApprovalsSection'
 import { DetailActions } from './DetailActions'
 import { TaskConversationView } from './TaskConversationView'
+import { TaskIntakePanel } from './TaskIntakePanel'
+import { draftGaps, DRAFT_GAP_LABELS, intakeMessages, latestDraftSuggestion, type DraftGapKey } from './draftIntake'
 import { TaskComposer } from './Composer'
 import { PlanSection } from './PlanSection'
 import { EditPlanDialog } from './EditPlanDialog'
@@ -44,6 +46,13 @@ import {
 
 const detailTabClass =
   'relative h-full gap-1.5 rounded-none border-0 px-3 text-xs! after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0 data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:after:bg-foreground'
+
+/**
+ * 缺项提示条点出来的开场白：说的就是屏幕上已经列出来的那几项，
+ * 不让用户再打一遍字。发出去后就是一条普通的用户消息，后续怎么追问由用户定。
+ */
+const intakeOpeningLine = (gaps: DraftGapKey[]): string =>
+  `这个任务还缺：${gaps.map((gap) => DRAFT_GAP_LABELS[gap]).join('；')}。请先看下代码现状，给出你的建议。`
 
 type Props = {
   card?: TaskCard
@@ -90,6 +99,10 @@ type Props = {
   onResume(): void
   onPrompt(value: string): void
   onSend(): void
+  /** `draft` 的澄清发送口：走 `sendTaskIntake`，与 `onSend` 的分别只在主进程那边（§2.4 第 4 条）。 */
+  onSendIntake(message: string): void
+  /** 采纳（带勾选的字段名）/ 丢弃一条建议。 */
+  onResolveSuggestion(eventId: string, action: 'apply' | 'discard', keys?: TaskDraftFieldKey[]): void
   onOpenUrl(url: string): void
 }
 
@@ -134,6 +147,8 @@ export function DetailPanel({
   onResume,
   onPrompt,
   onSend,
+  onSendIntake,
+  onResolveSuggestion,
   onOpenUrl
 }: Props) {
   const task = detail?.task
@@ -175,6 +190,15 @@ export function DetailPanel({
   )
   // PlanSection 数据源:只取历史 events（计划反馈不会出现在 live 流中）。
   const planEvents = detail?.events ?? []
+  // 澄清记录只存在于 `events` 表（上面那份 `events` 是从 trace span 合成的，`draft` 还没跑过任何阶段）。
+  const draftEvents = task?.state === 'draft' ? detail?.draftEvents : undefined
+  const intakeRecords = useMemo(() => intakeMessages(draftEvents ?? []), [draftEvents])
+  const pendingSuggestion = useMemo(() => latestDraftSuggestion(draftEvents ?? []), [draftEvents])
+  const intakeGaps = useMemo(
+    () =>
+      task && task.state === 'draft' ? draftGaps(task, (detail?.repositories ?? card?.repositories ?? []).length) : [],
+    [task, detail?.repositories, card?.repositories]
+  )
   useEffect(() => {
     setActiveTab(hasPlan ? 'plan' : 'activity')
   }, [taskId, hasPlan])
@@ -187,7 +211,9 @@ export function DetailPanel({
   if (!task || !card) return null
   const totalFiles = detail?.changedFiles.length ?? 0
   const mergeRequestCount = detail?.repositories.filter((repo) => repo.mergeRequestUrl).length ?? 0
+  const isDraft = task.state === 'draft'
   const canChat =
+    isDraft ||
     ['implementing', 'awaiting_input'].includes(task.state) ||
     inReviewStates.has(task.state) ||
     ['failed', 'validation_failed'].includes(task.state) ||
@@ -274,7 +300,17 @@ export function DetailPanel({
           </TabsContent>
         )}
         <TabsContent value="activity" className="thin-scrollbar mt-0 min-h-0 flex-1 overflow-y-auto">
-          <TaskConversationView parts={parts} live={running} />
+          {isDraft ? (
+            <TaskIntakePanel
+              messages={intakeRecords}
+              suggestion={pendingSuggestion}
+              busy={sending}
+              onApply={(eventId, keys) => onResolveSuggestion(eventId, 'apply', keys)}
+              onDiscard={(eventId) => onResolveSuggestion(eventId, 'discard')}
+            />
+          ) : (
+            <TaskConversationView parts={parts} live={running} />
+          )}
         </TabsContent>
         <TabsContent value="files" className="thin-scrollbar mt-0 min-h-0 flex-1 overflow-y-auto">
           {showChangedFiles ? (
@@ -409,13 +445,35 @@ export function DetailPanel({
       />
       {canChat && activeTab === 'activity' && (
         <div className="shrink-0 border-t bg-background/95 px-3 pt-1.5 pb-2">
+          {/* 缺项提示条：命中才亮，而且不自动发言（§2.4 第 5 条）。有待采纳建议时收起来：
+              那句「可以让 Agent 补」已经被回答了一次，再亮就是噪音。 */}
+          {isDraft && intakeGaps.length > 0 && !pendingSuggestion ? (
+            <div className="mb-1.5 flex items-center gap-2 rounded-md border border-dashed px-2.5 py-1.5">
+              <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
+                {intakeGaps.map((gap) => DRAFT_GAP_LABELS[gap]).join(' · ')}
+              </span>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={sending}
+                onClick={() => onSendIntake(intakeOpeningLine(intakeGaps))}
+              >
+                让 Agent 补全
+              </Button>
+            </div>
+          ) : null}
           <TaskComposer
             value={prompt}
             onChange={onPrompt}
-            onSend={onSend}
-            onStop={onAbort}
+            onSend={isDraft ? (value: string) => onSendIntake(value) : onSend}
+            onStop={isDraft ? undefined : onAbort}
             streaming={running}
             submitting={sending}
+            // 澄清阶段不接流式通道，那条 IPC 挂到整轮跑完才回：`sending` 就是它的 busy。
+            placeholder={isDraft ? (sending ? '澄清助手正在思考…' : '让 Agent 帮你补全任务定义') : undefined}
+            // 澄清会话的工具面是固定的（只读查询 + 提建议），挂 MCP / Skill 选择器就是让人选一个不会生效的东西。
+            showHitlMode={!isDraft}
             disabled={
               sending ||
               running ||
@@ -431,10 +489,12 @@ export function DetailPanel({
             hitlContextType="task"
             hitlContextId={task.id}
             leftSlot={
-              <>
-                <ChatMcpSelector selected={mcpService} onChange={onMcpServiceChange} disabled={running || sending} />
-                <ChatSkillSelector selected={skills} onChange={onSkillsChange} disabled={running || sending} />
-              </>
+              isDraft ? undefined : (
+                <>
+                  <ChatMcpSelector selected={mcpService} onChange={onMcpServiceChange} disabled={running || sending} />
+                  <ChatSkillSelector selected={skills} onChange={onSkillsChange} disabled={running || sending} />
+                </>
+              )
             }
           />
         </div>

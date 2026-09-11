@@ -1,0 +1,1674 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TaskPipeline 架构讲解 — Pi · Qoder SDK · Task</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --surface: #1e293b;
+        --surface-alt: #273549;
+        --border: #334155;
+        --text: #e2e8f0;
+        --text-muted: #94a3b8;
+        --accent: #818cf8;
+        --accent-light: #a5b4fc;
+        --accent-bg: rgba(129, 140, 248, 0.12);
+        --success: #34d399;
+        --success-bg: rgba(52, 211, 153, 0.12);
+        --warning: #fbbf24;
+        --warning-bg: rgba(251, 191, 36, 0.12);
+        --danger: #f87171;
+        --danger-bg: rgba(248, 113, 113, 0.12);
+        --info: #38bdf8;
+        --info-bg: rgba(56, 189, 248, 0.12);
+        --purple: #c084fc;
+        --purple-bg: rgba(192, 132, 252, 0.12);
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family:
+          'Inter',
+          -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.7;
+        font-size: 15px;
+      }
+      .container {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 40px 24px 80px;
+      }
+      h1 {
+        font-size: 32px;
+        font-weight: 700;
+        margin-bottom: 8px;
+        letter-spacing: -0.5px;
+      }
+      h1 span {
+        color: var(--accent);
+      }
+      .subtitle {
+        color: var(--text-muted);
+        font-size: 16px;
+        margin-bottom: 48px;
+      }
+      h2 {
+        font-size: 22px;
+        font-weight: 600;
+        margin: 48px 0 20px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--border);
+        letter-spacing: -0.3px;
+      }
+      h2 .badge {
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 500;
+        padding: 2px 8px;
+        border-radius: 4px;
+        margin-left: 10px;
+        vertical-align: middle;
+        letter-spacing: 0.3px;
+      }
+      .badge-arch {
+        background: var(--accent-bg);
+        color: var(--accent);
+      }
+      .badge-flow {
+        background: var(--success-bg);
+        color: var(--success);
+      }
+      .badge-code {
+        background: var(--purple-bg);
+        color: var(--purple);
+      }
+      h3 {
+        font-size: 17px;
+        font-weight: 600;
+        margin: 28px 0 12px;
+        color: var(--accent-light);
+      }
+      p {
+        margin-bottom: 14px;
+        color: var(--text);
+      }
+      p.muted {
+        color: var(--text-muted);
+        font-size: 14px;
+      }
+
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 24px;
+        margin: 16px 0;
+      }
+      .card-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 16px;
+        margin: 16px 0;
+      }
+      .card-grid .card {
+        margin: 0;
+      }
+      .card h4 {
+        font-size: 15px;
+        font-weight: 600;
+        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .card h4 .icon {
+        font-size: 18px;
+      }
+      .card p {
+        font-size: 14px;
+        color: var(--text-muted);
+        margin-bottom: 0;
+      }
+      .card .tag {
+        display: inline-block;
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 3px;
+        background: var(--accent-bg);
+        color: var(--accent);
+        margin-right: 4px;
+        margin-top: 6px;
+      }
+
+      .diagram-wrap {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 24px;
+        margin: 20px 0;
+        overflow-x: auto;
+      }
+      .diagram-wrap svg {
+        display: block;
+        margin: 0 auto;
+      }
+      .diagram-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        margin-bottom: 16px;
+      }
+
+      code {
+        font-family: 'JetBrains Mono', 'Fira Code', monospace;
+        background: var(--surface-alt);
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 13px;
+        color: var(--accent-light);
+      }
+      pre {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px 20px;
+        overflow-x: auto;
+        margin: 12px 0;
+        font-family: 'JetBrains Mono', 'Fira Code', monospace;
+        font-size: 13px;
+        line-height: 1.6;
+        color: var(--text);
+      }
+      pre .comment {
+        color: var(--text-muted);
+      }
+      pre .keyword {
+        color: var(--accent);
+      }
+      pre .string {
+        color: var(--success);
+      }
+      pre .type {
+        color: var(--warning);
+      }
+
+      .state-flow {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+        margin: 12px 0;
+      }
+      .state-node {
+        padding: 5px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .state-arrow {
+        color: var(--text-muted);
+        font-size: 14px;
+      }
+      .s-draft {
+        background: var(--surface-alt);
+        color: var(--text-muted);
+      }
+      .s-active {
+        background: var(--info-bg);
+        color: var(--info);
+      }
+      .s-wait {
+        background: var(--warning-bg);
+        color: var(--warning);
+      }
+      .s-review {
+        background: var(--purple-bg);
+        color: var(--purple);
+      }
+      .s-deliver {
+        background: var(--accent-bg);
+        color: var(--accent);
+      }
+      .s-done {
+        background: var(--success-bg);
+        color: var(--success);
+      }
+      .s-fail {
+        background: var(--danger-bg);
+        color: var(--danger);
+      }
+
+      .layer-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        margin: 16px 0;
+      }
+      .layer-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 16px;
+        border-radius: 6px;
+      }
+      .layer-label {
+        font-size: 12px;
+        font-weight: 600;
+        min-width: 130px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .layer-content {
+        font-size: 14px;
+        color: var(--text-muted);
+      }
+      .layer-content code {
+        font-size: 12px;
+      }
+      .l-ui {
+        background: rgba(56, 189, 248, 0.08);
+        border-left: 3px solid var(--info);
+      }
+      .l-service {
+        background: rgba(129, 140, 248, 0.08);
+        border-left: 3px solid var(--accent);
+      }
+      .l-driver {
+        background: rgba(192, 132, 252, 0.08);
+        border-left: 3px solid var(--purple);
+      }
+      .l-sdk {
+        background: rgba(251, 191, 36, 0.08);
+        border-left: 3px solid var(--warning);
+      }
+      .l-pi {
+        background: rgba(52, 211, 153, 0.08);
+        border-left: 3px solid var(--success);
+      }
+      .l-data {
+        background: rgba(248, 113, 113, 0.08);
+        border-left: 3px solid var(--danger);
+      }
+
+      .callout {
+        border-radius: 8px;
+        padding: 14px 18px;
+        margin: 16px 0;
+        font-size: 14px;
+      }
+      .callout-info {
+        background: var(--info-bg);
+        border-left: 3px solid var(--info);
+      }
+      .callout-warn {
+        background: var(--warning-bg);
+        border-left: 3px solid var(--warning);
+      }
+      .callout-key {
+        background: var(--accent-bg);
+        border-left: 3px solid var(--accent);
+      }
+      .callout strong {
+        color: var(--text);
+      }
+
+      .file-ref {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12px;
+        color: var(--text-muted);
+        background: var(--surface-alt);
+        padding: 1px 6px;
+        border-radius: 3px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 12px 0;
+        font-size: 14px;
+      }
+      th {
+        text-align: left;
+        padding: 10px 12px;
+        font-weight: 600;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        border-bottom: 2px solid var(--border);
+        color: var(--text-muted);
+      }
+      td {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        color: var(--text);
+      }
+      td code {
+        font-size: 12px;
+      }
+
+      .toc {
+        margin: 24px 0 40px;
+      }
+      .toc a {
+        display: block;
+        padding: 6px 0;
+        color: var(--accent-light);
+        text-decoration: none;
+        font-size: 14px;
+        border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+        transition: color 0.15s;
+      }
+      .toc a:hover {
+        color: var(--accent);
+      }
+      .toc a .num {
+        color: var(--text-muted);
+        margin-right: 8px;
+        font-size: 12px;
+      }
+
+      .two-col {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        margin: 16px 0;
+      }
+      @media (max-width: 700px) {
+        .two-col {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .step-list {
+        counter-reset: step;
+        list-style: none;
+        margin: 16px 0;
+      }
+      .step-list li {
+        counter-increment: step;
+        position: relative;
+        padding: 10px 12px 10px 44px;
+        margin-bottom: 6px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font-size: 14px;
+      }
+      .step-list li::before {
+        content: counter(step);
+        position: absolute;
+        left: 12px;
+        top: 10px;
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        background: var(--accent-bg);
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>TaskPipeline <span>架构讲解</span></h1>
+      <p class="subtitle">Pi Agent Runtime · Qoder SDK 集成 · Task 状态机 — 三大核心模块深度解析</p>
+
+      <div class="toc">
+        <a href="#overview"><span class="num">01</span>全局概览：Monorepo 与依赖分层</a>
+        <a href="#pi"><span class="num">02</span>Pi 架构：Agent Runtime 与 Extension 体系</a>
+        <a href="#qoder"><span class="num">03</span>Qoder SDK 接入：从 Extension 到全功能集成</a>
+        <a href="#task"><span class="num">04</span>Task 处理：状态机驱动的交付流水线</a>
+        <a href="#chat"><span class="num">05</span>Chat 子系统：Driver 抽象与流式对话</a>
+        <a href="#trace"><span class="num">06</span>Trace 可观测性：端到端执行回溯</a>
+        <a href="#summary"><span class="num">07</span>总结：关键设计决策</a>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <h2>01 全局概览 <span class="badge badge-arch">Architecture</span></h2>
+
+      <p>
+        TaskPipeline 是一个<strong>面向研发交付流程的桌面端 Coding Agent 工作台</strong>。以任务看板为核心，串联 Jira
+        导入 → Agent 编排 → 代码评审 → MR 提交 → 合并跟踪的完整交付闭环。
+      </p>
+
+      <h3>Monorepo 依赖方向</h3>
+
+      <div class="diagram-wrap">
+        <div class="diagram-title">Package Dependency Graph</div>
+        <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" style="width: 100%; height: auto">
+          <defs>
+            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L10,5 L0,10 Z" fill="#94a3b8" />
+            </marker>
+          </defs>
+          <!-- desktop -->
+          <rect
+            x="280"
+            y="20"
+            width="200"
+            height="50"
+            rx="8"
+            fill="rgba(129,140,248,0.15)"
+            stroke="#818cf8"
+            stroke-width="1.5"
+          />
+          <text x="380" y="50" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">apps/desktop</text>
+          <text x="380" y="38" text-anchor="middle" fill="#94a3b8" font-size="10">Electron 主进程 + React 前端</text>
+
+          <!-- pi-package -->
+          <rect
+            x="60"
+            y="120"
+            width="200"
+            height="50"
+            rx="8"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="160" y="150" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">
+            packages/pi-package
+          </text>
+          <text x="160" y="138" text-anchor="middle" fill="#94a3b8" font-size="10">Pi Extension 接入层</text>
+
+          <!-- integrations -->
+          <rect
+            x="300"
+            y="120"
+            width="200"
+            height="50"
+            rx="8"
+            fill="rgba(251,191,36,0.15)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+          />
+          <text x="400" y="150" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">
+            packages/integrations
+          </text>
+          <text x="400" y="138" text-anchor="middle" fill="#94a3b8" font-size="10">GitLab / Jira / Git / Review</text>
+
+          <!-- core -->
+          <rect
+            x="180"
+            y="220"
+            width="200"
+            height="50"
+            rx="8"
+            fill="rgba(248,113,113,0.15)"
+            stroke="#f87171"
+            stroke-width="1.5"
+          />
+          <text x="280" y="250" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">
+            packages/core
+          </text>
+          <text x="280" y="238" text-anchor="middle" fill="#94a3b8" font-size="10">TaskStore / Workflow / Types</text>
+
+          <!-- codegraph -->
+          <rect
+            x="540"
+            y="120"
+            width="180"
+            height="50"
+            rx="8"
+            fill="rgba(192,132,252,0.15)"
+            stroke="#c084fc"
+            stroke-width="1.5"
+          />
+          <text x="630" y="150" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">
+            packages/codegraph
+          </text>
+          <text x="630" y="138" text-anchor="middle" fill="#94a3b8" font-size="10">代码索引 / MCP 服务</text>
+
+          <!-- arrows -->
+          <line x1="330" y1="70" x2="210" y2="120" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+          <line x1="380" y1="70" x2="380" y2="120" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+          <line x1="430" y1="70" x2="580" y2="120" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+          <line x1="160" y1="170" x2="240" y2="220" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+          <line x1="400" y1="170" x2="320" y2="220" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+        </svg>
+      </div>
+
+      <div class="callout callout-key">
+        <strong>依赖方向：</strong
+        ><code>desktop → pi-package → integrations → core</code
+        >。上层可以引用下层，下层绝不反向依赖。所有跨层通信通过依赖注入（DI）完成。
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <h2>02 Pi 架构 <span class="badge badge-arch">Agent Runtime</span></h2>
+
+      <p>
+        <strong>Pi</strong>（<code>@earendil-works/pi-coding-agent</code>）是底层 Agent
+        Runtime，提供会话管理、工具执行、Extension 加载等基础能力。TaskPipeline 通过两个路径使用 Pi：
+      </p>
+
+      <div class="two-col">
+        <div class="card">
+          <h4><span class="icon">🔌</span> Pi Extension（pi-package）</h4>
+          <p>
+            把 TaskPipeline 的任务体系（TaskStore / Git / Docker 沙箱 / 权限评估）封装为 Pi 的一个扩展包。Pi
+            会话启动时通过 <code>DefaultResourceLoader</code> 加载。
+          </p>
+          <span class="tag">OpenAI 路径</span><span class="tag">工具注册</span><span class="tag">Docker 沙箱</span>
+        </div>
+        <div class="card">
+          <h4><span class="icon">🧩</span> Qoder Extension（pi-extension/qoder）</h4>
+          <p>
+            把 Qoder SDK 的完整能力封装为另一个 Extension。与 pi-package 平级，跑在 Electron 主进程同一 Node.js 进程中。
+          </p>
+          <span class="tag">Qoder 路径</span><span class="tag">常驻会话</span><span class="tag">HITL</span>
+        </div>
+      </div>
+
+      <h3>Pi 会话启动流程</h3>
+
+      <div class="diagram-wrap">
+        <div class="diagram-title">Pi Session Bootstrap Sequence</div>
+        <svg viewBox="0 0 760 360" xmlns="http://www.w3.org/2000/svg" style="width: 100%; height: auto">
+          <defs>
+            <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L10,5 L0,10 Z" fill="#94a3b8" />
+            </marker>
+          </defs>
+          <!-- Steps -->
+          <rect
+            x="40"
+            y="20"
+            width="160"
+            height="44"
+            rx="6"
+            fill="rgba(56,189,248,0.15)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+          />
+          <text x="120" y="46" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            startPi(taskId)
+          </text>
+
+          <rect
+            x="240"
+            y="20"
+            width="160"
+            height="44"
+            rx="6"
+            fill="var(--surface)"
+            stroke="#334155"
+            stroke-width="1.5"
+          />
+          <text x="320" y="38" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            SessionManager
+          </text>
+          <text x="320" y="52" text-anchor="middle" fill="#94a3b8" font-size="10">创建/恢复会话</text>
+
+          <rect
+            x="440"
+            y="20"
+            width="160"
+            height="44"
+            rx="6"
+            fill="var(--surface)"
+            stroke="#334155"
+            stroke-width="1.5"
+          />
+          <text x="520" y="38" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            DefaultResourceLoader
+          </text>
+          <text x="520" y="52" text-anchor="middle" fill="#94a3b8" font-size="10">加载 Extensions</text>
+
+          <rect
+            x="640"
+            y="20"
+            width="100"
+            height="44"
+            rx="6"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="690" y="38" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">ModelRuntime</text>
+          <text x="690" y="52" text-anchor="middle" fill="#94a3b8" font-size="10">API Key 注入</text>
+
+          <line x1="200" y1="42" x2="238" y2="42" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr2)" />
+          <line x1="400" y1="42" x2="438" y2="42" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr2)" />
+          <line x1="600" y1="42" x2="638" y2="42" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr2)" />
+
+          <!-- Row 2 -->
+          <rect
+            x="140"
+            y="100"
+            width="200"
+            height="44"
+            rx="6"
+            fill="var(--surface)"
+            stroke="#334155"
+            stroke-width="1.5"
+          />
+          <text x="240" y="118" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            createAgentSession()
+          </text>
+          <text x="240" y="132" text-anchor="middle" fill="#94a3b8" font-size="10">Pi 核心 API</text>
+
+          <rect
+            x="400"
+            y="100"
+            width="200"
+            height="44"
+            rx="6"
+            fill="rgba(192,132,252,0.15)"
+            stroke="#c084fc"
+            stroke-width="1.5"
+          />
+          <text x="500" y="118" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            session.bindExtensions()
+          </text>
+          <text x="500" y="132" text-anchor="middle" fill="#94a3b8" font-size="10">注册 UI 上下文 + RPC 模式</text>
+
+          <line x1="340" y1="64" x2="260" y2="100" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr2)" />
+          <line x1="340" y1="64" x2="480" y2="100" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr2)" />
+
+          <!-- Row 3: Extensions loaded -->
+          <rect
+            x="60"
+            y="190"
+            width="150"
+            height="60"
+            rx="6"
+            fill="rgba(52,211,153,0.1)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="135" y="214" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">pi-package</text>
+          <text x="135" y="230" text-anchor="middle" fill="#94a3b8" font-size="10">任务工具 / Docker</text>
+          <text x="135" y="242" text-anchor="middle" fill="#94a3b8" font-size="10">权限评估 / 计划模式</text>
+
+          <rect
+            x="240"
+            y="190"
+            width="150"
+            height="60"
+            rx="6"
+            fill="rgba(129,140,248,0.1)"
+            stroke="#818cf8"
+            stroke-width="1"
+          />
+          <text x="315" y="214" text-anchor="middle" fill="#818cf8" font-size="11" font-weight="600">
+            Pi 内置 Extensions
+          </text>
+          <text x="315" y="230" text-anchor="middle" fill="#94a3b8" font-size="10">文件系统 / Shell</text>
+          <text x="315" y="242" text-anchor="middle" fill="#94a3b8" font-size="10">搜索 / 编辑器</text>
+
+          <rect
+            x="420"
+            y="190"
+            width="150"
+            height="60"
+            rx="6"
+            fill="rgba(251,191,36,0.1)"
+            stroke="#fbbf24"
+            stroke-width="1"
+          />
+          <text x="495" y="214" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600">Skills</text>
+          <text x="495" y="230" text-anchor="middle" fill="#94a3b8" font-size="10">项目级 SKILL.md</text>
+          <text x="495" y="242" text-anchor="middle" fill="#94a3b8" font-size="10">可注册自定义工具</text>
+
+          <rect
+            x="600"
+            y="190"
+            width="140"
+            height="60"
+            rx="6"
+            fill="rgba(248,113,113,0.1)"
+            stroke="#f87171"
+            stroke-width="1"
+          />
+          <text x="670" y="214" text-anchor="middle" fill="#f87171" font-size="11" font-weight="600">
+            Project Config
+          </text>
+          <text x="670" y="230" text-anchor="middle" fill="#94a3b8" font-size="10">.pi/ 目录配置</text>
+          <text x="670" y="242" text-anchor="middle" fill="#94a3b8" font-size="10">Trust Store 校验</text>
+
+          <line
+            x1="240"
+            y1="144"
+            x2="135"
+            y2="190"
+            stroke="#94a3b8"
+            stroke-width="1"
+            stroke-dasharray="4,3"
+            marker-end="url(#arr2)"
+          />
+          <line
+            x1="240"
+            y1="144"
+            x2="315"
+            y2="190"
+            stroke="#94a3b8"
+            stroke-width="1"
+            stroke-dasharray="4,3"
+            marker-end="url(#arr2)"
+          />
+          <line
+            x1="500"
+            y1="144"
+            x2="495"
+            y2="190"
+            stroke="#94a3b8"
+            stroke-width="1"
+            stroke-dasharray="4,3"
+            marker-end="url(#arr2)"
+          />
+          <line
+            x1="500"
+            y1="144"
+            x2="670"
+            y2="190"
+            stroke="#94a3b8"
+            stroke-width="1"
+            stroke-dasharray="4,3"
+            marker-end="url(#arr2)"
+          />
+
+          <!-- Bottom: session.subscribe -->
+          <rect
+            x="180"
+            y="290"
+            width="400"
+            height="44"
+            rx="6"
+            fill="rgba(56,189,248,0.1)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+          />
+          <text x="380" y="308" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            session.subscribe(emitPi) → IPC → 渲染进程
+          </text>
+          <text x="380" y="322" text-anchor="middle" fill="#94a3b8" font-size="10">
+            所有 Agent 事件通过 IPC 转发给前端 UI
+          </text>
+          <line x1="380" y1="250" x2="380" y2="288" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr2)" />
+        </svg>
+      </div>
+
+      <div class="callout callout-info">
+        <strong>关键前提：</strong>Pi Extension 跑在<strong>同一 Node.js 进程</strong>内（Electron 主进程通过
+        <code>resourceLoader</code> 加载）。不存在跨进程问题——Extension 内可以直接 import 所有 API。
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <h2>03 Qoder SDK 接入 <span class="badge badge-flow">Integration</span></h2>
+
+      <p>
+        项目的核心架构目标是<strong>把 Qoder SDK 的完整能力封装为一个 Pi Extension</strong>，而非仅作为 LLM Provider
+        使用。这使我们可以访问会话管理、HITL、Trace、子任务委派、MCP 注入、Skills 等全部能力。
+      </p>
+
+      <div class="diagram-wrap">
+        <div class="diagram-title">Qoder SDK Integration Architecture</div>
+        <svg viewBox="0 0 760 440" xmlns="http://www.w3.org/2000/svg" style="width: 100%; height: auto">
+          <defs>
+            <marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L10,5 L0,10 Z" fill="#94a3b8" />
+            </marker>
+          </defs>
+
+          <!-- Layer labels -->
+          <text x="20" y="36" fill="#94a3b8" font-size="10" font-weight="600">宿主层</text>
+          <text x="20" y="126" fill="#94a3b8" font-size="10" font-weight="600">编排层</text>
+          <text x="20" y="226" fill="#94a3b8" font-size="10" font-weight="600">Driver 层</text>
+          <text x="20" y="336" fill="#94a3b8" font-size="10" font-weight="600">SDK 层</text>
+
+          <!-- Host layer -->
+          <rect
+            x="100"
+            y="16"
+            width="250"
+            height="40"
+            rx="6"
+            fill="rgba(56,189,248,0.12)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+          />
+          <text x="225" y="40" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            Electron main.ts (IPC)
+          </text>
+
+          <rect
+            x="400"
+            y="16"
+            width="250"
+            height="40"
+            rx="6"
+            fill="rgba(56,189,248,0.12)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+          />
+          <text x="525" y="40" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            task-lifecycle.ts (状态机)
+          </text>
+
+          <!-- Orchestrator -->
+          <rect
+            x="100"
+            y="100"
+            width="550"
+            height="50"
+            rx="8"
+            fill="rgba(129,140,248,0.12)"
+            stroke="#818cf8"
+            stroke-width="1.5"
+          />
+          <text x="375" y="122" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">
+            QoderOrchestrator — 统一编排入口
+          </text>
+          <text x="375" y="138" text-anchor="middle" fill="#94a3b8" font-size="10">
+            run / resume / pause / runPlan / runAutoFix / runTestCases / getStatus
+          </text>
+
+          <line x1="225" y1="56" x2="225" y2="100" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr3)" />
+          <line x1="525" y1="56" x2="525" y2="100" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr3)" />
+
+          <!-- Drivers -->
+          <rect
+            x="100"
+            y="196"
+            width="170"
+            height="60"
+            rx="6"
+            fill="rgba(192,132,252,0.12)"
+            stroke="#c084fc"
+            stroke-width="1.5"
+          />
+          <text x="185" y="218" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            QoderTaskAgentDriver
+          </text>
+          <text x="185" y="234" text-anchor="middle" fill="#94a3b8" font-size="10">任务执行 (Plan/Impl/Test)</text>
+          <text x="185" y="248" text-anchor="middle" fill="#94a3b8" font-size="10">常驻会话 + 阶段缓冲</text>
+
+          <rect
+            x="295"
+            y="196"
+            width="170"
+            height="60"
+            rx="6"
+            fill="rgba(192,132,252,0.12)"
+            stroke="#c084fc"
+            stroke-width="1.5"
+          />
+          <text x="380" y="218" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            QoderChatDriver
+          </text>
+          <text x="380" y="234" text-anchor="middle" fill="#94a3b8" font-size="10">对话流式交互</text>
+          <text x="380" y="248" text-anchor="middle" fill="#94a3b8" font-size="10">MCP / Skills / HITL</text>
+
+          <rect
+            x="490"
+            y="196"
+            width="160"
+            height="60"
+            rx="6"
+            fill="rgba(192,132,252,0.12)"
+            stroke="#c084fc"
+            stroke-width="1.5"
+          />
+          <text x="570" y="218" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">QoderSession</text>
+          <text x="570" y="234" text-anchor="middle" fill="#94a3b8" font-size="10">会话生命周期</text>
+          <text x="570" y="248" text-anchor="middle" fill="#94a3b8" font-size="10">消息分发 / Resume</text>
+
+          <line x1="250" y1="150" x2="185" y2="196" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr3)" />
+          <line x1="375" y1="150" x2="380" y2="196" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr3)" />
+          <line x1="500" y1="150" x2="570" y2="196" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr3)" />
+
+          <!-- SDK -->
+          <rect
+            x="100"
+            y="310"
+            width="550"
+            height="50"
+            rx="8"
+            fill="rgba(251,191,36,0.12)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+          />
+          <text x="375" y="332" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">
+            @qoder-ai/qoder-agent-sdk
+          </text>
+          <text x="375" y="348" text-anchor="middle" fill="#94a3b8" font-size="10">
+            query() · AsyncGenerator · SDKMessage · canUseTool · hooks · mcpServers · skills
+          </text>
+
+          <line x1="185" y1="256" x2="185" y2="310" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr3)" />
+          <line x1="380" y1="256" x2="380" y2="310" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr3)" />
+          <line x1="570" y1="256" x2="570" y2="310" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr3)" />
+
+          <!-- Trace -->
+          <rect
+            x="100"
+            y="396"
+            width="260"
+            height="36"
+            rx="6"
+            fill="rgba(52,211,153,0.12)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="230" y="418" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">
+            TracePipeline + QoderTraceBuilder
+          </text>
+
+          <rect
+            x="390"
+            y="396"
+            width="260"
+            height="36"
+            rx="6"
+            fill="rgba(248,113,113,0.12)"
+            stroke="#f87171"
+            stroke-width="1"
+          />
+          <text x="520" y="418" text-anchor="middle" fill="#f87171" font-size="11" font-weight="600">
+            JSONL 持久化 + 前端 Trace 回溯
+          </text>
+
+          <line
+            x1="375"
+            y1="360"
+            x2="230"
+            y2="396"
+            stroke="#94a3b8"
+            stroke-width="1"
+            stroke-dasharray="4,3"
+            marker-end="url(#arr3)"
+          />
+          <line
+            x1="375"
+            y1="360"
+            x2="520"
+            y2="396"
+            stroke="#94a3b8"
+            stroke-width="1"
+            stroke-dasharray="4,3"
+            marker-end="url(#arr3)"
+          />
+        </svg>
+      </div>
+
+      <h3>核心模块职责</h3>
+
+      <table>
+        <thead>
+          <tr>
+            <th>模块</th>
+            <th>文件</th>
+            <th>职责</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>QoderOrchestrator</code></td>
+            <td><span class="file-ref">pi-extension/qoder/qoder-orchestrator.ts</span></td>
+            <td>统一编排入口：管理 TaskAgent 单例、会话控制、状态探测、Review 调用、Auto-fix 循环</td>
+          </tr>
+          <tr>
+            <td><code>QoderTaskAgentDriver</code></td>
+            <td><span class="file-ref">pi-extension/qoder/qoder-task-agent.ts</span></td>
+            <td>
+              TaskAgentDriver 的 Qoder 实现：runPlan / runImplementation / runTestGeneration 三阶段在同一会话内推进
+            </td>
+          </tr>
+          <tr>
+            <td><code>QoderChatDriver</code></td>
+            <td><span class="file-ref">pi-extension/qoder/qoder-chat-driver.ts</span></td>
+            <td>ChatDriver 的 Qoder 实现：常驻会话、流式对话、MCP/Skills 注入、HITL 工具确认</td>
+          </tr>
+          <tr>
+            <td><code>QoderSession</code></td>
+            <td><span class="file-ref">pi-extension/qoder/qoder-session.ts</span></td>
+            <td>封装 SDK <code>query()</code> 的 AsyncGenerator：消息分发、回合管理、Resume 锚点、流式去重</td>
+          </tr>
+          <tr>
+            <td><code>QoderTraceBuilder</code></td>
+            <td><span class="file-ref">pi-extension/qoder/trace-builder.ts</span></td>
+            <td>SDK 消息 → Trace Span 转换器：把 SDKMessage 实时转为 agent.run / tool.call 等 span</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Scheme B：保留内部工具执行</h3>
+
+      <div class="callout callout-key">
+        <strong>为什么不用 Scheme A（纯 ExtensionAPI）？</strong><br />
+        Pi 的 ExtensionAPI 事件无法替代 SDK 的内部事件流（如 <code>onMessage</code>、<code>canUseTool</code>、会话
+        Resume 等）。Qoder SDK 必须在进程内保留 <code>query()</code> 的 AsyncGenerator 执行能力，由 Extension
+        包裹而非替换。这就是 <strong>Scheme B</strong> —— Extension 持有 SDK 的完整执行链路。
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <h2>04 Task 处理 <span class="badge badge-flow">State Machine</span></h2>
+
+      <p>
+        任务处理是整个系统的核心。每个任务从 Jira 导入到最终合并，经历一条由<strong>状态机</strong>严格驱动的流水线。
+      </p>
+
+      <h3>状态转移图</h3>
+
+      <div class="diagram-wrap">
+        <div class="diagram-title">Task State Machine — Full Transition Map</div>
+        <svg viewBox="0 0 760 560" xmlns="http://www.w3.org/2000/svg" style="width: 100%; height: auto">
+          <defs>
+            <marker id="arr4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+              <path d="M0,0 L10,5 L0,10 Z" fill="#94a3b8" />
+            </marker>
+            <marker id="arr4g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+              <path d="M0,0 L10,5 L0,10 Z" fill="#34d399" />
+            </marker>
+            <marker id="arr4r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+              <path d="M0,0 L10,5 L0,10 Z" fill="#f87171" />
+            </marker>
+          </defs>
+
+          <!-- Column headers -->
+          <text x="120" y="20" text-anchor="middle" fill="#38bdf8" font-size="11" font-weight="600">TODO</text>
+          <text x="340" y="20" text-anchor="middle" fill="#818cf8" font-size="11" font-weight="600">IN PROGRESS</text>
+          <text x="570" y="20" text-anchor="middle" fill="#c084fc" font-size="11" font-weight="600">IN REVIEW</text>
+          <text x="710" y="20" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">DONE</text>
+
+          <!-- Column dividers -->
+          <line x1="230" y1="10" x2="230" y2="550" stroke="#334155" stroke-width="1" stroke-dasharray="4,4" />
+          <line x1="470" y1="10" x2="470" y2="550" stroke="#334155" stroke-width="1" stroke-dasharray="4,4" />
+          <line x1="660" y1="10" x2="660" y2="550" stroke="#334155" stroke-width="1" stroke-dasharray="4,4" />
+
+          <!--
+            Layout: box height=50, gap=16
+            Row 1: y=50  (center=75, bottom=100)
+            Row 2: y=116 (center=141, bottom=166)
+            Row 3: y=182 (center=207, bottom=232)
+            Row 4: y=248 (center=273, bottom=298)
+            Row 5: y=324 (center=349, bottom=374)
+            Row 6: y=400 (center=425, bottom=450)
+            English text: box_Y + 20 | Chinese text: box_Y + 40
+          -->
+
+          <!-- States: TODO column -->
+          <!-- draft 待处理 -->
+          <rect
+            x="50"
+            y="50"
+            width="140"
+            height="50"
+            rx="6"
+            fill="rgba(148,163,184,0.15)"
+            stroke="#94a3b8"
+            stroke-width="1.5"
+          />
+          <text x="120" y="70" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">draft</text>
+          <text x="120" y="90" text-anchor="middle" fill="#94a3b8" font-size="10">待处理</text>
+
+          <!-- confirmed 已确认 -->
+          <rect
+            x="50"
+            y="116"
+            width="140"
+            height="50"
+            rx="6"
+            fill="rgba(148,163,184,0.15)"
+            stroke="#94a3b8"
+            stroke-width="1.5"
+          />
+          <text x="120" y="136" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">confirmed</text>
+          <text x="120" y="156" text-anchor="middle" fill="#94a3b8" font-size="10">已确认</text>
+
+          <!-- States: IN PROGRESS column -->
+          <!-- preparing 环境准备 -->
+          <rect
+            x="260"
+            y="50"
+            width="140"
+            height="50"
+            rx="6"
+            fill="rgba(56,189,248,0.15)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+          />
+          <text x="330" y="70" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">preparing</text>
+          <text x="330" y="90" text-anchor="middle" fill="#94a3b8" font-size="10">环境准备</text>
+
+          <!-- planning 计划生成 -->
+          <rect
+            x="260"
+            y="116"
+            width="140"
+            height="50"
+            rx="6"
+            fill="rgba(56,189,248,0.15)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+          />
+          <text x="330" y="136" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">planning</text>
+          <text x="330" y="156" text-anchor="middle" fill="#94a3b8" font-size="10">计划生成</text>
+
+          <!-- awaiting_plan_approval 等待计划确认 -->
+          <rect
+            x="260"
+            y="182"
+            width="140"
+            height="50"
+            rx="6"
+            fill="rgba(251,191,36,0.15)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+          />
+          <text x="330" y="200" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">
+            awaiting_plan_approval
+          </text>
+          <text x="330" y="222" text-anchor="middle" fill="#94a3b8" font-size="10">等待计划确认</text>
+
+          <!-- implementing 代码实现 -->
+          <rect
+            x="260"
+            y="248"
+            width="140"
+            height="50"
+            rx="6"
+            fill="rgba(129,140,248,0.2)"
+            stroke="#818cf8"
+            stroke-width="2"
+          />
+          <text x="330" y="268" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="700">implementing</text>
+          <text x="330" y="288" text-anchor="middle" fill="#94a3b8" font-size="10">代码实现</text>
+
+          <!-- paused / awaiting_input 已暂停 / 等待补充 -->
+          <rect
+            x="260"
+            y="324"
+            width="140"
+            height="50"
+            rx="6"
+            fill="rgba(251,191,36,0.15)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+          />
+          <text x="330" y="342" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">
+            paused / awaiting_input
+          </text>
+          <text x="330" y="364" text-anchor="middle" fill="#94a3b8" font-size="10">已暂停 / 等待补充</text>
+
+          <!-- validating 校验中 -->
+          <rect
+            x="260"
+            y="400"
+            width="140"
+            height="50"
+            rx="6"
+            fill="rgba(56,189,248,0.15)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+          />
+          <text x="330" y="420" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">validating</text>
+          <text x="330" y="440" text-anchor="middle" fill="#94a3b8" font-size="10">校验中</text>
+
+          <!-- States: IN REVIEW column -->
+          <!-- awaiting_review 等待评审 -->
+          <rect
+            x="490"
+            y="50"
+            width="150"
+            height="50"
+            rx="6"
+            fill="rgba(192,132,252,0.15)"
+            stroke="#c084fc"
+            stroke-width="1.5"
+          />
+          <text x="565" y="70" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            awaiting_review
+          </text>
+          <text x="565" y="90" text-anchor="middle" fill="#94a3b8" font-size="10">等待评审</text>
+
+          <!-- reviewing 评审中 -->
+          <rect
+            x="490"
+            y="116"
+            width="150"
+            height="50"
+            rx="6"
+            fill="rgba(192,132,252,0.15)"
+            stroke="#c084fc"
+            stroke-width="1.5"
+          />
+          <text x="565" y="136" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">reviewing</text>
+          <text x="565" y="156" text-anchor="middle" fill="#94a3b8" font-size="10">评审中</text>
+
+          <!-- review_blocked 评审阻断 -->
+          <rect
+            x="490"
+            y="182"
+            width="150"
+            height="50"
+            rx="6"
+            fill="rgba(248,113,113,0.15)"
+            stroke="#f87171"
+            stroke-width="1.5"
+          />
+          <text x="565" y="202" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            review_blocked
+          </text>
+          <text x="565" y="222" text-anchor="middle" fill="#94a3b8" font-size="10">评审阻断</text>
+
+          <!-- awaiting_commit 等待提交 MR -->
+          <rect
+            x="490"
+            y="248"
+            width="150"
+            height="50"
+            rx="6"
+            fill="rgba(129,140,248,0.15)"
+            stroke="#818cf8"
+            stroke-width="1.5"
+          />
+          <text x="565" y="268" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            awaiting_commit
+          </text>
+          <text x="565" y="288" text-anchor="middle" fill="#94a3b8" font-size="10">等待提交 MR</text>
+
+          <!-- delivering 提交 MR 中 -->
+          <rect
+            x="490"
+            y="324"
+            width="150"
+            height="50"
+            rx="6"
+            fill="rgba(129,140,248,0.15)"
+            stroke="#818cf8"
+            stroke-width="1.5"
+          />
+          <text x="565" y="344" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">delivering</text>
+          <text x="565" y="364" text-anchor="middle" fill="#94a3b8" font-size="10">提交 MR 中</text>
+
+          <!-- await_merge 等待合并 -->
+          <rect
+            x="490"
+            y="400"
+            width="150"
+            height="50"
+            rx="6"
+            fill="rgba(192,132,252,0.15)"
+            stroke="#c084fc"
+            stroke-width="1.5"
+          />
+          <text x="565" y="420" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">await_merge</text>
+          <text x="565" y="440" text-anchor="middle" fill="#94a3b8" font-size="10">等待合并</text>
+
+          <!-- States: DONE column -->
+          <!-- completed 已完成 -->
+          <rect
+            x="670"
+            y="182"
+            width="80"
+            height="50"
+            rx="6"
+            fill="rgba(52,211,153,0.2)"
+            stroke="#34d399"
+            stroke-width="2"
+          />
+          <text x="710" y="202" text-anchor="middle" fill="#34d399" font-size="12" font-weight="700">completed</text>
+          <text x="710" y="222" text-anchor="middle" fill="#94a3b8" font-size="10">已完成</text>
+
+          <!-- cancelled 已取消 -->
+          <rect
+            x="670"
+            y="258"
+            width="80"
+            height="50"
+            rx="6"
+            fill="rgba(148,163,184,0.15)"
+            stroke="#94a3b8"
+            stroke-width="1.5"
+          />
+          <text x="710" y="278" text-anchor="middle" fill="#94a3b8" font-size="12" font-weight="600">cancelled</text>
+          <text x="710" y="298" text-anchor="middle" fill="#94a3b8" font-size="10">已取消</text>
+
+          <!-- failed 执行失败 -->
+          <rect
+            x="670"
+            y="334"
+            width="80"
+            height="50"
+            rx="6"
+            fill="rgba(248,113,113,0.15)"
+            stroke="#f87171"
+            stroke-width="1.5"
+          />
+          <text x="710" y="354" text-anchor="middle" fill="#f87171" font-size="12" font-weight="600">failed</text>
+          <text x="710" y="374" text-anchor="middle" fill="#94a3b8" font-size="10">执行失败</text>
+
+          <!-- Main flow arrows (green) -->
+          <!-- draft → confirmed -->
+          <line x1="120" y1="100" x2="120" y2="116" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr4g)" />
+          <!-- confirmed → preparing -->
+          <path d="M190,141 Q230,141 260,75" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr4g)" />
+          <!-- preparing → planning -->
+          <line x1="330" y1="100" x2="330" y2="116" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr4g)" />
+          <!-- planning → awaiting_plan_approval -->
+          <line x1="330" y1="166" x2="330" y2="182" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr4g)" />
+          <!-- awaiting_plan_approval → implementing -->
+          <line x1="330" y1="232" x2="330" y2="248" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr4g)" />
+          <!-- implementing → validating -->
+          <path d="M330,298 L330,400" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr4g)" />
+          <!-- validating → awaiting_review -->
+          <path d="M400,425 Q460,425 490,75" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr4g)" />
+          <!-- reviewing → awaiting_commit -->
+          <line x1="565" y1="166" x2="565" y2="248" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr4g)" />
+          <!-- awaiting_commit → delivering -->
+          <line x1="565" y1="298" x2="565" y2="324" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr4g)" />
+          <!-- delivering → await_merge -->
+          <line x1="565" y1="374" x2="565" y2="400" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr4g)" />
+          <!-- await_merge → completed -->
+          <path
+            d="M640,425 Q660,425 670,207"
+            fill="none"
+            stroke="#34d399"
+            stroke-width="1.5"
+            marker-end="url(#arr4g)"
+          />
+
+          <!-- Side flows (amber dashed) -->
+          <!-- implementing → paused (暂停) -->
+          <line
+            x1="330"
+            y1="298"
+            x2="330"
+            y2="324"
+            stroke="#fbbf24"
+            stroke-width="1"
+            stroke-dasharray="4,3"
+            marker-end="url(#arr4)"
+          />
+          <!-- paused → implementing (恢复) -->
+          <path
+            d="M260,349 Q245,349 245,273 Q245,273 260,273"
+            fill="none"
+            stroke="#fbbf24"
+            stroke-width="1"
+            stroke-dasharray="4,3"
+            marker-end="url(#arr4)"
+          />
+          <!-- review_blocked → reviewing (重试) -->
+          <path
+            d="M490,207 Q475,207 475,141 Q475,141 490,141"
+            fill="none"
+            stroke="#fbbf24"
+            stroke-width="1"
+            stroke-dasharray="4,3"
+            marker-end="url(#arr4)"
+          />
+        </svg>
+      </div>
+
+      <h3>任务执行全流程</h3>
+
+      <ol class="step-list">
+        <li><strong>导入 & 确认</strong>：从 Jira 导入任务 → <code>draft</code> → 用户确认 → <code>confirmed</code></li>
+        <li><strong>环境准备</strong>：<code>preparing</code> 阶段创建 Git worktree，分配 feature 分支</li>
+        <li><strong>计划生成</strong>：<code>planning</code> 阶段 Agent 分析任务，输出实施计划 JSON</li>
+        <li><strong>计划审批</strong>：<code>awaiting_plan_approval</code> 用户审阅/修改计划后批准</li>
+        <li><strong>代码实现</strong>：<code>implementing</code> 阶段 Agent 按计划修改代码（Qoder SDK 常驻会话）</li>
+        <li><strong>校验</strong>：<code>validating</code> 执行 lint / test / build 命令验证代码质量</li>
+        <li>
+          <strong>代码评审</strong>：<code>reviewing</code> 自动 Code Review，阻断问题进入 <code>review_blocked</code>
+        </li>
+        <li>
+          <strong>提交 MR</strong>：<code>awaiting_commit</code> → <code>delivering</code> 提交 GitLab Merge Request
+        </li>
+        <li><strong>合并跟踪</strong>：<code>await_merge</code> 等待 MR 合并完成 → <code>completed</code></li>
+      </ol>
+
+      <h3>双运行时路由</h3>
+
+      <p>系统支持两种 Agent 运行时，通过 <code>runtimeProvider(task)</code> 动态路由：</p>
+
+      <div class="card-grid">
+        <div class="card">
+          <h4><span class="icon">⚡</span> Qoder 路径（主路径）</h4>
+          <p>
+            <code>task-lifecycle.ts</code> → <code>QoderOrchestrator</code> → <code>QoderTaskAgentDriver</code> → SDK
+            <code>query()</code>
+          </p>
+          <p style="margin-top: 8px">
+            常驻会话，三阶段（Plan / Impl / Test）在同一 Qoder Session 内按回合推进。支持 Resume、暂停、HITL 工具确认。
+          </p>
+          <span class="tag">会话持久化</span><span class="tag">MCP 注入</span><span class="tag">子任务委派</span>
+        </div>
+        <div class="card">
+          <h4><span class="icon">🔧</span> Pi 路径（备选）</h4>
+          <p><code>task-lifecycle.ts</code> → <code>startPi()</code> → Pi Agent Session → OpenAI 兼容模型</p>
+          <p style="margin-top: 8px">
+            通过 Pi Extension 体系执行。每次启动创建新会话，使用 OpenAI / 兼容模型。Docker 沙箱可选。
+          </p>
+          <span class="tag">OpenAI 兼容</span><span class="tag">Docker 沙箱</span><span class="tag">工具注册</span>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <h2>05 Chat 子系统 <span class="badge badge-code">Driver Pattern</span></h2>
+
+      <p>对话系统采用 <strong>Driver 抽象模式</strong>，上层 ChatService 不感知底层 SDK 细节。</p>
+
+      <div class="layer-stack">
+        <div class="layer-row l-ui">
+          <span class="layer-label" style="color: var(--info)">前端 UI</span>
+          <span class="layer-content">ChatPage → IPC <code>chat:startStream</code> → 渲染 StreamChunk</span>
+        </div>
+        <div class="layer-row l-service">
+          <span class="layer-label" style="color: var(--accent)">ChatService</span>
+          <span class="layer-content">编排层：取 Driver → 翻译输入 → 转发 Chunk → 持久化 → 记忆注入</span>
+        </div>
+        <div class="layer-row l-driver">
+          <span class="layer-label" style="color: var(--purple)">DriverRegistry</span>
+          <span class="layer-content"
+            ><code>ChatDriverRegistry</code> → 按 driverId 路由到 <code>QoderChatDriver</code> /
+            <code>OpenAIChatDriver</code></span
+          >
+        </div>
+        <div class="layer-row l-sdk">
+          <span class="layer-label" style="color: var(--warning)">QoderChatDriver</span>
+          <span class="layer-content"
+            ><code>QoderSession</code> → SDK <code>query()</code> → AsyncGenerator&lt;SDKMessage&gt;</span
+          >
+        </div>
+        <div class="layer-row l-data">
+          <span class="layer-label" style="color: var(--danger)">存储层</span>
+          <span class="layer-content"><code>ChatStorage</code> (SQLite) — 按 driverId 各自序列化/反序列化</span>
+        </div>
+      </div>
+
+      <div class="callout callout-info">
+        <strong>ChatDriver 接口契约：</strong><code>listModels()</code> · <code>streamChat()</code> ·
+        <code>serializeUserMessage()</code> · <code>serializeAssistantMessage()</code> ·
+        <code>deserializeMessage()</code> · <code>dispose()</code>。每种 Driver 自带消息序列化能力，存储层只存 raw
+        JSON。
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <h2>06 Trace 可观测性 <span class="badge badge-flow">Observability</span></h2>
+
+      <p>系统提供端到端的 Agent 执行 Trace 回溯能力，是项目的核心特色之一。</p>
+
+      <div class="card-grid">
+        <div class="card">
+          <h4><span class="icon">📊</span> TracePipeline</h4>
+          <p>
+            内存中的 Trace 总线：管理 Trace 生命周期（begin → active → end）、Span 栈、事件分发。支持 Task 和 Chat 两种
+            Trace 类型。
+          </p>
+        </div>
+        <div class="card">
+          <h4><span class="icon">🔄</span> QoderTraceBuilder</h4>
+          <p>
+            SDK 消息 → Span 转换器。监听 <code>onMessage</code> 钩子，把 SDKMessage 实时转为 <code>agent.run</code> /
+            <code>tool.call</code> / <code>llm.call</code> 等 Span。
+          </p>
+        </div>
+        <div class="card">
+          <h4><span class="icon">💾</span> JSONL 持久化</h4>
+          <p>每个 Trace 对应一个 <code>.jsonl</code> 文件，逐条追加 Span 事件。支持应用重启后加载历史 Trace。</p>
+        </div>
+        <div class="card">
+          <h4><span class="icon">🖥️</span> 前端 Trace 页面</h4>
+          <p>瀑布图 / 时间线展示完整的 Agent 执行过程：LLM 调用、工具执行、子任务嵌套、Token 消耗等。</p>
+        </div>
+      </div>
+
+      <div class="diagram-wrap">
+        <div class="diagram-title">Trace Data Flow</div>
+        <svg viewBox="0 0 760 180" xmlns="http://www.w3.org/2000/svg" style="width: 100%; height: auto">
+          <defs>
+            <marker id="arr5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L10,5 L0,10 Z" fill="#94a3b8" />
+            </marker>
+          </defs>
+
+          <rect
+            x="30"
+            y="50"
+            width="130"
+            height="50"
+            rx="6"
+            fill="rgba(251,191,36,0.15)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+          />
+          <text x="95" y="72" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">SDK query()</text>
+          <text x="95" y="88" text-anchor="middle" fill="#94a3b8" font-size="10">SDKMessage 流</text>
+
+          <rect
+            x="200"
+            y="50"
+            width="150"
+            height="50"
+            rx="6"
+            fill="rgba(192,132,252,0.15)"
+            stroke="#c084fc"
+            stroke-width="1.5"
+          />
+          <text x="275" y="72" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            QoderTraceBuilder
+          </text>
+          <text x="275" y="88" text-anchor="middle" fill="#94a3b8" font-size="10">onMessage 钩子</text>
+
+          <rect
+            x="390"
+            y="50"
+            width="140"
+            height="50"
+            rx="6"
+            fill="rgba(129,140,248,0.15)"
+            stroke="#818cf8"
+            stroke-width="1.5"
+          />
+          <text x="460" y="72" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">TracePipeline</text>
+          <text x="460" y="88" text-anchor="middle" fill="#94a3b8" font-size="10">Span 栈管理</text>
+
+          <rect
+            x="570"
+            y="20"
+            width="160"
+            height="36"
+            rx="6"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="650" y="43" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">
+            JSONL 文件持久化
+          </text>
+
+          <rect
+            x="570"
+            y="80"
+            width="160"
+            height="36"
+            rx="6"
+            fill="rgba(56,189,248,0.15)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+          />
+          <text x="650" y="103" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">
+            IPC → 前端瀑布图
+          </text>
+
+          <line x1="160" y1="75" x2="198" y2="75" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr5)" />
+          <line x1="350" y1="75" x2="388" y2="75" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr5)" />
+          <line x1="530" y1="65" x2="568" y2="42" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr5)" />
+          <line x1="530" y1="85" x2="568" y2="96" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr5)" />
+
+          <text x="380" y="155" text-anchor="middle" fill="#94a3b8" font-size="11">
+            Span 类型: task.run · agent.run · tool.call · llm.call · session.start · Finish
+          </text>
+        </svg>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <h2>07 总结：关键设计决策 <span class="badge badge-arch">Key Decisions</span></h2>
+
+      <div class="card-grid">
+        <div class="card">
+          <h4>🧩 Extension 化而非硬编码</h4>
+          <p>
+            Qoder SDK 以 Pi Extension 形式接入，而非硬编码在 main.ts 中。运行时行为不变，但代码组织清晰、可独立测试。
+          </p>
+        </div>
+        <div class="card">
+          <h4>🔌 Driver 抽象</h4>
+          <p>
+            Chat 和 Task Agent 都采用 Driver 模式。上层编排逻辑不感知底层 SDK 细节，后续接入新 Agent
+            运行时不需要重写上层。
+          </p>
+        </div>
+        <div class="card">
+          <h4>📊 状态机驱动</h4>
+          <p>任务状态转移由 <code>core/workflow.ts</code> 的纯函数表严格定义。任何非法转移直接抛错，杜绝状态混乱。</p>
+        </div>
+        <div class="card">
+          <h4>💉 依赖注入</h4>
+          <p>
+            所有模块通过 DI
+            获取依赖（<code>initTaskLifecycle(deps)</code>、<code>QoderOrchestrator(deps)</code>），避免循环引用，便于单测。
+          </p>
+        </div>
+        <div class="card">
+          <h4>🔄 会话持久化</h4>
+          <p>Qoder 会话支持 Resume：应用重启后通过 <code>sessionId</code> 恢复上下文，多轮对话/任务不丢失。</p>
+        </div>
+        <div class="card">
+          <h4>📡 端到端 Trace</h4>
+          <p>
+            Task 和 Chat 两条路径都有完整的 Trace 采集。JSONL 持久化 + 前端瀑布图，支持任意时刻回溯 Agent
+            的完整执行过程。
+          </p>
+        </div>
+      </div>
+
+      <div class="callout callout-key" style="margin-top: 32px">
+        <strong>一句话总结：</strong>TaskPipeline 以 Pi 为底层 Agent Runtime，通过 Extension 体系接入 Qoder SDK
+        的完整能力（会话/HITL/MCP/Trace），用状态机驱动的任务流水线串联从 Jira 导入到 MR
+        合并的研发交付闭环，并提供端到端的可观测性回溯。
+      </div>
+    </div>
+  </body>
+</html>

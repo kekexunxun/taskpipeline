@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { TASK_STATES } from '@task-pipeline/core'
 import {
+  assertDraftIntake,
   isExplicitNoChangeCompletionRequest,
   nextStepForImplementation,
   nextStepForPlan,
@@ -67,5 +69,19 @@ describe('isExplicitNoChangeCompletionRequest', () => {
   it('does not treat ordinary completion or clarification messages as a skip request', () => {
     expect(isExplicitNoChangeCompletionRequest('修改完成后直接结束任务')).toBe(false)
     expect(isExplicitNoChangeCompletionRequest('我来补充验收标准')).toBe(false)
+  })
+})
+
+describe('assertDraftIntake', () => {
+  it('lets a draft task open the clarification session', () => {
+    expect(() => assertDraftIntake('draft')).not.toThrow()
+  })
+
+  // 逐状态扫而不只测一个代表：这条 guard 的全部意义就是「除了 draft 都不行」，
+  // 以后往状态机里加一个状态时，漏放开这里比漏测这里更容易。
+  it('rejects every other state so clarifying cannot start the pipeline', () => {
+    const rejected = TASK_STATES.filter((state) => state !== 'draft')
+    expect(rejected.length).toBe(TASK_STATES.length - 1)
+    for (const state of rejected) expect(() => assertDraftIntake(state), state).toThrow('待处理')
   })
 })

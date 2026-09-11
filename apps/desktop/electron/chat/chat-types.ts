@@ -155,7 +155,7 @@ export type ChatAgentMode = 'chat' | 'task-create'
 /**
  * 对话模式：normal=常规对话, plan=只读计划模式。
  * 后续可扩展更多模式（如 'review'、'debug' 等），只需扩展联合类型 + 各处 switch-case。
- * 注意：与 Coding Pipeline 的 `TaskStartMode` 完全隔离，互不影响。
+ * 注意：这是对话自己的开关，与 Coding Pipeline 无关——固定链路下任务侧已经没有 mode 概念了。
  */
 export type ChatConversationMode = 'normal' | 'plan'
 

@@ -1,9 +1,6 @@
 export const BOARD_COLUMNS = ['todo', 'in_progress', 'in_review', 'done'] as const
 export type BoardColumn = (typeof BOARD_COLUMNS)[number]
 
-/** HITL (Human-in-the-Loop) 模式：按对话/任务独立存储。 */
-export type HitlMode = 'ask' | 'auto' | 'yolo'
-
 export const TASK_STATES = [
   'draft',
   'confirmed',
@@ -27,9 +24,17 @@ export const TASK_STATES = [
   'cancelled'
 ] as const
 export type TaskState = (typeof TASK_STATES)[number]
-export type TaskStartMode = 'direct' | 'plan'
 export type TaskFailureStage = 'preparing' | 'planning' | 'implementing' | 'validating'
 export type TaskSource = 'local' | 'jira' | 'github' | 'linear'
+
+/**
+ * 「Review 通过后」的任务级选择：`auto` 直接提交 MR，`manual` 停在 `awaiting_commit` 等人工点。
+ *
+ * 这是固定链路下唯一保留的任务级配置，取代原先的 `autoCreateMergeRequests` 布尔 +
+ * 系统设置 `deliveryConfirm` 两套开关。未设置（`undefined`）表示跟随系统默认，
+ * 它是有意义的第三态，回填迁移不能把它当成「漏写」补掉。
+ */
+export type TaskMrMode = 'auto' | 'manual'
 
 export type Task = {
   id: string
@@ -42,7 +47,6 @@ export type Task = {
   acceptanceCriteria: string[]
   state: TaskState
   summary?: string
-  startMode?: TaskStartMode
   planContent?: string
   planRevision?: number
   failureStage?: TaskFailureStage
@@ -53,15 +57,8 @@ export type Task = {
   /** Qoder Agent SDK 最近一次执行会话的 session_id，用于失败后续接时按 ID 恢复对话上下文。 */
   qoderSessionId?: string
   sessionUsage?: SessionUsage
-  /**
-   * 任务级覆盖：实现完成后是否自动跑 Code Review。
-   * `undefined` 表示沿用系统设置；显式布尔值在任务执行期间独立生效。
-   */
-  openCodeReviewEnabled?: boolean
-  /** 任务级覆盖：Review 通过后是否自动提交 Merge Request。 */
-  autoCreateMergeRequests?: boolean
-  /** 任务级覆盖：实现完成后是否先生成最小测试集，再进入校验/Review。 */
-  createTestCasesEnabled?: boolean
+  /** Review 通过后是否自动提交 MR；未设置时回退系统设置 `autoCreateMergeRequests`。 */
+  mrAutoSubmit?: TaskMrMode
   /**
    * 任务级 Agent 覆盖：指定 Agent id 时强制使用该 Agent（不再按仓库白名单解析）；
    * `AGENT_TASK_DISABLED` 表示本任务禁用 Agent 注入，跟随系统模型设置。
@@ -77,8 +74,6 @@ export type Task = {
   testsGenerated?: { files: string[]; commitSha?: string; finishedAt: string }
   /** Phase 4：Review 自动修订已执行的轮数（达到 reviewAutoFixMaxRounds 后停止）。 */
   reviewFixCount?: number
-  /** 任务级 HITL 模式（随任务落盘）。未设置时沿用全局默认 'ask'。 */
-  hitlMode?: HitlMode
   createdAt: string
   updatedAt: string
 }
@@ -156,6 +151,47 @@ export type AgentEvent = {
   /** Qoder SDKMessage.subtype 透传。 */
   sdkSubtype?: string
 }
+
+/**
+ * 澄清对话（`draft` 阶段）提交的任务定义建议：`Task` 里「人手填的那几项」的子集。
+ *
+ * 链路要读的描述、验收标准、仓库归属由用户采纳后才写入——模型只能提议，不能代签。
+ * 落库形态是 `AgentEvent`（`kind:'status'` + 下面那份 payload），
+ * 主进程与 renderer 共用这一份定义，避免建议体在两处各写一遍然后各自漂移。
+ */
+export type TaskDraftFields = {
+  title?: string
+  description?: string
+  keywords?: string[]
+  acceptanceCriteria?: string[]
+  repositoryIds?: string[]
+}
+
+/** 建议里的可采纳字段名：逐条采纳时，界面只回传键名，不回传建议体。 */
+export type TaskDraftFieldKey = keyof TaskDraftFields
+
+/**
+ * `AgentEvent.payload` 的三种取值：澄清问答的一句话、Agent 提出的建议、用户对它的处置。
+ *
+ * 一条建议是否已被处置由事件顺序决定（从后往前扫，先碰到 `resolved` 就没有待处理的建议），
+ * 所以下面不存建议事件的 id：一个 `draft` 同时只需要亮一条。
+ *
+ * 问答方向也必须显式记：`title`（「你」/「澄清助手」）是给人看的文案，拿它做渲染分支
+ * 等于把界面绑在一句中文上，改文案就静默丢气泡。
+ */
+export type TaskDraftEventPayload =
+  | {
+      type: 'draft-suggestion'
+      fields: TaskDraftFields
+      /**
+       * 仓库 id → 名称的快照。渲染层没有全量仓库表（只有本任务已关联的那几个），
+       * 而建议里的仓库通常还没关联上，不带上这份快照就只能显示裸 id。
+       * 采纳时仍按 id 重新校验，名字只用于展示。
+       */
+      repositoryNames?: Record<string, string>
+    }
+  | { type: 'draft-suggestion-resolved'; action: 'applied' | 'discarded' }
+  | { type: 'draft-message'; role: 'user' | 'assistant' }
 
 export type Approval = {
   id: string
@@ -288,28 +324,23 @@ export function boardColumnFor(state: TaskState): BoardColumn {
 }
 
 /**
- * 把任务级覆盖与系统级设置合并成一个布尔结果。
+ * 合并「Review 通过后」的任务级选择与系统默认。
  *
- * - task 字段为 `true` / `false` 时直接返回（任务级优先）。
- * - task 字段为 `undefined` 时回退到 `resolver.get(key) === "true"`。
- * - resolver 未配置时回退到 `defaults`。
+ * 优先级：`task.mrAutoSubmit` → 系统设置键 `autoCreateMergeRequests` → `'manual'`。
+ * 旧的任务级布尔 `autoCreateMergeRequests` 已不再参与回落：它已由 `TaskStore` 打开时
+ * 的一次性回填转成 `mrAutoSubmit`，字段本身也已从 `Task` 上删除。
  *
- * 业务编排模块（TaskWorkflow / DeliveryService 等）应通过此 helper
- * 而非直接读设置，确保任务级覆盖真正生效。
+ * 默认取 `'manual'`：与改造前 `resolveTaskSetting(..., defaults: false)` 一致，不新增自动提交行为。
  */
-export function resolveTaskSetting(
-  task: Pick<Task, 'openCodeReviewEnabled' | 'autoCreateMergeRequests' | 'createTestCasesEnabled'> | undefined,
-  taskKey: 'openCodeReviewEnabled' | 'autoCreateMergeRequests' | 'createTestCasesEnabled',
-  resolver: { get(key: string): string | undefined },
-  settingKey: string,
-  defaults: boolean
-): boolean {
-  const taskValue = task?.[taskKey]
-  if (typeof taskValue === 'boolean') return taskValue
-  const setting = resolver.get(settingKey)
-  if (setting === 'true') return true
-  if (setting === 'false') return false
-  return defaults
+export function resolveMrMode(
+  task: Pick<Task, 'mrAutoSubmit'> | undefined,
+  resolver: { get(key: string): string | undefined }
+): TaskMrMode {
+  if (task?.mrAutoSubmit === 'auto' || task?.mrAutoSubmit === 'manual') return task.mrAutoSubmit
+  const setting = resolver.get('autoCreateMergeRequests')
+  if (setting === 'true') return 'auto'
+  if (setting === 'false') return 'manual'
+  return 'manual'
 }
 
 // === Memory 系统(仓库级 / 用户级 / 对话级 + repowiki 文档) =====================

@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { BrowserWindow } from 'electron'
 import type { TaskStore, AgentEvent, SettingResolver, Task } from '@task-pipeline/core'
-import type { AtlassianClientFactory, testAtlassianConnectionRest } from '@task-pipeline/integrations'
+import type { AtlassianClientFactory } from '@task-pipeline/integrations'
 import type { CodegraphManager } from '@task-pipeline/codegraph'
 import {
   describeToolAction,
@@ -62,8 +62,6 @@ export interface ChatSystemDeps {
   desktopResolver: SettingResolver
   addTaskEvent: (event: Omit<AgentEvent, 'id' | 'createdAt'>) => void
   getQoderStatusForHealth: () => unknown
-  atlassianRestConfig: (kind: string) => unknown
-  testAtlassianRest: typeof testAtlassianConnectionRest
   codegraphManager: CodegraphManager
 }
 
@@ -104,8 +102,6 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
     store,
     protectedValue,
     getQoderStatusForHealth: () => getQoderOrch().getStatusForHealth(),
-    atlassianRestConfig: (kind) => atlassianFactory.restConfig(kind),
-    testAtlassianRest: deps.testAtlassianRest,
     mcpProfileResolver: chatMcpResolver
   })
 
@@ -133,7 +129,7 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
           if (answers && answers.length > 0) return { type: 'askUser' as const, answers }
           return { type: 'deny' as const, message: '用户取消了问答，请选择其他方式继续任务' }
         }
-        const hitlMode = getHitlModeForContext('conversation', conversationId, store)
+        const hitlMode = getHitlModeForContext('conversation', conversationId)
         if (hitlMode === 'yolo') return 'allow'
         const needsConfirm =
           hitlMode === 'auto'

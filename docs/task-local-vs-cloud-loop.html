@@ -1,0 +1,1210 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Task 任务实现讲解 — 本地 Task 与云端 Task Loop</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --surface: #1e293b;
+        --surface-alt: #273549;
+        --border: #334155;
+        --text: #e2e8f0;
+        --text-muted: #94a3b8;
+        --accent: #818cf8;
+        --accent-light: #a5b4fc;
+        --accent-bg: rgba(129, 140, 248, 0.12);
+        --success: #34d399;
+        --success-bg: rgba(52, 211, 153, 0.12);
+        --warning: #fbbf24;
+        --warning-bg: rgba(251, 191, 36, 0.12);
+        --danger: #f87171;
+        --danger-bg: rgba(248, 113, 113, 0.12);
+        --info: #38bdf8;
+        --info-bg: rgba(56, 189, 248, 0.12);
+        --purple: #c084fc;
+        --purple-bg: rgba(192, 132, 252, 0.12);
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family:
+          'Inter',
+          -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.7;
+        font-size: 15px;
+      }
+      .container {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 40px 24px 80px;
+      }
+      h1 {
+        font-size: 32px;
+        font-weight: 700;
+        margin-bottom: 8px;
+        letter-spacing: -0.5px;
+      }
+      h1 span {
+        color: var(--accent);
+      }
+      .subtitle {
+        color: var(--text-muted);
+        font-size: 15px;
+        margin-bottom: 32px;
+      }
+      h2 {
+        font-size: 22px;
+        font-weight: 700;
+        margin: 48px 0 16px;
+        padding-top: 24px;
+        border-top: 1px solid var(--border);
+        letter-spacing: -0.3px;
+      }
+      h2 .num {
+        display: inline-block;
+        width: 30px;
+        height: 30px;
+        line-height: 30px;
+        text-align: center;
+        background: var(--accent-bg);
+        color: var(--accent-light);
+        border-radius: 8px;
+        font-size: 15px;
+        margin-right: 10px;
+        vertical-align: -3px;
+      }
+      h3 {
+        font-size: 16px;
+        font-weight: 600;
+        margin: 24px 0 10px;
+        color: var(--accent-light);
+      }
+      p {
+        margin-bottom: 12px;
+      }
+      ul,
+      ol {
+        margin: 0 0 14px 22px;
+      }
+      li {
+        margin-bottom: 6px;
+      }
+      code {
+        font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+        background: var(--surface-alt);
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 13px;
+        color: var(--accent-light);
+      }
+      pre {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 18px 20px;
+        overflow-x: auto;
+        margin: 14px 0 18px;
+        font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+        font-size: 12.5px;
+        line-height: 1.75;
+        color: var(--text);
+      }
+      pre code {
+        background: none;
+        padding: 0;
+        color: var(--text);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 14px 0 20px;
+        font-size: 13.5px;
+      }
+      th,
+      td {
+        border: 1px solid var(--border);
+        padding: 9px 12px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: var(--surface);
+        color: var(--accent-light);
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      td {
+        background: var(--surface-alt);
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 18px 22px;
+        margin: 14px 0;
+      }
+      .card-title {
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+      .tag {
+        display: inline-block;
+        padding: 1px 10px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: 600;
+        margin-right: 6px;
+      }
+      .tag-blue {
+        background: var(--accent-bg);
+        color: var(--accent-light);
+      }
+      .tag-green {
+        background: var(--success-bg);
+        color: var(--success);
+      }
+      .tag-yellow {
+        background: var(--warning-bg);
+        color: var(--warning);
+      }
+      .tag-red {
+        background: var(--danger-bg);
+        color: var(--danger);
+      }
+      .tag-info {
+        background: var(--info-bg);
+        color: var(--info);
+      }
+      .tag-purple {
+        background: var(--purple-bg);
+        color: var(--purple);
+      }
+      .callout {
+        border-left: 3px solid var(--accent);
+        background: var(--accent-bg);
+        border-radius: 0 10px 10px 0;
+        padding: 12px 18px;
+        margin: 14px 0;
+      }
+      .callout.warn {
+        border-left-color: var(--warning);
+        background: var(--warning-bg);
+      }
+      .callout.danger {
+        border-left-color: var(--danger);
+        background: var(--danger-bg);
+      }
+      .callout.ok {
+        border-left-color: var(--success);
+        background: var(--success-bg);
+      }
+      .callout.info {
+        border-left-color: var(--info);
+        background: var(--info-bg);
+      }
+      .flow {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px 18px;
+        margin: 14px 0 20px;
+        font-size: 13px;
+      }
+      .step {
+        background: var(--surface-alt);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 4px 12px;
+        white-space: nowrap;
+      }
+      .step.hl {
+        background: var(--accent-bg);
+        border-color: var(--accent);
+        color: var(--accent-light);
+        font-weight: 600;
+      }
+      .step.ok {
+        background: var(--success-bg);
+        border-color: var(--success);
+        color: var(--success);
+      }
+      .step.warn {
+        background: var(--warning-bg);
+        border-color: var(--warning);
+        color: var(--warning);
+      }
+      .arrow {
+        color: var(--text-muted);
+      }
+      .grid-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+      @media (max-width: 800px) {
+        .grid-2 {
+          grid-template-columns: 1fr;
+        }
+      }
+      .muted {
+        color: var(--text-muted);
+      }
+      .toc {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px 22px;
+        margin-bottom: 8px;
+      }
+      .toc a {
+        color: var(--accent-light);
+        text-decoration: none;
+      }
+      .toc a:hover {
+        text-decoration: underline;
+      }
+      .toc ul {
+        margin-bottom: 0;
+      }
+      .footer-note {
+        margin-top: 48px;
+        padding-top: 16px;
+        border-top: 1px solid var(--border);
+        color: var(--text-muted);
+        font-size: 13px;
+      }
+      .fig {
+        margin: 16px 0 22px;
+      }
+      .fig svg {
+        width: 100%;
+        height: auto;
+        display: block;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+      }
+      .figcap {
+        font-size: 12.5px;
+        color: var(--text-muted);
+        text-align: center;
+        margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Task 任务实现讲解<span>。</span></h1>
+      <p class="subtitle">本地 TaskPipeline（Electron 桌面端）· 云端 SaaS Task Loop 设计 · 局限与取舍分析</p>
+
+      <div class="toc">
+        <ul>
+          <li><a href="#s1">一、本地 Task 的实现（当前代码）</a></li>
+          <li><a href="#s2">二、云端 SaaS Task Loop 设计（docs/saas-architecture-plan.md）</a></li>
+          <li><a href="#s3">三、为什么本地 Task 存在局限</a></li>
+          <li><a href="#s4">四、云端 Loop 的优势</a></li>
+          <li><a href="#s5">五、云端 Loop 的缺点</a></li>
+          <li><a href="#s6">六、总结对照</a></li>
+        </ul>
+      </div>
+
+      <!-- ═══════════════ 一、本地 Task 实现 ═══════════════ -->
+      <h2 id="s1"><span class="num">1</span>本地 Task 的实现（当前代码）</h2>
+
+      <p>
+        本地 Task 是一套跑在
+        <strong>Electron 主进程</strong>里的固定链路任务流水线：从任务创建、计划生成、人工审批、实现、测试、校验、Code
+        Review，一路到 MR 提交与合并跟踪，全部由一个<strong>19 态状态机</strong>驱动，数据落在本地 SQLite，Trace 落在
+        JSONL 文件。
+      </p>
+
+      <h3>1.1 分层架构</h3>
+      <div class="fig">
+        <svg viewBox="0 0 1000 620" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="本地 Task 分层架构图">
+          <defs>
+            <marker id="mA" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 z" fill="#94a3b8" />
+            </marker>
+          </defs>
+          <!-- React 前端 -->
+          <rect x="60" y="20" width="880" height="92" rx="12" fill="#1e293b" stroke="#334155" />
+          <text x="80" y="46" font-size="14" font-weight="600" fill="#a5b4fc">React 前端 · apps/desktop/src</text>
+          <g font-size="12" fill="#e2e8f0" text-anchor="middle">
+            <rect x="80" y="58" width="196" height="32" rx="6" fill="#273549" stroke="#334155" />
+            <text x="178" y="78">TaskEditorDialog 任务编辑</text>
+            <rect x="292" y="58" width="196" height="32" rx="6" fill="#273549" stroke="#334155" />
+            <text x="390" y="78">DetailPanel 详情 / 看板</text>
+            <rect x="504" y="58" width="196" height="32" rx="6" fill="#273549" stroke="#334155" />
+            <text x="602" y="78">api.ts（window.agentApi）</text>
+            <rect x="716" y="58" width="196" height="32" rx="6" fill="#273549" stroke="#334155" />
+            <text x="814" y="78">TracePage / SettingsDialog</text>
+          </g>
+          <!-- IPC -->
+          <line x1="500" y1="112" x2="500" y2="146" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mA)" />
+          <text x="516" y="133" font-size="12" fill="#94a3b8">
+            Electron IPC（contextBridge / invoke，约 120 个 handler）
+          </text>
+          <!-- Electron 主进程 -->
+          <rect x="60" y="150" width="880" height="190" rx="12" fill="#1e293b" stroke="#334155" />
+          <text x="80" y="176" font-size="14" font-weight="600" fill="#a5b4fc">
+            Electron 主进程 · apps/desktop/electron（任务编排 + 双引擎）
+          </text>
+          <g font-size="12" fill="#e2e8f0" text-anchor="middle">
+            <rect x="80" y="190" width="200" height="36" rx="6" fill="#273549" stroke="#334155" />
+            <text x="180" y="212">task-lifecycle 状态流转</text>
+            <rect x="296" y="190" width="200" height="36" rx="6" fill="#273549" stroke="#334155" />
+            <text x="396" y="212">task-runner Review·自动修订</text>
+            <rect x="512" y="190" width="200" height="36" rx="6" fill="#273549" stroke="#334155" />
+            <text x="612" y="212">pi-session Pi 引擎·全局单活</text>
+            <rect x="728" y="190" width="200" height="36" rx="6" fill="#273549" stroke="#334155" />
+            <text x="828" y="212">hitl-mode HITL 档位</text>
+            <rect x="80" y="236" width="200" height="36" rx="6" fill="#273549" stroke="#334155" />
+            <text x="180" y="258">qoder/ QoderOrchestrator</text>
+            <rect x="296" y="236" width="200" height="36" rx="6" fill="#273549" stroke="#334155" />
+            <text x="396" y="258">trace/ span 埋点</text>
+            <rect x="512" y="236" width="200" height="36" rx="6" fill="#273549" stroke="#334155" />
+            <text x="612" y="258">memory/ 记忆整理</text>
+            <rect x="728" y="236" width="200" height="36" rx="6" fill="#273549" stroke="#334155" />
+            <text x="828" y="258">agents/ 角色 Agent</text>
+            <rect x="80" y="282" width="200" height="28" rx="6" fill="#1e293b" stroke="#334155" />
+            <text x="180" y="300" font-size="11" fill="#94a3b8">services/ 交付与 Review</text>
+            <rect x="296" y="282" width="200" height="28" rx="6" fill="#1e293b" stroke="#334155" />
+            <text x="396" y="300" font-size="11" fill="#94a3b8">credential/ 凭据状态</text>
+            <rect x="512" y="282" width="200" height="28" rx="6" fill="#1e293b" stroke="#334155" />
+            <text x="612" y="300" font-size="11" fill="#94a3b8">chat/ 对话初始化</text>
+            <rect x="728" y="282" width="200" height="28" rx="6" fill="#1e293b" stroke="#334155" />
+            <text x="828" y="300" font-size="11" fill="#94a3b8">ipc/ 路由薄代理</text>
+          </g>
+          <line x1="290" y1="340" x2="290" y2="372" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mA)" />
+          <line x1="710" y1="340" x2="710" y2="372" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mA)" />
+          <!-- packages -->
+          <rect x="60" y="376" width="420" height="150" rx="12" fill="#1e293b" stroke="#334155" />
+          <text x="80" y="402" font-size="14" font-weight="600" fill="#a5b4fc">packages/integrations</text>
+          <g font-size="12.5" fill="#e2e8f0">
+            <text x="80" y="428">• TaskWorkflow — 阶段编排（两宿主共用）</text>
+            <text x="80" y="452">• GitService — execa git · worktree / 分支</text>
+            <text x="80" y="476">• DeliveryService — GitLab MR 提交</text>
+            <text x="80" y="500">• ReviewOrchestrator — Review 收口</text>
+          </g>
+          <rect x="520" y="376" width="420" height="150" rx="12" fill="#1e293b" stroke="#334155" />
+          <text x="540" y="402" font-size="14" font-weight="600" fill="#a5b4fc">packages/core</text>
+          <g font-size="12.5" fill="#e2e8f0">
+            <text x="540" y="428">• workflow.ts — 19 态状态机转移表</text>
+            <text x="540" y="452">• types.ts — Task / TaskState 数据模型</text>
+            <text x="540" y="476">• permissions.ts — L1 硬阻断（两引擎同源）</text>
+            <text x="540" y="500">• db.ts — better-sqlite3 本地库</text>
+          </g>
+          <line x1="270" y1="526" x2="270" y2="556" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mA)" />
+          <line x1="730" y1="526" x2="730" y2="556" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mA)" />
+          <!-- 存储 -->
+          <rect x="60" y="560" width="880" height="44" rx="10" fill="#273549" stroke="#334155" />
+          <text x="500" y="587" font-size="12.5" fill="#94a3b8" text-anchor="middle">
+            本地存储：SQLite 数据库 · JSONL Trace 文件 · 每任务独立 Git worktree（全部在本机磁盘）
+          </text>
+        </svg>
+        <div class="figcap">
+          图 1 · 本地 Task 分层架构：前端 / IPC / 主进程编排 / 共享包 / 本地存储，全部落在同一台机器
+        </div>
+      </div>
+
+      <h3>1.2 固定链路：19 态状态机</h3>
+      <p>
+        经过「Task 模式收缩」改造（docs/task-fixed-pipeline-plan.md），链路已从「9
+        组可配置组合」收缩为<strong>固定必经链路</strong>：计划审批恒为人工闸门，测试与 Review
+        恒为必经阶段（只允许结构性 no-op 且必须落事件留痕），任务级配置只剩「Review 通过后自动 / 手动提 MR」一个。
+      </p>
+
+      <div class="fig">
+        <svg viewBox="0 0 1040 400" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="固定链路状态机图">
+          <defs>
+            <marker id="mB" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 z" fill="#94a3b8" />
+            </marker>
+            <marker id="mBr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 z" fill="#f87171" />
+            </marker>
+          </defs>
+          <!-- Row 1 -->
+          <g text-anchor="middle">
+            <rect x="20" y="30" width="88" height="48" rx="10" fill="#273549" stroke="#334155" />
+            <text x="64" y="49" font-size="13" fill="#e2e8f0">草稿</text>
+            <text x="64" y="67" font-size="10" fill="#94a3b8">draft</text>
+            <rect x="136" y="30" width="100" height="48" rx="10" fill="#273549" stroke="#334155" />
+            <text x="186" y="49" font-size="13" fill="#e2e8f0">生成计划</text>
+            <text x="186" y="67" font-size="10" fill="#94a3b8">planning</text>
+            <rect
+              x="264"
+              y="30"
+              width="128"
+              height="48"
+              rx="10"
+              fill="rgba(129,140,248,0.15)"
+              stroke="#818cf8"
+              stroke-width="1.5"
+            />
+            <text x="328" y="49" font-size="13" font-weight="600" fill="#a5b4fc">计划审批</text>
+            <text x="328" y="67" font-size="9.5" fill="#94a3b8">awaiting_plan_approval</text>
+            <rect x="420" y="30" width="104" height="48" rx="10" fill="#273549" stroke="#334155" />
+            <text x="472" y="49" font-size="13" fill="#e2e8f0">环境准备</text>
+            <text x="472" y="67" font-size="10" fill="#94a3b8">preparing</text>
+            <rect
+              x="552"
+              y="30"
+              width="116"
+              height="48"
+              rx="10"
+              fill="rgba(129,140,248,0.15)"
+              stroke="#818cf8"
+              stroke-width="1.5"
+            />
+            <text x="610" y="49" font-size="13" font-weight="600" fill="#a5b4fc">实现</text>
+            <text x="610" y="67" font-size="10" fill="#94a3b8">implementing</text>
+            <rect x="694" y="30" width="136" height="48" rx="10" fill="#273549" stroke="#334155" />
+            <text x="762" y="49" font-size="13" fill="#e2e8f0">写测试用例</text>
+            <text x="762" y="67" font-size="10" fill="#94a3b8">generating_tests</text>
+          </g>
+          <g stroke="#94a3b8" stroke-width="1.5">
+            <line x1="108" y1="54" x2="134" y2="54" marker-end="url(#mB)" />
+            <line x1="236" y1="54" x2="262" y2="54" marker-end="url(#mB)" />
+            <line x1="392" y1="54" x2="418" y2="54" marker-end="url(#mB)" />
+            <line x1="524" y1="54" x2="550" y2="54" marker-end="url(#mB)" />
+            <line x1="668" y1="54" x2="692" y2="54" marker-end="url(#mB)" />
+          </g>
+          <!-- Review 自动修订环（虚线回跳） -->
+          <path
+            d="M 606 148 L 610 84"
+            fill="none"
+            stroke="#f87171"
+            stroke-width="1.5"
+            stroke-dasharray="5 4"
+            marker-end="url(#mBr)"
+          />
+          <text x="546" y="120" font-size="12" fill="#f87171" text-anchor="end">
+            Review 阻断 · 自动修订回实现（默认 ≤ 2 轮）
+          </text>
+          <!-- 换行箭头 -->
+          <line x1="762" y1="78" x2="762" y2="146" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mB)" />
+          <!-- Row 2（右 → 左） -->
+          <g text-anchor="middle">
+            <rect x="694" y="150" width="136" height="48" rx="10" fill="#273549" stroke="#334155" />
+            <text x="762" y="169" font-size="13" fill="#e2e8f0">校验</text>
+            <text x="762" y="187" font-size="10" fill="#94a3b8">validating</text>
+            <rect x="536" y="150" width="140" height="48" rx="10" fill="#273549" stroke="#334155" />
+            <text x="606" y="169" font-size="13" fill="#e2e8f0">Review 中</text>
+            <text x="606" y="187" font-size="10" fill="#94a3b8">reviewing</text>
+            <rect
+              x="386"
+              y="150"
+              width="130"
+              height="48"
+              rx="10"
+              fill="rgba(52,211,153,0.12)"
+              stroke="#34d399"
+              stroke-width="1.5"
+            />
+            <text x="451" y="169" font-size="13" font-weight="600" fill="#34d399">等提交 MR</text>
+            <text x="451" y="187" font-size="10" fill="#94a3b8">awaiting_commit</text>
+            <rect x="244" y="150" width="122" height="48" rx="10" fill="#273549" stroke="#334155" />
+            <text x="305" y="169" font-size="13" fill="#e2e8f0">提交 MR 中</text>
+            <text x="305" y="187" font-size="10" fill="#94a3b8">delivering</text>
+            <rect x="102" y="150" width="122" height="48" rx="10" fill="#273549" stroke="#334155" />
+            <text x="163" y="169" font-size="13" fill="#e2e8f0">等合并</text>
+            <text x="163" y="187" font-size="10" fill="#94a3b8">await_merge</text>
+          </g>
+          <g stroke="#94a3b8" stroke-width="1.5">
+            <line x1="694" y1="174" x2="678" y2="174" marker-end="url(#mB)" />
+            <line x1="536" y1="174" x2="518" y2="174" marker-end="url(#mB)" />
+            <line x1="386" y1="174" x2="368" y2="174" marker-end="url(#mB)" />
+            <line x1="244" y1="174" x2="226" y2="174" marker-end="url(#mB)" />
+          </g>
+          <!-- 完成态 -->
+          <line x1="163" y1="198" x2="163" y2="258" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mB)" />
+          <rect
+            x="102"
+            y="262"
+            width="122"
+            height="48"
+            rx="10"
+            fill="rgba(52,211,153,0.12)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="163" y="281" font-size="13" font-weight="600" fill="#34d399" text-anchor="middle">已完成</text>
+          <text x="163" y="299" font-size="10" fill="#94a3b8" text-anchor="middle">completed</text>
+          <!-- 异常 / 人工出口 -->
+          <rect x="290" y="252" width="660" height="120" rx="12" fill="none" stroke="#475569" stroke-dasharray="6 5" />
+          <text x="310" y="278" font-size="13" font-weight="600" fill="#f87171">
+            异常 / 人工出口（不改变主链形状，转移合法性由 transitionTask() 硬校验）
+          </text>
+          <g font-size="12" fill="#e2e8f0" text-anchor="middle">
+            <rect x="310" y="292" width="148" height="32" rx="6" fill="#273549" stroke="#334155" />
+            <text x="384" y="312">paused · 已暂停</text>
+            <rect x="474" y="292" width="148" height="32" rx="6" fill="#273549" stroke="#334155" />
+            <text x="548" y="312">awaiting_input · 待补充</text>
+            <rect x="638" y="292" width="148" height="32" rx="6" fill="#273549" stroke="#334155" />
+            <text x="712" y="312">validation_failed</text>
+            <rect x="802" y="292" width="130" height="32" rx="6" fill="#273549" stroke="#334155" />
+            <text x="867" y="312">review_blocked</text>
+            <rect x="310" y="332" width="148" height="30" rx="6" fill="#273549" stroke="#334155" />
+            <text x="384" y="351">failed · 失败</text>
+            <rect x="474" y="332" width="148" height="30" rx="6" fill="#273549" stroke="#334155" />
+            <text x="548" y="351">cancelled · 已取消</text>
+          </g>
+        </svg>
+        <div class="figcap">
+          图 2 · 固定链路状态机：主链 12 个必经状态 + 人工闸门（计划审批）+ Review 自动修订回跳环 + 异常出口
+        </div>
+      </div>
+      <p class="muted">
+        异常出口：paused（手动暂停）/ awaiting_input（Agent 要补充信息）/ validation_failed /
+        review_blocked（可自动修订回 implementing 循环）/ failed / cancelled。状态转移合法性由
+        <code>core/workflow.ts</code> 的 <code>transitionTask()</code> 硬校验，非法转移直接抛错。
+      </p>
+
+      <h3>1.3 核心模块职责</h3>
+      <table>
+        <tr>
+          <th>模块</th>
+          <th>位置</th>
+          <th>职责</th>
+        </tr>
+        <tr>
+          <td><code>TaskWorkflow</code></td>
+          <td>integrations</td>
+          <td>
+            阶段编排：建 worktree / feature 分支、跑 setup / validation 命令链、Review 收口；两条宿主（desktop 与
+            pi-package CLI 插件）共用
+          </td>
+        </tr>
+        <tr>
+          <td><code>task-lifecycle.ts</code></td>
+          <td>electron/task</td>
+          <td>
+            start / resume / pause / cancel / delete、计划生成与审批、<code>runTaskOperation</code>
+            在途操作管理（AbortController）、孤儿 Trace 收口
+          </td>
+        </tr>
+        <tr>
+          <td><code>task-runner.ts</code></td>
+          <td>electron/task</td>
+          <td>Review 双路调用（Qoder SDK / OpenAI 兼容 HTTP）、Review 自动修订循环、测试覆盖检测、计划决策落库</td>
+        </tr>
+        <tr>
+          <td>双引擎</td>
+          <td>qoder / pi-session</td>
+          <td>
+            Qoder：常驻会话按 <code>qoderSessionId</code> 续接；Pi/OpenAI：全局单活 session。每个任务按
+            <code>runtimeProvider</code> 二选一
+          </td>
+        </tr>
+        <tr>
+          <td><code>permissions.ts</code></td>
+          <td>core</td>
+          <td>
+            L1 硬阻断（越出 worktree 的写、<code>rm -rf</code>、敏感路径等），两条引擎同源；任务侧 HITL 收敛为恒 yolo +
+            L1 兜底
+          </td>
+        </tr>
+        <tr>
+          <td>Trace / Memory</td>
+          <td>electron</td>
+          <td>
+            逐阶段 span 埋点（关键词提取 → Plan → Exec → CodeReview → …）落
+            JSONL；任务完成后记忆整理（<code>consolidateTaskMemory</code>）
+          </td>
+        </tr>
+      </table>
+
+      <h3>1.4 关键执行机制</h3>
+      <ul>
+        <li>
+          <strong>在途操作管理</strong>：<code>runTaskOperation(taskId, action)</code> 用 Map 保存每个任务的
+          AbortController + Promise，新操作开始自动 abort 旧操作，保证同一任务同一时刻只有一条在途链路。
+        </li>
+        <li>
+          <strong>Review 自动修订循环</strong>：Review 阻断后按
+          <code>reviewBlockingLevel</code> 筛阻断意见，自动生成修订 prompt 回到 <code>implementing</code>，轮数受
+          <code>reviewAutoFixMaxRounds</code>（默认 2）约束。
+        </li>
+        <li>
+          <strong>结论交叉验证</strong>：Agent 声称「已完成 / 无需修改」时，宿主用 <code>taskChangedFiles()</code>（git
+          diff 对比 base 分支）复核，结论与文件改动不一致就不自动推进，落到人工确认。
+        </li>
+        <li>
+          <strong>执行环境</strong>：本地 Git worktree（每任务每仓库独立 worktree + feature 分支），交付命令（commit /
+          push / MR）留在主进程用宿主机凭据执行。
+        </li>
+      </ul>
+
+      <!-- ═══════════════ 二、云端 Loop 设计 ═══════════════ -->
+      <h2 id="s2"><span class="num">2</span>云端 SaaS Task Loop 设计（docs/saas-architecture-plan.md）</h2>
+
+      <p>
+        SaaS 方案的核心决策：<strong>统一 Node.js 后端 + 可插拔执行环境 + 多租户</strong>。每个 Task 增加一个
+        <code>executionTarget</code> 字段决定执行位置，业务逻辑不感知执行位置：
+      </p>
+
+      <pre><code>type ExecutionTarget =
+  | { type: 'local' }                  // Electron 专属：本地 worktree 执行
+  | { type: 'container' }              // Server 创建 Docker 容器执行
+  | { type: 'queue'; loopId: string }  // Loop：异步队列执行（云端）
+
+TaskWorkflow / QoderOrchestrator（业务逻辑，不感知执行位置）
+        │
+        ▼
+  ExecutionBackend（统一抽象）
+   ├── LocalBackend      → 本地文件系统 + execa（Electron）
+   ├── ContainerBackend  → Docker 容器 FS + docker exec（云端）
+   └── QueueBackend      → BullMQ 异步任务（Loop）</code></pre>
+
+      <div class="fig">
+        <svg
+          viewBox="0 0 920 430"
+          xmlns="http://www.w3.org/2000/svg"
+          role="img"
+          aria-label="ExecutionBackend 可插拔执行环境抽象图"
+        >
+          <defs>
+            <marker id="mC" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 z" fill="#94a3b8" />
+            </marker>
+          </defs>
+          <rect x="160" y="20" width="600" height="56" rx="10" fill="#1e293b" stroke="#334155" />
+          <text x="460" y="44" font-size="14" font-weight="600" fill="#e2e8f0" text-anchor="middle">
+            TaskWorkflow / QoderOrchestrator
+          </text>
+          <text x="460" y="64" font-size="12" fill="#94a3b8" text-anchor="middle">业务逻辑 · 不感知执行位置</text>
+          <line x1="460" y1="76" x2="460" y2="112" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mC)" />
+          <rect
+            x="235"
+            y="116"
+            width="450"
+            height="48"
+            rx="10"
+            fill="rgba(129,140,248,0.15)"
+            stroke="#818cf8"
+            stroke-width="1.5"
+          />
+          <text x="460" y="145" font-size="14" font-weight="600" fill="#a5b4fc" text-anchor="middle">
+            ExecutionBackend — 统一执行抽象
+          </text>
+          <g stroke="#94a3b8" stroke-width="1.5" fill="none">
+            <path d="M 460 164 L 160 204" marker-end="url(#mC)" />
+            <line x1="460" y1="164" x2="460" y2="204" marker-end="url(#mC)" />
+            <path d="M 460 164 L 760 204" marker-end="url(#mC)" />
+          </g>
+          <!-- LocalBackend -->
+          <rect x="30" y="210" width="260" height="140" rx="10" fill="#1e293b" stroke="#334155" />
+          <text x="160" y="238" font-size="14" font-weight="600" fill="#38bdf8" text-anchor="middle">LocalBackend</text>
+          <text x="160" y="260" font-size="12" fill="#e2e8f0" text-anchor="middle">本地文件系统 + execa</text>
+          <rect x="85" y="274" width="150" height="26" rx="13" fill="rgba(56,189,248,0.12)" stroke="#38bdf8" />
+          <text x="160" y="291" font-size="11.5" fill="#38bdf8" text-anchor="middle">Electron 桌面端</text>
+          <text x="160" y="326" font-size="11.5" fill="#94a3b8" text-anchor="middle">本地 worktree · L1 兜底拦断</text>
+          <!-- ContainerBackend -->
+          <rect x="330" y="210" width="260" height="140" rx="10" fill="#1e293b" stroke="#334155" />
+          <text x="460" y="238" font-size="14" font-weight="600" fill="#c084fc" text-anchor="middle">
+            ContainerBackend
+          </text>
+          <text x="460" y="260" font-size="12" fill="#e2e8f0" text-anchor="middle">Docker 容器 FS + docker exec</text>
+          <rect x="385" y="274" width="150" height="26" rx="13" fill="rgba(192,132,252,0.12)" stroke="#c084fc" />
+          <text x="460" y="291" font-size="11.5" fill="#c084fc" text-anchor="middle">云端 · 每 Task 一容器</text>
+          <text x="460" y="326" font-size="11.5" fill="#94a3b8" text-anchor="middle">硬隔离 · 销毁即清理</text>
+          <!-- QueueBackend -->
+          <rect x="630" y="210" width="260" height="140" rx="10" fill="#1e293b" stroke="#334155" />
+          <text x="760" y="238" font-size="14" font-weight="600" fill="#a5b4fc" text-anchor="middle">QueueBackend</text>
+          <text x="760" y="260" font-size="12" fill="#e2e8f0" text-anchor="middle">BullMQ 异步队列</text>
+          <rect x="685" y="274" width="150" height="26" rx="13" fill="rgba(129,140,248,0.12)" stroke="#818cf8" />
+          <text x="760" y="291" font-size="11.5" fill="#a5b4fc" text-anchor="middle">云端 Loop 编排</text>
+          <text x="760" y="326" font-size="11.5" fill="#94a3b8" text-anchor="middle">优先级 · 退避重试 · 并发配额</text>
+          <!-- 底部注释 -->
+          <rect x="160" y="380" width="600" height="36" rx="8" fill="#273549" stroke="#334155" />
+          <text
+            x="460"
+            y="403"
+            font-size="12.5"
+            fill="#a5b4fc"
+            text-anchor="middle"
+            font-family="JetBrains Mono, Menlo, monospace"
+          >
+            Task.executionTarget = local | container | queue(loopId)
+          </text>
+        </svg>
+        <div class="figcap">图 3 · 执行环境可插拔：业务逻辑与执行位置解耦，Loop 只是 executionTarget 的第三种取值</div>
+      </div>
+
+      <h3>2.1 Loop 是什么</h3>
+      <p>
+        Loop 被明确定位为 <strong>Task 的上层编排，不是替代 Task 数据模型</strong>：实现「任务新增 → 任务计划 →
+        确认执行进入队列 → 任务完成」的异步流水线，<strong>仅需云端实现</strong>。技术选型 Redis +
+        BullMQ（优先级队列、延迟任务、重试策略、并发控制、多 Worker 水平扩展）。
+      </p>
+
+      <pre><code>interface TaskLoop {
+  id: string; tenantId: string; name: string
+  status: 'idle' | 'planning' | 'queued' | 'executing' | 'paused' | 'completed' | 'failed'
+  concurrency: number                    // 同时执行的任务数（按租户配额）
+  retryPolicy: { maxRetries: number; backoffMs: number }
+  totalTasks: number; completedTasks: number; failedTasks: number
+}</code></pre>
+
+      <h3>2.2 云端整体架构</h3>
+      <div class="fig">
+        <svg viewBox="0 0 920 660" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="云端 SaaS 总体架构图">
+          <defs>
+            <marker id="mD" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 z" fill="#94a3b8" />
+            </marker>
+          </defs>
+          <!-- 客户端 -->
+          <rect x="230" y="20" width="170" height="48" rx="10" fill="#1e293b" stroke="#334155" />
+          <text x="315" y="49" font-size="13" font-weight="600" fill="#38bdf8" text-anchor="middle">Electron</text>
+          <rect x="520" y="20" width="170" height="48" rx="10" fill="#1e293b" stroke="#334155" />
+          <text x="605" y="49" font-size="13" font-weight="600" fill="#38bdf8" text-anchor="middle">Web</text>
+          <line x1="315" y1="68" x2="315" y2="100" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mD)" />
+          <line x1="605" y1="68" x2="605" y2="100" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mD)" />
+          <text x="460" y="92" font-size="11.5" fill="#94a3b8" text-anchor="middle">HTTPS / WS · 多端接入同一后端</text>
+          <!-- API Server -->
+          <rect x="110" y="104" width="700" height="150" rx="12" fill="#1e293b" stroke="#334155" />
+          <text x="130" y="130" font-size="14" font-weight="600" fill="#a5b4fc">API Server（Node.js）· 统一后端</text>
+          <g font-size="12" fill="#e2e8f0" text-anchor="middle">
+            <rect x="130" y="144" width="210" height="36" rx="6" fill="#273549" stroke="#334155" />
+            <text x="235" y="166">Auth / Tenant 认证租户</text>
+            <rect x="356" y="144" width="210" height="36" rx="6" fill="#273549" stroke="#334155" />
+            <text x="461" y="166">Chat Service</text>
+            <rect x="582" y="144" width="210" height="36" rx="6" fill="#273549" stroke="#334155" />
+            <text x="687" y="166">Task Service</text>
+            <rect x="130" y="190" width="210" height="36" rx="6" fill="#273549" stroke="#334155" />
+            <text x="235" y="212">Trace Service</text>
+            <rect x="356" y="190" width="210" height="36" rx="6" fill="#273549" stroke="#334155" />
+            <text x="461" y="212">Memory Service</text>
+            <rect
+              x="582"
+              y="190"
+              width="210"
+              height="36"
+              rx="6"
+              fill="rgba(129,140,248,0.15)"
+              stroke="#818cf8"
+              stroke-width="1.5"
+            />
+            <text x="687" y="212" fill="#a5b4fc" font-weight="600">Loop Scheduler 调度</text>
+          </g>
+          <line x1="300" y1="254" x2="300" y2="294" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mD)" />
+          <line x1="620" y1="254" x2="620" y2="294" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mD)" />
+          <!-- PG / Redis -->
+          <rect x="110" y="298" width="340" height="76" rx="10" fill="#1e293b" stroke="#334155" />
+          <text x="280" y="326" font-size="13" font-weight="600" fill="#e2e8f0" text-anchor="middle">PostgreSQL</text>
+          <text x="280" y="348" font-size="11.5" fill="#94a3b8" text-anchor="middle">
+            多租户数据 · tenant_id 行级隔离（RLS）
+          </text>
+          <rect x="470" y="298" width="340" height="76" rx="10" fill="#1e293b" stroke="#334155" />
+          <text x="640" y="326" font-size="13" font-weight="600" fill="#e2e8f0" text-anchor="middle">Redis</text>
+          <text x="640" y="348" font-size="11.5" fill="#94a3b8" text-anchor="middle">队列 + 缓存 · BullMQ</text>
+          <line x1="640" y1="374" x2="640" y2="412" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mD)" />
+          <text x="470" y="398" font-size="11.5" fill="#94a3b8" text-anchor="middle">
+            消费队列 · 按 loopId 派发任务
+          </text>
+          <!-- Docker Pool -->
+          <rect x="140" y="416" width="640" height="160" rx="12" fill="#1e293b" stroke="#334155" />
+          <text x="160" y="442" font-size="14" font-weight="600" fill="#c084fc">
+            Docker Executor Pool · 每 Task 独立容器
+          </text>
+          <g text-anchor="middle">
+            <rect x="160" y="460" width="136" height="78" rx="8" fill="#273549" stroke="#818cf8" />
+            <text x="228" y="488" font-size="13" font-weight="600" fill="#e2e8f0">T-01</text>
+            <text x="228" y="510" font-size="11" fill="#a5b4fc">executing</text>
+            <text x="228" y="526" font-size="10" fill="#94a3b8">clone + install</text>
+            <rect x="316" y="460" width="136" height="78" rx="8" fill="#273549" stroke="#818cf8" />
+            <text x="384" y="488" font-size="13" font-weight="600" fill="#e2e8f0">T-02</text>
+            <text x="384" y="510" font-size="11" fill="#a5b4fc">executing</text>
+            <text x="384" y="526" font-size="10" fill="#94a3b8">Agent 执行中</text>
+            <rect x="472" y="460" width="136" height="78" rx="8" fill="#273549" stroke="#334155" />
+            <text x="540" y="488" font-size="13" font-weight="600" fill="#e2e8f0">T-03</text>
+            <text x="540" y="510" font-size="11" fill="#94a3b8">ready</text>
+            <text x="540" y="526" font-size="10" fill="#94a3b8">等待派发</text>
+            <rect
+              x="628"
+              y="460"
+              width="136"
+              height="78"
+              rx="8"
+              fill="#273549"
+              stroke="#f87171"
+              stroke-dasharray="5 4"
+            />
+            <text x="696" y="488" font-size="13" font-weight="600" fill="#e2e8f0">T-04</text>
+            <text x="696" y="510" font-size="11" fill="#f87171">destroying</text>
+            <text x="696" y="526" font-size="10" fill="#94a3b8">完成即销毁</text>
+          </g>
+          <line x1="460" y1="576" x2="460" y2="600" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#mD)" />
+          <!-- 安全基线 -->
+          <rect x="110" y="604" width="700" height="42" rx="10" fill="rgba(251,191,36,0.08)" stroke="#fbbf24" />
+          <text x="460" y="630" font-size="12.5" fill="#fbbf24" text-anchor="middle">
+            容器安全基线：非 root · 只读根 FS · 网络白名单（禁内网/跨租户）· 资源限额 · 凭据运行时注入、销毁即清
+          </text>
+        </svg>
+        <div class="figcap">
+          图 4 · 云端 SaaS 总体架构：多端接入统一 API Server，PG / Redis 支撑多租户与队列，Docker Pool 承载任务执行
+        </div>
+      </div>
+      <ul>
+        <li>
+          <strong>执行环境</strong>：每任务一个 Docker 容器（非 root、只读根文件系统、网络白名单仅放行 npm registry /
+          Git remote / LLM API、资源限额 2C2G），完成即销毁；基础镜像 + 依赖缓存卷把启动压到约 5 秒。
+        </li>
+        <li>
+          <strong>多租户隔离</strong>：数据层 tenant_id 行级隔离（PG RLS
+          或应用层过滤）、执行层容器隔离、凭据加密按租户注入（不落镜像层）、LLM / 计算时长按租户计量配额。
+        </li>
+        <li>
+          <strong>用户体验</strong>：Web 创建 Task / Loop → 秒级生成计划 → 审批后自动建环境（clone → 装依赖，进度可视）→
+          Agent 执行（实时日志流）→ 审查 diff / 测试结果 → 通过则 push + 建 MR + 销毁环境，要求修改则在既有环境继续。
+        </li>
+      </ul>
+
+      <!-- ═══════════════ 三、本地局限 ═══════════════ -->
+      <h2 id="s3"><span class="num">3</span>为什么本地 Task 存在局限</h2>
+
+      <p>
+        本地实现的所有限制，本质上来自同一个事实：<strong>任务的编排者、执行环境、数据和人工审批者全部耦合在同一台桌面机上</strong>。具体表现为六个方面：
+      </p>
+
+      <h3>3.1 任务生命周期与桌面进程绑定</h3>
+      <p>
+        Task 的驱动逻辑跑在 Electron 主进程里：<code>activeTaskOperations</code>、Pi 全局单活 session、Qoder
+        常驻会话都是<strong>进程内内存状态</strong>。合盖睡眠、退出应用、断电、崩溃，任务就停在原地，只能事后靠
+        <code>resumeTask</code>（仅 <code>failed</code> 态可续）或 <code>sweepInterruptedTraces()</code> 收口孤儿
+        Trace。单任务可达 10–30 分钟，全程要求这台电脑在线。
+      </p>
+
+      <h3>3.2 没有队列：串行、无调度、无重试策略</h3>
+      <p>
+        本地没有优先级、延迟任务、退避重试这些队列原语。一次只能实际推进一个活跃会话（Pi
+        全局单活），多个任务只能排着等人；任务失败后没有自动重试，需要人手动点「继续执行」。并发上限就是这台机器的 CPU /
+        内存 / 磁盘，跑一次 <code>npm install</code> + 全量测试会直接挤占用户的日常工作环境。
+      </p>
+
+      <h3>3.3 人工在环被假设「用户在场」</h3>
+      <p>
+        固定链路里计划审批是人工闸门，<code>awaiting_input</code>、Review 阻断上限后的遗留意见、手动档的
+        <code>awaiting_commit</code>
+        都等人。本地形态下这些等待没有通知机制——人不在电脑前，任务就永远停在那；也没有「审批完自动进队列、跑完推送通知」的异步闭环。
+      </p>
+
+      <h3>3.4 执行环境就是用户本机</h3>
+      <p>
+        安全边界目前靠 L1 正则拦断（越出 worktree 集合的写 / 破坏性命令 / 敏感路径）——这是应用层软边界，容器化沙箱（PR
+        2）<strong>已明确暂缓</strong>。Agent 理论上仍运行在拥有用户全部权限的环境里；同时本机的
+        <code>~/.ssh</code>、凭据文件、其他项目目录都在同一文件系统上。桌面端的对策（每任务独立 worktree）只隔离了 Git
+        层，不隔离操作系统层。
+      </p>
+
+      <h3>3.5 数据与协作是单机孤岛</h3>
+      <p>
+        better-sqlite3 本地库 + JSONL
+        Trace，无多端同步：换一台电脑任务历史就不可见；团队成员之间没有共享看板、没有配额与计量。产品价值中的「价值
+        A」（对话 / 计划 / 管理，天然适合云端）被锁死在桌面形态里。
+      </p>
+
+      <h3>3.6 原生能力反过来锁死了迁移</h3>
+      <p>
+        CodeGraph 索引、OCR、MCP / Skill 子进程都按「本地子进程」形态实现，Qoder 引擎的文件读写发生在 qodercli
+        子进程内部（只有进程级控制粒度），这些在架构上假设了「能碰到用户本机」，是后续云端化必须逐一适配的债务。
+      </p>
+
+      <div class="callout info">
+        <strong>一句话概括</strong>：本地 Task 是「单人、单机、在场」模型——它把 IDE 级的交互体验（直接打开
+        VSCode、本地凭据、实时看板）做到了最好，但任务规模、并发、可靠性与协作的天花板就是这台桌面机本身。
+      </div>
+
+      <!-- ═══════════════ 四、云端优势 ═══════════════ -->
+      <h2 id="s4"><span class="num">4</span>云端 Loop 的优势</h2>
+
+      <h3>4.1 异步流水线：审批之后不再需要人盯着</h3>
+      <p>
+        Loop 把「确认执行」和「执行完成」之间的整段变成无人值守：审批通过 → 自动进队列 → 建容器环境 → Agent
+        执行（实时日志流可看可不看）→ 完成等待 review →
+        推送通知。用户的参与点收敛为「批计划、审结果」两个决策动作，中间过程完全后台化。这直接消解了 §3.1 / §3.3
+        的局限——任务不再绑在任何人的电脑上。
+      </p>
+
+      <div class="fig">
+        <svg
+          viewBox="0 0 980 370"
+          xmlns="http://www.w3.org/2000/svg"
+          role="img"
+          aria-label="本地与云端的用户参与时间线对比图"
+        >
+          <!-- 时间轴标题 -->
+          <text x="20" y="34" font-size="12" fill="#94a3b8">时间 →（单任务典型 10–30 分钟）</text>
+          <line x1="140" y1="28" x2="940" y2="28" stroke="#334155" stroke-width="1" />
+          <!-- 本地 Lane -->
+          <text x="20" y="84" font-size="14" font-weight="600" fill="#e2e8f0">本地 Task</text>
+          <rect x="140" y="56" width="800" height="48" rx="8" fill="rgba(251,191,36,0.10)" stroke="#fbbf24" />
+          <text x="540" y="85" font-size="12.5" fill="#fbbf24" text-anchor="middle">
+            桌面机全程在线 · 任务绑定本机进程（睡眠 / 退出应用 / 断电即中断）
+          </text>
+          <g fill="#fbbf24">
+            <circle cx="180" cy="128" r="5" />
+            <circle cx="400" cy="128" r="5" />
+            <circle cx="620" cy="128" r="5" />
+            <circle cx="860" cy="128" r="5" />
+          </g>
+          <g font-size="11.5" fill="#94a3b8" text-anchor="middle">
+            <text x="180" y="150">创建任务</text>
+            <text x="400" y="150">计划审批</text>
+            <text x="620" y="150">追问 / 暂停 / 续跑（随时可能）</text>
+            <text x="860" y="150">审 MR</text>
+          </g>
+          <!-- 云端 Lane -->
+          <text x="20" y="204" font-size="14" font-weight="600" fill="#e2e8f0">云端 Loop</text>
+          <rect
+            x="140"
+            y="176"
+            width="150"
+            height="48"
+            rx="8"
+            fill="rgba(129,140,248,0.15)"
+            stroke="#818cf8"
+            stroke-width="1.5"
+          />
+          <text x="215" y="205" font-size="12.5" font-weight="600" fill="#a5b4fc" text-anchor="middle">
+            创建 + 审批
+          </text>
+          <line x1="292" y1="200" x2="758" y2="200" stroke="#475569" stroke-width="1.5" stroke-dasharray="6 5" />
+          <text x="525" y="190" font-size="12" fill="#94a3b8" text-anchor="middle">
+            云端无人值守：队列 → 容器环境 → Agent 执行 → 完成通知
+          </text>
+          <rect
+            x="760"
+            y="176"
+            width="180"
+            height="48"
+            rx="8"
+            fill="rgba(52,211,153,0.12)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="850" y="205" font-size="12.5" font-weight="600" fill="#34d399" text-anchor="middle">
+            审结果 / 通知
+          </text>
+          <!-- 总结注释 -->
+          <rect x="140" y="252" width="800" height="90" rx="10" fill="#1e293b" stroke="#334155" />
+          <text x="540" y="280" font-size="13" fill="#e2e8f0" text-anchor="middle">
+            用户参与点：本地 4+ 处、全程在场；云端 2 处决策动作（批计划、审结果）
+          </text>
+          <text x="540" y="304" font-size="12" fill="#94a3b8" text-anchor="middle">
+            中间过程由 Loop 编排：优先级排队 · 退避重试 · 租户并发配额 · 完成推送
+          </text>
+          <text x="540" y="326" font-size="12" fill="#94a3b8" text-anchor="middle">
+            夜间跑批、任务积压削峰、多人协作共享看板均在此基础上自然成立
+          </text>
+        </svg>
+        <div class="figcap">
+          图 5 · 用户参与时间线对比：本地任务要求机器与人全程在场，云端 Loop 把人收敛到两端的决策动作
+        </div>
+      </div>
+
+      <h3>4.2 队列带来的调度能力</h3>
+      <ul>
+        <li>
+          <strong>弹性并发</strong>：BullMQ Worker
+          多进程水平扩展，并发上限由租户配额（<code>concurrency</code>）控制，而不是某台电脑的资源。
+        </li>
+        <li>
+          <strong>优先级与重试</strong>：紧急任务插队，失败任务按 <code>retryPolicy</code>（maxRetries +
+          backoff）自动退避重试，替代本地「失败了等人来点继续」。
+        </li>
+        <li><strong>削峰填谷</strong>：任务积压时排队而不是互相踩踏；夜间跑批成为可能。</li>
+      </ul>
+
+      <h3>4.3 更硬的安全边界</h3>
+      <p>
+        执行从「用户本机 + L1 正则兜底」变成「每任务独立容器 + 操作系统级隔离」：非 root
+        用户、只读根文件系统、网络白名单（仅 npm registry / Git remote / LLM
+        API，禁止内网与其他租户容器）、资源限额、凭据运行时注入且容器销毁即清除。本地方案里暂缓的容器化（PR
+        2），在云端是必做基线。
+      </p>
+
+      <h3>4.4 多租户与团队化</h3>
+      <p>
+        tenant_id 行级隔离 + 认证 + 配额计量（并发任务数 / 存储 / LLM token / 计算时长），任务数据、Trace、MR
+        管理全部云端化，Web 端拿到全量能力，多人共享看板与任务流成为可能。这是从「个人工具」到「研发平台」的形态跃迁。
+      </p>
+
+      <h3>4.5 一套后端、一套数据模型</h3>
+      <p>
+        方案明确禁止演化为两套系统：Electron 与 Web 接同一 Server（本地部署时为本地内置 Server + SQLite），Loop 只是
+        <code>executionTarget</code> 的第三种取值，不动 Task
+        数据模型。桌面用户可以平滑地「把任务丢到云端跑」，本地与云端的 Trace / 记忆 / 看板天然同步。
+      </p>
+
+      <table>
+        <tr>
+          <th>维度</th>
+          <th>本地 Task（现状）</th>
+          <th>云端 Loop（设计）</th>
+        </tr>
+        <tr>
+          <td>执行驱动</td>
+          <td>Electron 主进程，进程内内存状态</td>
+          <td>API Server + BullMQ 队列，服务端持久化</td>
+        </tr>
+        <tr>
+          <td>用户离线后</td>
+          <td>任务停摆，需手动续跑</td>
+          <td>照常执行，完成后通知</td>
+        </tr>
+        <tr>
+          <td>并发与调度</td>
+          <td>单机资源上限，无优先级 / 重试</td>
+          <td>Worker 水平扩展，租户配额 + 优先级 + 退避重试</td>
+        </tr>
+        <tr>
+          <td>执行隔离</td>
+          <td>Git worktree + L1 正则软边界</td>
+          <td>Docker 容器硬隔离（网络 / 文件系统 / 资源）</td>
+        </tr>
+        <tr>
+          <td>数据</td>
+          <td>本地 SQLite + JSONL，单机孤岛</td>
+          <td>PostgreSQL 多租户，多端同步</td>
+        </tr>
+        <tr>
+          <td>计费 / 配额</td>
+          <td>无</td>
+          <td>LLM token、计算时长、存储按租户计量</td>
+        </tr>
+      </table>
+
+      <!-- ═══════════════ 五、云端缺点 ═══════════════ -->
+      <h2 id="s5"><span class="num">5</span>云端 Loop 的缺点</h2>
+
+      <p>云端 Loop 不是免费的午餐，设计文档自己也把这些列为「潜在风险与应对」。归纳为六类：</p>
+
+      <h3>5.1 工程与迁移成本高昂</h3>
+      <ul>
+        <li>
+          <strong>改造周期 12–16 周</strong>，五个 Phase（统一后端 API 化 → PG 多租户 → Docker 执行环境 → Loop 编排 →
+          计费运维），约 120 个 IPC endpoint 迁移为 HTTP + WS。
+        </li>
+        <li>
+          <strong>SQLite → PostgreSQL 是最大的隐性工作量</strong>：同步 API 换异步 API，波及所有 Store
+          调用点，上层业务代码需逐个 <code>await</code> 化。
+        </li>
+        <li>
+          <strong>Agent 执行链路适配面大</strong>：Qoder SDK / Pi Agent 的文件操作要经
+          <code>ExecutionBackend</code> 代理进容器；CodeGraph、OCR、MCP / Skill 子进程都要容器化或另想办法。
+        </li>
+      </ul>
+
+      <h3>5.2 容器冷启动延迟与资源成本</h3>
+      <p>
+        每个任务 clone 仓库 + 安装依赖，裸跑可达 1–5 分钟；即便用「基础镜像 + 依赖缓存卷」压到约 5
+        秒，也引入了缓存卷管理、按租户 LRU 淘汰 repo clone
+        等运维负担。<strong>每任务一容器</strong>的模型在并发高时成本飙升，必须靠租户并发配额和同仓库容器复用来约束——成本模型从「用户的电费」变成「平台的账单」，且最终会转嫁给计费体系。
+      </p>
+
+      <h3>5.3 交互体验的折损</h3>
+      <p>本地 Task 最好的部分恰恰是 Loop 给不了的：</p>
+      <ul>
+        <li>
+          <strong>IDE 联动丢失</strong>：本地任务可直接「在 VSCode / Qoder 中打开
+          worktree」，人在自己的环境里随手看代码、顺手改两行；云端容器里的代码只能通过 Web diff 查看。
+        </li>
+        <li>
+          <strong>强交互阶段变弱</strong>：任务内追问（<code>sendTaskMessage</code>）、手动暂停 / 续跑、<code
+            >awaiting_input</code
+          >
+          补充信息这些「在场式」操作，在异步队列 + 通知的形态下变成「发起请求 → 等回调」。
+        </li>
+        <li><strong>实时性</strong>：日志从本地 stdio 变成网络日志流，受网络与推送链路影响。</li>
+      </ul>
+
+      <h3>5.4 安全与信任责任上移</h3>
+      <p>
+        凭据（Git Token / Jira Token / LLM
+        Key）从「用户本机加密文件」集中到云端入库加密，平台成为单一高价值攻击面；需要网络策略、审计、密钥不落镜像层等一整套纪律。更根本的是<strong>信任问题</strong>：私有代码必须
+        clone
+        到云端，企业内网仓库可能根本无法触达（容器网络只放行白名单）。对安全敏感的团队，「代码不出内网」是一条硬红线，云端
+        Loop 直接出局。
+      </p>
+
+      <h3>5.5 运维复杂度与新的故障域</h3>
+      <p>
+        Redis（队列）、PostgreSQL、Docker Executor Pool、镜像构建与
+        GC、配额中间件——每一个都是需要监控、备份、容量规划的基础设施组件。容器生命周期状态机（creating → ready →
+        executing → destroying）与 GC 规则（完成 1 小时 / 空闲 30 分钟 / 失败 24
+        小时销毁）本身就是一个需要持续运营的子系统。本地版的「坏了重启应用」不再成立。
+      </p>
+
+      <h3>5.6 架构长期约束</h3>
+      <ul>
+        <li>
+          <strong>交付命令必须留在 host 侧</strong>（带宿主机凭据的 push /
+          MR），执行与交付天然分裂在两个环境，链路更长。
+        </li>
+        <li><strong>长任务依赖配额而非超时</strong>约束，租户配额体系一旦设计不当，要么限死大任务、要么成本失控。</li>
+        <li>
+          <strong>Electron 本地模式不启用 Loop</strong>（可选连云端后使用），意味着产品要长期同时维护本地 /
+          云端两套执行路径的一致性——这正是「禁止两套系统」原则要持续对抗的引力。
+        </li>
+      </ul>
+
+      <!-- ═══════════════ 六、总结 ═══════════════ -->
+      <h2 id="s6"><span class="num">6</span>总结对照</h2>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title"><span class="tag tag-blue">本地 Task</span>适合什么</div>
+          <ul>
+            <li>个人开发者，任务串行、追求 IDE 内闭环体验</li>
+            <li>内网 / 私有仓库，代码不能出本机</li>
+            <li>强交互任务：频繁追问、暂停改两行再继续</li>
+            <li>零基础设施成本，开箱即用</li>
+          </ul>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="tag tag-purple">云端 Loop</span>适合什么</div>
+          <ul>
+            <li>任务批量化：审批后无人值守、夜间跑批</li>
+            <li>团队 / 多租户：共享看板、配额、计量计费</li>
+            <li>需要弹性并发与自动重试的规模化执行</li>
+            <li>多端接入，Web 全量能力</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>结论</strong>：本地 Task 与云端 Loop 不是替代关系，而是同一套 Task 数据模型在两种
+        <code>executionTarget</code> 下的投影。本地形态的局限（单机绑定、无队列、软安全边界、数据孤岛）正是云端 Loop
+        的设计动机；而云端 Loop 的代价（12–16
+        周改造、容器成本、交互折损、代码上云的信任问题、运维复杂度）又恰恰是本地桌面形态的既有优势。SaaS
+        方案用「一套后端 + 可插拔执行环境」让两者共存，把选择权留给每个任务。
+      </div>
+
+      <p class="footer-note">
+        依据：当前仓库代码（<code>packages/core/src/workflow.ts</code> ·
+        <code>packages/integrations/src/task-workflow.ts</code> ·
+        <code>apps/desktop/electron/task/task-lifecycle.ts</code> · <code>task-runner.ts</code> ·
+        <code>hitl-mode.ts</code>）与设计文档 <code>docs/saas-architecture-plan.md</code> ·
+        <code>docs/task-fixed-pipeline-plan.md</code> · <code>docs/task-pipeline-plugin-plan.md</code>。生成于
+        2026-09-09。
+      </p>
+    </div>
+  </body>
+</html>

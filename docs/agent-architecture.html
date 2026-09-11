@@ -1,0 +1,2203 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent 架构讲解 — 概念 · 接入 · A2A · 技术实施</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --surface: #1e293b;
+        --surface-alt: #273549;
+        --border: #334155;
+        --text: #e2e8f0;
+        --text-muted: #94a3b8;
+        --accent: #818cf8;
+        --accent-light: #a5b4fc;
+        --accent-bg: rgba(129, 140, 248, 0.12);
+        --success: #34d399;
+        --success-bg: rgba(52, 211, 153, 0.12);
+        --warning: #fbbf24;
+        --warning-bg: rgba(251, 191, 36, 0.12);
+        --danger: #f87171;
+        --danger-bg: rgba(248, 113, 113, 0.12);
+        --info: #38bdf8;
+        --info-bg: rgba(56, 189, 248, 0.12);
+        --purple: #c084fc;
+        --purple-bg: rgba(192, 132, 252, 0.12);
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family:
+          'Inter',
+          -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.7;
+        font-size: 15px;
+      }
+      .container {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 40px 24px 80px;
+      }
+      h1 {
+        font-size: 32px;
+        font-weight: 700;
+        margin-bottom: 8px;
+        letter-spacing: -0.5px;
+      }
+      h1 span {
+        color: var(--accent);
+      }
+      .subtitle {
+        color: var(--text-muted);
+        font-size: 16px;
+        margin-bottom: 40px;
+      }
+      h2 {
+        font-size: 24px;
+        font-weight: 700;
+        margin: 48px 0 16px;
+        padding-top: 24px;
+        border-top: 1px solid var(--border);
+      }
+      h2 .badge {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 10px;
+        vertical-align: middle;
+        margin-left: 8px;
+      }
+      .badge-concept {
+        background: var(--accent-bg);
+        color: var(--accent-light);
+      }
+      .badge-arch {
+        background: var(--success-bg);
+        color: var(--success);
+      }
+      .badge-flow {
+        background: var(--info-bg);
+        color: var(--info);
+      }
+      .badge-a2a {
+        background: var(--purple-bg);
+        color: var(--purple);
+      }
+      .badge-user {
+        background: var(--warning-bg);
+        color: var(--warning);
+      }
+      .badge-impl {
+        background: var(--danger-bg);
+        color: var(--danger);
+      }
+      h3 {
+        font-size: 18px;
+        font-weight: 600;
+        margin: 28px 0 12px;
+        color: var(--accent-light);
+      }
+      p {
+        margin-bottom: 14px;
+      }
+      code {
+        background: var(--surface);
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 13px;
+        color: var(--accent-light);
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 20px;
+      }
+      .card h4 {
+        font-size: 15px;
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+      .card p {
+        font-size: 14px;
+        color: var(--text-muted);
+        margin-bottom: 8px;
+      }
+      .two-col {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+      .three-col {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 16px;
+      }
+      @media (max-width: 768px) {
+        .two-col,
+        .three-col {
+          grid-template-columns: 1fr;
+        }
+      }
+      .tag {
+        display: inline-block;
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 10px;
+        margin-right: 6px;
+        margin-bottom: 4px;
+      }
+      .tag-blue {
+        background: var(--accent-bg);
+        color: var(--accent-light);
+      }
+      .tag-green {
+        background: var(--success-bg);
+        color: var(--success);
+      }
+      .tag-purple {
+        background: var(--purple-bg);
+        color: var(--purple);
+      }
+      .tag-orange {
+        background: var(--warning-bg);
+        color: var(--warning);
+      }
+      .callout {
+        border-radius: 8px;
+        padding: 16px 20px;
+        margin: 16px 0;
+        font-size: 14px;
+        border-left: 4px solid;
+      }
+      .callout-key {
+        background: var(--accent-bg);
+        border-color: var(--accent);
+      }
+      .callout-info {
+        background: var(--info-bg);
+        border-color: var(--info);
+      }
+      .callout-warn {
+        background: var(--warning-bg);
+        border-color: var(--warning);
+      }
+      .callout-a2a {
+        background: var(--purple-bg);
+        border-color: var(--purple);
+      }
+      .callout-danger {
+        background: var(--danger-bg);
+        border-color: var(--danger);
+      }
+      .timeline {
+        position: relative;
+        padding-left: 32px;
+        margin: 16px 0;
+      }
+      .timeline::before {
+        content: '';
+        position: absolute;
+        left: 15px;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: var(--border);
+      }
+      .timeline-item {
+        position: relative;
+        margin-bottom: 20px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px 20px;
+      }
+      .timeline-item::before {
+        content: '';
+        position: absolute;
+        left: -24px;
+        top: 20px;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        border: 2px solid var(--accent);
+        background: var(--bg);
+      }
+      .timeline-item.active::before {
+        background: var(--accent);
+      }
+      .timeline-item h4 {
+        font-size: 15px;
+        font-weight: 600;
+        margin-bottom: 6px;
+      }
+      .timeline-item p {
+        font-size: 14px;
+        color: var(--text-muted);
+        margin-bottom: 6px;
+      }
+      .icon {
+        margin-right: 6px;
+      }
+      .diagram {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 24px;
+        margin: 16px 0;
+        overflow-x: auto;
+      }
+      .diagram svg {
+        display: block;
+        margin: 0 auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 16px 0;
+        font-size: 14px;
+      }
+      th {
+        text-align: left;
+        padding: 10px 12px;
+        background: var(--surface-alt);
+        border: 1px solid var(--border);
+        font-weight: 600;
+      }
+      td {
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+      }
+      .step {
+        display: flex;
+        gap: 16px;
+        margin-bottom: 20px;
+      }
+      .step-num {
+        flex-shrink: 0;
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: var(--accent);
+        color: var(--bg);
+        font-weight: 700;
+        font-size: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .step-content {
+        flex: 1;
+      }
+      .step-content strong {
+        color: var(--accent-light);
+      }
+      .flow-list {
+        list-style: none;
+        padding: 0;
+      }
+      .flow-list li {
+        position: relative;
+        padding: 12px 16px 12px 40px;
+        margin-bottom: 8px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+      }
+      .flow-list li::before {
+        content: attr(data-step);
+        position: absolute;
+        left: 12px;
+        top: 12px;
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🤖 <span>Agent</span> 架构讲解</h1>
+      <p class="subtitle">Agent 概念 · 多层架构 · 通用四层模型 · A2A 委派 · 企业级技术实施方案</p>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <h2>01 Agent 是什么 <span class="badge badge-concept">Concept</span></h2>
+
+      <p>
+        在 AI 领域，<strong>Agent</strong>（智能体）是一个能够<strong>感知环境、自主决策、执行动作</strong>的软件实体。
+        与普通的 LLM 对话不同，Agent 拥有：
+      </p>
+
+      <div class="three-col">
+        <div class="card">
+          <h4><span class="icon">🧠</span>自主规划</h4>
+          <p>接收一个高层目标后，Agent 能自主拆解为可执行的步骤（Plan → Implement → Test），不需要人类逐步指挥。</p>
+          <span class="tag tag-blue">Planning</span><span class="tag tag-blue">Decomposition</span>
+        </div>
+        <div class="card">
+          <h4><span class="icon">🔧</span>工具使用</h4>
+          <p>Agent 可以调用外部工具（文件读写、Shell 命令、MCP 服务、代码搜索等），通过工具与真实环境交互。</p>
+          <span class="tag tag-green">Tools</span><span class="tag tag-green">MCP</span>
+        </div>
+        <div class="card">
+          <h4><span class="icon">🔄</span>持续会话</h4>
+          <p>Agent 维护一个持久会话（Session），支持多轮对话、上下文记忆、中断恢复，而不是单次的请求-响应。</p>
+          <span class="tag tag-purple">Session</span><span class="tag tag-purple">Resume</span>
+        </div>
+      </div>
+
+      <div class="callout callout-key">
+        <strong>本项目中的 Agent 有两层含义：</strong><br />
+        ① <strong>运行时 Agent</strong>：由 Pi Agent Runtime 或 Qoder SDK 驱动的、正在执行任务的 AI
+        实体（拥有会话、工具、上下文）；<br />
+        ②
+        <strong>配置态 Agent</strong
+        >（<code>AgentProfile</code>）：用户定义的领域角色，携带系统提示词、工程约定和模型偏好，任务执行时自动注入对应指引。
+      </div>
+
+      <h3>通用 Agent 系统架构（四层模型）</h3>
+      <p>从通用视角看，一个完整的 Agent 系统可分为四层。这是行业通用的架构参考，后续章节会结合本项目具体实现做对照：</p>
+      <div class="diagram">
+        <svg viewBox="0 0 760 440" width="760" height="440">
+          <!-- Layer 1: User -->
+          <rect
+            x="30"
+            y="10"
+            width="700"
+            height="50"
+            rx="8"
+            fill="rgba(129,140,248,0.12)"
+            stroke="#818cf8"
+            stroke-width="2"
+          />
+          <text x="380" y="32" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="700">
+            1. 用户交互层（User Layer）
+          </text>
+          <text x="380" y="48" text-anchor="middle" fill="#94a3b8" font-size="10">
+            多模态输入：文本 / 语音 / 文件 / 图像
+          </text>
+          <!-- Layer 2: Orchestration -->
+          <rect
+            x="30"
+            y="80"
+            width="700"
+            height="150"
+            rx="8"
+            fill="rgba(52,211,153,0.08)"
+            stroke="#34d399"
+            stroke-width="1.5"
+            stroke-dasharray="6,3"
+          />
+          <text x="50" y="100" fill="#34d399" font-size="11" font-weight="600">2. 编排层（Orchestration Layer）</text>
+          <!-- Main Agent -->
+          <rect
+            x="50"
+            y="110"
+            width="660"
+            height="36"
+            rx="6"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="380" y="128" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">
+            主 Agent（总调度官）· 全局任务拆解 · 子 Agent 路由与委派 · 多源结果融合
+          </text>
+          <text x="380" y="142" text-anchor="middle" fill="#94a3b8" font-size="9">动态委派 Dynamic Delegation ↓</text>
+          <!-- Sub agents -->
+          <rect
+            x="50"
+            y="156"
+            width="120"
+            height="36"
+            rx="4"
+            fill="rgba(52,211,153,0.1)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="110" y="172" text-anchor="middle" fill="#e2e8f0" font-size="10">子Agent-A</text>
+          <text x="110" y="186" text-anchor="middle" fill="#94a3b8" font-size="8">🧠知识库 🔌MCP 🔧Tools</text>
+          <rect
+            x="185"
+            y="156"
+            width="120"
+            height="36"
+            rx="4"
+            fill="rgba(52,211,153,0.1)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="245" y="172" text-anchor="middle" fill="#e2e8f0" font-size="10">子Agent-B</text>
+          <text x="245" y="186" text-anchor="middle" fill="#94a3b8" font-size="8">🧠知识库 🔌MCP 🔧Tools</text>
+          <rect
+            x="320"
+            y="156"
+            width="120"
+            height="36"
+            rx="4"
+            fill="rgba(52,211,153,0.1)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="380" y="172" text-anchor="middle" fill="#e2e8f0" font-size="10">子Agent-C</text>
+          <text x="380" y="186" text-anchor="middle" fill="#94a3b8" font-size="8">🧠知识库 🔌MCP 🔧Tools</text>
+          <rect
+            x="455"
+            y="156"
+            width="120"
+            height="36"
+            rx="4"
+            fill="rgba(52,211,153,0.1)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="515" y="172" text-anchor="middle" fill="#e2e8f0" font-size="10">子Agent-D</text>
+          <text x="515" y="186" text-anchor="middle" fill="#94a3b8" font-size="8">🧠知识库 🔌MCP 🔧Tools</text>
+          <rect
+            x="590"
+            y="156"
+            width="120"
+            height="36"
+            rx="4"
+            fill="rgba(52,211,153,0.1)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="650" y="172" text-anchor="middle" fill="#e2e8f0" font-size="10">子Agent-N</text>
+          <text x="650" y="186" text-anchor="middle" fill="#94a3b8" font-size="8">🧠知识库 🔌MCP 🔧Tools</text>
+          <!-- Layer 3: Model -->
+          <rect
+            x="30"
+            y="250"
+            width="700"
+            height="80"
+            rx="8"
+            fill="rgba(56,189,248,0.08)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+            stroke-dasharray="6,3"
+          />
+          <text x="50" y="270" fill="#38bdf8" font-size="11" font-weight="600">3. 模型层（Model Layer）</text>
+          <rect
+            x="50"
+            y="280"
+            width="660"
+            height="30"
+            rx="4"
+            fill="rgba(56,189,248,0.1)"
+            stroke="#38bdf8"
+            stroke-width="1"
+          />
+          <text x="380" y="300" text-anchor="middle" fill="#e2e8f0" font-size="10">
+            智能模型网关：语义路由 · 负载均衡 · 成本控制 · 兜底降级
+          </text>
+          <!-- Layer 4: Infra -->
+          <rect
+            x="30"
+            y="350"
+            width="700"
+            height="50"
+            rx="8"
+            fill="rgba(251,191,36,0.08)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+            stroke-dasharray="6,3"
+          />
+          <text x="380" y="372" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">
+            4. 基础设施层（Infrastructure Layer）
+          </text>
+          <text x="380" y="390" text-anchor="middle" fill="#94a3b8" font-size="10">
+            向量数据库 | 对象存储 | 消息队列 | 日志/监控 | 外部 API
+          </text>
+          <!-- Arrows -->
+          <line x1="380" y1="60" x2="380" y2="78" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+          <line x1="380" y1="230" x2="380" y2="248" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+          <line x1="380" y1="330" x2="380" y2="348" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+        </svg>
+      </div>
+      <div class="callout callout-info">
+        <strong>通用模型 vs 本项目：</strong>上述四层是行业通用的 Agent
+        架构参考。本项目的实现聚焦在<strong>编排层</strong>（Pi / Qoder
+        SDK）和<strong>模型层</strong>（双运行时路由），通过 Pi Extension 机制把任务体系、工具、知识注入 Agent
+        运行时。后续章节会逐层展开。
+      </div>
+
+      <h3>四层架构详解</h3>
+      <div class="two-col">
+        <div class="card" style="border-color: #818cf8">
+          <h4><span class="icon">👤</span>Layer 1 — 用户交互层</h4>
+          <p>
+            用户通过<strong>多模态输入</strong>与 Agent
+            交互：文本指令、语音命令、文件上传、图像识别。该层负责将各种输入形态统一为 Agent 可处理的标准消息格式。
+          </p>
+          <p>
+            在本项目中，交互入口是 <strong>Electron 桌面应用</strong>，通过 IPC 桥接与 Agent 后端通信，Chat / Coding
+            双页面对话式驱动任务。
+          </p>
+          <span class="tag tag-blue">多模态输入</span><span class="tag tag-blue">Electron IPC</span
+          ><span class="tag tag-blue">消息标准化</span>
+        </div>
+        <div class="card" style="border-color: #34d399">
+          <h4><span class="icon">🎯</span>Layer 2 — 编排层</h4>
+          <p><strong>主 Agent</strong>（总调度官）负责三大职责：</p>
+          <p>
+            ① <strong>全局任务拆解</strong>（Plan & Decompose）— 将高层目标分解为可执行步骤<br />
+            ② <strong>子 Agent 路由与委派</strong>（Routing）— 将子任务分配给领域专家<br />
+            ③ <strong>多源结果融合与冲突仲裁</strong>（Fusion & Arbitration）
+          </p>
+          <p>每个<strong>子 Agent</strong>（代码专家 / 数据专家 / 搜索专家 / 文案专家…）拥有独立的：</p>
+          <p>
+            🧠 <strong>知识库</strong>（私有代码库 / 业务指标库…）· 🔌 <strong>MCP</strong>（Git/IDE / SQL/数仓…）· ⚙️
+            <strong>Skill</strong>（代码审查 / SQL 调优…）· 🔧 <strong>Tools</strong>（原子执行函数）
+          </p>
+          <span class="tag tag-green">主 Agent 总调度</span><span class="tag tag-green">子 Agent 专家化</span
+          ><span class="tag tag-green">A2A 委派</span>
+        </div>
+        <div class="card" style="border-color: #38bdf8">
+          <h4><span class="icon">🧠</span>Layer 3 — 模型层</h4>
+          <p><strong>智能模型网关</strong>（Model Gateway）提供四大路由策略：</p>
+          <p>
+            🔀 <strong>语义路由</strong>（意图识别，按任务类型选模型）<br />
+            ⚖️ <strong>负载均衡</strong>（分散请求压力）<br />
+            💰 <strong>成本控制</strong>（简单任务用小模型，复杂推理用强模型）<br />
+            🛡️ <strong>兜底降级</strong>（模型超时/报错自动切换备用）
+          </p>
+          <p>
+            支持接入：GPT-4o（最强推理）、Claude（长上下文）、Gemini（多模态）、DeepSeek（代码）、Qwen/Llama（本地部署）等。
+          </p>
+          <span class="tag tag-blue">语义路由</span><span class="tag tag-blue">成本感知</span
+          ><span class="tag tag-blue">故障降级</span>
+        </div>
+        <div class="card" style="border-color: #fbbf24">
+          <h4><span class="icon">🏗️</span>Layer 4 — 基础设施层</h4>
+          <p>为整个 Agent 系统提供<strong>持久化与运维支撑</strong>：</p>
+          <p>
+            📦 <strong>向量数据库</strong>（Milvus / Pinecone）— 知识库 Embedding 存储与检索<br />
+            🗄️ <strong>对象存储</strong>（S3 / OSS）— 文件与附件管理<br />
+            📨 <strong>消息队列</strong>（Kafka / RabbitMQ）— 异步任务解耦<br />
+            📊 <strong>日志 / 监控</strong>（Prometheus / Grafana）— 全链路可观测<br />
+            🔗 <strong>外部 API</strong> — 第三方服务集成
+          </p>
+          <span class="tag tag-orange">向量存储</span><span class="tag tag-orange">可观测性</span
+          ><span class="tag tag-orange">消息队列</span>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <h2>02 Agent 多层架构 <span class="badge badge-arch">Architecture</span></h2>
+
+      <p>本项目的 Agent 体系分为四层，从底层运行时到用户配置，层层解耦：</p>
+
+      <div class="diagram">
+        <svg viewBox="0 0 760 520" width="760" height="520">
+          <defs>
+            <marker id="arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L8,3 L0,6" fill="#94a3b8" />
+            </marker>
+            <marker id="arr2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L8,3 L0,6" fill="#818cf8" />
+            </marker>
+          </defs>
+
+          <!-- Layer 1: Runtime -->
+          <rect
+            x="30"
+            y="20"
+            width="700"
+            height="90"
+            rx="10"
+            fill="rgba(129,140,248,0.08)"
+            stroke="#818cf8"
+            stroke-width="1.5"
+            stroke-dasharray="6,3"
+          />
+          <text x="50" y="42" fill="#818cf8" font-size="11" font-weight="600">
+            Layer 1 — Agent Runtime（底层运行时）
+          </text>
+
+          <rect
+            x="60"
+            y="52"
+            width="200"
+            height="44"
+            rx="6"
+            fill="rgba(129,140,248,0.15)"
+            stroke="#818cf8"
+            stroke-width="1.5"
+          />
+          <text x="160" y="70" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            Pi Agent Runtime
+          </text>
+          <text x="160" y="84" text-anchor="middle" fill="#94a3b8" font-size="10">@earendil-works/pi-coding-agent</text>
+
+          <rect
+            x="290"
+            y="52"
+            width="200"
+            height="44"
+            rx="6"
+            fill="rgba(129,140,248,0.15)"
+            stroke="#818cf8"
+            stroke-width="1.5"
+          />
+          <text x="390" y="70" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">Qoder SDK</text>
+          <text x="390" y="84" text-anchor="middle" fill="#94a3b8" font-size="10">@qoder-ai/qoder-agent-sdk</text>
+
+          <rect
+            x="520"
+            y="52"
+            width="190"
+            height="44"
+            rx="6"
+            fill="rgba(129,140,248,0.15)"
+            stroke="#818cf8"
+            stroke-width="1.5"
+          />
+          <text x="615" y="70" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            OpenAI Compatible
+          </text>
+          <text x="615" y="84" text-anchor="middle" fill="#94a3b8" font-size="10">ai-sdk / openai-compatible</text>
+
+          <!-- Layer 2: Extension -->
+          <rect
+            x="30"
+            y="130"
+            width="700"
+            height="90"
+            rx="10"
+            fill="rgba(52,211,153,0.08)"
+            stroke="#34d399"
+            stroke-width="1.5"
+            stroke-dasharray="6,3"
+          />
+          <text x="50" y="152" fill="#34d399" font-size="11" font-weight="600">Layer 2 — Extension 层（能力封装）</text>
+
+          <rect
+            x="60"
+            y="162"
+            width="200"
+            height="44"
+            rx="6"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="160" y="180" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">pi-package</text>
+          <text x="160" y="194" text-anchor="middle" fill="#94a3b8" font-size="10">Pi Extension 接入层</text>
+
+          <rect
+            x="290"
+            y="162"
+            width="200"
+            height="44"
+            rx="6"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="390" y="180" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            Qoder Extension
+          </text>
+          <text x="390" y="194" text-anchor="middle" fill="#94a3b8" font-size="10">pi-extension/qoder/</text>
+
+          <rect
+            x="520"
+            y="162"
+            width="190"
+            height="44"
+            rx="6"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="615" y="180" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            Driver Registry
+          </text>
+          <text x="615" y="194" text-anchor="middle" fill="#94a3b8" font-size="10">ChatDriver / TaskAgentDriver</text>
+
+          <!-- Layer 3: Orchestration -->
+          <rect
+            x="30"
+            y="240"
+            width="700"
+            height="90"
+            rx="10"
+            fill="rgba(56,189,248,0.08)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+            stroke-dasharray="6,3"
+          />
+          <text x="50" y="262" fill="#38bdf8" font-size="11" font-weight="600">
+            Layer 3 — Orchestration 层（编排调度）
+          </text>
+
+          <rect
+            x="60"
+            y="272"
+            width="155"
+            height="44"
+            rx="6"
+            fill="rgba(56,189,248,0.15)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+          />
+          <text x="137" y="290" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            TaskLifecycle
+          </text>
+          <text x="137" y="304" text-anchor="middle" fill="#94a3b8" font-size="10">状态机驱动</text>
+
+          <rect
+            x="235"
+            y="272"
+            width="155"
+            height="44"
+            rx="6"
+            fill="rgba(56,189,248,0.15)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+          />
+          <text x="312" y="290" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            QoderOrchestrator
+          </text>
+          <text x="312" y="304" text-anchor="middle" fill="#94a3b8" font-size="10">Qoder 编排器</text>
+
+          <rect
+            x="410"
+            y="272"
+            width="155"
+            height="44"
+            rx="6"
+            fill="rgba(56,189,248,0.15)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+          />
+          <text x="487" y="290" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">ChatService</text>
+          <text x="487" y="304" text-anchor="middle" fill="#94a3b8" font-size="10">对话编排</text>
+
+          <rect
+            x="585"
+            y="272"
+            width="130"
+            height="44"
+            rx="6"
+            fill="rgba(56,189,248,0.15)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+          />
+          <text x="650" y="290" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">PiSession</text>
+          <text x="650" y="304" text-anchor="middle" fill="#94a3b8" font-size="10">会话管理</text>
+
+          <!-- Layer 4: User Config -->
+          <rect
+            x="30"
+            y="350"
+            width="700"
+            height="90"
+            rx="10"
+            fill="rgba(251,191,36,0.08)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+            stroke-dasharray="6,3"
+          />
+          <text x="50" y="372" fill="#fbbf24" font-size="11" font-weight="600">
+            Layer 4 — User Config 层（用户配置）
+          </text>
+
+          <rect
+            x="60"
+            y="382"
+            width="155"
+            height="44"
+            rx="6"
+            fill="rgba(251,191,36,0.15)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+          />
+          <text x="137" y="400" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">AgentProfile</text>
+          <text x="137" y="414" text-anchor="middle" fill="#94a3b8" font-size="10">领域角色定义</text>
+
+          <rect
+            x="235"
+            y="382"
+            width="155"
+            height="44"
+            rx="6"
+            fill="rgba(251,191,36,0.15)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+          />
+          <text x="312" y="400" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">AgentService</text>
+          <text x="312" y="414" text-anchor="middle" fill="#94a3b8" font-size="10">多 Agent 管理</text>
+
+          <rect
+            x="410"
+            y="382"
+            width="155"
+            height="44"
+            rx="6"
+            fill="rgba(251,191,36,0.15)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+          />
+          <text x="487" y="400" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            Agent Templates
+          </text>
+          <text x="487" y="414" text-anchor="middle" fill="#94a3b8" font-size="10">模板 + AI 生成</text>
+
+          <rect
+            x="585"
+            y="382"
+            width="130"
+            height="44"
+            rx="6"
+            fill="rgba(251,191,36,0.15)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+          />
+          <text x="650" y="400" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">Repo Binding</text>
+          <text x="650" y="414" text-anchor="middle" fill="#94a3b8" font-size="10">仓库单一归属</text>
+
+          <!-- Vertical arrows -->
+          <line x1="160" y1="96" x2="160" y2="162" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+          <line x1="390" y1="96" x2="390" y2="162" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+          <line x1="160" y1="206" x2="312" y2="272" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+          <line x1="390" y1="206" x2="312" y2="272" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+          <line x1="615" y1="206" x2="487" y2="272" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+          <line x1="312" y1="316" x2="312" y2="382" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+          <line x1="487" y1="316" x2="487" y2="382" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+
+          <!-- Bottom label -->
+          <rect
+            x="180"
+            y="460"
+            width="400"
+            height="40"
+            rx="6"
+            fill="rgba(192,132,252,0.1)"
+            stroke="#c084fc"
+            stroke-width="1"
+          />
+          <text x="380" y="478" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            用户 / 前端 UI
+          </text>
+          <text x="380" y="492" text-anchor="middle" fill="#94a3b8" font-size="10">
+            Agent 创建 / 编辑 / 选择 / 对话
+          </text>
+          <line x1="380" y1="440" x2="380" y2="458" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+        </svg>
+      </div>
+
+      <div class="callout callout-key">
+        <strong>核心设计原则：</strong>每层只通过接口（DI）与下层通信，不直接 import 上层实现。
+        这意味着你可以替换底层运行时（Pi → Qoder → OpenAI），上层编排逻辑完全不变。
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <h2>03 用户自定义 Agent <span class="badge badge-user">User Guide</span></h2>
+
+      <p>
+        用户可以创建自己的 Agent（<code>AgentProfile</code>），为不同仓库/项目定制 AI 的行为风格。 Agent
+        的核心配置包括：
+      </p>
+
+      <div class="two-col">
+        <div class="card">
+          <h4><span class="icon">📝</span>核心字段</h4>
+          <table>
+            <tbody>
+              <tr>
+                <td><code>name</code></td>
+                <td>Agent 名称（如 "Java 服务端"）</td>
+              </tr>
+              <tr>
+                <td><code>systemPrompt</code></td>
+                <td>系统提示词：角色定位 + 领域知识</td>
+              </tr>
+              <tr>
+                <td><code>engineeringGuidelines</code></td>
+                <td>工程约定：实现前/中需遵守的流程</td>
+              </tr>
+              <tr>
+                <td><code>repositoryIds</code></td>
+                <td>绑定的仓库列表（单一归属）</td>
+              </tr>
+              <tr>
+                <td><code>preferredProvider</code></td>
+                <td>首选模型提供商</td>
+              </tr>
+              <tr>
+                <td><code>preferredModel</code></td>
+                <td>首选模型</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="card">
+          <h4><span class="icon">🔗</span>仓库单一归属</h4>
+          <p>每个仓库只能绑定一个 Agent。保存时系统自动从其他 Agent 解绑同一仓库，避免冲突。</p>
+          <p>
+            任务执行时，<code>AgentService.resolveAgentContext()</code> 按任务关联仓库找到对应 Agent， 把 systemPrompt +
+            engineeringGuidelines + repowiki 注入到 Plan / Implementation / Test 全阶段。
+          </p>
+          <span class="tag tag-orange">自动注入</span><span class="tag tag-orange">全阶段生效</span>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <h2>04 A2A — Agent 间委派与协作 <span class="badge badge-a2a">Agent-to-Agent</span></h2>
+
+      <p>
+        A2A（Agent-to-Agent）是本项目的核心亮点之一。一个 Agent 在执行过程中可以<strong>委派子任务给另一个 Agent</strong
+        >， 形成父子嵌套的执行结构。这在 Qoder SDK 中通过 <strong>Subtask + Delegate Tool</strong> 机制实现。
+      </p>
+
+      <h3>4.1 A2A 委派模型</h3>
+
+      <div class="diagram">
+        <svg viewBox="0 0 760 480" width="760" height="480">
+          <defs>
+            <marker id="arr5" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L8,3 L0,6" fill="#c084fc" />
+            </marker>
+            <marker id="arr5b" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L8,3 L0,6" fill="#94a3b8" />
+            </marker>
+          </defs>
+
+          <!-- Title -->
+          <text x="380" y="24" text-anchor="middle" fill="#c084fc" font-size="13" font-weight="700">
+            A2A 委派时序：主 Agent → 子 Agent → 结果回传
+          </text>
+
+          <!-- Main Agent lifeline -->
+          <rect
+            x="80"
+            y="40"
+            width="140"
+            height="40"
+            rx="6"
+            fill="rgba(129,140,248,0.15)"
+            stroke="#818cf8"
+            stroke-width="2"
+          />
+          <text x="150" y="58" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">主 Agent</text>
+          <text x="150" y="72" text-anchor="middle" fill="#94a3b8" font-size="10">TaskAgentDriver</text>
+          <line x1="150" y1="80" x2="150" y2="440" stroke="#818cf8" stroke-width="1.5" stroke-dasharray="4,3" />
+
+          <!-- SDK Runtime -->
+          <rect
+            x="300"
+            y="40"
+            width="160"
+            height="40"
+            rx="6"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="2"
+          />
+          <text x="380" y="58" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">
+            Qoder SDK Runtime
+          </text>
+          <text x="380" y="72" text-anchor="middle" fill="#94a3b8" font-size="10">query() AsyncGenerator</text>
+          <line x1="380" y1="80" x2="380" y2="440" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4,3" />
+
+          <!-- Sub Agent -->
+          <rect
+            x="540"
+            y="40"
+            width="140"
+            height="40"
+            rx="6"
+            fill="rgba(192,132,252,0.15)"
+            stroke="#c084fc"
+            stroke-width="2"
+          />
+          <text x="610" y="58" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">子 Agent</text>
+          <text x="610" y="72" text-anchor="middle" fill="#94a3b8" font-size="10">内置 Plan 子代理</text>
+          <line x1="610" y1="80" x2="610" y2="440" stroke="#c084fc" stroke-width="1.5" stroke-dasharray="4,3" />
+
+          <!-- Step 1: Main sends prompt -->
+          <line x1="150" y1="110" x2="378" y2="110" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr5b)" />
+          <rect x="180" y="96" width="170" height="24" rx="4" fill="var(--surface)" />
+          <text x="265" y="112" text-anchor="middle" fill="#e2e8f0" font-size="10">① prompt（任务指令）</text>
+
+          <!-- Step 2: SDK processes, decides to delegate -->
+          <rect
+            x="310"
+            y="135"
+            width="140"
+            height="30"
+            rx="4"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="380" y="154" text-anchor="middle" fill="#34d399" font-size="10">LLM 决策：需要委派</text>
+
+          <!-- Step 3: Delegate tool call -->
+          <line x1="380" y1="170" x2="608" y2="170" stroke="#c084fc" stroke-width="1.5" marker-end="url(#arr5)" />
+          <rect x="400" y="156" width="190" height="24" rx="4" fill="var(--surface)" />
+          <text x="495" y="172" text-anchor="middle" fill="#c084fc" font-size="10">
+            ② Agent 工具调用（description）
+          </text>
+
+          <!-- Step 4: Sub Agent works -->
+          <rect
+            x="540"
+            y="195"
+            width="140"
+            height="50"
+            rx="4"
+            fill="rgba(192,132,252,0.1)"
+            stroke="#c084fc"
+            stroke-width="1"
+          />
+          <text x="610" y="214" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">
+            子 Agent 独立执行
+          </text>
+          <text x="610" y="228" text-anchor="middle" fill="#94a3b8" font-size="9">LLM → Tools → LLM → ...</text>
+          <text x="610" y="240" text-anchor="middle" fill="#94a3b8" font-size="9">拥有自己的上下文窗口</text>
+
+          <!-- Step 5: task_started event -->
+          <line
+            x1="610"
+            y1="250"
+            x2="382"
+            y2="270"
+            stroke="#c084fc"
+            stroke-width="1.5"
+            marker-end="url(#arr5)"
+            stroke-dasharray="4,2"
+          />
+          <rect x="400" y="256" width="190" height="24" rx="4" fill="var(--surface)" />
+          <text x="495" y="272" text-anchor="middle" fill="#c084fc" font-size="10">③ task_started 事件</text>
+
+          <!-- Step 6: task_progress events -->
+          <line
+            x1="610"
+            y1="290"
+            x2="382"
+            y2="310"
+            stroke="#c084fc"
+            stroke-width="1"
+            marker-end="url(#arr5)"
+            stroke-dasharray="4,2"
+          />
+          <rect x="400" y="296" width="190" height="24" rx="4" fill="var(--surface)" />
+          <text x="495" y="312" text-anchor="middle" fill="#94a3b8" font-size="10">④ task_progress（进度流）</text>
+
+          <!-- Step 7: task_notification (completion) -->
+          <line
+            x1="610"
+            y1="335"
+            x2="382"
+            y2="355"
+            stroke="#c084fc"
+            stroke-width="1.5"
+            marker-end="url(#arr5)"
+            stroke-dasharray="4,2"
+          />
+          <rect x="400" y="341" width="190" height="24" rx="4" fill="var(--surface)" />
+          <text x="495" y="357" text-anchor="middle" fill="#34d399" font-size="10">⑤ task_notification（完成）</text>
+
+          <!-- Step 8: Result back to main -->
+          <line x1="380" y1="380" x2="152" y2="400" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr5b)" />
+          <rect x="180" y="386" width="190" height="24" rx="4" fill="var(--surface)" />
+          <text x="275" y="402" text-anchor="middle" fill="#e2e8f0" font-size="10">⑥ 结果回传主 Agent 会话</text>
+
+          <!-- Step 9: Main continues -->
+          <rect
+            x="80"
+            y="415"
+            width="140"
+            height="30"
+            rx="4"
+            fill="rgba(129,140,248,0.15)"
+            stroke="#818cf8"
+            stroke-width="1"
+          />
+          <text x="150" y="434" text-anchor="middle" fill="#818cf8" font-size="10">⑦ 主 Agent 继续执行</text>
+        </svg>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <h2>05 企业级 Agent 技术实施方案 <span class="badge badge-impl">Implementation</span></h2>
+
+      <p>
+        前面讲的是方法论和业务视角，下面展开讲<strong>具体的技术实施方案</strong>。 假设企业已经决定构建统一的 Agent
+        基座，并让多个产品线在上面生长各自的 Agent， 从总体架构、核心模块、实施路线和关键难点四个层面展开。
+      </p>
+
+      <h3>5.1 总体技术架构（五层模型）</h3>
+      <p>整个系统分为五层，每层有明确的技术组件和职责边界：</p>
+
+      <div class="diagram">
+        <svg viewBox="0 0 760 500" width="760" height="500">
+          <!-- Layer 1: Access -->
+          <rect
+            x="30"
+            y="10"
+            width="700"
+            height="60"
+            rx="8"
+            fill="rgba(129,140,248,0.12)"
+            stroke="#818cf8"
+            stroke-width="2"
+          />
+          <text x="380" y="32" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="700">
+            接入层 — 多渠道统一入口
+          </text>
+          <text x="380" y="50" text-anchor="middle" fill="#94a3b8" font-size="10">
+            Web / App / 企业微信 / 钉钉 / 飞书 / OpenAPI · 消息标准化 · OAuth2/OIDC 认证
+          </text>
+
+          <line x1="380" y1="70" x2="380" y2="90" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+
+          <!-- Layer 2: Agent Runtime -->
+          <rect
+            x="30"
+            y="90"
+            width="700"
+            height="90"
+            rx="8"
+            fill="rgba(52,211,153,0.08)"
+            stroke="#34d399"
+            stroke-width="1.5"
+            stroke-dasharray="6,3"
+          />
+          <text x="50" y="110" fill="#34d399" font-size="11" font-weight="600">智能体编排层 — Agent Runtime</text>
+
+          <rect
+            x="50"
+            y="118"
+            width="130"
+            height="36"
+            rx="4"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="115" y="134" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">意图识别</text>
+          <text x="115" y="148" text-anchor="middle" fill="#94a3b8" font-size="8">小模型+规则</text>
+
+          <rect
+            x="195"
+            y="118"
+            width="130"
+            height="36"
+            rx="4"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="260" y="134" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">任务规划</text>
+          <text x="260" y="148" text-anchor="middle" fill="#94a3b8" font-size="8">ReAct / Plan-and-Execute</text>
+
+          <rect
+            x="340"
+            y="118"
+            width="130"
+            height="36"
+            rx="4"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="405" y="134" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">工具调用</text>
+          <text x="405" y="148" text-anchor="middle" fill="#94a3b8" font-size="8">Function Calling</text>
+
+          <rect
+            x="485"
+            y="118"
+            width="110"
+            height="36"
+            rx="4"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="540" y="134" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">人工确认</text>
+          <text x="540" y="148" text-anchor="middle" fill="#94a3b8" font-size="8">HITL 审批节点</text>
+
+          <rect
+            x="610"
+            y="118"
+            width="100"
+            height="36"
+            rx="4"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="660" y="134" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">多Agent协作</text>
+          <text x="660" y="148" text-anchor="middle" fill="#94a3b8" font-size="8">Supervisor</text>
+
+          <text x="380" y="172" text-anchor="middle" fill="#94a3b8" font-size="9">
+            编排框架：LangGraph / LlamaIndex Workflows · 状态管理：Redis · 部署：Kubernetes
+          </text>
+
+          <line x1="380" y1="180" x2="380" y2="200" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+
+          <!-- Layer 3: Tools & Knowledge -->
+          <rect
+            x="30"
+            y="200"
+            width="700"
+            height="80"
+            rx="8"
+            fill="rgba(56,189,248,0.08)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+            stroke-dasharray="6,3"
+          />
+          <text x="50" y="220" fill="#38bdf8" font-size="11" font-weight="600">工具与知识层 — 能力中台</text>
+
+          <rect
+            x="50"
+            y="230"
+            width="210"
+            height="36"
+            rx="4"
+            fill="rgba(56,189,248,0.12)"
+            stroke="#38bdf8"
+            stroke-width="1"
+          />
+          <text x="155" y="246" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">RAG 知识库</text>
+          <text x="155" y="260" text-anchor="middle" fill="#94a3b8" font-size="8">Qdrant/Milvus · BGE · 混合检索</text>
+
+          <rect
+            x="275"
+            y="230"
+            width="210"
+            height="36"
+            rx="4"
+            fill="rgba(56,189,248,0.12)"
+            stroke="#38bdf8"
+            stroke-width="1"
+          />
+          <text x="380" y="246" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">工具注册中心</text>
+          <text x="380" y="260" text-anchor="middle" fill="#94a3b8" font-size="8">
+            PostgreSQL 元数据 · Tool Gateway
+          </text>
+
+          <rect
+            x="500"
+            y="230"
+            width="210"
+            height="36"
+            rx="4"
+            fill="rgba(56,189,248,0.12)"
+            stroke="#38bdf8"
+            stroke-width="1"
+          />
+          <text x="605" y="246" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">
+            审批流 / 数据API
+          </text>
+          <text x="605" y="260" text-anchor="middle" fill="#94a3b8" font-size="8">权限隔离 · 多租户</text>
+
+          <line x1="380" y1="280" x2="380" y2="300" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+
+          <!-- Layer 4: Model -->
+          <rect
+            x="30"
+            y="300"
+            width="700"
+            height="60"
+            rx="8"
+            fill="rgba(251,191,36,0.08)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+            stroke-dasharray="6,3"
+          />
+          <text x="380" y="322" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="700">
+            模型层 — 模型网关
+          </text>
+          <text x="380" y="340" text-anchor="middle" fill="#94a3b8" font-size="10">
+            LiteLLM · GPT / Claude / 开源模型 / 私有化模型 · 语义路由 · 成本控制 · 故障转移
+          </text>
+
+          <line x1="380" y1="360" x2="380" y2="380" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)" />
+
+          <!-- Layer 5: Infra -->
+          <rect
+            x="30"
+            y="380"
+            width="700"
+            height="60"
+            rx="8"
+            fill="rgba(248,113,113,0.08)"
+            stroke="#f87171"
+            stroke-width="1.5"
+            stroke-dasharray="6,3"
+          />
+          <text x="380" y="402" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="700">
+            基础设施与治理层 — 安全、审计、评测
+          </text>
+          <text x="380" y="420" text-anchor="middle" fill="#94a3b8" font-size="10">
+            OAuth2/OIDC · RBAC · OpenTelemetry 审计 · Prometheus+Grafana 监控 · 回归测试
+          </text>
+
+          <!-- Side labels -->
+          <text x="748" y="40" text-anchor="end" fill="#818cf8" font-size="9" font-weight="600">L1</text>
+          <text x="748" y="130" text-anchor="end" fill="#34d399" font-size="9" font-weight="600">L2</text>
+          <text x="748" y="240" text-anchor="end" fill="#38bdf8" font-size="9" font-weight="600">L3</text>
+          <text x="748" y="330" text-anchor="end" fill="#fbbf24" font-size="9" font-weight="600">L4</text>
+          <text x="748" y="410" text-anchor="end" fill="#f87171" font-size="9" font-weight="600">L5</text>
+
+          <!-- Bottom note -->
+          <rect
+            x="180"
+            y="455"
+            width="400"
+            height="35"
+            rx="6"
+            fill="rgba(192,132,252,0.1)"
+            stroke="#c084fc"
+            stroke-width="1"
+          />
+          <text x="380" y="477" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">
+            核心原则：模块化 · 可插拔 · 强治理
+          </text>
+        </svg>
+      </div>
+
+      <h3>5.2 核心模块实现方案</h3>
+
+      <div class="two-col">
+        <div class="card" style="border-color: #818cf8">
+          <h4><span class="icon">🌐</span>接入层</h4>
+          <p><strong>目标</strong>：统一各渠道（Web/App/企微/钉钉/飞书/OpenAPI）的消息格式。</p>
+          <p>
+            🔹 所有渠道消息统一转为 <code>{session_id, user_id, product_line, message, metadata}</code><br />
+            🔹 中间件处理身份认证（OAuth2/OIDC）和租户识别<br />
+            🔹 推荐 <strong>FastAPI</strong>（Python）或 <strong>NestJS</strong>（Node.js）
+          </p>
+          <span class="tag tag-blue">消息标准化</span><span class="tag tag-blue">多租户</span
+          ><span class="tag tag-blue">OAuth2</span>
+        </div>
+        <div class="card" style="border-color: #34d399">
+          <h4><span class="icon">🎯</span>智能体编排层</h4>
+          <p><strong>目标</strong>：让 Agent 能"思考并行动"，是基座核心。</p>
+          <p>
+            🔹 编排：<strong>LangGraph</strong> / LlamaIndex Workflows（有状态多步执行）<br />
+            🔹 规划：ReAct 或 Plan-and-Execute 模式<br />
+            🔹 工具：Function Calling + JSON Schema<br />
+            🔹 安全：HITL 人工确认节点（高风险操作暂停审批）<br />
+            🔹 协作：Supervisor 模式，主 Agent 调度子 Agent
+          </p>
+          <span class="tag tag-green">LangGraph</span><span class="tag tag-green">ReAct</span
+          ><span class="tag tag-green">HITL</span>
+        </div>
+        <div class="card" style="border-color: #38bdf8">
+          <h4><span class="icon">📚</span>工具与知识层</h4>
+          <p><strong>RAG 知识库</strong>：</p>
+          <p>
+            🔹 解析：Unstructured / LlamaParse（PDF/Word/Excel/HTML）<br />
+            🔹 向量库：<strong>Qdrant</strong>（轻量）/ <strong>Milvus</strong>（生产级）<br />
+            🔹 检索：混合检索（向量 + BM25）+ bge-reranker 重排序<br />
+            🔹 多租户隔离 + 权限过滤 + 增量更新
+          </p>
+          <p><strong>工具注册中心</strong>：</p>
+          <p>
+            🔹 OpenAI Function Calling JSON Schema 描述工具<br />
+            🔹 PostgreSQL 存储工具元数据<br />
+            🔹 Tool Gateway 统一鉴权、限流、日志、权限传递<br />
+            🔹 高危操作标记 <code>requires_approval: true</code>
+          </p>
+          <span class="tag tag-blue">RAG</span><span class="tag tag-blue">Tool Gateway</span
+          ><span class="tag tag-blue">多租户隔离</span>
+        </div>
+        <div class="card" style="border-color: #fbbf24">
+          <h4><span class="icon">🧠</span>模型层（模型网关）</h4>
+          <p><strong>目标</strong>：统一管理多模型，路由、限流、成本控制、故障转移。</p>
+          <p>
+            🔹 网关：<strong>LiteLLM</strong> 或自研（FastAPI + Redis）<br />
+            🔹 部署：开源模型用 <strong>vLLM</strong> / TGI，提供 OpenAI 兼容 API<br />
+            🔹 路由：简单意图 → GPT-4o-mini，复杂推理 → GPT-4o / Claude<br />
+            🔹 所有 Agent 只调用 <code>/v1/chat/completions</code><br />
+            🔹 记录 token 用量 / 耗时 / 成本，支持按产品线的分摊
+          </p>
+          <span class="tag tag-orange">LiteLLM</span><span class="tag tag-orange">成本感知</span
+          ><span class="tag tag-orange">故障降级</span>
+        </div>
+      </div>
+
+      <div class="card" style="border-color: #f87171; margin-top: 16px">
+        <h4><span class="icon">🛡️</span>基础设施与治理层</h4>
+        <div class="two-col" style="margin-top: 8px">
+          <div>
+            <p><strong>权限与审计</strong>：</p>
+            <p>
+              🔹 身份认证：<strong>OAuth2/OIDC</strong>（Keycloak / Authing）+ 企业 SSO<br />
+              🔹 权限模型：RBAC + 数据范围（租户 / 产品线 / 用户组）<br />
+              🔹 审计日志：<strong>OpenTelemetry</strong> → Elasticsearch / ClickHouse<br />
+              🔹 每条日志含 <code>session_id, user_id, agent_id, tool_name, input, output, timestamp</code>，不可篡改
+            </p>
+          </div>
+          <div>
+            <p><strong>评测与迭代</strong>：</p>
+            <p>
+              🔹 测试集：LangSmith 或自建评测平台<br />
+              🔹 自动评测：意图识别准确率 / 工具调用成功率 / 任务完成率<br />
+              🔹 线上监控：Prometheus + Grafana（token / 延迟 / 错误率 / 人工接管率）<br />
+              🔹 每次模型或 prompt 变更必须通过回归测试
+            </p>
+          </div>
+        </div>
+        <span class="tag tag-purple">RBAC</span><span class="tag tag-purple">OpenTelemetry</span
+        ><span class="tag tag-purple">回归测试</span>
+      </div>
+
+      <h3>5.3 产品线 Agent 开发集成指南</h3>
+
+      <p>
+        基座建好之后，核心问题变成：<strong>产品线团队如何在基座上开发和集成自己的 Agent？</strong><br />
+        在"统一基座 + 多产品线"模式下，职责边界清晰：
+      </p>
+
+      <div class="two-col" style="margin-bottom: 16px">
+        <div class="card" style="border-color: #818cf8">
+          <h4><span class="icon">🏗️</span>基座平台团队</h4>
+          <p>维护 Agent Runtime、模型网关、MCP 基础设施、权限审计等底层能力</p>
+          <span class="tag tag-blue">Runtime</span><span class="tag tag-blue">MCP 基础设施</span
+          ><span class="tag tag-blue">治理</span>
+        </div>
+        <div class="card" style="border-color: #34d399">
+          <h4><span class="icon">🚀</span>产品线团队</h4>
+          <p>定义 Agent 行为（Prompt、知识库、MCP Server、Skill），无需关心底层编排和模型调度</p>
+          <span class="tag tag-green">Prompt</span><span class="tag tag-green">知识库</span
+          ><span class="tag tag-green">MCP Server</span><span class="tag tag-green">Skill</span>
+        </div>
+      </div>
+
+      <p>产品线团队的核心工作只有三件事：<strong>喂知识、接 MCP 工具、写 Prompt</strong>。完整流程如下：</p>
+
+      <div class="diagram">
+        <svg viewBox="0 0 760 200" width="760" height="200">
+          <defs>
+            <marker id="arr-flow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L8,3 L0,6" fill="#94a3b8" />
+            </marker>
+          </defs>
+
+          <!-- Step 1: Agent Profile -->
+          <rect
+            x="10"
+            y="20"
+            width="120"
+            height="70"
+            rx="8"
+            fill="rgba(129,140,248,0.15)"
+            stroke="#818cf8"
+            stroke-width="1.5"
+          />
+          <text x="70" y="42" text-anchor="middle" fill="#818cf8" font-size="20">📝</text>
+          <text x="70" y="60" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">
+            ① Agent Profile
+          </text>
+          <text x="70" y="76" text-anchor="middle" fill="#94a3b8" font-size="9">角色 · Prompt</text>
+          <text x="70" y="88" text-anchor="middle" fill="#94a3b8" font-size="9">模型偏好 · 权限</text>
+
+          <!-- Arrow 1→2 -->
+          <line x1="130" y1="55" x2="155" y2="55" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr-flow)" />
+
+          <!-- Step 2: Knowledge -->
+          <rect
+            x="160"
+            y="20"
+            width="120"
+            height="70"
+            rx="8"
+            fill="rgba(56,189,248,0.15)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+          />
+          <text x="220" y="42" text-anchor="middle" fill="#38bdf8" font-size="20">📚</text>
+          <text x="220" y="60" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">② 知识库</text>
+          <text x="220" y="76" text-anchor="middle" fill="#94a3b8" font-size="9">文档上传 · 切分</text>
+          <text x="220" y="88" text-anchor="middle" fill="#94a3b8" font-size="9">向量化 · 检索验证</text>
+
+          <!-- Arrow 2→3 -->
+          <line x1="280" y1="55" x2="305" y2="55" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr-flow)" />
+
+          <!-- Step 3: MCP + Skill -->
+          <rect
+            x="310"
+            y="20"
+            width="140"
+            height="70"
+            rx="8"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="380" y="42" text-anchor="middle" fill="#34d399" font-size="20">🔌</text>
+          <text x="380" y="60" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">③ MCP + Skill</text>
+          <text x="380" y="76" text-anchor="middle" fill="#94a3b8" font-size="9">领域 MCP Server</text>
+          <text x="380" y="88" text-anchor="middle" fill="#94a3b8" font-size="9">Skill 流程编排</text>
+
+          <!-- Arrow 3→4 -->
+          <line x1="450" y1="55" x2="475" y2="55" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr-flow)" />
+
+          <!-- Step 4: Channel -->
+          <rect
+            x="480"
+            y="20"
+            width="120"
+            height="70"
+            rx="8"
+            fill="rgba(251,191,36,0.15)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+          />
+          <text x="540" y="42" text-anchor="middle" fill="#fbbf24" font-size="20">🌐</text>
+          <text x="540" y="60" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">④ 渠道上线</text>
+          <text x="540" y="76" text-anchor="middle" fill="#94a3b8" font-size="9">Web · IM · API</text>
+          <text x="540" y="88" text-anchor="middle" fill="#94a3b8" font-size="9">App 内嵌</text>
+
+          <!-- Arrow 4→5 -->
+          <line x1="600" y1="55" x2="625" y2="55" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr-flow)" />
+
+          <!-- Step 5: Test -->
+          <rect
+            x="630"
+            y="20"
+            width="120"
+            height="70"
+            rx="8"
+            fill="rgba(192,132,252,0.15)"
+            stroke="#c084fc"
+            stroke-width="1.5"
+          />
+          <text x="690" y="42" text-anchor="middle" fill="#c084fc" font-size="20">✅</text>
+          <text x="690" y="60" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">⑤ 测试迭代</text>
+          <text x="690" y="76" text-anchor="middle" fill="#94a3b8" font-size="9">工具单测 · 检索测试</text>
+          <text x="690" y="88" text-anchor="middle" fill="#94a3b8" font-size="9">端到端 · 回归门禁</text>
+
+          <!-- Bottom: feedback loop -->
+          <path
+            d="M 690 90 L 690 130 L 70 130 L 70 95"
+            fill="none"
+            stroke="#94a3b8"
+            stroke-width="1"
+            stroke-dasharray="4,3"
+            marker-end="url(#arr-flow)"
+          />
+          <text x="380" y="148" text-anchor="middle" fill="#94a3b8" font-size="10">
+            持续反馈迭代：Bad Case → 知识库补充 / Prompt 调优 / Skill 优化
+          </text>
+
+          <!-- Bottom labels -->
+          <rect
+            x="10"
+            y="165"
+            width="240"
+            height="28"
+            rx="4"
+            fill="rgba(129,140,248,0.08)"
+            stroke="#818cf8"
+            stroke-width="1"
+          />
+          <text x="130" y="183" text-anchor="middle" fill="#818cf8" font-size="10" font-weight="600">
+            产品线核心：写 Prompt
+          </text>
+
+          <rect
+            x="260"
+            y="165"
+            width="240"
+            height="28"
+            rx="4"
+            fill="rgba(52,211,153,0.08)"
+            stroke="#34d399"
+            stroke-width="1"
+          />
+          <text x="380" y="183" text-anchor="middle" fill="#34d399" font-size="10" font-weight="600">
+            产品线核心：接 MCP 工具
+          </text>
+
+          <rect
+            x="510"
+            y="165"
+            width="240"
+            height="28"
+            rx="4"
+            fill="rgba(56,189,248,0.08)"
+            stroke="#38bdf8"
+            stroke-width="1"
+          />
+          <text x="630" y="183" text-anchor="middle" fill="#38bdf8" font-size="10" font-weight="600">
+            产品线核心：喂知识
+          </text>
+        </svg>
+      </div>
+
+      <!-- MCP 双层架构 -->
+      <h4 style="font-size: 16px; font-weight: 600; color: var(--accent-light); margin: 24px 0 12px">
+        <span class="icon">🔌</span>MCP 双层架构 — 业务能力基座
+      </h4>
+
+      <p>
+        产品线接入业务工具时，以 <strong>MCP（Model Context Protocol）</strong>作为业务能力的基本单元。 MCP
+        天然支持<strong>双层架构</strong>，解决"全量工具注入导致上下文爆炸"的问题：
+      </p>
+
+      <div class="diagram">
+        <svg viewBox="0 0 760 420" width="760" height="420">
+          <defs>
+            <marker id="arr-mcp" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L8,3 L0,6" fill="#34d399" />
+            </marker>
+            <marker id="arr-mcp2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L8,3 L0,6" fill="#818cf8" />
+            </marker>
+          </defs>
+
+          <!-- Title -->
+          <text x="380" y="22" text-anchor="middle" fill="#34d399" font-size="13" font-weight="700">
+            MCP 双层架构：领域层 → 工具层
+          </text>
+
+          <!-- Agent at top -->
+          <rect
+            x="260"
+            y="36"
+            width="240"
+            height="36"
+            rx="6"
+            fill="rgba(129,140,248,0.2)"
+            stroke="#818cf8"
+            stroke-width="2"
+          />
+          <text x="380" y="52" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="700">产品线 Agent</text>
+          <text x="380" y="66" text-anchor="middle" fill="#94a3b8" font-size="9">
+            只看到领域 MCP Server，不直接面对全量工具
+          </text>
+
+          <!-- Arrow down -->
+          <line x1="380" y1="72" x2="380" y2="96" stroke="#818cf8" stroke-width="1.5" marker-end="url(#arr-mcp2)" />
+          <text x="400" y="88" fill="#94a3b8" font-size="8">发现 &amp; 委派</text>
+
+          <!-- Layer 1: Domain MCP Servers -->
+          <rect
+            x="30"
+            y="96"
+            width="700"
+            height="100"
+            rx="8"
+            fill="rgba(52,211,153,0.06)"
+            stroke="#34d399"
+            stroke-width="1.5"
+            stroke-dasharray="6,3"
+          />
+          <text x="50" y="114" fill="#34d399" font-size="11" font-weight="600">
+            Layer 1 — 领域 MCP Server（Domain Level）
+          </text>
+          <text x="50" y="128" fill="#94a3b8" font-size="9">
+            每个领域聚合为一台 MCP Server，Agent 只与领域 Server 交互
+          </text>
+
+          <rect
+            x="50"
+            y="138"
+            width="155"
+            height="44"
+            rx="5"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="127" y="156" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">订单域 MCP</text>
+          <text x="127" y="172" text-anchor="middle" fill="#94a3b8" font-size="9">order-mcp-server</text>
+
+          <rect
+            x="220"
+            y="138"
+            width="155"
+            height="44"
+            rx="5"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="297" y="156" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">库存域 MCP</text>
+          <text x="297" y="172" text-anchor="middle" fill="#94a3b8" font-size="9">inventory-mcp-server</text>
+
+          <rect
+            x="390"
+            y="138"
+            width="155"
+            height="44"
+            rx="5"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="467" y="156" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">财务域 MCP</text>
+          <text x="467" y="172" text-anchor="middle" fill="#94a3b8" font-size="9">finance-mcp-server</text>
+
+          <rect
+            x="560"
+            y="138"
+            width="155"
+            height="44"
+            rx="5"
+            fill="rgba(52,211,153,0.15)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="637" y="156" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">用户域 MCP</text>
+          <text x="637" y="172" text-anchor="middle" fill="#94a3b8" font-size="9">user-mcp-server</text>
+
+          <!-- Arrows to Layer 2 -->
+          <line
+            x1="127"
+            y1="182"
+            x2="127"
+            y2="210"
+            stroke="#34d399"
+            stroke-width="1"
+            marker-end="url(#arr-mcp)"
+            stroke-dasharray="3,2"
+          />
+          <line
+            x1="297"
+            y1="182"
+            x2="297"
+            y2="210"
+            stroke="#34d399"
+            stroke-width="1"
+            marker-end="url(#arr-mcp)"
+            stroke-dasharray="3,2"
+          />
+          <line
+            x1="467"
+            y1="182"
+            x2="467"
+            y2="210"
+            stroke="#34d399"
+            stroke-width="1"
+            marker-end="url(#arr-mcp)"
+            stroke-dasharray="3,2"
+          />
+          <line
+            x1="637"
+            y1="182"
+            x2="637"
+            y2="210"
+            stroke="#34d399"
+            stroke-width="1"
+            marker-end="url(#arr-mcp)"
+            stroke-dasharray="3,2"
+          />
+
+          <!-- Layer 2: Tools within domain -->
+          <rect
+            x="30"
+            y="210"
+            width="700"
+            height="110"
+            rx="8"
+            fill="rgba(56,189,248,0.06)"
+            stroke="#38bdf8"
+            stroke-width="1.5"
+            stroke-dasharray="6,3"
+          />
+          <text x="50" y="228" fill="#38bdf8" font-size="11" font-weight="600">Layer 2 — 领域内工具（Tool Level）</text>
+          <text x="50" y="242" fill="#94a3b8" font-size="9">
+            每个领域 MCP Server 内部封装该领域的具体工具，按需暴露给 Agent
+          </text>
+
+          <!-- Order domain tools -->
+          <rect
+            x="50"
+            y="252"
+            width="155"
+            height="56"
+            rx="4"
+            fill="rgba(56,189,248,0.1)"
+            stroke="#38bdf8"
+            stroke-width="1"
+          />
+          <text x="127" y="268" text-anchor="middle" fill="#e2e8f0" font-size="9" font-weight="600">订单域工具集</text>
+          <text x="127" y="282" text-anchor="middle" fill="#94a3b8" font-size="8">query_order · track_logistics</text>
+          <text x="127" y="296" text-anchor="middle" fill="#94a3b8" font-size="8">cancel_order · refund_request</text>
+
+          <!-- Inventory domain tools -->
+          <rect
+            x="220"
+            y="252"
+            width="155"
+            height="56"
+            rx="4"
+            fill="rgba(56,189,248,0.1)"
+            stroke="#38bdf8"
+            stroke-width="1"
+          />
+          <text x="297" y="268" text-anchor="middle" fill="#e2e8f0" font-size="9" font-weight="600">库存域工具集</text>
+          <text x="297" y="282" text-anchor="middle" fill="#94a3b8" font-size="8">stock_check · stock_reserve</text>
+          <text x="297" y="296" text-anchor="middle" fill="#94a3b8" font-size="8">warehouse_query · transfer</text>
+
+          <!-- Finance domain tools -->
+          <rect
+            x="390"
+            y="252"
+            width="155"
+            height="56"
+            rx="4"
+            fill="rgba(56,189,248,0.1)"
+            stroke="#38bdf8"
+            stroke-width="1"
+          />
+          <text x="467" y="268" text-anchor="middle" fill="#e2e8f0" font-size="9" font-weight="600">财务域工具集</text>
+          <text x="467" y="282" text-anchor="middle" fill="#94a3b8" font-size="8">invoice_query · payment_status</text>
+          <text x="467" y="296" text-anchor="middle" fill="#94a3b8" font-size="8">refund_process · reconcile</text>
+
+          <!-- User domain tools -->
+          <rect
+            x="560"
+            y="252"
+            width="155"
+            height="56"
+            rx="4"
+            fill="rgba(56,189,248,0.1)"
+            stroke="#38bdf8"
+            stroke-width="1"
+          />
+          <text x="637" y="268" text-anchor="middle" fill="#e2e8f0" font-size="9" font-weight="600">用户域工具集</text>
+          <text x="637" y="282" text-anchor="middle" fill="#94a3b8" font-size="8">user_profile · membership</text>
+          <text x="637" y="296" text-anchor="middle" fill="#94a3b8" font-size="8">address_manage · auth_verify</text>
+
+          <!-- Bottom: Skill layer -->
+          <rect
+            x="140"
+            y="340"
+            width="480"
+            height="40"
+            rx="6"
+            fill="rgba(192,132,252,0.12)"
+            stroke="#c084fc"
+            stroke-width="1.5"
+          />
+          <text x="380" y="356" text-anchor="middle" fill="#c084fc" font-size="11" font-weight="700">
+            Skill — 关键节点补充（跨领域编排逻辑）
+          </text>
+          <text x="380" y="370" text-anchor="middle" fill="#94a3b8" font-size="9">
+            退换货流程 Skill · 大促风控 Skill · VIP 客户专属流程 Skill
+          </text>
+
+          <line x1="127" y1="308" x2="250" y2="340" stroke="#c084fc" stroke-width="1" stroke-dasharray="3,2" />
+          <line x1="380" y1="308" x2="380" y2="340" stroke="#c084fc" stroke-width="1" stroke-dasharray="3,2" />
+          <line x1="637" y1="308" x2="510" y2="340" stroke="#c084fc" stroke-width="1" stroke-dasharray="3,2" />
+
+          <!-- Right side annotation -->
+          <rect
+            x="540"
+            y="390"
+            width="200"
+            height="26"
+            rx="4"
+            fill="rgba(251,191,36,0.1)"
+            stroke="#fbbf24"
+            stroke-width="1"
+          />
+          <text x="640" y="407" text-anchor="middle" fill="#fbbf24" font-size="9" font-weight="600">
+            ✦ 避免全量工具注入上下文
+          </text>
+        </svg>
+      </div>
+
+      <div class="callout callout-info">
+        <strong>双层架构的核心价值：</strong><br />
+        <strong>Layer 1（领域 MCP Server）</strong>：每个业务领域聚合为一台 MCP Server，Agent 只看到领域级别的入口。
+        例如"订单域 MCP"对外只暴露"订单查询""物流追踪"等高层语义工具。<br />
+        <strong>Layer 2（领域内工具）</strong>：具体实现细节封装在领域 MCP Server 内部，由 Server
+        自行路由到正确的子工具。 Agent 无需感知底层有多少细粒度工具。<br />
+        <strong>效果</strong>：Agent 上下文窗口中只注入 4~8 个领域 MCP Server 的描述，而非 50+
+        个散碎工具，彻底解决全量工具注入导致的 token 浪费和选择困难。
+      </div>
+
+      <div class="two-col" style="margin-bottom: 16px">
+        <div class="card" style="border-color: #34d399">
+          <h4><span class="icon">🔌</span>MCP — 业务能力基座</h4>
+          <p>
+            产品线团队将自身系统的 API 封装为 <strong>MCP Server</strong>，遵循 MCP 协议标准。 每个领域一台
+            Server，内部封装该领域的全部工具能力：
+          </p>
+          <p>
+            🔹 按领域划分 MCP Server（订单域、库存域、财务域…）<br />
+            🔹 Server 内部定义 tools / resources / prompts<br />
+            🔹 高危工具标记 <code>requires_approval</code>，调用前自动走审批<br />
+            🔹 Tool Gateway 自动处理鉴权、限流、日志、租户上下文注入
+          </p>
+          <span class="tag tag-green">MCP 协议</span><span class="tag tag-green">领域聚合</span
+          ><span class="tag tag-green">按需暴露</span>
+        </div>
+        <div class="card" style="border-color: #c084fc">
+          <h4><span class="icon">⚡</span>Skill — 关键节点补充</h4>
+          <p>MCP 提供原子工具能力，而 <strong>Skill</strong> 补充<strong>跨领域编排和关键业务节点</strong>的逻辑：</p>
+          <p>
+            🔹 Skill = 预定义的多步骤业务流程（如"退换货全流程"）<br />
+            🔹 编排多个 MCP 工具的调用顺序和条件分支<br />
+            🔹 嵌入人工确认节点、合规校验、异常回退<br />
+            🔹 产品线团队用 YAML / DSL 定义，无需写 Agent 代码
+          </p>
+          <p style="font-size: 13px; color: var(--text-muted)">
+            <strong>关系</strong>：MCP 是"能力砖块"，Skill 是"流程蓝图"。Agent 优先调用 MCP 工具，遇到复杂流程时加载对应
+            Skill 获得编排指引。
+          </p>
+          <span class="tag tag-purple">跨领域编排</span><span class="tag tag-purple">关键节点</span
+          ><span class="tag tag-purple">流程蓝图</span>
+        </div>
+      </div>
+
+      <!-- 开发集成流程详解 -->
+      <h4 style="font-size: 16px; font-weight: 600; color: var(--accent-light); margin: 24px 0 12px">
+        开发集成流程详解
+      </h4>
+
+      <div class="two-col">
+        <div class="card" style="border-color: #818cf8">
+          <h4><span class="icon">📝</span>① 定义 Agent Profile</h4>
+          <p>每个产品线 Agent 是一份配置文件，描述身份、能力和行为边界：</p>
+          <p>
+            🔹 <code>system_prompt</code>：角色定位 + 领域知识 + 行为规则<br />
+            🔹 <code>model_preference</code>：模型偏好（网关实际路由决策）<br />
+            🔹 <code>permissions</code>：可调用哪些领域 MCP Server、数据范围边界<br />
+            🔹 <code>skills</code>：加载哪些 Skill 作为流程补充
+          </p>
+          <span class="tag tag-blue">Prompt 定义灵魂</span><span class="tag tag-blue">权限声明</span>
+        </div>
+        <div class="card" style="border-color: #38bdf8">
+          <h4><span class="icon">📚</span>② 接入知识库</h4>
+          <p>产品线将领域文档灌入 RAG 知识库，无需关心向量化细节：</p>
+          <p>
+            🔹 上传文档（PDF / Word / Markdown），指定 <code>product_line</code> 标签<br />
+            🔹 配置切分策略：通用文档按 token 切分，FAQ 按 QA 对切分<br />
+            🔹 混合检索（向量 + BM25）+ 重排序<br />
+            🔹 多租户隔离：每个产品线独立 collection，查询时强制过滤<br />
+            🔹 增量更新：文档变更自动重新切分、向量化、入库
+          </p>
+          <span class="tag tag-blue">RAG</span><span class="tag tag-blue">多租户隔离</span
+          ><span class="tag tag-blue">增量更新</span>
+        </div>
+      </div>
+
+      <div class="two-col" style="margin-top: 16px">
+        <div class="card" style="border-color: #34d399">
+          <h4><span class="icon">🌐</span>④ 接入渠道上线</h4>
+          <p>Agent 通过基座接入层统一对外服务，产品线只需选择渠道：</p>
+          <p>
+            🔹 <strong>Web</strong>：嵌入 JS SDK，传入 <code>agent_id</code><br />
+            🔹 <strong>企微/钉钉/飞书</strong>：基座已封装消息适配器，配置回调地址即可<br />
+            🔹 <strong>OpenAPI</strong>：<code>POST /v1/agents/{agent_id}/chat</code><br />
+            🔹 <strong>App 内嵌</strong>：WebView 或 Native SDK
+          </p>
+          <span class="tag tag-green">多渠道</span><span class="tag tag-green">统一消息格式</span>
+        </div>
+        <div class="card" style="border-color: #fbbf24">
+          <h4><span class="icon">✅</span>⑤ 测试验收 &amp; 迭代</h4>
+          <p>上线前完成三层测试：</p>
+          <p>
+            🔹 <strong>工具单测</strong>：MCP 工具输入/输出/异常覆盖<br />
+            🔹 <strong>知识检索测试</strong>：50~100 条黄金 QA 对，Top-3 命中率 ≥ 85%<br />
+            🔹 <strong>端到端测试</strong>：完整对话场景，意图准确率 ≥ 90%<br />
+            🔹 每次 Prompt / 模型变更必须通过回归测试
+          </p>
+          <span class="tag tag-orange">分层测试</span><span class="tag tag-orange">回归门禁</span>
+        </div>
+      </div>
+
+      <!-- 三种集成模式 -->
+      <h4 style="font-size: 16px; font-weight: 600; color: var(--accent-light); margin: 24px 0 12px">
+        三种典型集成模式
+      </h4>
+
+      <div class="three-col">
+        <div class="card" style="border-color: #818cf8">
+          <h4>A. 轻量接入</h4>
+          <p>产品线只提供知识库文档 + 几个 API，平台团队帮配 Prompt 和注册 MCP。</p>
+          <p><strong style="color: var(--accent-light)">适合：</strong>快速验证、内部工具、低频场景</p>
+          <span class="tag tag-blue">最低门槛</span>
+        </div>
+        <div class="card" style="border-color: #34d399">
+          <h4>B. 标准集成（推荐）</h4>
+          <p>产品线自主定义 Agent、注册 MCP Server、管理知识库、配置 Skill。</p>
+          <p><strong style="color: var(--success)">适合：</strong>大多数产品线的主力场景</p>
+          <span class="tag tag-green">自主可控</span>
+        </div>
+        <div class="card" style="border-color: #c084fc">
+          <h4>C. 深度定制</h4>
+          <p>在基座之上扩展自定义编排，通过 SDK Extension 机制注入自定义组件。</p>
+          <p><strong style="color: var(--purple)">适合：</strong>核心业务系统、高复杂度多步骤任务</p>
+          <span class="tag tag-purple">Extension 扩展</span>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <h2>06 总结 <span class="badge badge-concept">Summary</span></h2>
+
+      <div class="diagram">
+        <svg viewBox="0 0 700 360" width="700" height="360">
+          <!-- Central concept map -->
+          <rect
+            x="260"
+            y="10"
+            width="180"
+            height="50"
+            rx="8"
+            fill="rgba(129,140,248,0.2)"
+            stroke="#818cf8"
+            stroke-width="2"
+          />
+          <text x="350" y="32" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="700">Agent</text>
+          <text x="350" y="48" text-anchor="middle" fill="#94a3b8" font-size="10">感知 · 决策 · 执行</text>
+
+          <!-- Four branches -->
+          <line x1="280" y1="60" x2="100" y2="110" stroke="#818cf8" stroke-width="1.5" />
+          <line x1="350" y1="60" x2="350" y2="110" stroke="#34d399" stroke-width="1.5" />
+          <line x1="420" y1="60" x2="600" y2="110" stroke="#fbbf24" stroke-width="1.5" />
+
+          <!-- Branch 1: Architecture -->
+          <rect
+            x="20"
+            y="110"
+            width="160"
+            height="40"
+            rx="6"
+            fill="rgba(129,140,248,0.12)"
+            stroke="#818cf8"
+            stroke-width="1.5"
+          />
+          <text x="100" y="134" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">多层架构</text>
+
+          <line x1="60" y1="150" x2="40" y2="180" stroke="#818cf8" stroke-width="1" />
+          <line x1="100" y1="150" x2="100" y2="180" stroke="#818cf8" stroke-width="1" />
+          <line x1="140" y1="150" x2="160" y2="180" stroke="#818cf8" stroke-width="1" />
+          <text x="40" y="196" text-anchor="middle" fill="#94a3b8" font-size="10">Runtime</text>
+          <text x="100" y="196" text-anchor="middle" fill="#94a3b8" font-size="10">Extension</text>
+          <text x="160" y="196" text-anchor="middle" fill="#94a3b8" font-size="10">Orchestration</text>
+
+          <!-- Branch 2: Generic 4-Layer Model -->
+          <rect
+            x="260"
+            y="110"
+            width="180"
+            height="40"
+            rx="6"
+            fill="rgba(52,211,153,0.12)"
+            stroke="#34d399"
+            stroke-width="1.5"
+          />
+          <text x="350" y="134" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">通用四层模型</text>
+
+          <line x1="300" y1="150" x2="280" y2="180" stroke="#34d399" stroke-width="1" />
+          <line x1="350" y1="150" x2="350" y2="180" stroke="#34d399" stroke-width="1" />
+          <line x1="400" y1="150" x2="420" y2="180" stroke="#34d399" stroke-width="1" />
+          <text x="280" y="196" text-anchor="middle" fill="#94a3b8" font-size="10">用户交互层</text>
+          <text x="350" y="196" text-anchor="middle" fill="#94a3b8" font-size="10">编排层</text>
+          <text x="420" y="196" text-anchor="middle" fill="#94a3b8" font-size="10">模型层+基础设施</text>
+
+          <!-- Branch 3: User Agent -->
+          <rect
+            x="520"
+            y="110"
+            width="160"
+            height="40"
+            rx="6"
+            fill="rgba(251,191,36,0.12)"
+            stroke="#fbbf24"
+            stroke-width="1.5"
+          />
+          <text x="600" y="134" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">用户自定义</text>
+
+          <line x1="560" y1="150" x2="540" y2="180" stroke="#fbbf24" stroke-width="1" />
+          <line x1="600" y1="150" x2="600" y2="180" stroke="#fbbf24" stroke-width="1" />
+          <line x1="640" y1="150" x2="660" y2="180" stroke="#fbbf24" stroke-width="1" />
+          <text x="540" y="196" text-anchor="middle" fill="#94a3b8" font-size="10">Templates</text>
+          <text x="600" y="196" text-anchor="middle" fill="#94a3b8" font-size="10">AI 生成</text>
+          <text x="660" y="196" text-anchor="middle" fill="#94a3b8" font-size="10">Repo 绑定</text>
+
+          <!-- A2A section -->
+          <rect
+            x="180"
+            y="230"
+            width="340"
+            height="50"
+            rx="8"
+            fill="rgba(192,132,252,0.15)"
+            stroke="#c084fc"
+            stroke-width="2"
+          />
+          <text x="350" y="252" text-anchor="middle" fill="#c084fc" font-size="14" font-weight="700">
+            A2A — Agent 间委派
+          </text>
+          <text x="350" y="268" text-anchor="middle" fill="#94a3b8" font-size="10">
+            Subtask + Delegate Tool + Span Ownership
+          </text>
+
+          <line x1="100" y1="210" x2="250" y2="230" stroke="#c084fc" stroke-width="1" />
+          <line x1="350" y1="210" x2="350" y2="230" stroke="#c084fc" stroke-width="1" />
+          <line x1="600" y1="210" x2="450" y2="230" stroke="#c084fc" stroke-width="1" />
+
+          <!-- Bottom: routing -->
+          <rect
+            x="140"
+            y="310"
+            width="420"
+            height="40"
+            rx="6"
+            fill="rgba(56,189,248,0.1)"
+            stroke="#38bdf8"
+            stroke-width="1"
+          />
+          <text x="350" y="328" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600">双运行时路由</text>
+          <text x="350" y="342" text-anchor="middle" fill="#94a3b8" font-size="10">
+            Qoder（主）↔ Pi / OpenAI（备选）· 模块化 · 可插拔 · 强治理
+          </text>
+
+          <line x1="350" y1="280" x2="350" y2="308" stroke="#38bdf8" stroke-width="1.5" />
+        </svg>
+      </div>
+
+      <div class="callout callout-key">
+        <strong>核心要点回顾：</strong>
+        <ol style="padding-left: 20px; margin-top: 8px">
+          <li><strong>Agent 两层含义</strong>：运行时实体（Session + Tools）+ 配置态角色（AgentProfile）</li>
+          <li>
+            <strong>通用四层模型</strong>：用户交互层 → 编排层（主 Agent + 子 Agent 专家集群）→ 模型层（智能网关路由）→
+            基础设施层
+          </li>
+          <li><strong>四层解耦架构</strong>：Runtime → Extension → Orchestration → User Config，每层通过 DI 通信</li>
+          <li><strong>用户自定义 Agent</strong>：空白创建 / 模板创建 / AI 生成，绑定仓库后全阶段自动注入指引</li>
+          <li>
+            <strong>A2A 委派</strong>：主 Agent 通过 SDK Agent 工具 spawn 子 Agent，形成 subtask.run → delegate tool →
+            子 Agent 内部 span 的嵌套结构
+          </li>
+          <li>
+            <strong>双运行时路由</strong>：Qoder（全功能主路径）+ Pi/OpenAI（灵活备选），resolveRuntime()
+            自动决策，模型失效保护
+          </li>
+          <li>
+            <strong>企业级五层实施架构</strong>：接入层 → 编排层（LangGraph）→ 工具与知识层（RAG + Tool Gateway）→
+            模型层（LiteLLM）→ 基础设施与治理层（审计 + 评测）
+          </li>
+          <li>
+            <strong>MCP 双层架构 + Skill 补充</strong>：领域 MCP Server（Layer 1）聚合工具，领域内工具（Layer
+            2）按需暴露，避免全量注入；Skill 补充跨领域编排关键节点
+          </li>
+        </ol>
+      </div>
+    </div>
+  </body>
+</html>

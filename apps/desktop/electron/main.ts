@@ -21,7 +21,7 @@ import {
   type TaskEventSink,
   type SettingResolver
 } from '@task-pipeline/core'
-import { redactSecrets, testAtlassianConnectionRest } from '@task-pipeline/integrations'
+import { redactSecrets } from '@task-pipeline/integrations'
 import { CodegraphManager } from '@task-pipeline/codegraph'
 import { QoderOrchestrator, QoderTraceBuilder } from './pi-extension/qoder/index.js'
 import { initAutoUpdater } from './auto-updater.js'
@@ -45,6 +45,7 @@ import { AGENT_TEMPLATES } from './agents/templates.js'
 import { buildAgentGenerationPrompt, parseAgentGenerationResult } from './agents/agent-generator.js'
 // ── 提取模块 ─────────────────────────────────────────────────────────────────
 import { resolveQodercliPath } from './init/qodercli-path.js'
+import { resolveCodegraphCliRuntime } from './init/codegraph-runtime.js'
 import { resolveDataDir, writeCustomDataDir, createAppStores } from './init/data-dir.js'
 import { createReviewDeliveryPipeline } from './services/review-delivery.js'
 import { createChatSystem } from './chat/chat-init.js'
@@ -96,6 +97,8 @@ import {
   reviseTaskPlan,
   retryTaskValidation,
   sendTaskMessage,
+  sendTaskIntake,
+  resolveDraftSuggestion,
   cancelTask,
   deleteTask,
   taskChangedFiles,
@@ -227,7 +230,12 @@ try {
   console.warn('[memory] startup retention failed:', error)
 }
 const pathRegistry = new PathRegistry(store.db)
-const codegraphManager = new CodegraphManager({ dataDir })
+// codegraph CLI 走随应用分发的自带资源 + Electron 作为 Node 运行时，不依赖宿主 PATH
+const codegraphCli = resolveCodegraphCliRuntime()
+const codegraphManager = new CodegraphManager({
+  dataDir,
+  ...(codegraphCli ? { cli: codegraphCli } : {})
+})
 const agentService = new AgentService(
   (key) => store.getSetting(key),
   (key, value) => store.setSetting(key, value),
@@ -302,8 +310,6 @@ const { chatService, chatAttachmentCache } = createChatSystem({
   desktopResolver,
   addTaskEvent,
   getQoderStatusForHealth: () => qoderOrch.getStatusForHealth(),
-  atlassianRestConfig: (kind: string) => atlassianFactory.restConfig(kind as 'jira' | 'confluence'),
-  testAtlassianRest: testAtlassianConnectionRest,
   codegraphManager
 })
 
@@ -353,7 +359,6 @@ qoderOrch = new QoderOrchestrator({
     return { sections }
   },
   resolveMemoryContext: taskMemoryContext,
-  getHitlMode: (contextType, contextId) => getHitlModeForContext(contextType, contextId, store),
   getActiveTaskId: () => getActiveTaskId(),
   setActiveTaskId: (id) => setActiveTaskId(id),
   finishImplementation,
@@ -410,7 +415,6 @@ initTaskRunner({
   openAIApiKeyFor,
   stripOpenAIModelPrefix,
   resolveLiteModel,
-  updateState,
   submitMergeRequestsWithCredentialWatch: submitMergeRequestsWithCredWatch,
   taskChangedFiles,
   runReviewWithAutoFix,
@@ -447,6 +451,8 @@ registerIpc({
   reviseTaskPlan,
   retryTaskValidation,
   sendTaskMessage,
+  sendTaskIntake,
+  resolveDraftSuggestion,
   cancelTask,
   deleteTask,
   stopTaskOperations: stopTaskOperations as never,
@@ -471,7 +477,7 @@ registerIpc({
   agentService,
   tracePipeline,
   traceService,
-  getHitlModeForContext: (contextType, contextId) => getHitlModeForContext(contextType, contextId, store),
+  getHitlModeForContext: (contextType, contextId) => getHitlModeForContext(contextType, contextId),
   setGlobalHitlMode,
   setConversationHitlMode,
   loadMcpServers,

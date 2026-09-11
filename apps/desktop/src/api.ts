@@ -11,8 +11,8 @@ import type {
   RepoWikiSearchHit,
   Task,
   TaskCard,
+  TaskDraftFieldKey,
   TaskRepository,
-  TaskStartMode,
   TraceDashboardStats,
   TraceSummary
 } from '@task-pipeline/core'
@@ -36,6 +36,11 @@ export type TaskDetail = {
   running?: boolean
   repositories: TaskRepository[]
   events: AgentEvent[]
+  /**
+   * `events` 表的原始记录（上面的 `events` 是从 trace span 合成的）。
+   * 只给 `draft` 阶段用：那时还没跑过任何阶段，没有 trace，问答与建议全在这张表里。
+   */
+  draftEvents?: AgentEvent[]
   /** Pi/OpenAI 独立表（openai_events）的事件，与 events 表分开存储、分开渲染。 */
   openAiEvents: AgentEvent[]
   approvals: Approval[]
@@ -95,23 +100,34 @@ export type MergeStatusSummary = {
   taskCompleted: boolean
 }
 export type CreateTaskInput = Pick<Task, 'title' | 'description'> &
-  Partial<
-    Pick<
-      Task,
-      | 'keywords'
-      | 'acceptanceCriteria'
-      | 'openCodeReviewEnabled'
-      | 'autoCreateMergeRequests'
-      | 'createTestCasesEnabled'
-      | 'agentProfileId'
-      | 'repoAgentIds'
-    >
+  Partial<Pick<Task, 'keywords' | 'acceptanceCriteria' | 'mrAutoSubmit' | 'agentProfileId' | 'repoAgentIds'>>
+/**
+ * 可编辑的任务字段：创建面板这组 + 详情头部的逐任务模型覆盖。
+ *
+ * 不含 `state` / `planContent` 等工作流字段（它们各有专用 IPC），
+ * 也不含已随固定链路下线的旧开关。
+ */
+export type UpdateTaskInput = Partial<
+  Pick<
+    Task,
+    | 'title'
+    | 'description'
+    | 'keywords'
+    | 'acceptanceCriteria'
+    | 'mrAutoSubmit'
+    | 'agentProfileId'
+    | 'repoAgentIds'
+    | 'qoderModel'
   >
+>
 export type RepositoryCommands = Partial<
   Pick<TaskRepository, 'setupCommand' | 'lintCommand' | 'testCommand' | 'buildCommand'>
 >
+/**
+ * 启动入参。原 `mode: TaskStartMode` 已删：固定链路下 `begin()` 恒进 `planning`，
+ * 「直接开始 / 先生成计划」不再是用户可选的分叉。
+ */
 export type StartTaskOptions = {
-  mode: TaskStartMode
   repositoryCommands?: Record<string, RepositoryCommands>
   useAllRepositories?: boolean
   repoAgentIds?: Record<string, string>
@@ -614,7 +630,8 @@ export type AgentApi = {
   listTasks(): Promise<TaskCard[]>
   getTask(id: string): Promise<TaskDetail>
   createTask(input: CreateTaskInput): Promise<Task>
-  updateTask(id: string, patch: Partial<Task>): Promise<Task>
+  /** patch 只允许 `UpdateTaskInput` 里的用户可编辑字段，避免把已下线的旧开关写回去。 */
+  updateTask(id: string, patch: UpdateTaskInput): Promise<Task>
   deleteTask(id: string, mode?: TaskRemovalMode): Promise<void>
   listRepositories(): Promise<RepositoryProfile[]>
   saveRepository(profile: RepositoryProfile): Promise<void>
@@ -649,6 +666,18 @@ export type AgentApi = {
   reviseTaskPlan(taskId: string, feedback: string): Promise<void>
   retryTaskValidation(taskId: string): Promise<void>
   sendTaskMessage(taskId: string, message: string): Promise<void>
+  /** `draft` 阶段的澄清对话：只写任务定义，不改任务状态（§2.4）。 */
+  sendTaskIntake(taskId: string, message: string): Promise<void>
+  /**
+   * 采纳 / 丢弃一条澄清建议。只传事件 id：建议体由主进程从库里读并再过一次白名单，
+   * 否则 renderer 可以自己拼字段写库。`keys` 是采纳时勾选的字段名（不传 = 全采纳）。
+   */
+  resolveDraftSuggestion(
+    taskId: string,
+    eventId: string,
+    action: 'apply' | 'discard',
+    keys?: TaskDraftFieldKey[]
+  ): Promise<void>
   abortTask(): Promise<void>
   cancelTask(taskId: string): Promise<void>
   runReview(taskId: string): Promise<void>
@@ -807,7 +836,6 @@ const demoTasks: TaskCard[] = [
     keywords: ['payment', 'concurrency'],
     acceptanceCriteria: ['并发请求只核销一次'],
     state: 'awaiting_plan_approval',
-    startMode: 'plan',
     planRevision: 2,
     planContent:
       '## 目标\n\n为优惠券核销流程增加幂等保护，保证相同业务请求在并发情况下只执行一次。\n\n## 实施步骤\n\n1. 梳理结算服务到优惠券服务的调用链，确认业务幂等键的生成位置和传递方式。\n2. 在核销入口增加原子占位与结果复用逻辑，区分处理中、成功和失败三种状态。\n3. 将重复请求统一返回首次核销结果，避免重复写入订单优惠明细。\n4. 为超时与异常场景补充状态清理策略，确保可重试错误不会永久占用幂等键。\n5. 增加并发单元测试、集成测试和回归用例，覆盖成功、冲突、超时及重试。\n\n## 验证\n\n- 并发发起 20 次相同核销请求，只产生一条核销记录。\n- 不同订单或不同优惠券的请求互不阻塞。\n- 执行支付服务完整测试与构建。',
@@ -876,16 +904,14 @@ const demoTasks: TaskCard[] = [
     id: 'demo-5',
     taskKey: 'INFRA-22',
     source: 'jira',
-    title: '示例：跳过 Review 的任务',
-    description: '演示任务级 openCodeReviewEnabled=false：实现完成后直接进入 awaiting_commit。',
+    title: '示例：Review 通过后自动提 MR',
+    description: '演示任务级 mrAutoSubmit=auto：Review 通过后直接提交 Merge Request。',
     keywords: ['infra', 'demo'],
     acceptanceCriteria: [],
     state: 'await_merge',
-    reviewStatus: 'waived',
-    commitMessage: 'chore: skip review for INFRA-22',
-    openCodeReviewEnabled: false,
-    autoCreateMergeRequests: true,
-    createTestCasesEnabled: false,
+    reviewStatus: 'passed',
+    commitMessage: 'chore: automate MR submission for INFRA-22',
+    mrAutoSubmit: 'auto',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     boardColumn: 'in_review',
@@ -1204,6 +1230,8 @@ export const api: AgentApi = window.agentApi ?? {
   async reviseTaskPlan() {},
   async retryTaskValidation() {},
   async sendTaskMessage() {},
+  async sendTaskIntake() {},
+  async resolveDraftSuggestion() {},
   async abortTask() {},
   async cancelTask() {},
   async runReview() {},

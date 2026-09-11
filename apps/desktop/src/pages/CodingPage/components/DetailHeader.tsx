@@ -102,20 +102,25 @@ export function DetailHeader({
 
   return (
     <div className="relative shrink-0 overflow-hidden border-b bg-linear-to-b from-card/70 via-card/40 to-card/30">
-      {/* 顶部工具条：来源 + 启动模式 + 操作按钮 */}
+      {/* 顶部工具条：来源 + MR 提交档 + 操作按钮 */}
       <div className="flex items-center justify-between gap-2 border-b border-border/40 px-3.5 py-1.5">
         <div className="flex min-w-0 items-center gap-1.5">
           <SourceBadge source={task.source} taskKey={task.taskKey} sourceUrl={task.sourceUrl} />
-          {task.startMode === 'direct' && (
-            <span className="rounded border border-border/70 bg-foreground/3 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-              直接执行
-            </span>
-          )}
-          {task.startMode === 'plan' && (
-            <span className="rounded border border-border/70 bg-foreground/3 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-              计划模式
-            </span>
-          )}
+          {/* MR 提交档徽章。只报任务自己有没有显式选择，不猜系统默认值（那需要再读一次设置）。 */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="rounded border border-border/70 bg-foreground/3 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                {task.mrAutoSubmit === 'auto' && 'Review 后自动提 MR'}
+                {task.mrAutoSubmit === 'manual' && 'Review 后手动提 MR'}
+                {task.mrAutoSubmit === undefined && 'MR 档跟随系统'}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              {task.mrAutoSubmit
+                ? '本任务单独设置，可在开始任务对话框里改'
+                : '未为本任务单独设置，实际行为取系统默认的 MR 提交档'}
+            </TooltipContent>
+          </Tooltip>
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
           {hasRepositories && (

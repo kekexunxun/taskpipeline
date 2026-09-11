@@ -531,7 +531,9 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
           codegraph: {
             type: 'stdio' as const,
             command: codegraphConfig.command,
-            args: codegraphConfig.args
+            args: codegraphConfig.args,
+            // 自带 codegraph CLI 时需要 ELECTRON_RUN_AS_NODE 等环境变量
+            ...(codegraphConfig.env ? { env: codegraphConfig.env } : {})
           }
         }
       : undefined

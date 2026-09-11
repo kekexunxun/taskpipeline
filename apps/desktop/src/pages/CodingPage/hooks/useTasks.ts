@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { TASK_TOOL_NAMES, parseTaskToolMeta } from '@task-pipeline/core/dist/trace/task-tool-meta.js'
-import type { AgentEvent, Task, TaskCard } from '@task-pipeline/core/dist/types.js'
+import type { AgentEvent, Task, TaskCard, TaskDraftFieldKey } from '@task-pipeline/core/dist/types.js'
 import { api, type DriverPart, type TaskDetail } from '../../../api'
 import { useFeedback } from '../../../hooks/useGlobalFeedback'
 import { isPlanningEvent } from '../components/planningEvent'
@@ -376,6 +376,10 @@ export type CodingPageState = {
   refresh(): Promise<void>
   loadDetail(id: string): Promise<void>
   send(): Promise<void>
+  /** `draft` 澄清对话的发送口；`message` 缺省时取输入框当前内容。 */
+  sendIntake(message?: string): Promise<void>
+  /** 采纳（`keys` = 勾选的字段）/ 丢弃一条澄清建议。 */
+  resolveSuggestion(eventId: string, action: 'apply' | 'discard', keys?: TaskDraftFieldKey[]): Promise<void>
   run(action: () => Promise<unknown>): Promise<void>
   /** 推送一个 HITL 确认请求（按 taskId 归属，缺省挂当前选中任务）。 */
   pushApproval(taskId: string | undefined, request: ChatApprovalRequest): void
@@ -424,7 +428,7 @@ export function useTasks(): CodingPageState {
         }
       } else if (
         next.task?.state === 'completed' &&
-        next.task.startMode === 'plan' &&
+        // 固定链路下恒先生成计划，旧的 `startMode === 'plan'` 判据已删（只会漏掉老任务的提示）。
         next.task.summary === '代码已满足任务要求，无需修改'
       ) {
         const key = `${next.task.id}:completed`
@@ -622,6 +626,37 @@ export function useTasks(): CodingPageState {
     }
   }, [prompt, run, selectedId, tasks])
 
+  /**
+   * `draft` 的澄清发送口（§2.4）。与 `send()` 分成两个函数而不是给 `send()` 加个开关：
+   * 主进程那边本就是两条不能混的入口（澄清不推状态、不共用会话），这里合成一个只是把同一句判据复写到两处。
+   */
+  const sendIntake = useCallback(
+    async (message?: string) => {
+      const selected = tasks.find((t) => t.id === selectedId)
+      const text = (message ?? prompt).trim()
+      if (!selected || !text) return
+      // 只清自己发出去的那句：缺项提示条带的是现成文案，不该顺手抹掉用户正在输入框里打的草稿。
+      if (message === undefined) setPrompt('')
+      setSending(true)
+      try {
+        // 这条 IPC 挂到整轮澄清跑完才回（主进程不推流式），所以 `sending` 就是「Agent 在想」。
+        // 不做乐观插入：用户那句在主进程是同一条语句里先落库再开跑的，`run` 紧接着重拉详情就能看到。
+        await run(() => api.sendTaskIntake(selected.id, text))
+      } finally {
+        setSending(false)
+      }
+    },
+    [prompt, run, selectedId, tasks]
+  )
+
+  const resolveSuggestion = useCallback(
+    async (eventId: string, action: 'apply' | 'discard', keys?: TaskDraftFieldKey[]) => {
+      if (!selectedId) return
+      await run(() => api.resolveDraftSuggestion(selectedId, eventId, action, keys))
+    },
+    [run, selectedId]
+  )
+
   return {
     tasks,
     selectedId,
@@ -641,6 +676,8 @@ export function useTasks(): CodingPageState {
     refresh,
     loadDetail,
     send,
+    sendIntake,
+    resolveSuggestion,
     run,
     pushApproval,
     respondApproval

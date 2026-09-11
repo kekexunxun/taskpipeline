@@ -5,8 +5,8 @@
  *  - Qoder / OpenAI Review 调用（callQoderReviewer, callQoderOrOpenAIReviewer, …）
  *  - OpenAI 兼容 prompt 调用（callOpenAIForPrompt）
  *  - AI Agent 生成（callQoderForAgentGeneration, loadRepoContext）
- *  - 自动修订配置（reviewAutoFixEnabled, collectReviewComments, buildReviewFixPrompt）
- *  - 校验后推进（advanceAfterValidation）
+ *  - 自动修订配置（reviewAutoFixEnabled, reviewBlockingLevel, collectReviewComments, buildReviewFixPrompt）
+ *  - 校验后推进（advanceAfterValidation：Review 必经，提交 MR 与否看 mrAutoSubmit）
  *  - 测试覆盖检测（runTestCoverageCheck）
  *
  * Pi 依赖的编排函数（runQoder / runReviewWithAutoFix / finishImplementation / runQoderPlan …）
@@ -17,6 +17,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AgentSpan, AgentSpanUsage, Task, TaskState, TaskStore, AgentEvent } from '@task-pipeline/core'
+import { blockingSeveritiesFor } from '@task-pipeline/core'
 import type { OpenAICompatReviewer, TaskWorkflow } from '@task-pipeline/integrations'
 import { stripQoderModelPrefix, QoderTraceBuilder } from '../pi-extension/qoder/index.js'
 import type { QoderOrchestrator } from '../pi-extension/qoder/index.js'
@@ -51,7 +52,6 @@ interface TaskRunnerDeps {
   openAIApiKeyFor: (profile: { baseUrl?: string; model?: string; vendor?: string }) => string | undefined
   stripOpenAIModelPrefix: (model: string | undefined) => string | undefined
   resolveLiteModel: (driverId: ChatDriverId) => Promise<string>
-  updateState: (task: Task, state: TaskState) => Task
   submitMergeRequestsWithCredentialWatch: (taskId: string, signal?: AbortSignal) => Promise<void>
   taskChangedFiles: (
     taskId: string,
@@ -337,12 +337,25 @@ function reviewAutoFixMaxRounds(): number {
   return Number.isFinite(raw) && raw >= 1 ? Math.min(Math.floor(raw), 10) : 2
 }
 
+/**
+ * 系统设置：哪些 severity 算「阻断问题」。
+ *
+ * 这是 Review 阻断级别的**唯一读取点**：`review-delivery.ts` 把它传给 `ReviewOrchestrator`
+ * （决定 Review 是否落 `review_blocked`），本文件又用它筛自动修订的意见。两处必须同源，
+ * 否则会出现「按 high 判定阻断、却只拿 critical 去修」的空转。
+ */
+function reviewBlockingLevel(): 'critical' | 'high' | 'medium' {
+  const raw = deps.store.getSetting('reviewBlockingLevel')
+  return raw === 'critical' || raw === 'medium' ? raw : 'high'
+}
+
 /** 从最近的 review 事件里收集意见（含阻断级别），用于自动修订 prompt。 */
 function collectReviewComments(
   taskId: string,
   blockingOnly: boolean
 ): Array<{ severity?: string; path?: string; line?: number; message?: string }> {
   const events = deps.store.listEvents(taskId)
+  const blocking = new Set(blockingSeveritiesFor(reviewBlockingLevel()))
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i]!
     if (event.kind !== 'review') continue
@@ -351,10 +364,8 @@ function collectReviewComments(
       | undefined
     const comments = payload?.comments ?? []
     if (!blockingOnly) return comments
-    const blocking = comments.filter((comment) =>
-      ['critical', 'high', 'error'].includes(String(comment.severity ?? '').toLowerCase())
-    )
-    if (blocking.length) return blocking
+    const hit = comments.filter((comment) => blocking.has(String(comment.severity ?? '').toLowerCase()))
+    if (hit.length) return hit
   }
   return []
 }
@@ -380,27 +391,22 @@ function buildReviewFixPrompt(
 }
 
 /**
- * 校验后推进：Review 开启则跑 review，否则直接跳到 awaiting_commit；
- * 若任务级/系统级开关打开则自动创建 MR。
+ * 校验后推进：Review 是必经阶段，恒定执行（不再有「关闭 Review」的跳过分支）；
+ * Review 通过落到 `awaiting_commit` 后，是否顺手提交 MR 由任务的 `mrAutoSubmit` 档决定。
  */
 async function advanceAfterValidation(taskId: string, state: TaskState, signal?: AbortSignal): Promise<void> {
   if (state !== 'awaiting_review') return
   signal?.throwIfAborted()
-  const task = deps.store.getTask(taskId)
-  // 任务级覆盖优先于系统级设置。
-  if (deps.taskWorkflow.isReviewEnabledFor(task)) {
-    // runReviewWithAutoFix 保留在 main.ts（依赖 piSession / startPi 共享状态），
-    // 通过 deps 回调注入，避免循环引用。
-    await deps.runReviewWithAutoFix(taskId, signal)
-  } else {
-    deps.store.updateTask(taskId, { reviewStatus: 'waived' })
-    deps.updateState(deps.store.getTask(taskId)!, 'awaiting_commit')
-    deps.addTaskEvent({ taskId, kind: 'status', title: '已跳过 Review,等待提交 MR' })
-  }
+  // runReviewWithAutoFix 通过 deps 回调注入（它依赖 piSession / startPi 等共享状态，留在 lifecycle 侧），
+  // 避免循环引用。
+  await deps.runReviewWithAutoFix(taskId, signal)
   const updated = deps.store.getTask(taskId)
-  if (updated?.state === 'awaiting_commit' && deps.taskWorkflow.shouldAutoCreateMergeRequestsFor(updated)) {
+  if (updated?.state !== 'awaiting_commit') return
+  if (deps.taskWorkflow.mrMode(updated) === 'auto') {
     await deps.submitMergeRequestsWithCredentialWatch(taskId, signal)
+    return
   }
+  deps.addTaskEvent({ taskId, kind: 'status', title: 'Review 已通过,等待手动提交 MR' })
 }
 
 // ── 测试覆盖检测 ─────────────────────────────────────────────────────────────
@@ -517,6 +523,7 @@ export {
   savePlanDecision,
   reviewAutoFixEnabled,
   reviewAutoFixMaxRounds,
+  reviewBlockingLevel,
   collectReviewComments,
   buildReviewFixPrompt,
   advanceAfterValidation,

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Shield, ShieldAlert, Zap } from 'lucide-react'
+import { Shield, ShieldAlert, ShieldCheck, Zap } from 'lucide-react'
 import { api } from '@/api'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -57,7 +57,7 @@ export function HitlModeSwitcher({
   const [internalMode, setInternalMode] = useState<HitlMode>('ask')
 
   useEffect(() => {
-    if (isControlled) return
+    if (isControlled || contextType === 'task') return
     api
       .getHitlMode(contextType, contextId)
       .then(setInternalMode)
@@ -65,6 +65,29 @@ export function HitlModeSwitcher({
   }, [contextType, contextId, isControlled])
 
   const mode = isControlled ? controlledValue : internalMode
+
+  // 任务执行期不再有「询问 / 自动 / YOLO」三态（§4.2）：旧实现里 `ask` 与 `auto` 对任务是同一个行为，
+  // 而真正的拦断已经下沉到 core 的 L1（越界写 / 破坏性命令 / 敏感路径），提交动作则由任务的 MR 档决定。
+  // 所以这里只作只读说明——一个切不动的三态控件比没有控件更容易让人误解。
+  if (contextType === 'task') {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className={cn('inline-flex items-center gap-1 px-1 text-[11px] text-muted-foreground', className)}>
+            <ShieldCheck className="size-2.5" />
+            任务执行仅拦「越界写 / 破坏性命令」，提交动作看任务的 MR 档
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" sideOffset={6} className="max-w-56">
+          <p className="font-medium">固定链路的执行期权限</p>
+          <p className="mt-0.5 text-[11px] opacity-70">
+            越出本任务工作区的写入与破坏性命令始终拦下；其余工具调用自动执行；commit / push / 建 MR 是否自动由任务的
+            「Review 通过后」提交档决定。
+          </p>
+        </TooltipContent>
+      </Tooltip>
+    )
+  }
 
   const handleChange = async (newMode: string) => {
     if (newMode === mode) return

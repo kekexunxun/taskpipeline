@@ -28,6 +28,9 @@ contextBridge.exposeInMainWorld('agentApi', {
   reviseTaskPlan: (taskId: string, feedback: string) => ipcRenderer.invoke('tasks:revise-plan', taskId, feedback),
   retryTaskValidation: (taskId: string) => ipcRenderer.invoke('tasks:retry-validation', taskId),
   sendTaskMessage: (taskId: string, message: string) => ipcRenderer.invoke('tasks:message', taskId, message),
+  sendTaskIntake: (taskId: string, message: string) => ipcRenderer.invoke('tasks:intake-message', taskId, message),
+  resolveDraftSuggestion: (taskId: string, eventId: string, action: 'apply' | 'discard', keys?: string[]) =>
+    ipcRenderer.invoke('tasks:resolve-draft-suggestion', taskId, eventId, action, keys),
   abortTask: () => ipcRenderer.invoke('tasks:abort'),
   cancelTask: (taskId: string) => ipcRenderer.invoke('tasks:cancel', taskId),
   runReview: (taskId: string) => ipcRenderer.invoke('tasks:review', taskId),

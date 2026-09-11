@@ -21,9 +21,10 @@ import {
   type UsageInfo
 } from '@qoder-ai/qoder-agent-sdk'
 import type { Task, TaskState, TaskStore, AgentEvent } from '@task-pipeline/core'
+import { evaluateExecutionPermission, taskRoots } from '@task-pipeline/core'
 import type { TaskWorkflow, OpenAICompatReviewer } from '@task-pipeline/integrations'
 import type { McpServerConfig as CodegraphMcpConfig } from '@task-pipeline/codegraph'
-import { isDangerousTool, describeToolAction } from '../../agents/task-agent/dangerous-tools.js'
+import { describeToolAction } from '../../agents/task-agent/dangerous-tools.js'
 import { parseTestCaseGeneration } from '../../agents/task-agent/parsers/test-case-parser.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
 import type { AgentService } from '../../agents/agent-service.js'
@@ -96,9 +97,6 @@ export interface QoderOrchestratorDeps {
   resolveModel: QoderTaskAgentDeps['resolveModel']
   resolveTestContext: QoderTaskAgentDeps['resolveTestContext']
   resolveMemoryContext: QoderTaskAgentDeps['resolveMemoryContext']
-
-  // HITL
-  getHitlMode: (contextType: 'conversation' | 'task', contextId?: string) => string
 
   // 共享状态读写（activeTaskId 由 main.ts 拥有，orchestrator 需读写）
   getActiveTaskId: () => string | undefined
@@ -244,27 +242,22 @@ export class QoderOrchestrator {
           }
           return { type: 'deny' as const, message: '用户取消了问答，请选择其他方式继续任务' }
         }
-        const hitlMode = this.deps.getHitlMode('task', taskId)
-        if (hitlMode === 'yolo') return 'allow'
-        if (!isDangerousTool(toolName, toolInput)) return 'allow'
+        // 执行期不再按 HITL 档位弹框：一律走与 Pi 路径同源的 L1 判定，
+        // 命中即直接 deny 并把原因回给模型（模型会换界内做法），不请用户裁决。
+        const repos = this.deps.store.listTaskRepositories(taskId)
+        const decision = evaluateExecutionPermission(toolName, toolInput, {
+          roots: taskRoots(repos),
+          cwd: repos[0]?.worktreePath ?? repos[0]?.localPath ?? process.cwd()
+        })
+        if (decision.action === 'allow') return 'allow'
         const detail = describeToolAction(toolName, toolInput)
-        const task = store.getTask(taskId)
-        const approval = store.addApproval({ taskId, kind: 'permission', context: detail })
-        addTaskEvent({ taskId, kind: 'permission', title: `请求执行破坏性操作:${toolName}`, detail })
-        const ok =
-          (await this.deps.requestUi<boolean>(
-            'confirm',
-            {
-              title: `允许执行 ${toolName}?`,
-              message: `${task?.title ?? ''}\n\n${detail}`,
-              taskId,
-              toolName,
-              toolInput: typeof toolInput === 'object' && toolInput !== null ? toolInput : {}
-            },
-            { signal }
-          )) ?? false
-        store.resolveApproval(approval.id, ok ? 'approved' : 'rejected')
-        return ok ? 'allow' : 'deny'
+        addTaskEvent({
+          taskId,
+          kind: 'permission',
+          title: `已拦截:${toolName}`,
+          detail: `${decision.reason ?? '超出本任务执行边界'}\n${detail}`
+        })
+        return { type: 'deny' as const, message: `${decision.reason ?? '操作超出本任务边界'}（${detail}）` }
       }
     })
   }

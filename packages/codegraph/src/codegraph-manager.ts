@@ -2,7 +2,7 @@
  * CodegraphManager — 代码图谱索引生命周期管理。
  *
  * 职责：
- * - 为每个目录管理索引（集中存储在 dataDir/codegraph/<hash>/graph.db）
+ * - 为每个目录管理索引（集中存储在 dataDir/codegraph/<hash>/.codegraph/graph.db）
  * - 触发首次构建 / 增量更新
  * - 维护索引状态（idle/indexing/error/not_indexed）
  * - 生成 MCP Server 配置供 Agent 注入
@@ -14,11 +14,17 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, copyFileSync, rmSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { existsSync, mkdirSync, copyFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { buildMcpArgs, runBuild, runStats, runWatch } from './codegraph-cli.js'
 import { loadMeta, loadAllMeta, saveMeta } from './codegraph-meta.js'
-import type { BuildResult, CodegraphManagerOptions, McpServerConfig, RepoIndexMeta } from './types.js'
+import type {
+  BuildResult,
+  CodegraphCliRuntime,
+  CodegraphManagerOptions,
+  McpServerConfig,
+  RepoIndexMeta
+} from './types.js'
 
 /** 最大并行构建数 */
 const MAX_CONCURRENT_BUILDS = 2
@@ -49,10 +55,13 @@ export class CodegraphManager {
   private readonly buildQueue: QueuedBuild[] = []
 
   private readonly indexRoot: string
+  /** CLI 子进程运行时（自带资源），未配置时 codegraph-cli 回落 npx */
+  private readonly cli?: CodegraphCliRuntime
 
   constructor(options: CodegraphManagerOptions) {
     this.engine = options.engine ?? 'wasm'
     this.indexRoot = join(options.dataDir, 'codegraph')
+    this.cli = options.cli
   }
 
   // ─── 路径计算 ─────────────────────────────────────────────────────────────
@@ -87,6 +96,9 @@ export class CodegraphManager {
     for (const [repoId, meta] of allMeta) {
       const key = normalizePath(meta.localPath)
       this.metaCache.set(key, meta)
+
+      // 旧版布局把 graph.db 直接放在 <hash>/ 下，先迁移再校验
+      this.migrateLegacyDbLayout(meta.localPath)
 
       const dbPath = this.dirDbPath(meta.localPath)
       if (meta.status === 'idle' && existsSync(dbPath)) {
@@ -180,6 +192,9 @@ export class CodegraphManager {
 
     const dbPath = this.dirDbPath(localPath)
     const existingMeta = this.metaCache.get(key)
+
+    // 旧版布局遗留的 <hash>/graph.db 先迁移，避免无意义的全量重建
+    this.migrateLegacyDbLayout(localPath)
 
     // 如果已索引且 graph.db 存在，跳过
     if (existingMeta?.status === 'idle' && existsSync(dbPath)) {
@@ -387,7 +402,7 @@ export class CodegraphManager {
     if (meta.status === 'idle' && meta.fileCount === 0 && meta.nodeCount === 0 && meta.edgeCount === 0) {
       const dbPath = this.dirDbPath(localPath)
       if (existsSync(dbPath)) {
-        const stats = await runStats(dbPath, { engine: this.engine })
+        const stats = await runStats(dbPath, { engine: this.engine, cli: this.cli })
         if (stats && (stats.fileCount > 0 || stats.nodeCount > 0 || stats.edgeCount > 0)) {
           // 更新缓存
           this.setMeta(meta.repositoryId, localPath, {
@@ -431,13 +446,14 @@ export class CodegraphManager {
     if (!hasIndex) return null
 
     const dbPath = this.dirDbPath(localPath)
-    const { command, args } = buildMcpArgs(dbPath, this.engine)
+    const { command, args, env } = buildMcpArgs(dbPath, this.engine, this.cli)
     console.log('[codegraph] MCP config:', { dbPath, command, args })
 
     return {
       type: 'stdio',
       command,
-      args
+      args,
+      ...(env ? { env } : {})
     }
   }
 
@@ -446,8 +462,8 @@ export class CodegraphManager {
   /**
    * 为指定目录启动 watch 进程。
    *
-   * watch 命令不支持 -d 参数，所有输出固定写入 <cwd>/.codegraph/。
-   * 将 cwd 设为集中存储的 per-repo 目录（dirIndexDir），使输出写入集中存储。
+   * 用 -d 显式指向集中存储的 graph.db：不传时 watch 会去推导
+   * <repo>/.codegraph/graph.db，而那个目录已被 moveToCentral 清掉。
    * 启动前清理项目目录下可能残留的 .codegraph/（历史遗留）。
    */
   private startWatch(key: string, localPath: string): void {
@@ -457,7 +473,7 @@ export class CodegraphManager {
     this.cleanLocalCodegraphDir(localPath)
 
     const indexDir = this.dirIndexDir(localPath)
-    const { stop } = runWatch(localPath, indexDir, { engine: this.engine })
+    const { stop } = runWatch(localPath, indexDir, dbPath, { engine: this.engine, cli: this.cli })
     this.activeWatches.set(key, stop)
     console.info('[codegraph] watch started for:', localPath)
   }
@@ -476,11 +492,11 @@ export class CodegraphManager {
   }
 
   /**
-   * 清理 watch 命令在监听目录下产生的 .codegraph/ 残留。
+   * 清理监听目录下可能残留的 .codegraph/。
    *
-   * codegraph CLI 的 watch 模式会在 <localPath>/.codegraph/ 下写入
-   * change-events.ndjson、changes.journal 等文件（不受 -d 参数控制），
-   * 需要在启动前 / 停止后主动清理，避免污染项目目录。
+   * 早期版本未传 -d，watch 会在 <localPath>/.codegraph/ 下写
+   * change-events.ndjson、changes.journal 等文件；现在已改为 -d 直指集中存储，
+   * 这里作为旧残留 / 异常退出的兼顾处理。
    */
   private cleanLocalCodegraphDir(localPath: string): void {
     const localCgDir = join(localPath, '.codegraph')
@@ -501,11 +517,63 @@ export class CodegraphManager {
     const localDb = join(localCgDir, 'graph.db')
     if (!existsSync(localDb)) return
     const centralDb = this.dirDbPath(localPath)
-    const centralDir = this.dirIndexDir(localPath)
+    const centralDir = dirname(centralDb)
+    // 目标在 <hash>/.codegraph/ 下，必须先建出这一层：否则 copyFileSync 抛 ENOENT，
+    // 构建明明成功也会被记为 error，且本地 .codegraph 不会被清理
     mkdirSync(centralDir, { recursive: true })
-    copyFileSync(localDb, centralDb)
+
+    // 本地产物的完整集合：未 checkpoint 的内容可能在 -wal 里，只拿 graph.db 会拿到残库
+    const localFiles = readdirSync(localCgDir).filter((name) => /^graph\.db(-.+)?$/.test(name))
+
+    // 先清除目标里上一代库的残留 sidecar。SQLite 会把同名 -wal 当作本库的
+    // 未 checkpoint 事务回放，新 db + 旧 wal = database disk image is malformed
+    for (const name of readdirSync(centralDir)) {
+      if (/^graph\.db(-.+)?$/.test(name)) rmSync(join(centralDir, name), { force: true })
+    }
+    for (const name of localFiles) {
+      copyFileSync(join(localCgDir, name), join(centralDir, name))
+    }
     // 清理项目本地的 .codegraph 目录
     rmSync(localCgDir, { recursive: true, force: true })
+  }
+
+  /**
+   * 迁移旧版集中存储布局。
+   *
+   * 早期版本把 graph.db 直接放在 dataDir/codegraph/<hash>/ 下，现行布局（与
+   * watch 命令的输出一致）是 <hash>/.codegraph/graph.db。未迁移时
+   * existsSync(dirDbPath) 恒为 false，会导致每次启动全量重建、stats 恒为 0、
+   * watch 永不启动。
+   */
+  private migrateLegacyDbLayout(localPath: string): void {
+    const centralDb = this.dirDbPath(localPath)
+    if (existsSync(centralDb)) return
+
+    const legacyDir = this.dirIndexDir(localPath)
+    if (!existsSync(join(legacyDir, 'graph.db'))) return
+
+    const targetDir = dirname(centralDb)
+    mkdirSync(targetDir, { recursive: true })
+
+    // 连同 -wal / -shm 一并搬走（它们属于同一个库，缺了会丢未 checkpoint 的事务）；
+    // graph.db.lock 是运行期文件，不该跟到新版布局，直接丢弃
+    const files = readdirSync(legacyDir).filter((name) => /^graph\.db(-.+)?$/.test(name))
+    rmSync(join(legacyDir, 'graph.db.lock'), { force: true })
+    if (!files.includes('changes.journal') && existsSync(join(legacyDir, 'changes.journal'))) {
+      files.push('changes.journal')
+    }
+    for (const name of files) {
+      const from = join(legacyDir, name)
+      const to = join(targetDir, name)
+      try {
+        renameSync(from, to)
+      } catch {
+        // 跳设备或权限问题时退回复制
+        copyFileSync(from, to)
+        rmSync(from, { force: true })
+      }
+    }
+    console.info('[codegraph] 迁移旧版索引布局:', legacyDir, '→', targetDir, `(${files.length} 个文件)`)
   }
 
   /**
@@ -564,7 +632,8 @@ export class CodegraphManager {
   ): Promise<BuildResult> {
     const result = await runBuild(localPath, {
       engine: this.engine,
-      incremental
+      incremental,
+      cli: this.cli
     })
     console.log('[codegraph] build result:', result)
 
@@ -572,7 +641,7 @@ export class CodegraphManager {
     this.moveToCentral(localCgDir, localPath)
 
     // build 命令不返回统计，构建完成后通过 stats 命令获取实际数据
-    const stats = await runStats(dbPath, { engine: this.engine })
+    const stats = await runStats(dbPath, { engine: this.engine, cli: this.cli })
     console.log('[codegraph] stats result:', stats, 'dbPath:', dbPath)
     if (stats) {
       return { ...result, ...stats }

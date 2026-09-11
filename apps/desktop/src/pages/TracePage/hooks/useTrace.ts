@@ -51,9 +51,10 @@ export function useTrace() {
     mounted.current = true
     void reload()
     const timer = setInterval(() => void reload(), 5 * 60 * 1000)
-    const unsubscribe = api.onTaskEvent?.((event: { type?: string }) => {
+    const unsubscribe = api.onTaskEvent?.((event: unknown) => {
       // 新 span / 任务状态变更 → 重拉列表与统计
-      if (event?.type === 'trace_span' || event?.type === 'agent_end' || event?.type === 'agent_error') void reload()
+      const type = (event as { type?: string } | undefined)?.type
+      if (type === 'trace_span' || type === 'agent_end' || type === 'agent_error') void reload()
     })
     return () => {
       mounted.current = false

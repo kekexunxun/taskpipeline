@@ -19,6 +19,40 @@ type TraceEvent = {
   createdAt: string
 }
 
+/** `repo_agent_ids` 以 JSON 对象存盘：空对象与 undefined 一律写 NULL，避免历史行里混入 `{}`。 */
+function serializeRepoAgentIds(value: Task['repoAgentIds']): string | null {
+  if (!value || Object.keys(value).length === 0) return null
+  return JSON.stringify(value)
+}
+
+/** 读回时兜住坏数据：非对象 / 空对象 / 解析失败都按「未设置」处理，不让整行 getTask 抛错。 */
+function parseRepoAgentIds(value: unknown): Task['repoAgentIds'] {
+  if (!value) return undefined
+  try {
+    const parsed: unknown = JSON.parse(String(value))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    const entries = Object.entries(parsed as Record<string, unknown>).filter(
+      (entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1] !== ''
+    )
+    return entries.length > 0 ? Object.fromEntries(entries) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** `mr_auto_submit` 只认 `auto` / `manual`；历史脏值一律按「未设置」处理，交给 `resolveMrMode` 回退。 */
+function parseMrAutoSubmit(value: unknown): Task['mrAutoSubmit'] {
+  return value === 'auto' || value === 'manual' ? value : undefined
+}
+
+/**
+ * 旧 `auto_create_merge_requests` → `mr_auto_submit` 回填只跑一次的完成标记。
+ *
+ * 旧列停止写入后会永久留在行里，没有这个标记时，它会在每次打开时把
+ * `mr_auto_submit IS NULL`（= 用户选的「跟随系统默认」）重新填成固化值，刚点的「恢复跟随」就静默失效了。
+ */
+const LEGACY_MR_MODE_BACKFILLED = 'legacyMrAutoSubmitBackfilled'
+
 export class TaskStore {
   readonly db: Database.Database
 
@@ -86,6 +120,9 @@ export class TaskStore {
     } catch {
       /* Existing databases may already contain the column. */
     }
+    // 固定链路下已停止读写的旧开关列（`start_mode` / `open_code_review_enabled` /
+    // `auto_create_merge_requests` / `create_test_cases_enabled` / `hitl_mode`）仍然保留：
+    // 删列需要一整套表重建迁移，而留下它们对读写没有任何影响。
     for (const statement of [
       'ALTER TABLE tasks ADD COLUMN session_usage TEXT',
       'ALTER TABLE tasks ADD COLUMN qoder_model TEXT',
@@ -110,13 +147,34 @@ export class TaskStore {
       'ALTER TABLE task_repositories ADD COLUMN merge_request_iid INTEGER',
       'ALTER TABLE task_repositories ADD COLUMN merge_request_state TEXT',
       'ALTER TABLE task_repositories ADD COLUMN merge_request_checked_at TEXT',
-      'ALTER TABLE tasks ADD COLUMN hitl_mode TEXT'
+      'ALTER TABLE tasks ADD COLUMN hitl_mode TEXT',
+      'ALTER TABLE tasks ADD COLUMN repo_agent_ids TEXT',
+      'ALTER TABLE tasks ADD COLUMN mr_auto_submit TEXT',
+      'ALTER TABLE tasks ADD COLUMN review_fix_count INTEGER'
     ]) {
       try {
         this.db.exec(statement)
       } catch {
         /* Existing databases may already contain the column. */
       }
+    }
+    // 一次性回填：旧任务级布尔 `auto_create_merge_requests`（列里存的是 '1'/'0'）→ `mr_auto_submit`。
+    // 只搬任务上显式选过的布尔：没选过的任务本来就走系统默认，`resolveMrMode()` 现在仍然这么算，
+    // 把系统值也固化进列反而会让「跟随系统默认」不再跟随。已完成 / 已取消 / draft 任务不改写。
+    // 归一必须在这条 SQL 里做：直接 COALESCE 旧列会把 '1' 原样存进只认 'auto'/'manual' 的新列。
+    try {
+      if (this.getSetting(LEGACY_MR_MODE_BACKFILLED) !== '1') {
+        this.db.exec(
+          `UPDATE tasks SET mr_auto_submit = CASE
+              WHEN auto_create_merge_requests = '1' THEN 'auto'
+              ELSE 'manual' END
+           WHERE mr_auto_submit IS NULL AND auto_create_merge_requests IN ('1','0')
+             AND state NOT IN ('completed','cancelled','draft')`
+        )
+        this.setSetting(LEGACY_MR_MODE_BACKFILLED, '1')
+      }
+    } catch {
+      /* 回填失败不影响打开；代价只是旧任务上显式选过的布尔退回系统默认 */
     }
     // 兼容更早的历史库：legacy `jira_key` 列 → 通用 `task_key` + `source='jira'`。
     // 只在 task_key 为空时迁移，避免覆盖用户后续对 source 的修改（幂等，可安全重复打开）。
@@ -151,7 +209,6 @@ export class TaskStore {
       acceptanceCriteria: input.acceptanceCriteria ?? [],
       state: input.state ?? 'draft',
       summary: input.summary,
-      startMode: input.startMode,
       planContent: input.planContent,
       planRevision: input.planRevision,
       failureStage: input.failureStage,
@@ -161,31 +218,26 @@ export class TaskStore {
       qoderModel: input.qoderModel,
       qoderSessionId: input.qoderSessionId,
       sessionUsage: input.sessionUsage,
-      openCodeReviewEnabled: input.openCodeReviewEnabled,
-      autoCreateMergeRequests: input.autoCreateMergeRequests,
-      createTestCasesEnabled: input.createTestCasesEnabled,
+      mrAutoSubmit: input.mrAutoSubmit,
       agentProfileId: input.agentProfileId,
+      repoAgentIds: input.repoAgentIds,
       testsGenerated: input.testsGenerated,
-      hitlMode: input.hitlMode,
+      reviewFixCount: input.reviewFixCount,
       createdAt: this.now(),
       updatedAt: this.now()
     }
     this.db
       .prepare(
-        `INSERT INTO tasks (id,task_key,source,source_url,title,description,keywords,acceptance_criteria,state,summary,start_mode,plan_content,plan_revision,failure_stage,review_status,commit_message,pi_session_path,qoder_model,qoder_session_id,session_usage,open_code_review_enabled,auto_create_merge_requests,create_test_cases_enabled,tests_generated,agent_profile_id,hitl_mode,created_at,updated_at)
-      VALUES (@id,@taskKey,@source,@sourceUrl,@title,@description,@keywords,@acceptanceCriteria,@state,@summary,@startMode,@planContent,@planRevision,@failureStage,@reviewStatus,@commitMessage,@piSessionPath,@qoderModel,@qoderSessionId,@sessionUsage,@openCodeReviewEnabled,@autoCreateMergeRequests,@createTestCasesEnabled,@testsGenerated,@agentProfileId,@hitlMode,@createdAt,@updatedAt)`
+        `INSERT INTO tasks (id,task_key,source,source_url,title,description,keywords,acceptance_criteria,state,summary,plan_content,plan_revision,failure_stage,review_status,commit_message,pi_session_path,qoder_model,qoder_session_id,session_usage,mr_auto_submit,tests_generated,review_fix_count,agent_profile_id,repo_agent_ids,created_at,updated_at)
+      VALUES (@id,@taskKey,@source,@sourceUrl,@title,@description,@keywords,@acceptanceCriteria,@state,@summary,@planContent,@planRevision,@failureStage,@reviewStatus,@commitMessage,@piSessionPath,@qoderModel,@qoderSessionId,@sessionUsage,@mrAutoSubmit,@testsGenerated,@reviewFixCount,@agentProfileId,@repoAgentIds,@createdAt,@updatedAt)`
       )
       .run({
         ...task,
         keywords: JSON.stringify(task.keywords),
         acceptanceCriteria: JSON.stringify(task.acceptanceCriteria),
         sessionUsage: task.sessionUsage ? JSON.stringify(task.sessionUsage) : null,
-        openCodeReviewEnabled: task.openCodeReviewEnabled === undefined ? null : task.openCodeReviewEnabled ? '1' : '0',
-        autoCreateMergeRequests:
-          task.autoCreateMergeRequests === undefined ? null : task.autoCreateMergeRequests ? '1' : '0',
-        createTestCasesEnabled:
-          task.createTestCasesEnabled === undefined ? null : task.createTestCasesEnabled ? '1' : '0',
-        testsGenerated: task.testsGenerated ? JSON.stringify(task.testsGenerated) : null
+        testsGenerated: task.testsGenerated ? JSON.stringify(task.testsGenerated) : null,
+        repoAgentIds: serializeRepoAgentIds(task.repoAgentIds)
       })
     return task
   }
@@ -196,20 +248,16 @@ export class TaskStore {
     const next = { ...current, ...patch, updatedAt: this.now() }
     this.db
       .prepare(
-        `UPDATE tasks SET task_key=@taskKey,source=@source,source_url=@sourceUrl,title=@title,description=@description,keywords=@keywords,acceptance_criteria=@acceptanceCriteria,state=@state,summary=@summary,start_mode=@startMode,plan_content=@planContent,plan_revision=@planRevision,failure_stage=@failureStage,review_status=@reviewStatus,commit_message=@commitMessage,pi_session_path=@piSessionPath,qoder_model=@qoderModel,qoder_session_id=@qoderSessionId,session_usage=@sessionUsage,open_code_review_enabled=@openCodeReviewEnabled,auto_create_merge_requests=@autoCreateMergeRequests,create_test_cases_enabled=@createTestCasesEnabled,tests_generated=@testsGenerated,agent_profile_id=@agentProfileId,hitl_mode=@hitlMode,updated_at=@updatedAt WHERE id=@id`
+        `UPDATE tasks SET task_key=@taskKey,source=@source,source_url=@sourceUrl,title=@title,description=@description,keywords=@keywords,acceptance_criteria=@acceptanceCriteria,state=@state,summary=@summary,plan_content=@planContent,plan_revision=@planRevision,failure_stage=@failureStage,review_status=@reviewStatus,commit_message=@commitMessage,pi_session_path=@piSessionPath,qoder_model=@qoderModel,qoder_session_id=@qoderSessionId,session_usage=@sessionUsage,mr_auto_submit=@mrAutoSubmit,tests_generated=@testsGenerated,review_fix_count=@reviewFixCount,agent_profile_id=@agentProfileId,repo_agent_ids=@repoAgentIds,updated_at=@updatedAt WHERE id=@id`
       )
       .run({
         ...next,
         keywords: JSON.stringify(next.keywords),
         acceptanceCriteria: JSON.stringify(next.acceptanceCriteria),
         sessionUsage: next.sessionUsage ? JSON.stringify(next.sessionUsage) : null,
-        openCodeReviewEnabled: next.openCodeReviewEnabled === undefined ? null : next.openCodeReviewEnabled ? '1' : '0',
-        autoCreateMergeRequests:
-          next.autoCreateMergeRequests === undefined ? null : next.autoCreateMergeRequests ? '1' : '0',
-        createTestCasesEnabled:
-          next.createTestCasesEnabled === undefined ? null : next.createTestCasesEnabled ? '1' : '0',
         testsGenerated: next.testsGenerated ? JSON.stringify(next.testsGenerated) : null,
-        agentProfileId: next.agentProfileId ?? null
+        agentProfileId: next.agentProfileId ?? null,
+        repoAgentIds: serializeRepoAgentIds(next.repoAgentIds)
       })
     return next
   }
@@ -286,7 +334,6 @@ export class TaskStore {
       acceptanceCriteria: JSON.parse(String(r.acceptance_criteria)),
       state: r.state as Task['state'],
       summary: r.summary ? String(r.summary) : undefined,
-      startMode: (r.start_mode as Task['startMode']) || undefined,
       planContent: r.plan_content ? String(r.plan_content) : undefined,
       planRevision: r.plan_revision == null ? undefined : Number(r.plan_revision),
       failureStage: (r.failure_stage as Task['failureStage']) || undefined,
@@ -296,15 +343,11 @@ export class TaskStore {
       qoderModel: r.qoder_model ? String(r.qoder_model) : undefined,
       qoderSessionId: r.qoder_session_id ? String(r.qoder_session_id) : undefined,
       sessionUsage: r.session_usage ? (JSON.parse(String(r.session_usage)) as Task['sessionUsage']) : undefined,
-      openCodeReviewEnabled:
-        r.open_code_review_enabled === '1' ? true : r.open_code_review_enabled === '0' ? false : undefined,
-      autoCreateMergeRequests:
-        r.auto_create_merge_requests === '1' ? true : r.auto_create_merge_requests === '0' ? false : undefined,
-      createTestCasesEnabled:
-        r.create_test_cases_enabled === '1' ? true : r.create_test_cases_enabled === '0' ? false : undefined,
+      mrAutoSubmit: parseMrAutoSubmit(r.mr_auto_submit),
       testsGenerated: r.tests_generated ? (JSON.parse(String(r.tests_generated)) as Task['testsGenerated']) : undefined,
+      reviewFixCount: r.review_fix_count == null ? undefined : Number(r.review_fix_count),
       agentProfileId: r.agent_profile_id ? String(r.agent_profile_id) : undefined,
-      hitlMode: r.hitl_mode ? (String(r.hitl_mode) as Task['hitlMode']) : undefined,
+      repoAgentIds: parseRepoAgentIds(r.repo_agent_ids),
       createdAt: String(r.created_at),
       updatedAt: String(r.updated_at)
     }

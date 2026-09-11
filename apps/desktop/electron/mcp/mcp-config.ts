@@ -4,7 +4,8 @@
  * 背景：MCP 服务此前硬编码为三个固定服务（gitlab/jira/confluence），散落三处重复
  * （chat/mcp-services.ts、integrations jira-mcp.ts、main.ts testGitlabMcp）。本模块是
  * MCP 配置的唯一真相：
- *  - 内置三个服务启动时自动合并写入（builtin=true，不允许修改参数/删除，仅可切换 enabled）；
+ *  - 内置三个服务启动时自动合并写入（builtin=true，参数由代码默认值单一决定，落盘旧参数
+ *    每次读取时会被刷新；用户侧仅可切换 enabled，不可删除）；
  *  - 自定义服务由设置页弹窗维护（可增/改/删/启停）；
  *  - 内置服务的凭据（URL/Token）不落盘，运行时由 resolver 从 store/keyStore 注入；
  *  - 自定义服务 env/headers 原样持久化（与 .mcp.json 行业惯例一致）。
@@ -55,7 +56,7 @@ export const BUILTIN_MCP_SERVERS: McpServerEntry[] = [
     enabled: true,
     transport: 'stdio',
     command: 'npx',
-    args: ['@alexbuzo/jira-mcp']
+    args: ['-y', '@alexbuzo/jira-mcp']
   },
   {
     id: 'confluence',
@@ -65,23 +66,23 @@ export const BUILTIN_MCP_SERVERS: McpServerEntry[] = [
     enabled: true,
     transport: 'stdio',
     command: 'npx',
-    args: ['@alexbuzo/jira-mcp']
+    args: ['-y', '@alexbuzo/jira-mcp']
   }
 ]
 
 /** 内置服务 id 集合（保护：不允许修改参数/删除）。 */
 export const BUILTIN_MCP_IDS = new Set(BUILTIN_MCP_SERVERS.map((s) => s.id))
 
-/** 合并内置：文件里缺失的内置项按默认值补入；已存在的仅确保 builtin 标志，不覆盖用户数据。 */
+/**
+ * 合并内置：缺失的内置项按默认值补入；已存在的以代码默认值为准刷新，仅保留用户的 enabled。
+ * 内置参数在编辑弹窗与 mcp:save 两端都被锁定（只有 enabled 能落盘），因此保留旧参数
+ * 没有任何语义，只会让历史 mcp.json 永久盖掉代码里的默认命令（改内置服务不生效）。
+ */
 function mergeBuiltins(servers: McpServerEntry[]): McpServerEntry[] {
   const byId = new Map(servers.map((s) => [s.id, s]))
   for (const builtin of BUILTIN_MCP_SERVERS) {
     const existing = byId.get(builtin.id)
-    if (!existing) {
-      byId.set(builtin.id, { ...builtin })
-    } else {
-      byId.set(builtin.id, { ...existing, builtin: true })
-    }
+    byId.set(builtin.id, existing ? { ...builtin, enabled: existing.enabled ?? builtin.enabled } : { ...builtin })
   }
   return [...byId.values()]
 }

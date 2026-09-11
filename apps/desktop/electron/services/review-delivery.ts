@@ -20,9 +20,8 @@ import {
   asReviewer
 } from '@task-pipeline/integrations'
 import { resolveOcrBinary, createOcrRunner } from '../init/ocr-binary.js'
-import { callQoderOrOpenAIReviewer } from '../task/task-runner.js'
+import { callQoderOrOpenAIReviewer, reviewBlockingLevel } from '../task/task-runner.js'
 import { runOperationAgent, taskWorkspace } from '../task/task-lifecycle.js'
-import { requestUi } from '../task/pi-session.js'
 import { TraceService } from '../trace/trace-service.js'
 
 export interface ReviewDeliveryDeps {
@@ -58,7 +57,13 @@ export function createReviewDeliveryPipeline(deps: ReviewDeliveryDeps): ReviewDe
 
   function buildReviewOrchestrator(): ReviewOrchestrator {
     return new ReviewOrchestrator(
-      { ocr: ocrService, git: gitService, reviewer: asReviewer(callQoderOrOpenAIReviewer) },
+      {
+        ocr: ocrService,
+        git: gitService,
+        reviewer: asReviewer(callQoderOrOpenAIReviewer),
+        // 以前这里不传，`ReviewOrchestrator` 永远落在默认的 `high`，设置页的「阻断级别」是个死配置。
+        reviewBlockingLevel: reviewBlockingLevel()
+      },
       desktopSink
     )
   }
@@ -78,23 +83,18 @@ export function createReviewDeliveryPipeline(deps: ReviewDeliveryDeps): ReviewDe
     kind: 'commit' | 'push' | 'merge_request',
     context: string
   ): Promise<boolean> {
-    if (store.getSetting('deliveryConfirm') !== 'true') return true
-    const label = deliveryStepLabels[kind]
+    // 不再弹框：固定链路下交付动作已由 `mrAutoSubmit` 定位——
+    // 自动档由 `advanceAfterValidation()` 无参与提，手动档则是用户在 `awaiting_commit` 自己按的按钮，
+    // 两种情况都不需要再逐 commit / push / MR 问一遍。这里只保留审计记录。
     const approval = store.addApproval({ taskId: task.id, kind, context })
-    const ok =
-      (await requestUi<boolean>('confirm', {
-        title: `确认${label}：${task.title}`,
-        message: `${task.title}\n\n${context}`,
-        taskId: task.id
-      })) ?? false
-    store.resolveApproval(approval.id, ok ? 'approved' : 'rejected')
+    store.resolveApproval(approval.id, 'approved')
     addTaskEvent({
       taskId: task.id,
       kind: 'permission',
-      title: ok ? `已确认${label}` : `已拒绝${label}`,
+      title: `自动执行${deliveryStepLabels[kind]}`,
       detail: context
     })
-    return ok
+    return true
   }
 
   const deliveryService = new DeliveryService(store, gitService, desktopResolver, desktopSink, {

@@ -65,6 +65,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { SecretInput } from '@/components/ui/secret-input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import type { AgentTemplate, QoderStatus } from '@/api'
@@ -78,16 +79,18 @@ type Settings = {
   jiraToken: string
   confluenceUrl: string
   confluenceToken: string
+  /**
+   * MR 默认提交档：仍用旧键名 `autoCreateMergeRequests`（core 的 `resolveMrMode()` 读的就是它）。
+   * `'true'` = 自动提交，`'false'` = 停在待提交。任务上显式设了 `mrAutoSubmit` 时以任务为准。
+   */
   autoCreateMergeRequests: string
-  openCodeReviewEnabled: string
-  createTestCasesEnabled: string
-  /** Phase 4：review 阻断后是否自动按意见修订并重审（默认关闭，需人工确认开启）。 */
+  /** Review 阻断级别：决定哪些 severity 算「阻断问题」（`blockingSeveritiesFor`）。 */
+  reviewBlockingLevel: string
+  /** Review 阻断后是否自动按意见修订并重审（默认关闭，需人工确认开启）。 */
   reviewAutoFix: string
-  /** Phase 4：自动修订最大轮数。 */
+  /** 自动修订最大轮数。 */
   reviewAutoFixMaxRounds: string
-  /** 交付确认：commit/push/MR 前是否弹窗确认（默认关闭=自动提交，常规可行）。 */
-  deliveryConfirm: string
-  /** 全局默认 HITL 模式：ask=所有写操作需确认, auto=仅危险操作需确认, yolo=全部自动放行。 */
+  /** 全局默认 HITL 模式：仅对对话路径生效，任务执行期走固定链路的权限层。 */
   hitlMode: 'ask' | 'auto' | 'yolo'
   // modelApiKey 不再在通用设置中展示，由 OpenAI-Compatible 弹窗维护
   modelApiKey?: string
@@ -132,11 +135,9 @@ const defaults: Settings = {
   confluenceUrl: '',
   confluenceToken: '',
   autoCreateMergeRequests: 'false',
-  openCodeReviewEnabled: 'false',
-  createTestCasesEnabled: 'false',
+  reviewBlockingLevel: 'high',
   reviewAutoFix: 'false',
   reviewAutoFixMaxRounds: '2',
-  deliveryConfirm: 'false',
   hitlMode: 'ask'
 }
 const ordinaryKeys = [
@@ -145,11 +146,9 @@ const ordinaryKeys = [
   'jiraUrl',
   'confluenceUrl',
   'autoCreateMergeRequests',
-  'openCodeReviewEnabled',
-  'createTestCasesEnabled',
+  'reviewBlockingLevel',
   'reviewAutoFix',
   'reviewAutoFixMaxRounds',
-  'deliveryConfirm',
   'hitlMode'
 ] as const
 const secretKeys = ['qoderToken', 'gitlabToken', 'jiraToken', 'confluenceToken', 'modelApiKey'] as const
@@ -1011,17 +1010,14 @@ export function SettingsDialog({
       setSavingKey(null)
     }
   }
-  /** 任务自动化开关：本地 state 与落盘同步更新（实时生效）。 */
-  const toggleSettingLive = (
-    key:
-      | 'openCodeReviewEnabled'
-      | 'createTestCasesEnabled'
-      | 'autoCreateMergeRequests'
-      | 'deliveryConfirm'
-      | 'reviewAutoFix',
-    checked: boolean
-  ) => {
+  /** Review 自动修订开关：本地 state 与落盘同步更新（实时生效）。 */
+  const toggleSettingLive = (key: 'reviewAutoFix', checked: boolean) => {
     const value = checked ? 'true' : 'false'
+    update(key, value)
+    void persistSetting(key, value)
+  }
+  /** 下拉档（阻断级别 / MR 默认档）：同样实时落盘。 */
+  const setSettingLive = (key: 'reviewBlockingLevel' | 'autoCreateMergeRequests', value: string) => {
     update(key, value)
     void persistSetting(key, value)
   }
@@ -1318,55 +1314,37 @@ export function SettingsDialog({
               </TabsList>
               <div className="thin-scrollbar min-h-0 space-y-5 overflow-y-auto p-6">
                 <TabsContent value="general" className="space-y-5">
-                  <Section title="任务自动化" description="控制实现完成后的 Review / 测试用例生成 / MR 提交流程。">
+                  <Section
+                    title="任务自动化"
+                    description="Review、测试用例与提交都是必经阶段，这里只配置严格程度与默认的 MR 提交档。"
+                  >
                     <div className="space-y-2.5">
                       <div className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
                         <span className="min-w-0">
-                          <span className="block text-xs font-medium text-foreground">开启 CodeReview</span>
+                          <span className="block text-xs font-medium text-foreground">Review 阻断级别</span>
                           <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                            实现和校验完成后自动执行代码评审。
+                            哪些严重度的评审意见会挡住流程；低于该级别的意见只记录不阻断。
                           </span>
                         </span>
-                        <Switch
-                          checked={settings.openCodeReviewEnabled === 'true'}
-                          onCheckedChange={(checked) => toggleSettingLive('openCodeReviewEnabled', checked)}
-                        />
-                      </div>
-                      <div className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
-                        <span className="min-w-0">
-                          <span className="block text-xs font-medium text-foreground">生成测试用例</span>
-                          <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                            实现完成后、Review 之前自动生成最小测试集；不修改业务逻辑。
-                          </span>
-                        </span>
-                        <Switch
-                          checked={settings.createTestCasesEnabled === 'true'}
-                          onCheckedChange={(checked) => toggleSettingLive('createTestCasesEnabled', checked)}
-                        />
-                      </div>
-                      <div className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
-                        <span className="min-w-0">
-                          <span className="block text-xs font-medium text-foreground">自动提交 MR</span>
-                          <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                            Review 通过后自动提交 Merge Request。
-                          </span>
-                        </span>
-                        <Switch
-                          checked={settings.autoCreateMergeRequests === 'true'}
-                          onCheckedChange={(checked) => toggleSettingLive('autoCreateMergeRequests', checked)}
-                        />
-                      </div>
-                      <div className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
-                        <span className="min-w-0">
-                          <span className="block text-xs font-medium text-foreground">提交前人工确认</span>
-                          <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                            开启后 commit / push / 建 MR 前逐步骤弹窗确认；关闭时自动提交。
-                          </span>
-                        </span>
-                        <Switch
-                          checked={settings.deliveryConfirm === 'true'}
-                          onCheckedChange={(checked) => toggleSettingLive('deliveryConfirm', checked)}
-                        />
+                        <Select
+                          value={settings.reviewBlockingLevel}
+                          onValueChange={(value) => setSettingLive('reviewBlockingLevel', value)}
+                        >
+                          <SelectTrigger className="h-8 w-[160px] text-xs" aria-label="Review 阻断级别">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent className="text-xs">
+                            <SelectItem value="critical" className="text-xs">
+                              仅 critical
+                            </SelectItem>
+                            <SelectItem value="high" className="text-xs">
+                              critical + high（默认）
+                            </SelectItem>
+                            <SelectItem value="medium" className="text-xs">
+                              含 medium（最严）
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
                       </div>
                       <div className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
                         <span className="min-w-0">
@@ -1397,11 +1375,35 @@ export function SettingsDialog({
                           onChange={(event) => updateRoundsLive(event.target.value)}
                         />
                       </div>
+                      <div className="flex items-center justify-between gap-3 rounded-md border bg-card/40 px-3 py-2.5">
+                        <span className="min-w-0">
+                          <span className="block text-xs font-medium text-foreground">MR 默认提交档</span>
+                          <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                            Review 通过后默认怎么做；任务上单独设过「Review 通过后」则以任务为准。
+                          </span>
+                        </span>
+                        <Select
+                          value={settings.autoCreateMergeRequests}
+                          onValueChange={(value) => setSettingLive('autoCreateMergeRequests', value)}
+                        >
+                          <SelectTrigger className="h-8 w-[160px] text-xs" aria-label="MR 默认提交档">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent className="text-xs">
+                            <SelectItem value="false" className="text-xs">
+                              停在待提交，我手动提
+                            </SelectItem>
+                            <SelectItem value="true" className="text-xs">
+                              自动提交 MR
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </div>
                   </Section>
                   <Section
                     title="人工确认模式"
-                    description="控制 AI 执行工具调用时的人工确认策略。新对话和新任务默认使用此设置，可在对话/任务内单独修改。"
+                    description="仅对对话生效：新对话默认使用此设置，可在对话内单独修改。任务执行期不再提供三态开关（越界写 / 破坏性命令恒拦，提交动作看任务的 MR 档）。"
                   >
                     <SettingField label="全局默认模式">
                       <HitlModeSwitcher

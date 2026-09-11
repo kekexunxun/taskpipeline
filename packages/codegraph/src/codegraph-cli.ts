@@ -1,13 +1,20 @@
 /**
  * @optave/codegraph CLI 子进程封装。
  *
- * 通过 npx 调用 codegraph CLI，避免依赖冲突（better-sqlite3 v13 vs 项目 v11）。
+ * 默认通过 npx 调用 codegraph CLI，避免依赖冲突（better-sqlite3 与项目自身版本不一致），
  * 子进程完全隔离，崩溃不影响主进程。
+ *
+ * 打包后的桌面应用会注入 {@link CodegraphCliRuntime}（自带资源 + Electron 作为 Node
+ * 运行时），此时不再依赖宿主 PATH / Node / npm registry。
  */
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import type { BuildResult } from './types.js'
+import { existsSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import type { BuildResult, CodegraphCliRuntime } from './types.js'
+
+/** codegraph 包名（npx 回落路径使用） */
+const CLI_PACKAGE = '@optave/codegraph'
 
 /** 默认超时：10 分钟 */
 const DEFAULT_TIMEOUT = 600_000
@@ -20,6 +27,36 @@ export interface CodegraphCliOptions {
   incremental?: boolean
   /** 超时毫秒数 */
   timeout?: number
+  /** CLI 运行时，由调用方注入自带资源；缺省回落 npx */
+  cli?: CodegraphCliRuntime
+}
+
+/** 一次子进程调用的完整描述 */
+interface CliInvocation {
+  command: string
+  args: string[]
+  env: NodeJS.ProcessEnv
+}
+
+/**
+ * 将 codegraph 子命令参数组装为一次调用。
+ *
+ * 无 runtime 时走 `npx -y @optave/codegraph …`（开发环境直接用仓库安装）；
+ * 有 runtime 时走自带资源，不假定 PATH 里有 node/npx。
+ */
+function toInvocation(cli: CodegraphCliRuntime | undefined, pkgArgs: string[]): CliInvocation {
+  if (cli) {
+    return {
+      command: cli.command,
+      args: [...(cli.argsPrefix ?? []), ...pkgArgs],
+      env: { ...process.env, ...cli.env }
+    }
+  }
+  return {
+    command: 'npx',
+    args: ['-y', CLI_PACKAGE, ...pkgArgs],
+    env: process.env
+  }
 }
 
 /**
@@ -32,18 +69,17 @@ export interface CodegraphCliOptions {
  * @param options CLI 选项
  */
 export async function runBuild(repoPath: string, options: CodegraphCliOptions): Promise<BuildResult> {
-  const { engine, incremental = true, timeout = DEFAULT_TIMEOUT } = options
+  const { engine, incremental = true, timeout = DEFAULT_TIMEOUT, cli } = options
 
   // --engine 是全局选项，必须放在子命令前面
-  const args = ['-y', '@optave/codegraph', '--engine', engine, 'build', repoPath]
-
+  const invocation = toInvocation(cli, ['--engine', engine, 'build', repoPath])
   if (!incremental) {
-    args.push('--no-incremental')
+    invocation.args.push('--no-incremental')
   }
 
   return new Promise((resolve, reject) => {
     const startTime = Date.now()
-    execFile('npx', args, { timeout }, (error, stdout, stderr) => {
+    execFile(invocation.command, invocation.args, { timeout, env: invocation.env }, (error, stdout, stderr) => {
       const duration = Date.now() - startTime
 
       if (error) {
@@ -71,18 +107,18 @@ export async function runBuild(repoPath: string, options: CodegraphCliOptions): 
  */
 export async function runStats(
   dbPath: string,
-  options: Pick<CodegraphCliOptions, 'engine' | 'timeout'>
+  options: Pick<CodegraphCliOptions, 'engine' | 'timeout' | 'cli'>
 ): Promise<{ fileCount: number; nodeCount: number; edgeCount: number } | null> {
   if (!existsSync(dbPath)) {
     console.warn('[codegraph] stats: db not found:', dbPath)
     return null
   }
 
-  const { engine, timeout = 30_000 } = options
-  const args = ['-y', '@optave/codegraph', '--engine', engine, 'stats', '-d', dbPath, '--json']
+  const { engine, timeout = 30_000, cli } = options
+  const invocation = toInvocation(cli, ['--engine', engine, 'stats', '-d', dbPath, '--json'])
 
   return new Promise((resolve) => {
-    execFile('npx', args, { timeout }, (error, stdout, stderr) => {
+    execFile(invocation.command, invocation.args, { timeout, env: invocation.env }, (error, stdout, stderr) => {
       if (error) {
         console.warn('[codegraph] stats command failed:', stderr || error.message)
         resolve(null)
@@ -127,45 +163,81 @@ export async function runStats(
 }
 
 /**
+ * 不可抛出异常的日志写入。
+ *
+ * 主进程的 stdout 可能是已被关闭的管道（从终端启动、输出被重定向后接收方退出），
+ * 此时 console.* 会同步抛 `write EPIPE`；子进程回调里抛出就是未捕获异常，
+ * Electron 会弹错误弹窗。日志不值得搞崩主进程，写入失败直接吞掉。
+ */
+function safeLog(level: 'info' | 'warn', ...args: unknown[]): void {
+  try {
+    console[level](...args)
+  } catch {
+    // stdout / stderr 不可写，忽略
+  }
+}
+
+/** 输出一行 watch 子进程的日志 */
+function logWatchLine(level: 'info' | 'warn', msg: string): void {
+  safeLog(level, '[codegraph] watch:', msg)
+}
+
+/**
  * 启动 codegraph watch 长驻进程，监听文件变更并增量更新 graph.db。
  *
- * watch 命令不支持 -d 参数，所有输出（graph.db、change-events.ndjson、changes.journal）
- * 固定写入 <cwd>/.codegraph/。通过设置 cwd 为集中存储的 hash 目录，
- * 使副作用文件写入集中存储而非项目目录。
+ * 必须显式传 -d 指向集中存储的 db：watch 缺省按监听目录推导 db 位置
+ * （<repo>/.codegraph/graph.db），而 build 后该目录已被 moveToCentral 清掉，
+ * 不传 -d 会直接 `DB_ERROR: No graph.db found` 后退出。
  *
  * @param dir 监听目录
- * @param cwd 子进程工作目录（应设为 dirIndexDir，即集中存储的 per-repo 目录）
+ * @param cwd 子进程工作目录（设为 dirIndexDir，副作用文件也跟着落在集中存储）
+ * @param dbPath 集中存储的 graph.db 路径
  * @param options CLI 选项
  */
 export function runWatch(
   dir: string,
   cwd: string,
-  options: Pick<CodegraphCliOptions, 'engine'>
+  dbPath: string,
+  options: Pick<CodegraphCliOptions, 'engine' | 'cli'>
 ): { process: ChildProcess; stop: () => void } {
-  const { engine } = options
-  // watch 不支持 -d 参数，输出固定写入 <cwd>/.codegraph/
-  const args = ['@optave/codegraph', '--engine', engine, 'watch', dir]
+  const { engine, cli } = options
+  const invocation = toInvocation(cli, ['--engine', engine, 'watch', '-d', dbPath, dir])
 
-  console.info('[codegraph] starting watch:', args.join(' '), 'cwd:', cwd)
+  console.info('[codegraph] starting watch:', invocation.args.join(' '), 'cwd:', cwd)
 
-  const child = spawn('npx', args, {
+  const child = spawn(invocation.command, invocation.args, {
     cwd,
+    env: invocation.env,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false
   })
 
   child.stdout?.on('data', (data: Buffer) => {
     const msg = data.toString().trim()
-    if (msg) console.info('[codegraph] watch:', msg)
+    if (msg) logWatchLine('info', msg)
   })
 
   child.stderr?.on('data', (data: Buffer) => {
     const msg = data.toString().trim()
-    if (msg) console.warn('[codegraph] watch:', msg)
+    if (msg) logWatchLine('warn', msg)
+  })
+
+  // 启动失败（如可执行文件不存在）是异步 'error' 事件，不会进 'exit'；
+  // 未监听时 Node 会抛未捕获异常，直接杀掉主进程。
+  child.on('error', (error) => {
+    safeLog('warn', '[codegraph] watch 进程启动失败:', dir, error.message)
   })
 
   child.on('exit', (code, signal) => {
-    console.info('[codegraph] watch exited:', { dir, code, signal })
+    safeLog('info', '[codegraph] watch exited:', { dir, code, signal })
+    // watch 的 change-events.ndjson / changes.journal 是按被监听目录写入的
+    // （不受 -d 控制），且常在退出时才落盘；在这里清才能避开
+    // stopWatch() 里“SIGTERM 后同步删”的竞态。
+    try {
+      rmSync(join(dir, '.codegraph'), { recursive: true, force: true })
+    } catch {
+      // 清理失败不阻断退出流程；startWatch 会再清一次
+    }
   })
 
   const stop = () => {
@@ -180,11 +252,28 @@ export function runWatch(
 
 /**
  * 生成 MCP Server 启动参数。
+ *
+ * 自带资源模式下返回绝对路径的 command 与必需 env，
+ * 使 MCP 子进程不依赖宿主 PATH / npx。
  */
-export function buildMcpArgs(dbPath: string, engine: 'native' | 'wasm'): { command: string; args: string[] } {
+export function buildMcpArgs(
+  dbPath: string,
+  engine: 'native' | 'wasm',
+  cli?: CodegraphCliRuntime
+): { command: string; args: string[]; env?: Record<string, string> } {
+  const invocation = toInvocation(cli, ['--engine', engine, 'mcp', '-d', dbPath])
+  if (!cli) {
+    return { command: invocation.command, args: invocation.args }
+  }
   return {
-    command: 'npx',
-    args: ['-y', '@optave/codegraph', '--engine', engine, 'mcp', '-d', dbPath]
+    command: invocation.command,
+    args: invocation.args,
+    // 下游可能整体替换而非合并 env，因此同时带上基础环境变量
+    env: {
+      ...cli.env,
+      PATH: process.env.PATH ?? '',
+      HOME: process.env.HOME ?? ''
+    }
   }
 }
 

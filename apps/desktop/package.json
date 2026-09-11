@@ -14,12 +14,13 @@
     "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json --watch\" \"wait-on tcp:5173 file:dist-electron/main.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "build": "vite build && tsc -p tsconfig.electron.json",
     "prebuild": "node scripts/sync-icon.mjs",
-    "prepackage": "node scripts/sync-icon.mjs && node scripts/copy-monorepo-packages.mjs && node scripts/copy-qodercli.mjs",
-    "prepackage:dir": "node scripts/sync-icon.mjs && node scripts/copy-monorepo-packages.mjs && node scripts/copy-qodercli.mjs",
-    "prepackage:mac": "node scripts/sync-icon.mjs && node scripts/copy-monorepo-packages.mjs && node scripts/copy-qodercli.mjs",
-    "prepackage:win": "node scripts/sync-icon.mjs && node scripts/copy-monorepo-packages.mjs && node scripts/copy-qodercli.mjs",
-    "prepackage:linux": "node scripts/sync-icon.mjs && node scripts/copy-monorepo-packages.mjs && node scripts/copy-qodercli.mjs",
+    "prepackage": "node scripts/sync-icon.mjs && node scripts/copy-monorepo-packages.mjs && node scripts/copy-codegraph-cli.mjs && node scripts/copy-qodercli.mjs",
+    "prepackage:dir": "node scripts/sync-icon.mjs && node scripts/copy-monorepo-packages.mjs && node scripts/copy-codegraph-cli.mjs && node scripts/copy-qodercli.mjs",
+    "prepackage:mac": "node scripts/sync-icon.mjs && node scripts/copy-monorepo-packages.mjs && node scripts/copy-codegraph-cli.mjs && node scripts/copy-qodercli.mjs",
+    "prepackage:win": "node scripts/sync-icon.mjs && node scripts/copy-monorepo-packages.mjs && node scripts/copy-codegraph-cli.mjs && node scripts/copy-qodercli.mjs",
+    "prepackage:linux": "node scripts/sync-icon.mjs && node scripts/copy-monorepo-packages.mjs && node scripts/copy-codegraph-cli.mjs && node scripts/copy-qodercli.mjs",
     "stage:monorepo": "node scripts/copy-monorepo-packages.mjs",
+    "stage:codegraph-cli": "node scripts/copy-codegraph-cli.mjs",
     "package": "electron-builder && node scripts/sync-local-install.mjs",
     "package:dir": "electron-builder --dir && node scripts/sync-local-install.mjs",
     "package:mac": "electron-builder --mac && node scripts/sync-local-install.mjs",
@@ -42,7 +43,10 @@
       "dist-electron/**/*",
       "qoder-bin/**/*",
       "package.json",
-      "!**/*.map"
+      "!**/*.map",
+      "!**/node_modules/@optave/**",
+      "!**/node_modules/web-tree-sitter/**",
+      "!**/node_modules/smol-toml/**"
     ],
     "asar": true,
     "asarUnpack": [
@@ -52,6 +56,15 @@
       "**/qoder-bin/**",
       "**/@alibaba-group/ocr-darwin-arm64/**",
       "**/@alibaba-group/ocr-darwin-x64/**"
+    ],
+    "extraResources": [
+      {
+        "from": "codegraph-cli",
+        "to": "codegraph-cli",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "mac": {

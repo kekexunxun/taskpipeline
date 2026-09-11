@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import type { TaskCard } from '@task-pipeline/core'
+import type { AgentEvent, TaskCard } from '@task-pipeline/core'
 import { DetailPanel } from './DetailPanel'
 import { isPlanningEvent } from './planningEvent'
 import type { TaskDetail } from '@/api'
@@ -50,7 +50,6 @@ const card: TaskCard = {
   keywords: [],
   acceptanceCriteria: [],
   state: 'implementing',
-  startMode: 'plan',
   planContent: 'Implementation plan',
   planRevision: 1,
   reviewStatus: 'pending',
@@ -95,6 +94,8 @@ const callbacks = {
   onResume: vi.fn(),
   onPrompt: vi.fn(),
   onSend: vi.fn(),
+  onSendIntake: vi.fn(),
+  onResolveSuggestion: vi.fn(),
   onMcpServiceChange: vi.fn(),
   onSkillsChange: vi.fn(),
   onOpenUrl: vi.fn()
@@ -195,6 +196,97 @@ describe('DetailPanel tabs', () => {
 
     await user.click(screen.getByRole('button', { name: '批准并开始' }))
     expect(onApprovePlan).toHaveBeenCalledOnce()
+  })
+})
+
+describe('DetailPanel draft intake', () => {
+  const draftCard: TaskCard = {
+    ...card,
+    state: 'draft',
+    description: '',
+    acceptanceCriteria: [],
+    planContent: undefined,
+    planRevision: undefined
+  }
+
+  const draftEvent = (id: string, payload: unknown): AgentEvent =>
+    ({
+      id,
+      taskId: 'task-1',
+      kind: 'status',
+      title: '',
+      detail: '',
+      createdAt: '2026-09-10T00:00:00.000Z',
+      payload
+    }) as AgentEvent
+
+  function renderDraft(draftEvents: AgentEvent[] = [], sending = false) {
+    render(
+      <DetailPanel
+        card={draftCard}
+        detail={{ ...detail, task: draftCard, draftEvents }}
+        parts={[]}
+        prompt=""
+        running={false}
+        sending={sending}
+        starting={false}
+        merging={false}
+        focused={false}
+        mcpService={[]}
+        skills={[]}
+        {...callbacks}
+      />
+    )
+  }
+
+  it('shows the intake log instead of the execution stream, and sends through intake', async () => {
+    const user = userEvent.setup()
+    vi.clearAllMocks()
+    renderDraft()
+
+    expect(screen.getByText('还没有澄清记录')).toBeInTheDocument()
+    expect(screen.queryByText('conversation')).not.toBeInTheDocument()
+
+    // 输入框是受控的，这个 mock 不持草稿：能验的是「发送走哪条通道」，文本本身归 sendIntake 管。
+    expect(screen.getByRole('textbox', { name: '让 Agent 帮你补全任务定义' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '发送' }))
+    expect(callbacks.onSendIntake).toHaveBeenCalledOnce()
+    expect(callbacks.onSend).not.toHaveBeenCalled()
+  })
+
+  it('names the missing fields in the hint so the user does not have to type them', async () => {
+    const user = userEvent.setup()
+    vi.clearAllMocks()
+    renderDraft()
+
+    await user.click(screen.getByRole('button', { name: '让 Agent 补全' }))
+    expect(callbacks.onSendIntake).toHaveBeenCalledWith(
+      '这个任务还缺：描述还没讲清背景与期望；还没有可判定的验收标准；还没关联仓库。请先看下代码现状，给出你的建议。'
+    )
+  })
+
+  it('puts the suggestion card in place of the hint, and writes back only the checked fields', async () => {
+    const user = userEvent.setup()
+    vi.clearAllMocks()
+    renderDraft([draftEvent('evt-1', { type: 'draft-suggestion', fields: { title: '新标题', description: '新描述' } })])
+
+    expect(screen.queryByRole('button', { name: '让 Agent 补全' })).not.toBeInTheDocument()
+    // 默认全勾；取消描述那一勾就是告诉主进程「这项我自己填」。
+    await user.click(screen.getByRole('checkbox', { name: '采纳描述' }))
+    await user.click(screen.getByRole('button', { name: '采纳勾选项' }))
+    expect(callbacks.onResolveSuggestion).toHaveBeenCalledWith('evt-1', 'apply', ['title'])
+
+    await user.click(screen.getByRole('button', { name: '全部忽略' }))
+    expect(callbacks.onResolveSuggestion).toHaveBeenLastCalledWith('evt-1', 'discard')
+  })
+
+  it('keeps the suggestion read-only while a clarification turn is in flight', () => {
+    vi.clearAllMocks()
+    renderDraft([draftEvent('evt-1', { type: 'draft-suggestion', fields: { title: '新标题' } })], true)
+
+    expect(screen.getByRole('button', { name: '采纳勾选项' })).toBeDisabled()
+    expect(screen.getByRole('checkbox', { name: '采纳标题' })).toBeDisabled()
+    expect(screen.getByText('澄清助手正在思考…')).toBeInTheDocument()
   })
 })
 

@@ -19,16 +19,33 @@ export function jiraKeyFrom(value: string): string {
  * 把 MCP callTool 响应里的 `content[].text` 字段(JSON 字符串)解析为对象;
  * 如果 content 不是 text 类型或不是 JSON,返回 `{ text: <原始字符串> }`。
  * 抽到独立函数便于在 `importJiraIssue` / `syncJiraTasks` 复用。
+ *
+ * 另外拆掉 @alexbuzo/jira-mcp 的响应信封：它所有工具都返回 `{ status, headers, body }`，
+ * 真实数据在 `body` 里。不拆的话上层按顶层 `issues` / `fields` 取值会全部落空，
+ * 表现为「同步成功但 0 条任务」而不是报错。
  */
 export function mcpPayload(result: unknown): any {
   const content = (result as any)?.content
   const text = Array.isArray(content) ? content.find((item: any) => item?.type === 'text')?.text : undefined
-  if (typeof text !== 'string') return result
-  try {
-    return JSON.parse(text)
-  } catch {
-    return { text }
+  let payload: unknown = result
+  if (typeof text === 'string') {
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      payload = { text }
+    }
   }
+  const envelope = payload as { status?: unknown; headers?: unknown; body?: unknown } | undefined
+  if (
+    envelope &&
+    typeof envelope === 'object' &&
+    typeof envelope.status === 'number' &&
+    typeof envelope.headers === 'object' &&
+    'body' in envelope
+  ) {
+    return envelope.body
+  }
+  return payload
 }
 
 /**
@@ -54,11 +71,18 @@ export class AtlassianClientFactory {
       name: '@alexbuzo/jira-mcp',
       transport: 'stdio',
       command: 'npx',
-      args: ['@alexbuzo/jira-mcp'],
+      args: ['-y', '@alexbuzo/jira-mcp'],
+      // @alexbuzo/jira-mcp 强制要求 ATLASSIAN_SITE，且每次启动都同时校验 Jira+Confluence 两套鉴权，
+      // 故用 ATLASSIAN_SITE + ATLASSIAN_BEARER_TOKEN 统一满足；Confluence API 前缀交给服务端按站点推断。
       env:
         kind === 'jira'
-          ? { JIRA_BASE_URL: url, JIRA_BEARER_TOKEN: token }
-          : { CONFLUENCE_BASE_URL: url, CONFLUENCE_BEARER_TOKEN: token, CONFLUENCE_API_PREFIX: '/rest/api' },
+          ? { ATLASSIAN_SITE: url, JIRA_BASE_URL: url, ATLASSIAN_BEARER_TOKEN: token, JIRA_BEARER_TOKEN: token }
+          : {
+              ATLASSIAN_SITE: url,
+              CONFLUENCE_BASE_URL: url,
+              ATLASSIAN_BEARER_TOKEN: token,
+              CONFLUENCE_BEARER_TOKEN: token
+            },
       tools: {}
     } as McpProfile)
   }
@@ -130,12 +154,15 @@ export async function testAtlassianConnectionRest(
 export async function importJiraIssue(client: McpClient, keyOrUrl: string, store: TaskStore): Promise<Task> {
   const key = jiraKeyFrom(keyOrUrl)
   try {
-    const result = await client.callTool('jira_get_issue', { issue_key: key })
+    const result = await client.callTool('jira_get_issue', { issueKey: key })
     const payload = mcpPayload(result)
     // 部分版本 @alexbuzo/jira-mcp 失败时不抛错也不置 isError，而是把错误文案当普通 text 返回。
     // 不在此拦截，401/404 文案会被当作 description 落库，导入一条标题为 key 的脏任务。
-    const errorText = typeof payload?.text === 'string' ? payload.text : ''
-    if ((result as { isError?: boolean } | undefined)?.isError || errorText) {
+    const failed = Boolean((result as { isError?: boolean } | undefined)?.isError)
+    const plainText = typeof payload?.text === 'string' ? payload.text : ''
+    // 新版失败会置 isError 并返回结构化 `{ code, message, details }`，旧版只给错误文案。
+    const errorText = failed && typeof payload?.message === 'string' ? payload.message : plainText
+    if (failed || errorText) {
       if (looksLikeAuthError(errorText)) throw new Error(`Jira Token 无效或已过期：${errorText}`)
       if (looksLikeNotFoundError(errorText)) throw new Error(`Jira Issue ${key} 不存在`)
       throw new Error(errorText || `获取 Jira Issue ${key} 失败`)
@@ -170,39 +197,35 @@ export async function importJiraIssue(client: McpClient, keyOrUrl: string, store
 /**
  * 只读取 Jira 任务候选项，不写入本地 store。
  *
- * 分页策略:
- * - 优先用 `next_page_token`(@alexbuzo/jira-mcp 现代接口)
- * - 没有时退回 `start_at` + `total` 传统分页
- * - 最多 100 页,每页 50 条
+ * 分页策略（jira_search_issues 只认 camelCase 的 maxResults / startAt）:
+ * - 用 `startAt` + `total` 翻页，每页 50 条，最多 100 页;
+ * - 该服务端不做入参校验，写错的 key（如 limit / start_at）会被默默忽略而不是报错，
+ *   等于分页参数丢失，必须与工具 schema 严格对齐。
  */
 export async function fetchJiraTasks(client: McpClient, jql?: string): Promise<JiraTaskInput[]> {
   try {
     const tasks = new Map<string, JiraTaskInput & { taskKey: string }>()
+    const pageSize = 50
     let startAt = 0
-    let pageToken: string | undefined
     const finalJql = jql ?? 'assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC'
     for (let page = 0; page < 100; page += 1) {
       const result = await client.callTool('jira_search_issues', {
         jql: finalJql,
-        fields: 'summary,description,labels,status',
-        limit: 50,
-        start_at: startAt,
-        ...(pageToken ? { page_token: pageToken } : {})
+        fields: ['summary', 'description', 'labels', 'status'],
+        maxResults: pageSize,
+        startAt
       })
-      const mapped = mapJiraTasks(result)
-      for (const task of mapped) if (task.taskKey) tasks.set(task.taskKey, task as JiraTaskInput & { taskKey: string })
       const payload = mcpPayload(result)
-      const issueCount = Array.isArray(payload?.issues) ? payload.issues.length : mapped.length
-      const total = Number(payload?.total)
-      const nextPageToken =
-        typeof payload?.next_page_token === 'string' && payload.next_page_token ? payload.next_page_token : undefined
-      if (nextPageToken) {
-        pageToken = nextPageToken
-        continue
+      // 工具失败（含 Token 失效）必须显式抛出：静默当成空列表会让「连不上」伪装成「没有未完成任务」。
+      if ((result as { isError?: boolean } | undefined)?.isError) {
+        throw new Error(typeof payload?.message === 'string' ? payload.message : 'Jira 任务查询失败')
       }
-      const nextStart = startAt + issueCount
-      if (issueCount === 0 || (Number.isFinite(total) && total >= 0 && nextStart >= total) || issueCount < 50) break
-      startAt = nextStart
+      const mapped = mapJiraTasks(payload)
+      for (const task of mapped) if (task.taskKey) tasks.set(task.taskKey, task as JiraTaskInput & { taskKey: string })
+      const issues = Array.isArray(payload?.issues) ? payload.issues : []
+      const total = Number(payload?.total)
+      startAt += issues.length
+      if (issues.length < pageSize || (Number.isFinite(total) && total >= 0 && startAt >= total)) break
     }
     return [...tasks.values()]
   } finally {
@@ -227,8 +250,8 @@ export async function syncJiraTasks(client: McpClient, store: TaskStore, jql?: s
  * - Token 有效 → 404/does not exist（凭据被接受，只是对象不存在）→ 判通过。
  */
 const ATLASSIAN_PROBES: Record<'jira' | 'confluence', { candidates: string[]; args: Record<string, unknown> }> = {
-  jira: { candidates: ['jira_get_issue'], args: { issue_key: 'PROBE-0' } },
-  confluence: { candidates: ['confluence_get_page'], args: { page_id: '0' } }
+  jira: { candidates: ['jira_get_issue'], args: { issueKey: 'PROBE-0' } },
+  confluence: { candidates: ['confluence_get_page'], args: { id: '0' } }
 }
 
 /** 工具报错文案是否指向凭据问题（401/403/未授权等）。 */

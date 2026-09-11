@@ -4,7 +4,6 @@
  */
 import type { BrowserWindow } from 'electron'
 import type { McpProfile, TaskStore } from '@task-pipeline/core'
-import type { AtlassianRestConfig } from '@task-pipeline/integrations'
 import { McpClient, parseGitLabRemote } from '@task-pipeline/integrations'
 
 // ── 类型 ────────────────────────────────────────────────────────────────────
@@ -33,11 +32,6 @@ interface CredentialStateDeps {
     error?: string
     models: unknown[]
   }>
-  atlassianRestConfig: (kind: 'jira' | 'confluence') => AtlassianRestConfig | undefined
-  testAtlassianRest: (
-    kind: 'jira' | 'confluence',
-    config: AtlassianRestConfig
-  ) => Promise<{ ok: boolean; message: string }>
   mcpProfileResolver: (id: string) => McpProfile | undefined
 }
 
@@ -227,16 +221,17 @@ export async function checkCredentialHealth(): Promise<CredentialState[]> {
     start('gitlab', checkGitLabCredential(gitlabToken))
   }
 
-  // Jira / Confluence：走 REST API 直接验权（/myself 等），秒级返回，不拉 MCP。
+  // Jira / Confluence：与 AI 实际使用通道一致，走 MCP 工具握手（listTools）验证连通，不再直连 REST。
   for (const kind of ['jira', 'confluence'] as const) {
-    const rest = d().atlassianRestConfig(kind)
-    if (!rest) {
+    // 凭据是否齐备（URL + Token）：缺失直接计为未配置 skipped，避免与「连接失败」混淆。
+    const configured = Boolean(d().protectedValue(`${kind}Token`) && d().store.getSetting(`${kind}Url`)?.trim())
+    if (!configured) {
       skip(kind)
       continue
     }
     start(
       kind,
-      withTimeout(d().testAtlassianRest(kind, rest), 15_000, '连接测试超时（15s）').then(
+      withTimeout(testMcpConnectionById(kind), 30_000, 'MCP 连接超时（30s）').then(
         (result): Pick<CredentialState, 'status' | 'message'> =>
           result.ok ? { status: 'ok' } : { status: 'failed', message: result.message }
       )

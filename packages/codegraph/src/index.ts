@@ -23,4 +23,11 @@
 
 export { CodegraphManager } from './codegraph-manager.js'
 export { buildMcpArgs, runBuild, runStats } from './codegraph-cli.js'
-export type { BuildResult, CodegraphManagerOptions, IndexStatus, McpServerConfig, RepoIndexMeta } from './types.js'
+export type {
+  BuildResult,
+  CodegraphCliRuntime,
+  CodegraphManagerOptions,
+  IndexStatus,
+  McpServerConfig,
+  RepoIndexMeta
+} from './types.js'

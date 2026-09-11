@@ -1,3 +1,5 @@
+import type { TaskState } from '@task-pipeline/core'
+
 export type ImplementationOutcome = 'needs_input' | 'already_satisfied' | 'completed' | 'unknown'
 export type ImplementationNextStep = 'await_input' | 'complete_without_changes' | 'validate' | 'await_confirmation'
 export type PlanNextStep = 'complete_without_changes' | 'await_plan_approval'
@@ -91,4 +93,14 @@ export function isExplicitNoChangeCompletionRequest(message: string): boolean {
       normalized
     )
   return noWorkRequested && completionRequested
+}
+
+/**
+ * 澄清对话的入口判据（§2.4）：只有 `draft` 能开口。
+ *
+ * 为什么不跟实现期对话共用判据：那条入口会把状态推到 `implementing`，而澄清的全部意义
+ * 就在「还没开工」——在别的状态上开口等于替用户启动了链路。
+ */
+export function assertDraftIntake(state: TaskState): void {
+  if (state !== 'draft') throw new Error('只有待处理的任务可以让 Agent 补全定义')
 }

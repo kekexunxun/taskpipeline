@@ -12,7 +12,15 @@
  */
 import { existsSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Task, TaskState, TaskStore, TaskRepository, TaskStartMode, AgentEvent } from '@task-pipeline/core'
+import type {
+  AgentEvent,
+  Task,
+  TaskDraftEventPayload,
+  TaskDraftFieldKey,
+  TaskRepository,
+  TaskState,
+  TaskStore
+} from '@task-pipeline/core'
 import { JsonlTraceStorage, summarizeTrace, traceEventsDir, traceInfoFile, transitionTask } from '@task-pipeline/core'
 import { openTaskEditor } from '@task-pipeline/integrations'
 import type {
@@ -27,8 +35,15 @@ import type {
   RepositoryCommandMap
 } from '@task-pipeline/integrations'
 import type { AgentService, OperationKind } from '../agents/agent-service.js'
+import {
+  adoptDraftFields,
+  closeTaskIntake,
+  describeDraftFields,
+  pickDraftFields,
+  runTaskIntakeTurn
+} from '../agents/task-intake/task-intake.js'
 import type { QoderOrchestrator } from '../pi-extension/qoder/index.js'
-import { closeQoderQuerySafely } from '../pi-extension/qoder/index.js'
+import { closeQoderQuerySafely, stripQoderModelPrefix } from '../pi-extension/qoder/index.js'
 import type { TracePipeline } from '../trace/bus/trace-pipeline.js'
 import type { PiTraceBuilder } from '../trace/instrument/pi-trace-builder.js'
 import type { TraceService } from '../trace/trace-service.js'
@@ -36,6 +51,7 @@ import type { MemoryService } from '../memory/memory-service.js'
 import { consolidateTaskMemory } from '../memory/memory-context.js'
 import { stripOpenAIModelPrefix, resolveLiteModel } from '../chat/model-profile.js'
 import {
+  assertDraftIntake,
   implementationOutcomeInstruction,
   isExplicitNoChangeCompletionRequest,
   nextStepForImplementation,
@@ -386,18 +402,20 @@ async function finishImplementation(taskId: string, responseTexts: string[], sig
     })
     return
   }
-  if (d().taskWorkflow.shouldGenerateTestCases(task)) {
-    const covered = await runTestCoverageCheck(taskId, signal)
-    if (covered) {
-      const validated = await d().taskWorkflow.runValidation(taskId, signal)
-      await advanceAfterValidation(taskId, validated.state, signal)
-    } else {
-      await runTestCaseGenerationThenValidate(taskId, signal)
-    }
+  if (await runTestCoverageCheck(taskId, signal)) {
+    // 「写用例」阶段唯一允许的 no-op 判据是已有覆盖（§2.2）；跳过时必须落一条说清「测了、只是没重写」，
+    // 否则 Timeline 上只看到「跳过生成」，用户会以为整个测试阶段没做。
+    d().addTaskEvent({
+      taskId,
+      kind: 'status',
+      title: '已有测试覆盖，本次不新增用例',
+      detail: '仍会执行现有测试与 Lint / Build。'
+    })
+    const validated = await d().taskWorkflow.runValidation(taskId, signal)
+    await advanceAfterValidation(taskId, validated.state, signal)
     return
   }
-  const validated = await d().taskWorkflow.runValidation(taskId, signal)
-  await advanceAfterValidation(taskId, validated.state, signal)
+  await runTestCaseGenerationThenValidate(taskId, signal)
 }
 
 async function runTestCaseGenerationThenValidate(taskId: string, signal?: AbortSignal): Promise<void> {
@@ -478,7 +496,6 @@ async function taskCardsWithCurrentChanges() {
 export async function startTask(
   taskId: string,
   options: {
-    mode?: TaskStartMode
     repositoryCommands?: RepositoryCommandMap
     useAllRepositories?: boolean
     repoAgentIds?: Record<string, string>
@@ -501,55 +518,36 @@ export async function startTask(
   }
   if (current && ['draft', 'failed'].includes(current.state) && d().runtimeProvider(current) === 'qoder')
     d().store.updateTask(taskId, { sessionUsage: undefined })
-  const mode = options.mode ?? 'direct'
   d().store.updateTask(taskId, { reviewFixCount: 0 })
+  // 离开 `draft` 就丢弃澄清会话：它的上下文只属于任务定义阶段，带进实现阶段只会污染计划。
+  closeTaskIntake(taskId)
+  // `begin()` 恒进 `planning`：固定链路下「直接开始」分支已删，启动入参不再有 `mode`。
   const task = await runTaskOperation(taskId, (signal) =>
-    d().taskWorkflow.begin(taskId, mode, options.repositoryCommands, signal)
+    d().taskWorkflow.begin(taskId, { repositoryCommands: options.repositoryCommands }, signal)
   )
-  if (mode === 'plan') {
-    if (d().runtimeProvider(task) === 'qoder')
-      void runTaskOperation(taskId, (signal) => d().qoderOrch.runPlan(taskId, undefined, signal)).catch(
-        (error: unknown) =>
-          emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
-      )
-    else {
-      try {
-        await runTaskOperation(taskId, async (signal) => {
-          signal.throwIfAborted()
-          await runOpenAIPlan(
-            taskId,
-            await buildAgentPrompt(
-              task,
-              `你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${task.title}\n${task.description}`
-            ),
-            signal
-          )
-        })
-      } catch (error) {
-        failPlanGeneration(taskId, error)
-        emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
-      }
-    }
-    return
-  }
   if (d().runtimeProvider(task) === 'qoder') {
-    void runTaskOperation(taskId, (signal) => d().qoderOrch.run(taskId, undefined, signal)).catch((error: unknown) =>
-      emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
+    void runTaskOperation(taskId, (signal) => d().qoderOrch.runPlan(taskId, undefined, signal)).catch(
+      (error: unknown) =>
+        emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     )
     return
   }
-  await runTaskOperation(taskId, async (signal) => {
-    signal.throwIfAborted()
-    await startPi(taskId)
-    if (!getPiSession()) throw new Error('OpenAI agent session is unavailable')
-    await getPiSession()!.prompt(
-      await buildAgentPrompt(
-        task,
-        `${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ''}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join('\n')}\n\n${implementationOutcomeInstruction}`
-      ),
-      { source: 'rpc' }
-    )
-  })
+  try {
+    await runTaskOperation(taskId, async (signal) => {
+      signal.throwIfAborted()
+      await runOpenAIPlan(
+        taskId,
+        await buildAgentPrompt(
+          task,
+          `你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${task.title}\n${task.description}`
+        ),
+        signal
+      )
+    })
+  } catch (error) {
+    failPlanGeneration(taskId, error)
+    emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
+  }
 }
 
 const resumeImplementationInstruction =
@@ -560,11 +558,12 @@ async function resumeTask(taskId: string): Promise<void> {
   if (!current || current.state !== 'failed') throw new Error('只有失败的任务可以继续执行')
   qoderTokenGuard(current)
   d().store.updateTask(taskId, { sessionUsage: undefined })
-  const failedDuringPlanning =
-    current.failureStage === 'planning' || (current.startMode === 'plan' && !current.planContent)
+  // 旧条件里的 `startMode === 'plan' && !planContent` 一并删：固定链路下所有任务都是 plan 档，
+  // 阶段判断只看 `failureStage`；旧的「没计划就算挂在计划阶段」会把实现阶段失败误判成计划阶段失败。
+  const failedDuringPlanning = current.failureStage === 'planning'
   d().store.updateTask(taskId, { failureStage: undefined })
   if (failedDuringPlanning) {
-    const task = await runTaskOperation(taskId, (signal) => d().taskWorkflow.begin(taskId, 'plan', undefined, signal))
+    const task = await runTaskOperation(taskId, (signal) => d().taskWorkflow.begin(taskId, {}, signal))
     if (d().runtimeProvider(task) === 'qoder') {
       void runTaskOperation(taskId, (signal) => d().qoderOrch.runPlan(taskId, undefined, signal, 'resume')).catch(
         (error: unknown) =>
@@ -802,6 +801,132 @@ async function retryTaskValidation(taskId: string): Promise<void> {
 
 // ── 任务消息 / 停止 / 取消 / 删除 ────────────────────────────────────────────
 
+/**
+ * `draft` 阶段的澄清对话入口（§2.4）。
+ *
+ * 与 `sendTaskMessage` 分家是两处不可调和的差异：那条入口会把状态推到 `implementing`
+ * （它的语义是「实现期跟进」），而澄清改状态就等于替用户启动链路；两者也不能共用会话，
+ * 执行会话的上下文要留给实现阶段（澄清走 `${taskId}:intake`）。
+ *
+ * 澄清只走 Qoder 路径：它靠的是一套自定义工具注入，Pi 侧没有对应能力；宁可直接报错，
+ * 也不退化成「看起来发了但永远没反应」。输出不落流式通道，整轮回复落一条事件。
+ */
+export async function sendTaskIntake(taskId: string, message: string): Promise<void> {
+  const task = d().store.getTask(taskId)
+  if (!task) throw new Error('Task not found')
+  assertDraftIntake(task.state)
+  const token = d().protectedValue('qoderToken')
+  if (!token) throw new Error('澄清对话使用 Qoder 模型，请先配置 Qoder Token')
+  const repositories = d().store.listTaskRepositories(taskId)
+  addDraftEvent({
+    taskId,
+    kind: 'message',
+    title: '你',
+    detail: message,
+    payload: { type: 'draft-message', role: 'user' } satisfies TaskDraftEventPayload
+  })
+  // 等整轮跑完才回 IPC：澄清不接流式通道，也就没有 `agent_start` / `message_update` 那套 busy 信号，
+  // 这条 promise 挂多久就是「Agent 在想」多久。它失败时直接 rejection 上抛，
+  // 比广播一个只有当前页能听见的 `agent_error` 更容易让人知道没说出去的原因。
+  await runTaskOperation(taskId, (signal) =>
+    runTaskIntakeTurn(
+      {
+        task,
+        repositories,
+        availableRepositories: d().store.listRepositoryProfiles(),
+        token,
+        model: stripQoderModelPrefix(d().agentService.resolveModelForTask(task, repositories)),
+        addEvent: addDraftEvent
+      },
+      message,
+      signal
+    )
+  )
+}
+
+/**
+ * 澄清记录的落库出口。
+ *
+ * 不能用 `d().addTaskEvent`：那个 deps 只发一次 `task_changed` 通知，而 Timeline 的事件是从
+ * trace span 合成的——`draft` 阶段根本没有 trace，走那条路等于话说完就消失。
+ */
+function addDraftEvent(event: Omit<AgentEvent, 'id' | 'createdAt'>): void {
+  d().store.addEvent(event)
+  d().emitTaskChanged(event.taskId)
+}
+
+/** 取出一条事件载荷里的建议体；不是建议时返回 `undefined`。 */
+function draftEventPayload(event: AgentEvent): Partial<TaskDraftEventPayload> | undefined {
+  return event.payload && typeof event.payload === 'object'
+    ? (event.payload as Partial<TaskDraftEventPayload>)
+    : undefined
+}
+
+/**
+ * 采纳 / 丢弃一条澄清建议（§2.4 第 3 条）。
+ *
+ * 只认事件 id、不认 renderer 传回来的建议体：否则 renderer 可以自己拼字段让主进程写库，
+ * 「字段写入与白名单校验都在主进程」这句话就白写了。`keys` 是逐项采纳的勾选结果，
+ * 它只能从存量建议里挑键，不在名单里的键一律当作没勾（而不是新字段）。
+ */
+export async function resolveDraftSuggestion(
+  taskId: string,
+  eventId: string,
+  action: 'apply' | 'discard',
+  keys?: TaskDraftFieldKey[]
+): Promise<void> {
+  const task = d().store.getTask(taskId)
+  if (!task) throw new Error('Task not found')
+  assertDraftIntake(task.state)
+  const events = d().store.listEvents(taskId)
+  const index = events.findIndex((event) => event.id === eventId)
+  if (index < 0) throw new Error('这条建议已经不存在，请刷新后重试')
+  const payload = draftEventPayload(events[index]!)
+  if (payload?.type !== 'draft-suggestion') throw new Error('这条事件不是待采纳的任务建议')
+  if (events.slice(index + 1).some((later) => draftEventPayload(later)?.type === 'draft-suggestion-resolved'))
+    throw new Error('这条建议已经处置过了')
+  const available = d().store.listRepositoryProfiles()
+  const rawFields = (payload.fields ?? {}) as Record<string, unknown>
+  if (action === 'discard') {
+    // 再过一次清洗：库里这份 payload 是上一个版本写的可能性不大，但字段名单只能有一处。
+    addDraftEvent({
+      taskId,
+      kind: 'status',
+      title: '已忽略 Agent 的任务定义建议',
+      detail: describeDraftFields(pickDraftFields(rawFields, available)),
+      payload: { type: 'draft-suggestion-resolved', action: 'discarded' } satisfies TaskDraftEventPayload
+    })
+    return
+  }
+  // 交集、空勾选、仓库脏数据三条判据都在 `adoptDraftFields` 里：它才是「点一下采纳会写什么」的答案。
+  const { fields: adopted, error } = adoptDraftFields(rawFields, keys, available)
+  if (error) throw new Error(error)
+  d().store.updateTask(taskId, {
+    ...(adopted.title ? { title: adopted.title } : {}),
+    ...(adopted.description ? { description: adopted.description } : {}),
+    ...(adopted.keywords ? { keywords: adopted.keywords } : {}),
+    ...(adopted.acceptanceCriteria ? { acceptanceCriteria: adopted.acceptanceCriteria } : {})
+  } satisfies Partial<Task>)
+  if (adopted.repositoryIds) applyDraftRepositories(taskId, adopted.repositoryIds)
+  addDraftEvent({
+    taskId,
+    kind: 'status',
+    title: '已采纳 Agent 的任务定义建议',
+    // 记的是实际写进去的那几项，不是建议原文：用户只勾两项时摘要里不该出现第三项。
+    detail: describeDraftFields(adopted),
+    payload: { type: 'draft-suggestion-resolved', action: 'applied' } satisfies TaskDraftEventPayload
+  })
+}
+
+/** 建议里的仓库列表当作最终结果用：缺的补上、多的 detach，不只做增量。 */
+function applyDraftRepositories(taskId: string, repositoryIds: string[]): void {
+  const attached = d()
+    .store.listTaskRepositories(taskId)
+    .map((repo) => repo.repositoryId)
+  for (const id of repositoryIds) if (!attached.includes(id)) d().store.attachRepository(taskId, id)
+  for (const id of attached) if (!repositoryIds.includes(id)) d().store.detachRepository(taskId, id)
+}
+
 async function sendTaskMessage(taskId: string, message: string): Promise<void> {
   let task = d().store.getTask(taskId)
   if (
@@ -849,6 +974,8 @@ export async function stopTaskOperations(taskId: string, markFailed: boolean): P
   if (markFailed && task && ['planning', 'implementing', 'validating', 'generating_tests'].includes(task.state))
     updateState(task, 'failed')
   d().qoderOrch.closeSession(taskId)
+  // 澄清会话不在 qoderOrch 手里（它只持执行会话），停止 / 取消 / 删除时要单独丢。
+  closeTaskIntake(taskId)
   if (getActiveTaskId() === taskId) {
     const result = await d().qoderOrch.stop(taskId, markFailed)
     const qoderAbort = result.abortedController

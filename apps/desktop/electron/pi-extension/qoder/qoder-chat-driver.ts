@@ -9,7 +9,7 @@
  *  - 会话控制作为底层能力:首次创建;历史末尾有 `qoder.session` 时自动 `resume`(应用重启后
  *    打开历史对话可恢复上下文);`abort → interrupt`(停止当前回复、保留会话);
  *    `closeSession` 删除对话时调用;`dispose` 应用退出统一关闭;
- *  - 工具注入:把 `ToolSource` 翻译成 Qoder MCP server(`qoderTool + createSdkMcpServer`);
+ *  - 工具注入:把 `ToolSource` 翻译成 Qoder MCP server(共用 `./tool-source-mcp.ts`);
  *  - 任务已创建:每次 tool 执行后调 `ToolSource.describeResult(output)`,有结果就 emit
  *    `{ type: "task-created", result }` chunk;
  *  - 持久化:raw 字段存 SDK 自己的"原样"消息列表(由 driver 内部累积,流结束一次性 dump)。
@@ -18,15 +18,7 @@
  */
 
 import { planModeInstruction } from '@task-pipeline/core'
-import type { z } from 'zod'
-import {
-  createSdkMcpServer,
-  tool as qoderTool,
-  type CanUseToolOptions,
-  type McpServerConfig,
-  type PermissionResult,
-  type SdkMcpToolDefinition
-} from '@qoder-ai/qoder-agent-sdk'
+import { type CanUseToolOptions, type McpServerConfig, type PermissionResult } from '@qoder-ai/qoder-agent-sdk'
 import type { McpServerConfig as CodegraphMcpConfig } from '@task-pipeline/codegraph'
 import type { ChatAttachmentCache } from '../../chat/chat-attachment-cache.js'
 import type { ChatDriver, StreamChatInput } from '../../chat/drivers/chat-driver.js'
@@ -39,10 +31,10 @@ import type {
   UserFileAttachment
 } from '../../chat/chat-types.js'
 import type { McpServiceProfileResolver } from '../../mcp/mcp-services.js'
-import type { ToolSource } from '../../chat/drivers/tool-source.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
 import { QoderSession, QoderSessionRegistry } from './qoder-session.js'
 import { QoderTraceBuilder } from './trace-builder.js'
+import { buildToolSourceMcp } from './tool-source-mcp.js'
 
 type QoderStatus = {
   enabled: boolean
@@ -117,42 +109,6 @@ function rawToParts(raw: unknown): DriverPart[] {
   if (record.kind === 'system') return [{ driverId: 'qoder', type: 'text', text: record.text }]
   if (record.kind === 'assistant' && Array.isArray(record.parts)) return record.parts
   return emptyParts()
-}
-
-/**
- * 把 ToolDeclaration[] 翻译成 Qoder MCP server。
- *  - `qoderTool(name, description, shape, execute, opts)` 直接吃单层 zod 字段;
- *  - `permissionPolicy: "always_allow"` 让工具不被 Qoder 权限检查拦截(任务创建工具不在 CLI 上下文内);
- *  - `modelToolResult` 把 execute 结果包成 MCP 标准 `CallToolResult` 形态。
- */
-function buildTaskCreationMcp(source: ToolSource): {
-  server: ReturnType<typeof createSdkMcpServer>
-  toolNames: string[]
-} {
-  const declarations = source.tools()
-  if (declarations.length === 0) {
-    return { server: createSdkMcpServer({ name: 'task-creation', version: '1.0.0', tools: [] }), toolNames: [] }
-  }
-  const tools: SdkMcpToolDefinition<any>[] = declarations.map((decl) => {
-    const annotations = decl.annotations ?? {}
-    const mcpAnnotations: { readOnlyHint?: boolean; destructiveHint?: boolean; openWorldHint?: boolean } = {}
-    if (annotations.readOnlyHint) mcpAnnotations.readOnlyHint = true
-    if (annotations.destructiveHint) mcpAnnotations.destructiveHint = true
-    if (annotations.openWorldHint) mcpAnnotations.openWorldHint = true
-    return qoderTool(
-      decl.name,
-      decl.description,
-      decl.schema as Record<string, z.ZodTypeAny>,
-      async (input: Record<string, unknown>) => ({
-        content: [{ type: 'text' as const, text: JSON.stringify(await decl.execute(input)) }]
-      }),
-      { annotations: mcpAnnotations, permissionPolicy: 'always_allow' }
-    )
-  })
-  return {
-    server: createSdkMcpServer({ name: 'task-creation', version: '1.0.0', tools }),
-    toolNames: declarations.map((decl) => `mcp__task_creation__${decl.name}`)
-  }
 }
 
 /** 从历史末尾倒序找最后一个 `qoder.session` part(恢复会话的锚点)。 */
@@ -406,7 +362,7 @@ export class QoderChatDriver implements ChatDriver {
   ) {
     const resumeSessionId = extractLastSessionId(input.history)
     const taskSource = input.toolSource
-    const mcpSetup = taskSource ? buildTaskCreationMcp(taskSource) : undefined
+    const mcpSetup = taskSource ? buildToolSourceMcp('task_creation', taskSource.tools()) : undefined
     // 用户勾选的外部 MCP 服务（gitlab/jira/confluence）→ SDK stdio mcpServers，
     // 凭据缺失的服务由 resolver 返回 undefined 直接跳过（不误注入空配置）。
     const mcpServers: Record<string, McpServerConfig> = {}
@@ -428,7 +384,9 @@ export class QoderChatDriver implements ChatDriver {
         mcpServers.codegraph = {
           type: 'stdio',
           command: cgConfig.command,
-          args: cgConfig.args
+          args: cgConfig.args,
+          // 自带 codegraph CLI 时需要 ELECTRON_RUN_AS_NODE 等环境变量
+          ...(cgConfig.env ? { env: cgConfig.env } : {})
         }
       }
     }

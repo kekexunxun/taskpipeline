@@ -1,17 +1,16 @@
 /**
- * 危险工具判定 — 工具调用 HITL 规则。
+ * 对话路径的工具调用 HITL 规则。
  *
- * Qoder 实现阶段用 `permissionMode: "acceptEdits"`（自动接受编辑）。
- * 默认"常规可行"：只有不可逆的破坏性操作才拦截给用户确认，避免频繁弹窗打断执行，
- * 也避免并行任务时确认框归属不清。
+ * ⚠️ **任务执行路径不再使用本文件**：它已改走 `@task-pipeline/core` 的
+ * `evaluateExecutionPermission`（L1 硬阻断 + 其余放行，不弹框），两边规则不再各写一份。
+ * 本文件只服务 `chat/chat-init.ts` 的对话回调，以及它下面的 `describeToolAction` 工具描述助手。
+ *
+ * Qoder 对话侧默认「常规可行」：只有不可逆的破坏性操作才拦截给用户确认。
  *
  * 规则（仅确认删除/重命名/移动类，其余一律放行）：
  * - 工具名含 delete / remove / unlink / rm / rename / mv / move → 确认；
  * - Bash / Shell 命令中出现 rm / rmdir / unlink / mv / git rm → 确认；
  * - 其余（shell 写命令、git push/merge/reset 等写操作、Read/Write/Edit/Glob 等）→ 自动放行。
- *
- * 该判定与 PermissionRequest hook 之间保持接口不变（返回 boolean），
- * 后续如需按工具/按命令细化策略（白名单、按仓库规则等），只需扩展本文件。
  */
 
 /** Bash 命令中的破坏性动词（词边界扫描，任意位置命中即确认，覆盖 sudo/xargs/引号/多行前缀；

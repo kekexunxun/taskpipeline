@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { importJiraIssue, testAtlassianConnection, testAtlassianConnectionRest } from './jira-mcp.js'
+import { fetchJiraTasks, importJiraIssue, testAtlassianConnection, testAtlassianConnectionRest } from './jira-mcp.js'
 import type { McpClient } from './mcp.js'
 
 /** 构造只含 listTools / callTool / close 的 McpClient 桩。 */
@@ -149,6 +149,69 @@ describe('importJiraIssue', () => {
         sourceUrl: 'https://jira.example.com/browse/OPS-12'
       })
     )
+  })
+})
+
+describe('fetchJiraTasks', () => {
+  /** 记录每次 tools/call 入参，并按页返回 @alexbuzo/jira-mcp 真实的 `{ status, headers, body }` 信封。 */
+  function stubSearchClient(pages: Array<{ issues: unknown[]; total: number }>) {
+    const calls: Array<Record<string, unknown>> = []
+    let page = 0
+    const client = {
+      callTool: async (_name: string, args: Record<string, unknown>) => {
+        calls.push(args)
+        const current = pages[Math.min(page, pages.length - 1)] ?? { issues: [], total: 0 }
+        page += 1
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ status: 200, headers: {}, body: { issues: current.issues, total: current.total } })
+            }
+          ]
+        }
+      },
+      close: () => {}
+    }
+    return { client: client as unknown as McpClient, calls }
+  }
+
+  const issue = (key: string) => ({
+    key,
+    self: `https://jira.example.com/rest/api/2/issue/${key}`,
+    fields: { summary: `Title ${key}`, description: 'desc', labels: ['x'], status: { name: 'In Progress' } }
+  })
+
+  it('reads issues out of the { status, headers, body } envelope', async () => {
+    const { client } = stubSearchClient([{ issues: [issue('OPS-12')], total: 1 }])
+    const tasks = await fetchJiraTasks(client)
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0]).toMatchObject({ taskKey: 'OPS-12', title: 'Title OPS-12' })
+  })
+
+  it('sends camelCase pagination args and advances startAt by the returned page size', async () => {
+    const { client, calls } = stubSearchClient([
+      { issues: Array.from({ length: 50 }, (_, i) => issue(`OPS-${i}`)), total: 51 },
+      { issues: [issue('OPS-50')], total: 51 }
+    ])
+    const tasks = await fetchJiraTasks(client)
+    expect(calls[0]).toMatchObject({ maxResults: 50, startAt: 0 })
+    expect(calls[0]).not.toHaveProperty('limit')
+    expect(calls[0]).not.toHaveProperty('start_at')
+    expect(Array.isArray(calls[0]?.fields)).toBe(true)
+    expect(calls[1]).toMatchObject({ startAt: 50 })
+    expect(tasks).toHaveLength(51)
+  })
+
+  it('throws instead of returning an empty list when the tool reports isError', async () => {
+    const client = {
+      callTool: async () => ({
+        isError: true,
+        content: [{ type: 'text', text: JSON.stringify({ code: 'HTTP_ERROR', message: '401 Unauthorized' }) }]
+      }),
+      close: () => {}
+    }
+    await expect(fetchJiraTasks(client as unknown as McpClient)).rejects.toThrow('401 Unauthorized')
   })
 })
 

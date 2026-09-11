@@ -1,9 +1,11 @@
 import { homedir } from 'node:os'
-import { join, resolve as resolvePath } from 'node:path'
-import { isToolCallEventType, type ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import { join } from 'node:path'
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import {
+  evaluateExecutionPermission,
   LocalFileKeyStore,
   TaskStore,
+  taskRoots,
   type AgentEvent,
   type McpProfile,
   type SettingResolver,
@@ -26,7 +28,6 @@ import {
   testAtlassianConnection
 } from '@task-pipeline/integrations'
 import { DockerToolRouter } from './sandbox.js'
-import { evaluatePermission } from './permission.js'
 import { PiAgentPlanModeProvider } from './plan-mode.js'
 
 const dataDir = process.env.TASK_PIPELINE_DATA_DIR ?? join(homedir(), '.task-pipeline')
@@ -70,7 +71,13 @@ const gitService = new GitService()
 const ocrService = new OpenCodeReviewService(store.getSetting('ocrBinary') ?? process.env.OCR_BINARY ?? 'ocr')
 const openAIReviewer = new OpenAICompatReviewer(piResolver)
 function buildReviewOrchestrator(): ReviewOrchestrator {
-  return new ReviewOrchestrator({ ocr: ocrService, git: gitService, reviewer: openAIReviewer }, piSink)
+  // 与 desktop 侧同源：不传时 ReviewOrchestrator 会恒定落在 'high'，设置页的「阻断级别」就形同虚设。
+  const raw = piResolver.get('reviewBlockingLevel')
+  const level = raw === 'critical' || raw === 'medium' ? raw : 'high'
+  return new ReviewOrchestrator(
+    { ocr: ocrService, git: gitService, reviewer: openAIReviewer, reviewBlockingLevel: level },
+    piSink
+  )
 }
 const taskWorkflow = new TaskWorkflow(store, piResolver, piSink, (taskId) => join(dataDir, 'workspaces', taskId))
 const mergeRefresher = new MergeStatusRefresher(store, piResolver, piSink)
@@ -91,19 +98,18 @@ function buildJiraClient(profile: McpProfile): McpClient {
 
 /**
  * Pi 端的 DeliveryService 实例。
- * 每次调用都新建一个,因为要注入 `ctx.ui.confirm` 作为 approver。
+ *
+ * approver 不再逐步弹确认:固定链路下 `/deliver` 本身就是人显式触发的意图,
+ * 而「Review 通过后是否自动走到这一步」由 `resolveMrMode()` 决定——
+ * 旧的 `deliveryConfirm` 设置项既没有写入入口,也不该再当隐藏开关。
+ * 这里只保留审批表的审计记录。
  */
-function buildDeliveryService(ctx: {
-  ui: { confirm(title: string, message: string): Promise<boolean> }
-}): DeliveryService {
+function buildDeliveryService(): DeliveryService {
   return new DeliveryService(store, gitService, piResolver, piSink, {
     approver: async (task, kind, context) => {
-      // 与 desktop 端一致：默认"常规可行"不弹窗；deliveryConfirm=true 时才逐步骤确认。
-      if (piResolver.get('deliveryConfirm') !== 'true') return true
       const approval = store.addApproval({ taskId: task.id, kind, context })
-      const accepted = await ctx.ui.confirm(`确认${kind}：${task.title}`, `${task.title}\n\n${context}`)
-      store.resolveApproval(approval.id, accepted ? 'approved' : 'rejected')
-      return accepted
+      store.resolveApproval(approval.id, 'approved')
+      return true
     }
   })
 }
@@ -152,22 +158,20 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
     await sandboxRouter.stop()
   })
 
-  pi.on('tool_call', async (event, ctx) => {
+  pi.on('tool_call', async (event) => {
     const input = event.input as Record<string, unknown>
     const task = selectedTask('')
-    const roots = task
-      ? store.listTaskRepositories(task.id).map((repo) => resolvePath(repo.worktreePath ?? repo.localPath))
-      : []
-    const decision = evaluatePermission(event.toolName, input, roots, sandboxRouter.activeCwd(process.cwd()))
+    const repos = task ? store.listTaskRepositories(task.id) : []
+    const decision = evaluateExecutionPermission(event.toolName, input, {
+      roots: taskRoots(repos),
+      cwd: sandboxRouter.activeCwd(process.cwd())
+    })
     if (decision.action === 'allow') return undefined
-    if (decision.action === 'block') return { block: true, reason: decision.reason }
-    if (!isToolCallEventType('bash', event)) return { block: true, reason: decision.reason }
-    const command = event.input.command
-    if (!ctx.hasUI) return { block: true, reason: '受保护命令在无交互模式下默认拒绝' }
-    const allowed = await ctx.ui.confirm('受保护命令', `${command}\n\n确认执行？`)
-    if (!allowed) return { block: true, reason: '用户拒绝执行' }
-    if (task) store.addEvent({ taskId: task.id, kind: 'permission', title: '已批准受保护命令', detail: command })
-    return undefined
+    // L1 硬阻断：不询问用户，直接 block 并把原因回给模型。
+    const reason = decision.reason ?? '操作超出本任务边界'
+    if (task)
+      store.addEvent({ taskId: task.id, kind: 'permission', title: `已拦截：${event.toolName}`, detail: reason })
+    return { block: true, reason }
   })
 
   pi.registerCommand('tasks', {
@@ -220,86 +224,76 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
         }
         task = setState(task, 'confirmed')
       }
-      const selection = await ctx.ui.select('启动方式', ['直接开始', '先生成计划'])
-      if (!selection) {
-        store.releaseLease(task.id, owner)
-        return
-      }
-      const mode = selection === '先生成计划' ? 'plan' : 'direct'
+      // 固定链路：去掉「直接开始 / 先生成计划」二选一，begin() 恒进 planning。
       try {
-        await taskWorkflow.begin(task.id, mode)
+        await taskWorkflow.begin(task.id)
       } catch (error) {
         store.releaseLease(task.id, owner)
         return ctx.ui.notify(`准备环境失败：${error instanceof Error ? error.message : String(error)}`, 'error')
       }
       store.setSetting('activeTaskId', task.id)
-      if (mode === 'plan') {
-        // plan 阶段:走子 agent 隔离,spawn 一个只读工具集的子 pi 进程跑 planner。
-        // 主 session 的 active tools / hook 完全不动,plan 结束后也不需要还原。
-        const planProvider = new PiAgentPlanModeProvider()
-        const primaryRepo = store.listTaskRepositories(task.id)[0]!
-        const cwd = primaryRepo.worktreePath ?? primaryRepo.localPath
-        ctx.ui.notify('正在生成计划…', 'info')
-        let parsed
-        try {
-          parsed = await planProvider.runPlan({ task, feedback: undefined }, { cwd, hardTimeoutMs: 5 * 60_000 })
-        } catch (error) {
-          store.releaseLease(task.id, owner)
-          return ctx.ui.notify(`生成计划失败：${error instanceof Error ? error.message : String(error)}`, 'error')
-        }
+      // plan 阶段:走子 agent 隔离,spawn 一个只读工具集的子 pi 进程跑 planner。
+      // 主 session 的 active tools / hook 完全不动,plan 结束后也不需要还原。
+      const planProvider = new PiAgentPlanModeProvider()
+      const primaryRepo = store.listTaskRepositories(task.id)[0]!
+      const cwd = primaryRepo.worktreePath ?? primaryRepo.localPath
+      ctx.ui.notify('正在生成计划…', 'info')
+      let parsed
+      try {
+        parsed = await planProvider.runPlan({ task, feedback: undefined }, { cwd, hardTimeoutMs: 5 * 60_000 })
+      } catch (error) {
+        store.releaseLease(task.id, owner)
+        return ctx.ui.notify(`生成计划失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+      }
 
-        let planForApproval: string
-        if (parsed.outcome === 'unparsed') {
+      let planForApproval: string
+      if (parsed.outcome === 'unparsed') {
+        store.releaseLease(task.id, owner)
+        return ctx.ui.notify('planner 输出无法解析为 plan', 'error')
+      } else if (parsed.outcome === 'already_satisfied') {
+        const changedGroups = await Promise.all(
+          store.listTaskRepositories(task.id).map(async (repo) => {
+            const files = await gitService.changedFiles(repo.worktreePath ?? repo.localPath, repo.baseBranch)
+            return files.map((file) => ({ repositoryName: repo.name, ...file }))
+          })
+        )
+        const changedFiles = changedGroups.flat()
+        if (changedFiles.length === 0) {
+          taskWorkflow.completeWithoutChanges(task.id, parsed.summary)
           store.releaseLease(task.id, owner)
-          return ctx.ui.notify('planner 输出无法解析为 plan', 'error')
-        } else if (parsed.outcome === 'already_satisfied') {
-          const changedGroups = await Promise.all(
-            store.listTaskRepositories(task.id).map(async (repo) => {
-              const files = await gitService.changedFiles(repo.worktreePath ?? repo.localPath, repo.baseBranch)
-              return files.map((file) => ({ repositoryName: repo.name, ...file }))
-            })
-          )
-          const changedFiles = changedGroups.flat()
-          if (changedFiles.length === 0) {
-            taskWorkflow.completeWithoutChanges(task.id, parsed.summary)
-            store.releaseLease(task.id, owner)
-            ctx.ui.notify('代码已满足任务要求，任务已自动完成', 'info')
-            return
-          }
-          planForApproval = [
-            '## 需要人工确认',
-            '',
-            `Agent 判断当前代码已满足任务要求，但系统检测到 ${changedFiles.length} 个文件变化，因此任务未自动完成。`,
-            '',
-            parsed.summary,
-            '',
-            '## 检测到的文件变化',
-            '',
-            ...changedFiles.map((file) => `- ${file.repositoryName}: ${file.path} (${file.status})`)
-          ].join('\n')
-          store.updateTask(task.id, { summary: '计划结论与文件状态不一致，等待确认' })
-        } else {
-          planForApproval = parsed.plan
+          ctx.ui.notify('代码已满足任务要求，任务已自动完成', 'info')
+          return
         }
-        taskWorkflow.setPlan(task.id, planForApproval)
-        const choice = await ctx.ui.select('计划已生成', ['批准并开始', '补充意见并重新生成', '稍后确认'])
-        if (choice === '批准并开始') {
-          const approval = store.addApproval({ taskId: task.id, kind: 'plan', context: planForApproval })
-          store.resolveApproval(approval.id, 'approved')
-          await taskWorkflow.approvePlan(task.id)
-          pi.sendUserMessage(`按已批准计划实现任务：\n\n${planForApproval}`, { deliverAs: 'followUp' })
-        } else if (choice === '补充意见并重新生成') {
-          const feedback = await ctx.ui.editor('计划调整意见', '')
-          if (feedback?.trim()) {
-            taskWorkflow.revisePlan(task.id)
-            pi.sendUserMessage(`根据以下意见重新生成完整计划，仍然禁止修改文件：\n\n${feedback.trim()}`, {
-              deliverAs: 'followUp'
-            })
-          }
-        }
+        planForApproval = [
+          '## 需要人工确认',
+          '',
+          `Agent 判断当前代码已满足任务要求，但系统检测到 ${changedFiles.length} 个文件变化，因此任务未自动完成。`,
+          '',
+          parsed.summary,
+          '',
+          '## 检测到的文件变化',
+          '',
+          ...changedFiles.map((file) => `- ${file.repositoryName}: ${file.path} (${file.status})`)
+        ].join('\n')
+        store.updateTask(task.id, { summary: '计划结论与文件状态不一致，等待确认' })
       } else {
-        pi.sendUserMessage(`开始实现任务：\n\n${task.title}\n\n${task.description}`, { deliverAs: 'followUp' })
-        ctx.ui.notify('worktree 与准备命令已完成，开始实现。', 'info')
+        planForApproval = parsed.plan
+      }
+      taskWorkflow.setPlan(task.id, planForApproval)
+      const choice = await ctx.ui.select('计划已生成', ['批准并开始', '补充意见并重新生成', '稍后确认'])
+      if (choice === '批准并开始') {
+        const approval = store.addApproval({ taskId: task.id, kind: 'plan', context: planForApproval })
+        store.resolveApproval(approval.id, 'approved')
+        await taskWorkflow.approvePlan(task.id)
+        pi.sendUserMessage(`按已批准计划实现任务：\n\n${planForApproval}`, { deliverAs: 'followUp' })
+      } else if (choice === '补充意见并重新生成') {
+        const feedback = await ctx.ui.editor('计划调整意见', '')
+        if (feedback?.trim()) {
+          taskWorkflow.revisePlan(task.id)
+          pi.sendUserMessage(`根据以下意见重新生成完整计划，仍然禁止修改文件：\n\n${feedback.trim()}`, {
+            deliverAs: 'followUp'
+          })
+        }
       }
     }
   })
@@ -377,7 +371,7 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
       if (!gitlabProfile?.baseUrl) return ctx.ui.notify('GitLab 配置不完整：缺少实例地址', 'error')
       const token = configuredSecret('gitlabToken', gitlabProfile.tokenEnv)
       if (!token) return ctx.ui.notify('GitLab Token 未通过环境变量或加密配置提供', 'error')
-      const delivery = buildDeliveryService(ctx)
+      const delivery = buildDeliveryService()
       try {
         await delivery.submitMergeRequests(taskId)
         const updated = store.getTask(taskId)

@@ -2,14 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import {
   CheckIcon,
   ChevronDownIcon,
+  GitMergeIcon,
+  HandIcon,
   Loader2Icon,
   PlayIcon,
   SaveIcon,
-  SlidersHorizontalIcon,
-  SparklesIcon,
-  WandSparklesIcon
+  SlidersHorizontalIcon
 } from 'lucide-react'
-import type { AgentProfile, RepositoryProfile, Task, TaskRepository, TaskStartMode } from '@task-pipeline/core'
+import type { AgentProfile, RepositoryProfile, Task, TaskRepository, TaskMrMode } from '@task-pipeline/core'
 import { mergeRepositoryOptions, RepositoryPicker } from './RepositoryPicker'
 import { api, type RepositoryCommands, type StartTaskOptions } from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
@@ -43,6 +43,14 @@ import { getLastSelectedModel } from '@/utils/last-model-cache'
 // 前端不得 import core 运行值（会拖入 better-sqlite3，导致 vite 预打包在浏览器环境崩溃）
 const AGENT_TASK_DISABLED = '__disabled__'
 
+/** 仓库命令的展示名，用于折叠态的命令摘要。 */
+const COMMAND_LABELS = {
+  setupCommand: '准备',
+  lintCommand: 'Lint',
+  testCommand: 'Test',
+  buildCommand: 'Build'
+} as const
+
 /**
  * 任务编辑/启动 统一弹窗。
  *
@@ -51,10 +59,12 @@ const AGENT_TASK_DISABLED = '__disabled__'
  *   - start 模式：先保存任务 + 同步仓库 + 持久化命令（让用户可以顺手改任务正文），再启动任务。
  *
  * 共享字段（两种模式都展示、都可编辑）：
- *   标题 / 描述 / 关键词 / 验收标准 / 关联仓库（含每个仓库的命令配置，默认折叠）/ 高级设置 · 任务自动化
+ *   标题 / 描述 / 关键词 / 验收标准 / Review 通过后提交档 / 关联仓库（含每个仓库的命令配置，默认折叠）
  *
- * 启动专用字段（仅 start 模式展示）：
- *   启动方式（卡片选择器）
+ * 高级设置（默认折叠）：
+ *   执行 Agent（任务级：跟随仓库 / 指定 / 禁用）/ 逐仓库执行 Agent
+ *
+ * 固定链路下「直接开始 / 先生成计划」不再是可选分叉，启动方式卡片已删。
  *
  * 共享：宽度 720px、容器 max-h-[88vh] flex-col、正文 max-h-[58vh] overflow-y-auto；
  * 共享：DialogHeader / DialogFooter 排版；共享：仓库选择 + 取消按钮。
@@ -62,141 +72,99 @@ const AGENT_TASK_DISABLED = '__disabled__'
 export type TaskEditorDialogMode = 'edit' | 'start'
 
 /**
- * 任务级自动化覆盖的三态值：
+ * 系统默认的 MR 提交档：仍读旧的 `autoCreateMergeRequests` 设置键。
  *
- * - `undefined` 表示「沿用系统设置」（保存时不写入 task 字段）。
- * - `true` / `false` 表示本任务的显式覆盖。
- *
- * 选中「沿用」会重置回 `undefined`；切换到「开启 / 关闭」会写入 task 字段。
- * 这里与 system setting 互相独立——用户改系统设置不会回写到已有任务。
+ * core 的 `resolveMrMode()` 回落链读的就是这个键，UI 只负责展示「不单独设置时会怎样」，
+ * 不再另立一个新的设置项，避免同一个决策两个来源。
  */
-type TaskOverride = boolean | undefined
-type Overrides = {
-  openCodeReviewEnabled: TaskOverride
-  createTestCasesEnabled: TaskOverride
-  autoCreateMergeRequests: TaskOverride
-}
-
-const SYSTEM_FLAG_KEYS = {
-  openCodeReviewEnabled: 'openCodeReviewEnabled',
-  createTestCasesEnabled: 'createTestCasesEnabled',
-  autoCreateMergeRequests: 'autoCreateMergeRequests'
-} as const
-
-function readSetting(key: keyof typeof SYSTEM_FLAG_KEYS): Promise<boolean> {
-  return api.getSetting(SYSTEM_FLAG_KEYS[key]).then((value) => value === 'true')
+function readSystemMrDefault(): Promise<TaskMrMode> {
+  return api.getSetting('autoCreateMergeRequests').then((value) => (value === 'true' ? 'auto' : 'manual'))
 }
 
 /**
- * 启动方式卡片选择器。
+ * 「Review 通过后」提交档卡片：本任务唯一的主决策。
  *
- * 视觉上彻底脱离 tab / segmented control 模式：左右两枚独立卡片，每张卡含
- * icon + 标题 + 描述；选中态用 `border-primary` + `bg-primary/5` + `ring-1 ring-primary/30`
- * 强调，与页面里其它"主操作"区域在视觉权重上一致。
+ * 视觉上沿用原双卡语言（icon + 标题 + 描述，选中态 `border-primary` + `ring`），
+ * 但语义不同：**初始两张卡都不选中**，`undefined` 表示「不写 `task.mrAutoSubmit`、跟随系统默认」——
+ * 这样 core 回落链里「任务级未设置」这个状态在 UI 上可达，而不是一进来就被写成显式值。
+ * 已显式选择后，helper 行给出「恢复跟随」把字段清回去。
  */
-function StartModeCards({ value, onChange }: { value: TaskStartMode; onChange(next: TaskStartMode): void }) {
-  const options: Array<{ value: TaskStartMode; label: string; description: string; Icon: typeof PlayIcon }> = [
-    { value: 'direct', label: '直接开始', description: '立即进入实现，跳过计划阶段。', Icon: PlayIcon },
-    { value: 'plan', label: '先生成计划', description: '先输出执行计划，确认后再实现。', Icon: WandSparklesIcon }
-  ]
-  return (
-    <Field label="启动方式">
-      <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="启动方式">
-        {options.map((option) => {
-          const active = option.value === value
-          return (
-            <button
-              key={option.value}
-              type="button"
-              role="radio"
-              aria-checked={active}
-              onClick={() => onChange(option.value)}
-              className={cn(
-                'rounded-md border p-3 text-left transition-all focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none',
-                active
-                  ? 'border-primary/60 bg-primary/[0.06] ring-1 ring-primary/30'
-                  : 'border-border/60 hover:border-foreground/30 hover:bg-foreground/[0.02]'
-              )}
-            >
-              <div className="flex items-center gap-1.5">
-                <option.Icon size={12} className={cn(active ? 'text-primary' : 'text-muted-foreground')} />
-                <span className={cn('text-xs font-medium', active ? 'text-foreground' : 'text-foreground/80')}>
-                  {option.label}
-                </span>
-                {active && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />}
-              </div>
-              <p className="mt-1 text-[10.5px] leading-snug text-muted-foreground">{option.description}</p>
-            </button>
-          )
-        })}
-      </div>
-    </Field>
-  )
-}
-
-/**
- * 任务级覆盖的「沿用 / 开启 / 关闭」三态控件。
- *
- * 视觉重设计：
- *   - 字段标签与控件分离：标签「CodeReview」在 Field 的 label 区，控件在 children 区，避免把名字塞进按钮文案。
- *   - 按钮组只承担动作语义：「沿用」「开启」「关闭」。
- *   - 控件右侧用 inline tag 显示「系统默认: 开/关」，明确告诉用户跟随时的实际行为。
- *   - 底部 helper 行显示「实际生效: 开启 (沿用系统)」或「实际生效: 关闭 (任务独立覆盖)」。
- */
-function AutomationOverrideField({
-  label,
-  helper,
+function MrModeCards({
   value,
-  systemValue,
+  systemDefault,
   onChange
 }: {
-  label: string
-  helper: string
-  value: TaskOverride
-  systemValue: boolean
-  onChange(next: TaskOverride): void
+  value: TaskMrMode | undefined
+  systemDefault: TaskMrMode
+  onChange(next: TaskMrMode | undefined): void
 }) {
-  const options: Array<{ value: TaskOverride; label: string }> = [
-    { value: undefined, label: '沿用' },
-    { value: true, label: '开启' },
-    { value: false, label: '关闭' }
+  const options: Array<{ value: TaskMrMode; label: string; description: string; Icon: typeof PlayIcon }> = [
+    { value: 'auto', label: '自动提交 MR', description: 'Review 通过后直接创建 Merge Request。', Icon: GitMergeIcon },
+    { value: 'manual', label: '停住，我手动提', description: '停在待提交，由人确认后自己提。', Icon: HandIcon }
   ]
-  const effective = value ?? systemValue
-  const source = value === undefined ? '沿用系统' : '任务独立配置'
   return (
-    <Field label={<span className="text-xs font-medium">{label}</span>}>
-      <div className="space-y-1.5">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="inline-flex h-7 items-center gap-0.5 rounded-md border bg-card/40 p-0.5 text-[11px]">
-            {options.map((option) => {
-              const active = option.value === value
-              return (
-                <Button
-                  key={option.label}
-                  type="button"
-                  variant={active ? 'default' : 'ghost'}
-                  size="sm"
-                  className="h-6 px-2"
-                  onClick={() => onChange(option.value)}
-                  aria-pressed={active}
-                >
-                  {option.label}
-                </Button>
-              )
-            })}
-          </div>
-          <span className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/30 px-1.5 py-0.5 text-[10px] text-muted-foreground">
-            <span className="text-muted-foreground/70">系统默认</span>
-            <span className={cn('font-medium', systemValue ? 'text-emerald-500' : 'text-muted-foreground/80')}>
-              {systemValue ? '开' : '关'}
+    <Field
+      label={
+        <span className="flex items-center gap-2">
+          <span>Review 通过后</span>
+          <span className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/30 px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground">
+            系统默认
+            <span
+              className={cn('font-medium', systemDefault === 'auto' ? 'text-emerald-500' : 'text-muted-foreground/80')}
+            >
+              {systemDefault === 'auto' ? '自动提交' : '手动提交'}
             </span>
           </span>
+        </span>
+      }
+    >
+      <div className="space-y-1.5">
+        <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Review 通过后的 MR 提交方式">
+          {options.map((option) => {
+            const active = option.value === value
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => onChange(option.value)}
+                className={cn(
+                  'rounded-md border p-3 text-left transition-all focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none',
+                  active
+                    ? 'border-primary/60 bg-primary/[0.06] ring-1 ring-primary/30'
+                    : 'border-border/60 hover:border-foreground/30 hover:bg-foreground/[0.02]'
+                )}
+              >
+                <div className="flex items-center gap-1.5">
+                  <option.Icon size={12} className={cn(active ? 'text-primary' : 'text-muted-foreground')} />
+                  <span className={cn('text-xs font-medium', active ? 'text-foreground' : 'text-foreground/80')}>
+                    {option.label}
+                  </span>
+                  {active && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />}
+                </div>
+                <p className="mt-1 text-[10.5px] leading-snug text-muted-foreground">{option.description}</p>
+              </button>
+            )
+          })}
         </div>
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {helper}
-          <span className="ml-1 text-foreground/70">
-            实际生效：{effective ? '开启' : '关闭'}（{source}）
+        <p className="flex flex-wrap items-center gap-2 text-[11px] leading-relaxed text-muted-foreground">
+          <span>
+            {value === undefined
+              ? `未为本任务单独设置，跟随系统默认（${systemDefault === 'auto' ? '自动提交 MR' : '手动提交'}）。`
+              : '已为本任务单独设置，优先于系统默认。'}
           </span>
+          {value !== undefined && (
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              className="h-auto p-0 text-[11px] font-normal"
+              onClick={() => onChange(undefined)}
+            >
+              恢复跟随
+            </Button>
+          )}
         </p>
       </div>
     </Field>
@@ -350,6 +318,56 @@ function TaskBodyFields({
 }
 
 /**
+ * 逐仓库执行 Agent 覆盖（从仓库面板标题行移到高级设置）。
+ *
+ * 与任务级「执行 Agent」并存：仓库级优先，未设置的仓库回落到任务级 / 仓库绑定。
+ * 不单独占主区一行：它属于「偶尔调一次」的配置，且需要随仓库数量增长。
+ */
+function RepoAgentOverrideField({
+  repos,
+  agents,
+  values,
+  onChange
+}: {
+  repos: RepositoryProfile[]
+  agents: AgentProfile[]
+  values: Record<string, string>
+  onChange(repositoryId: string, agentId: string | undefined): void
+}) {
+  const selectableAgents = agents.filter((agent) => !agent.builtin)
+  return (
+    <Field label={<span className="text-xs font-medium">逐仓库执行 Agent</span>}>
+      <div className="space-y-1.5">
+        {repos.length === 0 && <p className="text-[11px] text-muted-foreground">未选择仓库。</p>}
+        {repos.map((repo) => (
+          <div key={repo.id} className="flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-[11px] text-foreground/80">{repo.name}</span>
+            <Select
+              value={values[repo.id] || '__none__'}
+              onValueChange={(next) => onChange(repo.id, next === '__none__' ? undefined : next)}
+            >
+              <SelectTrigger className="h-6 w-[170px] text-[11px]" aria-label={`${repo.name} 的执行 Agent`}>
+                <SelectValue placeholder="默认 Agent" />
+              </SelectTrigger>
+              <SelectContent className="text-xs">
+                <SelectItem value="__none__" className="text-xs">
+                  默认 Agent（跟随仓库绑定）
+                </SelectItem>
+                {selectableAgents.map((agent) => (
+                  <SelectItem key={agent.id} value={agent.id} className="text-xs">
+                    {agent.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        ))}
+      </div>
+    </Field>
+  )
+}
+
+/**
  * 单个仓库的命令配置面板：默认折叠，标题行直接显示命令摘要。
  *
  * 之所以折叠：start 模式下用户通常不会在每次启动时都重写命令；展开后看到的
@@ -361,10 +379,7 @@ function RepositoryCommandPanel({
   isOpen,
   onToggle,
   commands,
-  onChange,
-  agentId,
-  agents,
-  onAgentChange
+  onChange
 }: {
   profile: RepositoryProfile
   isNewlyAttached: boolean
@@ -372,10 +387,10 @@ function RepositoryCommandPanel({
   onToggle(): void
   commands: RepositoryCommands | undefined
   onChange(key: keyof RepositoryCommands, value: string): void
-  agentId?: string
-  agents: AgentProfile[]
-  onAgentChange(agentId: string | undefined): void
 }) {
+  const configured = (['setupCommand', 'lintCommand', 'testCommand', 'buildCommand'] as const).filter((key) =>
+    Boolean(commands?.[key]?.trim())
+  )
   return (
     <section className="overflow-hidden rounded-md border bg-card/40">
       <button
@@ -384,33 +399,15 @@ function RepositoryCommandPanel({
         aria-expanded={isOpen}
         className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition-colors hover:bg-foreground/[0.02] focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
       >
-        <div className="flex items-center gap-1.5">
+        <div className="flex min-w-0 items-center gap-1.5">
           <span className="text-xs font-medium">{profile.name}</span>
           {isNewlyAttached && <span className="text-[10.5px] text-muted-foreground/80">· 新关联</span>}
           <span className="mx-1 h-3 w-px bg-border/60" />
-          <Select
-            value={agentId ?? '__none__'}
-            onValueChange={(value) => onAgentChange(value === '__none__' ? undefined : value)}
-          >
-            <SelectTrigger
-              className="h-5 w-auto gap-0.5 border-0 bg-transparent p-0 text-[10.5px]! text-muted-foreground hover:text-foreground focus:ring-0 [&_svg]:h-3 [&_svg]:w-3"
-              aria-label="选择执行 Agent"
-            >
-              <SelectValue placeholder={<span className="text-muted-foreground/60">默认 Agent</span>} />
-            </SelectTrigger>
-            <SelectContent className="text-xs">
-              <SelectItem value="__none__" className="text-xs">
-                默认 Agent（跟随仓库绑定）
-              </SelectItem>
-              {agents
-                .filter((agent) => !agent.builtin)
-                .map((agent) => (
-                  <SelectItem key={agent.id} value={agent.id} className="text-xs">
-                    {agent.name}
-                  </SelectItem>
-                ))}
-            </SelectContent>
-          </Select>
+          <span className="truncate text-[10.5px] text-muted-foreground">
+            {configured.length === 0
+              ? '未配置命令（回落仓库默认）'
+              : `已配置 ${configured.map((key) => COMMAND_LABELS[key]).join(' / ')}`}
+          </span>
         </div>
         <ChevronDownIcon size={11} className={cn('transition-transform duration-200', isOpen && 'rotate-180')} />
       </button>
@@ -486,17 +483,11 @@ export function TaskEditorDialog({
   const initialIdsRef = useRef<Set<string>>(new Set())
   const { showError, showSuccess } = useFeedback()
 
-  // === 共享：高级设置（折叠面板） ===
-  const [overrides, setOverrides] = useState<Overrides>({
-    openCodeReviewEnabled: undefined,
-    createTestCasesEnabled: undefined,
-    autoCreateMergeRequests: undefined
-  })
-  const [systemFlags, setSystemFlags] = useState<{
-    openCodeReviewEnabled: boolean
-    createTestCasesEnabled: boolean
-    autoCreateMergeRequests: boolean
-  }>({ openCodeReviewEnabled: false, createTestCasesEnabled: false, autoCreateMergeRequests: false })
+  // === 共享：主决策「Review 通过后」 + 高级设置（折叠面板） ===
+  /** `undefined` = 不写 `task.mrAutoSubmit`，跟随系统默认（回落链见 core 的 `resolveMrMode`）。 */
+  const [mrAutoSubmit, setMrAutoSubmit] = useState<TaskMrMode | undefined>(undefined)
+  /** 只用于展示「不单独设置时会怎样」，不参与提交。 */
+  const [systemMrDefault, setSystemMrDefault] = useState<TaskMrMode>('manual')
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   // === 任务级 Agent 覆盖：undefined=跟随仓库 | AGENT_TASK_DISABLED=禁用 | 其它=指定 Agent id ===
@@ -505,8 +496,7 @@ export function TaskEditorDialog({
   // 逐仓库 Agent 覆盖
   const [repoAgentIds, setRepoAgentIds] = useState<Record<string, string>>({})
 
-  // === start 专用：启动方式 / 仓库命令（默认折叠） / reimplement 标记 ===
-  const [startMode, setStartMode] = useState<TaskStartMode>('direct')
+  // === start 专用：仓库命令（默认折叠） / reimplement 标记 ===
   const [taskRepositories, setTaskRepositories] = useState<TaskRepository[]>([])
   const [commands, setCommands] = useState<Record<string, RepositoryCommands>>({})
   const [commandPanelsOpen, setCommandPanelsOpen] = useState<Record<string, boolean>>({})
@@ -529,10 +519,8 @@ export function TaskEditorDialog({
       .split('\n')
       .map((item) => item.trim())
       .filter(Boolean),
-    // 任务级覆盖：显式 boolean 才写入 task 字段；undefined 视为"沿用系统设置"（后端 patch 会清掉字段）。
-    openCodeReviewEnabled: overrides.openCodeReviewEnabled,
-    createTestCasesEnabled: overrides.createTestCasesEnabled,
-    autoCreateMergeRequests: overrides.autoCreateMergeRequests,
+    // 唯一的主决策：未显式选择不写入（后端 patch 会清掉字段，回到跟随系统默认）。
+    mrAutoSubmit,
     // 任务级 Agent：undefined=跟随仓库（不写入）；AGENT_TASK_DISABLED / id 为显式覆盖。
     agentProfileId,
     // 逐仓库 Agent 覆盖
@@ -568,6 +556,7 @@ export function TaskEditorDialog({
       setAcceptance(task?.acceptanceCriteria.join('\n') ?? '')
       setAdvancedOpen(false)
       setAgentProfileId(task?.agentProfileId ?? undefined)
+      setMrAutoSubmit(task?.mrAutoSubmit)
     } else {
       // start 模式：标题等数据由下面的 fetch effect 填充；这里只清 start 专用状态。
       reimplementedRef.current = false
@@ -595,20 +584,16 @@ export function TaskEditorDialog({
         })
       : Promise.resolve(undefined)
 
-    // 两种模式都需要读系统设置，让高级设置区显示真实"系统默认"。
-    const systemFlagsPromise = Promise.all([
-      readSetting('openCodeReviewEnabled'),
-      readSetting('createTestCasesEnabled'),
-      readSetting('autoCreateMergeRequests')
-    ])
+    // 读一次系统默认的 MR 提交档，只为在卡片上标出「不单独设置时会怎样」。
+    const mrDefaultPromise = readSystemMrDefault()
 
     const agentsPromise = api.listAgents().catch((reason) => {
       showError(reason instanceof Error ? reason.message : String(reason))
       return [] as AgentProfile[]
     })
 
-    Promise.all([repoPromise, detailPromise, systemFlagsPromise, agentsPromise])
-      .then(([repos, detail, flags, agentList]) => {
+    Promise.all([repoPromise, detailPromise, mrDefaultPromise, agentsPromise])
+      .then(([repos, detail, mrDefault, agentList]) => {
         if (cancelled) return
         setAgents(agentList)
         const attached = detail?.repositories ?? []
@@ -617,7 +602,7 @@ export function TaskEditorDialog({
         const ids = attached.map((item) => item.repositoryId)
         initialIdsRef.current = new Set(ids)
         setSelectedRepoIds(new Set(ids))
-        // 用详情填充正文 + overrides + 仓库命令（start 模式起始默认值）
+        // 用详情填充正文 + 提交档 + 仓库命令（start 模式起始默认值）
         if (detail?.task) {
           setTitle(detail.task.title)
           setDescription(detail.task.description)
@@ -625,28 +610,13 @@ export function TaskEditorDialog({
           setAcceptance(detail.task.acceptanceCriteria.join('\n'))
           setAgentProfileId(detail.task.agentProfileId)
           setRepoAgentIds(detail.task.repoAgentIds ?? {})
-          setOverrides({
-            openCodeReviewEnabled: detail.task.openCodeReviewEnabled,
-            createTestCasesEnabled: detail.task.createTestCasesEnabled,
-            autoCreateMergeRequests: detail.task.autoCreateMergeRequests
-          })
+          setMrAutoSubmit(detail.task.mrAutoSubmit)
         } else if (task) {
           setAgentProfileId(task.agentProfileId)
           setRepoAgentIds(task.repoAgentIds ?? {})
-          setOverrides({
-            openCodeReviewEnabled: task.openCodeReviewEnabled,
-            createTestCasesEnabled: task.createTestCasesEnabled,
-            autoCreateMergeRequests: task.autoCreateMergeRequests
-          })
+          setMrAutoSubmit(task.mrAutoSubmit)
         }
-        setSystemFlags({
-          openCodeReviewEnabled: flags[0],
-          createTestCasesEnabled: flags[1],
-          autoCreateMergeRequests: flags[2]
-        })
-        if (mode === 'start') {
-          setStartMode(detail?.task?.state === 'planning' ? 'plan' : 'direct')
-        }
+        setSystemMrDefault(mrDefault)
         setTaskRepositories(attached)
         const byProfile = new Map(attached.map((repo) => [repo.repositoryId, repo]))
         setCommands(
@@ -708,7 +678,7 @@ export function TaskEditorDialog({
     onStarting?.(taskId)
     onOpenChange(false)
     try {
-      // 1) 任务正文 + 自动化覆盖 与 仓库关联 一起持久化。
+      // 1) 任务正文 + 提交档 与 仓库关联 一起持久化（启动入参不再携带任务字段）。
       await api.updateTask(taskId, buildTaskInput())
       await syncRepositories(taskId, useAllRepositories)
       // 2) 启动。
@@ -718,7 +688,6 @@ export function TaskEditorDialog({
         reimplementedRef.current = true
       }
       const startOptions: StartTaskOptions = {
-        mode: startMode,
         repositoryCommands,
         repoAgentIds: Object.keys(repoAgentIds).length > 0 ? repoAgentIds : undefined,
         ...(useAllRepositories ? { useAllRepositories: true } : {})
@@ -736,15 +705,8 @@ export function TaskEditorDialog({
   const creating = mode === 'edit' && !task
   const selectedRepoProfiles = repositories.filter((repo) => selectedRepoIds.has(repo.id))
 
-  // 启动按钮的文案 + 图标
-  const startButtonLabel = startSaving
-    ? '启动中'
-    : selectedRepoIds.size === 0
-      ? '使用全部 system 仓库启动'
-      : startMode === 'plan'
-        ? '生成计划'
-        : '开始实现'
-  const StartIcon = startMode === 'plan' ? SparklesIcon : PlayIcon
+  // 启动按钮文案：固定链路下恒先生成计划，不再有「直接开始 / 先生成计划」两样写法。
+  const startButtonLabel = startSaving ? '启动中' : selectedRepoIds.size === 0 ? '使用全部 system 仓库启动' : '启动任务'
 
   return (
     <>
@@ -761,7 +723,7 @@ export function TaskEditorDialog({
                   : '调整标题、描述、关键词、验收标准与仓库关联。'
                 : reimplement
                   ? '将基于现有任务重新实现。可直接修改任务正文，确认后启动会一并保存。'
-                  : '可直接修改任务正文与启动方式，确认后启动会一并保存任务。'}
+                  : '可直接修改任务正文与 Review 通过后的提交档，确认后启动会一并保存任务。'}
             </DialogDescription>
           </DialogHeader>
 
@@ -777,7 +739,7 @@ export function TaskEditorDialog({
               onAcceptanceChange={setAcceptance}
             />
 
-            {mode === 'start' && <StartModeCards value={startMode} onChange={setStartMode} />}
+            <MrModeCards value={mrAutoSubmit} systemDefault={systemMrDefault} onChange={setMrAutoSubmit} />
 
             <Field
               label={
@@ -817,9 +779,6 @@ export function TaskEditorDialog({
                   onChange={(key, value) =>
                     setCommands((current) => ({ ...current, [profile.id]: { ...current[profile.id], [key]: value } }))
                   }
-                  agentId={repoAgentIds[profile.id]}
-                  agents={agents}
-                  onAgentChange={(agentId) => setRepoAgentIds((prev) => ({ ...prev, [profile.id]: agentId ?? '' }))}
                 />
               )
             })}
@@ -834,7 +793,7 @@ export function TaskEditorDialog({
               >
                 <span className="inline-flex items-center gap-1.5 text-xs">
                   <SlidersHorizontalIcon size={11} className="text-foreground/70" />
-                  高级设置 · 任务自动化
+                  高级设置 · 执行 Agent
                 </span>
                 <ChevronDownIcon
                   size={11}
@@ -844,29 +803,16 @@ export function TaskEditorDialog({
               {advancedOpen && (
                 <div id="task-advanced-section" className="space-y-3 border-t p-3">
                   <p className="text-[11px] text-muted-foreground">
-                    默认沿用系统设置；如需本任务独立配置，请选择「开启 / 关闭」。修改系统设置不会回写到已创建的任务。
+                    执行 Agent 属于任务怎么跑的配置；Review、测试用例、提交都是必经阶段，已经没有开关了。
                   </p>
                   <TaskAgentOverrideField agents={agents} value={agentProfileId} onChange={setAgentProfileId} />
-                  <AutomationOverrideField
-                    label="CodeReview"
-                    helper="实现完成后是否自动跑 Review。"
-                    value={overrides.openCodeReviewEnabled}
-                    systemValue={systemFlags.openCodeReviewEnabled}
-                    onChange={(next) => setOverrides((prev) => ({ ...prev, openCodeReviewEnabled: next }))}
-                  />
-                  <AutomationOverrideField
-                    label="生成测试用例"
-                    helper="实现完成后、Review 之前是否生成最小测试集。"
-                    value={overrides.createTestCasesEnabled}
-                    systemValue={systemFlags.createTestCasesEnabled}
-                    onChange={(next) => setOverrides((prev) => ({ ...prev, createTestCasesEnabled: next }))}
-                  />
-                  <AutomationOverrideField
-                    label="自动提交 MR"
-                    helper="Review 通过后是否自动提交 Merge Request。"
-                    value={overrides.autoCreateMergeRequests}
-                    systemValue={systemFlags.autoCreateMergeRequests}
-                    onChange={(next) => setOverrides((prev) => ({ ...prev, autoCreateMergeRequests: next }))}
+                  <RepoAgentOverrideField
+                    repos={selectedRepoProfiles}
+                    agents={agents}
+                    values={repoAgentIds}
+                    onChange={(repositoryId, agentId) =>
+                      setRepoAgentIds((prev) => ({ ...prev, [repositoryId]: agentId ?? '' }))
+                    }
                   />
                 </div>
               )}
@@ -886,7 +832,7 @@ export function TaskEditorDialog({
               </Button>
             ) : (
               <Button size="sm" disabled={startSaving || loading || !taskId} onClick={() => void startTask(false)}>
-                {startSaving ? <Loader2Icon className="animate-spin-slow" size={12} /> : <StartIcon size={12} />}
+                {startSaving ? <Loader2Icon className="animate-spin-slow" size={12} /> : <PlayIcon size={12} />}
                 {startButtonLabel}
               </Button>
             )}

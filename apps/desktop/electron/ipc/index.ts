@@ -15,7 +15,7 @@ import {
   testAtlassianConnectionRest,
   safeAtlassianCall
 } from '@task-pipeline/integrations'
-import type { Task, TaskRepository, TaskStartMode, Memory, AgentProfile } from '@task-pipeline/core'
+import type { Task, TaskRepository, Memory, AgentProfile, AgentEvent, TaskDraftFieldKey } from '@task-pipeline/core'
 import type { RepositoryCommandMap } from '@task-pipeline/integrations'
 import type { CodegraphManager } from '@task-pipeline/codegraph'
 import type { QoderOrchestrator } from '../pi-extension/qoder/index.js'
@@ -48,10 +48,10 @@ export interface IpcDeps {
   taskCardsWithCurrentChanges: () => unknown[]
   getActiveTaskOperations: () => Set<string>
   getActiveTaskId: () => string | undefined
+  // 固定链路下 `begin()` 恒进 `planning`，启动入参不再有 `mode` 二选一。
   startTask: (
     taskId: string,
     options?: {
-      mode?: TaskStartMode
       repositoryCommands?: RepositoryCommandMap
       useAllRepositories?: boolean
       repoAgentIds?: Record<string, string>
@@ -65,6 +65,13 @@ export interface IpcDeps {
   reviseTaskPlan: (taskId: string, feedback: string) => Promise<void>
   retryTaskValidation: (taskId: string) => Promise<void>
   sendTaskMessage: (taskId: string, message: string) => Promise<void>
+  sendTaskIntake: (taskId: string, message: string) => Promise<void>
+  resolveDraftSuggestion: (
+    taskId: string,
+    eventId: string,
+    action: 'apply' | 'discard',
+    keys?: TaskDraftFieldKey[]
+  ) => Promise<void>
   cancelTask: (taskId: string) => Promise<void>
   deleteTask: (id: string, mode?: TaskRemovalMode) => Promise<void>
   stopTaskOperations: (taskId: string, force?: boolean) => Promise<void>
@@ -178,6 +185,8 @@ interface TaskStoreLike {
   ) => TaskRepository
   getSetting: (key: string) => string | undefined
   setSetting: (key: string, value: string) => void
+  /** `draft` 阶段的澄清问答与建议只在这张表里（那时没有 trace）。 */
+  listEvents: (taskId: string) => AgentEvent[]
   listApprovals: (taskId: string) => unknown[]
   addApproval: (input: { taskId: string; kind: string; context: string }) => { id: string }
   resolveApproval: (id: string, status: 'approved' | 'rejected') => void
@@ -205,6 +214,8 @@ export function registerIpc(d: IpcDeps): void {
     reviseTaskPlan,
     retryTaskValidation,
     sendTaskMessage,
+    sendTaskIntake,
+    resolveDraftSuggestion,
     cancelTask,
     deleteTask,
     stopTaskOperations,
@@ -293,6 +304,8 @@ export function registerIpc(d: IpcDeps): void {
       running: getActiveTaskOperations().has(id),
       repositories: store.listTaskRepositories(id),
       events: await traceService.getTaskEvents(id),
+      // `draft` 阶段的问答与建议只存在于 events 表（那时还没有 trace），所以单独给一份。
+      draftEvents: store.listEvents(id),
       openAiEvents: [],
       approvals: store.listApprovals(id),
       changedFiles: await taskChangedFiles(id)
@@ -389,7 +402,9 @@ export function registerIpc(d: IpcDeps): void {
         setConversationHitlMode(contextId, mode)
         void chatService.setChatHitlMode(contextId, mode).catch(() => {})
       } else if (contextType === 'task') {
-        store.updateTask(contextId, { hitlMode: mode })
+        // 任务执行期权限不再由三态模式决定（§4.2）：L1 硬阻断 + L2 交付档 + 其余放行，
+        // 逐任务的 `hitlMode` 已无读取点，这里直接拒绝写入，避免出现「改了没效果」的死配置。
+        throw new Error('任务执行期权限由固定链路决定，不支持按任务切换 HITL 模式')
       }
     }
   )
@@ -404,7 +419,6 @@ export function registerIpc(d: IpcDeps): void {
       _event,
       taskId: string,
       options?: {
-        mode?: TaskStartMode
         repositoryCommands?: RepositoryCommandMap
         useAllRepositories?: boolean
         repoAgentIds?: Record<string, string>
@@ -422,6 +436,13 @@ export function registerIpc(d: IpcDeps): void {
   ipcMain.handle('tasks:revise-plan', (_event, taskId: string, feedback: string) => reviseTaskPlan(taskId, feedback))
   ipcMain.handle('tasks:retry-validation', (_event, taskId: string) => retryTaskValidation(taskId))
   ipcMain.handle('tasks:message', (_event, taskId: string, message: string) => sendTaskMessage(taskId, message))
+  // 澄清入口与实现期消息分开：前者仅 `draft` 可用且不推状态，走哪条路由 renderer 不需要知道。
+  ipcMain.handle('tasks:intake-message', (_event, taskId: string, message: string) => sendTaskIntake(taskId, message))
+  ipcMain.handle(
+    'tasks:resolve-draft-suggestion',
+    (_event, taskId: string, eventId: string, action: 'apply' | 'discard', keys?: TaskDraftFieldKey[]) =>
+      resolveDraftSuggestion(taskId, eventId, action, keys)
+  )
   ipcMain.handle('tasks:abort', () => (getActiveTaskId() ? stopTaskOperations(getActiveTaskId()!, true) : undefined))
   ipcMain.handle('tasks:cancel', (_event, taskId: string) => cancelTask(taskId))
   ipcMain.handle('tasks:review', (_event, taskId: string) =>

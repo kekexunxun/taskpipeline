@@ -76,20 +76,31 @@ function resolveBuiltinProfile(
       tools: {}
     }
   }
-  // jira / confluence：同一 npx @alexbuzo/jira-mcp，按 id 注入不同环境变量。
+  // jira / confluence：同一 npx -y @alexbuzo/jira-mcp，按 id 注入不同环境变量。
   const url = credentials.getSetting(`${entry.id}Url`)?.trim()
   const token = credentials.getSecret(`${entry.id}Token`)
   if (!url || !token) return undefined
+  // @alexbuzo/jira-mcp 的 loadConfig 有两个硬性要求：
+  //  1) ATLASSIAN_SITE 必填——JIRA_BASE_URL/CONFLUENCE_BASE_URL 只在缺省时回退到它，不能替代它；
+  //  2) 每次启动都会同时校验 Jira 与 Confluence 两套鉴权（无 jira-only 模式），
+  //     bearer 走 `${KEY}_BEARER_TOKEN` 或统一的 `ATLASSIAN_BEARER_TOKEN`。
+  // 因此用同一份 url+token 填 ATLASSIAN_SITE + ATLASSIAN_BEARER_TOKEN，两套鉴权一并满足；
+  // Confluence API 前缀交给服务端按站点自动推断（.atlassian.net → /wiki/rest/api），不再写死 /rest/api。
   const env: Record<string, string> =
     entry.id === 'jira'
-      ? { JIRA_BASE_URL: url, JIRA_BEARER_TOKEN: token }
-      : { CONFLUENCE_BASE_URL: url, CONFLUENCE_BEARER_TOKEN: token, CONFLUENCE_API_PREFIX: '/rest/api' }
+      ? { ATLASSIAN_SITE: url, JIRA_BASE_URL: url, ATLASSIAN_BEARER_TOKEN: token, JIRA_BEARER_TOKEN: token }
+      : {
+          ATLASSIAN_SITE: url,
+          CONFLUENCE_BASE_URL: url,
+          ATLASSIAN_BEARER_TOKEN: token,
+          CONFLUENCE_BEARER_TOKEN: token
+        }
   return {
     id: entry.id,
     name: entry.name,
     transport: 'stdio',
     command: entry.command ?? 'npx',
-    args: entry.args ?? ['@alexbuzo/jira-mcp'],
+    args: entry.args ?? ['-y', '@alexbuzo/jira-mcp'],
     env,
     tools: {}
   }
