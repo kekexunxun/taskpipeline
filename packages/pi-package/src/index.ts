@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import {
   evaluateExecutionPermission,
+  executionPhaseOf,
   LocalFileKeyStore,
   TaskStore,
   taskRoots,
@@ -162,9 +163,12 @@ export default function codingAgentExtension(pi: ExtensionAPI) {
     const input = event.input as Record<string, unknown>
     const task = selectedTask('')
     const repos = task ? store.listTaskRepositories(task.id) : []
+    // 阶段取自任务状态机（P4）：Pi 运行时没有 CLI 的 disallowedTools 原语，
+    // 「Plan 只读」「Test 只改测试文件」只能在这一层由 L1 判定保证。
     const decision = evaluateExecutionPermission(event.toolName, input, {
       roots: taskRoots(repos),
-      cwd: sandboxRouter.activeCwd(process.cwd())
+      cwd: sandboxRouter.activeCwd(process.cwd()),
+      phase: executionPhaseOf(task?.state)
     })
     if (decision.action === 'allow') return undefined
     // L1 硬阻断：不询问用户，直接 block 并把原因回给模型。

@@ -1,11 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { evaluateExecutionPermission, isSensitivePath, taskRoots } from './permissions.js'
+import {
+  evaluateExecutionPermission,
+  executionPhaseOf,
+  isSensitivePath,
+  isTestArtifactPath,
+  taskRoots,
+  type ExecutionPhase
+} from './permissions.js'
 
 const options = { roots: ['/workspace/repo'], cwd: '/workspace/repo' }
 const bash = (command: string) => evaluateExecutionPermission('Bash', { command }, options)
 const write = (file_path: string) => evaluateExecutionPermission('Write', { file_path }, options)
 const edit = (input: Record<string, unknown>) => evaluateExecutionPermission('Edit', input, options)
 const read = (file_path: string) => evaluateExecutionPermission('Read', { file_path }, options)
+const at = (phase: ExecutionPhase) => ({ ...options, phase })
+const writeAt = (phase: ExecutionPhase, file_path: string) =>
+  evaluateExecutionPermission('Write', { file_path }, at(phase))
+const bashAt = (phase: ExecutionPhase, command: string) => evaluateExecutionPermission('Bash', { command }, at(phase))
 
 describe('execution permission (L1 / L2 / L3)', () => {
   it('allows in-worktree moves and single-file deletes', () => {
@@ -72,5 +83,75 @@ describe('execution permission (L1 / L2 / L3)', () => {
       '/wt/repo',
       '/repo2'
     ])
+  })
+})
+
+describe('phase-aware permission (P4)', () => {
+  it('maps task states to execution phases', () => {
+    expect(executionPhaseOf('planning')).toBe('planning')
+    expect(executionPhaseOf('generating_tests')).toBe('test')
+    expect(executionPhaseOf('implementing')).toBe('implementation')
+    expect(executionPhaseOf('validation_failed')).toBe('implementation')
+    // 非执行态不附加阶段约束：人工审阅 / 交付 / 草稿都不该被 L1 拦住
+    expect(executionPhaseOf('awaiting_plan_approval')).toBe('other')
+    expect(executionPhaseOf('completed')).toBe('other')
+    expect(executionPhaseOf(undefined)).toBe('other')
+  })
+
+  it('keeps the planning phase read-only for file tools', () => {
+    expect(writeAt('planning', '/workspace/repo/src/a.ts').action).toBe('block')
+    expect(evaluateExecutionPermission('Edit', { file_path: '/workspace/repo/a.ts' }, at('planning')).action).toBe(
+      'block'
+    )
+    expect(read('/workspace/repo/src/a.ts').action).toBe('allow')
+    expect(evaluateExecutionPermission('Read', { file_path: '/workspace/repo/a.ts' }, at('planning')).action).toBe(
+      'allow'
+    )
+  })
+
+  it('blocks mutating commands but keeps read-only exploration while planning', () => {
+    expect(bashAt('planning', 'touch src/a.ts').action).toBe('block')
+    expect(bashAt('planning', 'echo x > src/a.ts').action).toBe('block')
+    expect(bashAt('planning', 'npm install').action).toBe('block')
+    expect(bashAt('planning', 'git status').action).toBe('allow')
+    expect(bashAt('planning', 'rg "executeExecutionPermission" packages/core/src').action).toBe('allow')
+  })
+
+  it('restricts the test phase to test artifacts', () => {
+    expect(writeAt('test', '/workspace/repo/src/a.test.ts').action).toBe('allow')
+    expect(writeAt('test', '/workspace/repo/tests/x.ts').action).toBe('allow')
+    expect(writeAt('test', '/workspace/repo/src/a.ts').action).toBe('block')
+    // 工作区路径自带 test 字样时不得把整仓洗成测试目录
+    const nested = { roots: ['/home/me/test/repo'], cwd: '/home/me/test/repo' }
+    expect(
+      evaluateExecutionPermission('Write', { file_path: '/home/me/test/repo/src/a.ts' }, { ...nested, phase: 'test' })
+        .action
+    ).toBe('block')
+  })
+
+  it('keeps implementation phase behaviour identical to the unphased default', () => {
+    const cases: Array<[string, unknown]> = [
+      ['Write', { file_path: '/workspace/repo/src/a.ts' }],
+      ['Write', { file_path: '/src/a.ts' }],
+      ['Edit', { file_path: '/workspace/repo/tests/a.spec.ts' }],
+      ['Bash', { command: 'npm test' }],
+      ['Bash', { command: 'rm -rf dist' }],
+      ['Bash', { command: 'touch /workspace/repo/x' }],
+      ['Read', { file_path: '/workspace/repo/a.ts' }]
+    ]
+    for (const [tool, input] of cases) {
+      expect(evaluateExecutionPermission(tool, input, options)).toEqual(
+        evaluateExecutionPermission(tool, input, { ...options, phase: 'implementation' })
+      )
+    }
+  })
+
+  it('recognises test artifact paths across ecosystems', () => {
+    expect(isTestArtifactPath('pkg/handler_test.go')).toBe(true)
+    expect(isTestArtifactPath('tests/test_login.py')).toBe(true)
+    expect(isTestArtifactPath('src/test_login.py')).toBe(true)
+    expect(isTestArtifactPath('a.spec.mjs')).toBe(true)
+    expect(isTestArtifactPath('src/App.vue')).toBe(false)
+    expect(isTestArtifactPath('latest.md')).toBe(false)
   })
 })

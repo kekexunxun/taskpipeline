@@ -18,7 +18,14 @@
  *    `close`(结束会话)、`dispose`(应用退出统一清理)。
  */
 
-import { accessToken, query, type Query, type SDKMessage, type SDKUserMessage } from '@qoder-ai/qoder-agent-sdk'
+import {
+  DEFAULT_RUNTIME_TRANSPORT,
+  accessToken,
+  query,
+  type Query,
+  type SDKMessage,
+  type SDKUserMessage
+} from '@qoder-ai/qoder-agent-sdk'
 import type { ChatStreamChunk, ChatTaskCreationResult, DriverPart, UserFileAttachment } from '../../chat/chat-types.js'
 import type { ToolSource } from '../../chat/drivers/tool-source.js'
 import type { ChatAttachmentCache } from '../../chat/chat-attachment-cache.js'
@@ -57,7 +64,23 @@ export type RawSdkMessage = {
   status?: string
   output_file?: string
   summary?: string
-  usage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number }
+  usage?: {
+    total_tokens?: number
+    tool_uses?: number
+    duration_ms?: number
+    context_usage_ratio?: number
+    credits?: number
+  }
+  /** result 消息的分模型计费桶(只取我们真正能用的 credits 字段)。 */
+  modelUsage?: Record<string, { credits?: number }>
+  total_credits?: number
+  /** system/init 字段(运行时事实)。 */
+  qodercli_version?: string
+  protocol_version?: string
+  permissionMode?: string
+  tools?: string[]
+  capabilities?: string[]
+  skills?: string[]
   parent_tool_use_id?: string | null
   event?: {
     type?: string
@@ -79,6 +102,70 @@ function readNonEmptyString(value: unknown): string | undefined {
 /** 抽取 SDKMessage 上的 parent_tool_use_id(SDK 可能挂在顶层或 message 顶层)。 */
 function parentToolUseIdOf(message: RawSdkMessage): string | undefined {
   return readNonEmptyString(message.parent_tool_use_id) ?? readNonEmptyString(message.message?.parent_tool_use_id)
+}
+
+// === 运行时事实与用量口径 ==================================================
+
+/**
+ * CLI 运行时事实(`system/init` 一次性采集)。
+ *
+ * 为什么必须入档：同一份代码在不同机器上可能面对不同 qodercli(版本/能力集/工具集都不同)，
+ * 阶段表现对不上时没任何线索。缺了它，“为什么那边能 fork 这边不能”这类问题只能靠猜。
+ */
+export type QoderRuntimeInfo = {
+  cliVersion?: string
+  protocolVersion?: string
+  permissionMode?: string
+  tools?: string[]
+  capabilities?: string[]
+  skills?: string[]
+  /** 本次会话实际跑在哪条 transport 上（会话创建时就确定，不依赖 init）。 */
+  transport?: QoderTransport
+}
+
+/**
+ * 一次回合的用量口径。
+ *
+ * 实测(V7)：`input_tokens` / `cache_read_input_tokens` / `total_cost_usd` 在 auto/performance
+ * 两种模型下恒为 0，能用的只有 `context_usage_ratio`(本回合后的上下文占比) 与 `credits`。
+ * 因此预算与成本判定一律用这两个字段，不要拿 token 做判据。
+ */
+export type QoderTurnUsage = {
+  contextUsageRatio?: number
+  credits?: number
+  totalCredits?: number
+}
+
+/** 分模型计费累加 = 本回合总 credits(顶层 usage.credits 是单次请求级别,仅作兜底)。 */
+function sumModelUsageCredits(modelUsage: RawSdkMessage['modelUsage']): number | undefined {
+  if (!modelUsage || typeof modelUsage !== 'object') return undefined
+  let total = 0
+  let seen = false
+  for (const value of Object.values(modelUsage)) {
+    if (typeof value?.credits === 'number') {
+      total += value.credits
+      seen = true
+    }
+  }
+  return seen ? total : undefined
+}
+
+/** SDK 支持的两条运行时 transport。 */
+export type QoderTransport = 'process' | 'worker'
+
+/**
+ * 当前进程会落在哪条 transport 上（P0-5 对 V12 的复核结论）。
+ *
+ * SDK 的隐式选择优先级是：显式 `transport` > `pathToQoderCLIExecutable` > `executable` /
+ * `executableArgs` / `spawnQoderCLIProcess` > **环境变量 `QODERCLI_PATH`** > 包默认。
+ * 我们一个都不传，但 `init/qodercli-path.ts` 会设 `QODERCLI_PATH` —— 它不只是“路径提示”，
+ * 而是把 transport 从包默认的 `worker` 切到 `process`。两者都跑同一个 qodercli 版本
+ * （manifest `qoderCliVersion` 与 `qoder-bin/qodercli --version` 实测同为 1.1.23），
+ * 差异只在运行边界，所以行为必须按实际值记录而不是靠猜 —— 因此把它落进 span meta。
+ */
+export function resolveQoderTransport(): QoderTransport {
+  if (process.env.QODERCLI_PATH) return 'process'
+  return DEFAULT_RUNTIME_TRANSPORT
 }
 
 // === 回合 =====================================================================
@@ -127,11 +214,26 @@ export type QoderSessionOptions = {
   model?: string
   /** 恢复已有会话(底层能力)。 */
   resume?: string
+  /**
+   * 从 `resume` 的会话分叉出一个新会话（阶段间继承上下文而不共享会话）。
+   * 新会话有自己的 sessionId，上一阶段的后续写入不会再影响本阶段。
+   */
+  forkSession?: boolean
+  /**
+   * 只加载到该 entry uuid 为止（与 `resume` 搭配）。
+   * 必须是「要保留的那个 turn 的最后一条 entry」，指到 user 条目会被 CLI 拒绝（exit 42）。
+   */
+  resumeSessionAt?: string
   permissionMode?: SdkQueryOptions['permissionMode']
   settings?: SdkQueryOptions['settings']
   /** 透传给 SDK 的 hooks(任务板块的 PermissionRequest HITL 等)。 */
   hooks?: SdkQueryOptions['hooks']
   allowedTools?: SdkQueryOptions['allowedTools']
+  /**
+   * 阶段级工具硬边界（P4）：Plan 阶段禁掉写类工具，模型侧根本看不到这些工具，
+   * 比 prompt 里的口头约束和 `canUseTool` 事后 deny 都强（见 §5 表）。
+   */
+  disallowedTools?: SdkQueryOptions['disallowedTools']
   /** 工具调用 HITL：透传给 SDK 的 canUseTool(对话板块由 driver 注入，缺省不注入)。 */
   canUseTool?: SdkQueryOptions['canUseTool']
   systemPrompt?: SdkQueryOptions['systemPrompt']
@@ -175,6 +277,8 @@ export class QoderSession {
   private readonly abortController = new AbortController()
   private readonly taskIdByToolUseId = new Map<string, string>()
   private sessionId: string | undefined
+  private runtimeInfo: QoderRuntimeInfo = { transport: resolveQoderTransport() }
+  private lastTurnUsage: QoderTurnUsage = {}
   private closed = false
   private turnSeq = 0
   private activeTurn: ActiveTurn | undefined
@@ -200,10 +304,15 @@ export class QoderSession {
           : {}),
         ...(options.model ? { model: options.model } : {}),
         ...(options.resume ? { resume: options.resume } : {}),
+        ...(options.forkSession ? { forkSession: true } : {}),
+        ...(options.resumeSessionAt ? { resumeSessionAt: options.resumeSessionAt } : {}),
         ...(options.permissionMode ? { permissionMode: options.permissionMode } : {}),
         ...(options.settings ? { settings: options.settings } : {}),
         ...(options.hooks ? { hooks: options.hooks } : {}),
         ...(options.allowedTools && options.allowedTools.length ? { allowedTools: options.allowedTools } : {}),
+        ...(options.disallowedTools && options.disallowedTools.length
+          ? { disallowedTools: options.disallowedTools }
+          : {}),
         ...(options.canUseTool ? { canUseTool: options.canUseTool } : {}),
         ...(options.systemPrompt ? { systemPrompt: options.systemPrompt } : {}),
         ...(options.mcpServers ? { mcpServers: options.mcpServers } : {}),
@@ -226,6 +335,16 @@ export class QoderSession {
   /** 已恢复 / 已捕获的 sessionId(resume 的锚点)。 */
   getSessionId(): string | undefined {
     return this.sessionId
+  }
+
+  /** CLI 版本 / 能力集等运行时事实(首条 `system/init` 到达后可用)。 */
+  getRuntimeInfo(): QoderRuntimeInfo {
+    return this.runtimeInfo
+  }
+
+  /** 最近一个回合的用量口径(`result` 消息落点);未收到 result 时为空对象。 */
+  getTurnUsage(): QoderTurnUsage {
+    return this.lastTurnUsage
   }
 
   /**
@@ -417,11 +536,40 @@ export class QoderSession {
     this.wakeTurn(turn)
   }
 
+  /** 采集会话级事实：`system/init` 的 CLI 版本/能力集，`result` 的上下文占比与 credits。 */
+  private captureFacts(message: RawSdkMessage): void {
+    if (message.type === 'system' && message.subtype === 'init') {
+      this.runtimeInfo = {
+        ...this.runtimeInfo,
+        ...(readNonEmptyString(message.qodercli_version) ? { cliVersion: message.qodercli_version } : {}),
+        ...(readNonEmptyString(message.protocol_version) ? { protocolVersion: message.protocol_version } : {}),
+        ...(readNonEmptyString(message.permissionMode) ? { permissionMode: message.permissionMode } : {}),
+        ...(Array.isArray(message.tools) && message.tools.length ? { tools: message.tools } : {}),
+        ...(Array.isArray(message.capabilities) && message.capabilities.length
+          ? { capabilities: message.capabilities }
+          : {}),
+        ...(Array.isArray(message.skills) && message.skills.length ? { skills: message.skills } : {})
+      }
+      return
+    }
+    if (message.type === 'result') {
+      const usage = message.usage ?? {}
+      const credits = sumModelUsageCredits(message.modelUsage) ?? usage.credits
+      this.lastTurnUsage = {
+        ...(typeof usage.context_usage_ratio === 'number' ? { contextUsageRatio: usage.context_usage_ratio } : {}),
+        ...(typeof credits === 'number' ? { credits } : {}),
+        ...(typeof message.total_credits === 'number' ? { totalCredits: message.total_credits } : {})
+      }
+    }
+  }
+
   /** 消费循环:独占 query 输出,把消息转成 chunk 分发给当前回合。 */
   private async consume(): Promise<void> {
     try {
       for await (const raw of this.query) {
         const message = raw as SDKMessage
+        // 会话级事实在任何分发之前采集：回合外的 init / 残留 result 同样要落档。
+        this.captureFacts(message as RawSdkMessage)
         this.options.onMessage?.(message)
         const turn = this.activeTurn
         if (!turn || turn.status !== 'active') {
@@ -778,6 +926,13 @@ export class QoderSessionRegistry {
     if (!session) return
     this.sessions.delete(id)
     await session.close()
+  }
+
+  /** 批量关闭满足条件的会话（阶段实例为 key 时的任务级联清理：前缀 = taskId）。 */
+  async closeMatching(predicate: (id: string) => boolean): Promise<void> {
+    for (const id of [...this.sessions.keys()]) {
+      if (predicate(id)) await this.close(id)
+    }
   }
 
   async dispose(): Promise<void> {

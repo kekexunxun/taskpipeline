@@ -25,6 +25,8 @@ import type { AgentService } from '../agents/agent-service.js'
 import type { TracePipeline } from '../trace/bus/trace-pipeline.js'
 import type { TraceService } from '../trace/trace-service.js'
 import type { McpServerEntry } from '../mcp/mcp-config.js'
+import { removeTaskArtifacts } from '../task/stage-artifacts.js'
+import { purgeTaskSessionsFor } from '../task/task-lifecycle.js'
 import type { ChatDriverId } from '../chat/chat-types.js'
 import type { AgentGenerationRepository } from '../agents/agent-generator.js'
 import type { TaskBackendId } from '../chat/task-backends/index.js'
@@ -46,7 +48,8 @@ export interface IpcDeps {
   // 任务生命周期
   taskCardsWithCurrentChanges: () => unknown[]
   getActiveTaskOperations: () => Set<string>
-  getActiveTaskId: () => string | undefined
+  /** 缺省无入参时的兜底：旧版本把「全局唯一活动任务」存在进程级单例里，P3 后只看当前在跑的操作。 */
+  getActiveTaskId?: () => string | undefined
   // 固定链路下 `begin()` 恒进 `planning`，启动入参不再有 `mode` 二选一。
   startTask: (
     taskId: string,
@@ -415,7 +418,13 @@ export function registerIpc(d: IpcDeps): void {
       }
     ) => startTask(taskId, options)
   )
-  ipcMain.handle('tasks:reimplement', (_event, taskId: string) => taskWorkflow.reimplement(taskId))
+  ipcMain.handle('tasks:reimplement', async (_event, taskId: string) => {
+    // 重置为一轮新链路：旧计划/摘要不能继续当阶段输入（否则新一版 Exec 会读到上一版的产物）。
+    await removeTaskArtifacts(dataDir, taskId)
+    // 旧会话同样作废：reset 已清 `qoderSessionId`，留着文件只会让 `~/.qoder` 只增不减（§4.4）。
+    await purgeTaskSessionsFor(taskId)
+    return taskWorkflow.reimplement(taskId)
+  })
   ipcMain.handle('tasks:resume', (_event, taskId: string) => resumeTask(taskId))
   ipcMain.handle('tasks:pause', (_event, taskId: string) => pauseTask(taskId))
   ipcMain.handle('tasks:resume-paused', (_event, taskId: string) => resumePausedTask(taskId))
@@ -433,7 +442,11 @@ export function registerIpc(d: IpcDeps): void {
     (_event, taskId: string, eventId: string, action: 'apply' | 'discard', keys?: TaskDraftFieldKey[]) =>
       resolveDraftSuggestion(taskId, eventId, action, keys)
   )
-  ipcMain.handle('tasks:abort', () => (getActiveTaskId() ? stopTaskOperations(getActiveTaskId()!, true) : undefined))
+  // 停止按任务生效（P3）：以前从全局「当前活动任务」反推，两个任务并行时会停错。
+  ipcMain.handle('tasks:abort', (_event, taskId?: string) => {
+    const target = taskId ?? getActiveTaskId?.() ?? [...getActiveTaskOperations()][0]
+    return target ? stopTaskOperations(target, true) : undefined
+  })
   ipcMain.handle('tasks:cancel', (_event, taskId: string) => cancelTask(taskId))
   ipcMain.handle('tasks:review', (_event, taskId: string) =>
     runTaskOperation(taskId, (signal) => runReviewWithAutoFix(taskId, signal))

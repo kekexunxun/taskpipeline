@@ -665,7 +665,8 @@ export type AgentApi = {
     action: 'apply' | 'discard',
     keys?: TaskDraftFieldKey[]
   ): Promise<void>
-  abortTask(): Promise<void>
+  /** 停止一个任务的执行链路；不传则退到「当前在跑的第一个任务」（旧行为）。 */
+  abortTask(taskId?: string): Promise<void>
   cancelTask(taskId: string): Promise<void>
   runReview(taskId: string): Promise<void>
   resetReview(taskId: string): Promise<void>

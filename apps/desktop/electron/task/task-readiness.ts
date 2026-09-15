@@ -19,6 +19,27 @@ export const implementationOutcomeInstruction = [
   '不要把一次对话结束当作实现完成。无法确定时必须使用 needs_input。'
 ].join('\n')
 
+/**
+ * 测试用例生成阶段的 Agent 指引。
+ *
+ * 放在这里而不是某个 driver 内部：Plan/Exec 之外的阶段同样需要“同一份约束”——
+ * Pi 与 Qoder 两条运行时如果各自维护一份提示词，产出契约（末尾的 JSON，由
+ * `parseTestCaseGeneration` 解析）就会与提示词漂移，一个运行时能解析另一个不能。
+ */
+export const testCaseGenerationInstruction = [
+  '你是一个测试用例生成 Agent，专为当前 Coding 任务生成最小测试集。',
+  '硬性约束：',
+  '1. 不得修改任何业务逻辑文件、不得重构、不得调整非测试相关的配置。',
+  '2. 仅为本次改动产出可被现有 testCommand 跑通的最小测试集（单元测试为主，必要时一个集成测试）。',
+  '3. 若现有 testCommand 不存在或无法识别测试文件，请按仓库常见约定新增。',
+  '4. 所有新增文件必须以 _test.* / .test.* / .spec.* 结尾，并放到合理的测试目录。',
+  '5. 完成后请把测试相关的修改 commit 到当前 feature 分支（一个 commit 即可），commit message 形如 `test: <简短说明>`。',
+  '',
+  '请在最后输出一个 JSON 对象（不要输出额外说明）：',
+  '{"files":["path/to/test1", "path/to/test2"], "commitSha":"<短 sha 或全 sha>", "summary":"<一句话概述>"}',
+  '若没有任何可测试的逻辑面，输出 {"files":[], "summary":"<解释原因>"}。'
+].join('\n')
+
 export function parseImplementationDecision(texts: string[]): ImplementationDecision {
   // 先把流式增量片段按顺序拼成完整文本再解析(兼容消息粒度与 delta 碎片粒度):
   // outcome marker 或 JSON 可能横跨多条碎片,逐条解析会漏判,导致实现结果被误判。

@@ -3,7 +3,7 @@
  *
  * 从 main.ts 提取：
  *  - createQoderTaskAgent + qoderTaskAgent 单例
- *  - runQoder / runQoderPlan / runQoderTestCases
+ *  - 三个阶段入口（计划 / 实现 / 测试用例）：都只包一层 `agent.runStage`，差异在 driver 内
  *  - probeQoderStatus / getQoderStatus
  *  - callQoderReviewer / callQoderForAgentGeneration（从 task-runner.ts 迁入）
  *  - 会话管理（stop / pause / interrupt / closeSession）
@@ -21,8 +21,9 @@ import {
   type UsageInfo
 } from '@qoder-ai/qoder-agent-sdk'
 import type { Task, TaskState, TaskStore, AgentEvent } from '@task-pipeline/core'
-import { evaluateExecutionPermission, taskRoots } from '@task-pipeline/core'
+import { evaluateExecutionPermission, executionPhaseOf, taskRoots } from '@task-pipeline/core'
 import type { TaskWorkflow, OpenAICompatReviewer } from '@task-pipeline/integrations'
+import type { TaskAgentPhase } from '../../agents/task-agent/task-agent-driver.js'
 import { describeToolAction } from '../../agents/task-agent/dangerous-tools.js'
 import { parseTestCaseGeneration } from '../../agents/task-agent/parsers/test-case-parser.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
@@ -87,24 +88,14 @@ export interface QoderOrchestratorDeps {
   updateState: (task: Task, state: TaskState) => Task
   runTaskOperation: <T>(taskId: string, action: (signal: AbortSignal) => Promise<T>) => Promise<T>
 
-  // 路由
-  runtimeProvider: (task: Task) => string
-  providerForTask: (taskId: string | undefined) => string
-
   // Agent 上下文
   resolveAgentContext: QoderTaskAgentDeps['resolveAgentContext']
   resolveModel: QoderTaskAgentDeps['resolveModel']
   resolveTestContext: QoderTaskAgentDeps['resolveTestContext']
   resolveMemoryContext: QoderTaskAgentDeps['resolveMemoryContext']
 
-  // 共享状态读写（activeTaskId 由 main.ts 拥有，orchestrator 需读写）
-  getActiveTaskId: () => string | undefined
-  setActiveTaskId: (id: string | undefined) => void
-
-  // 实现完成回调（由 main.ts 提供，因涉及 Pi 路径共享的 finishImplementation）
+  // 阶段产物回调（涉及 Pi 路径共享的 finishImplementation / savePlanDecision）
   finishImplementation: (taskId: string, responseTexts: string[], signal?: AbortSignal) => Promise<void>
-
-  // 计划保存（task-runner.ts 的 savePlanDecision）
   savePlanDecision: (taskId: string, texts: string[]) => Promise<unknown>
 
   // OpenAI 相关（resolveLiteModel 的 OpenAI 回落路径）
@@ -128,8 +119,6 @@ export class QoderOrchestrator {
   // Qoder 专属状态
   private _activeQuery: Query | undefined
   private _activeAbort: AbortController | undefined
-  private _activePlanningTaskId: string | undefined
-  private _activePlanText = ''
 
   // 状态探测缓存
   private _statusInflight: Promise<QoderStatus> | null = null
@@ -148,18 +137,6 @@ export class QoderOrchestrator {
 
   get activeAbort(): AbortController | undefined {
     return this._activeAbort
-  }
-
-  get activePlanningTaskId(): string | undefined {
-    return this._activePlanningTaskId
-  }
-
-  get activePlanText(): string {
-    return this._activePlanText
-  }
-
-  set activePlanText(value: string) {
-    this._activePlanText = value
   }
 
   get taskAgent(): QoderTaskAgentDriver {
@@ -188,30 +165,21 @@ export class QoderOrchestrator {
       emitPi,
       tracePipeline,
       emit: (event) => {
+        // 事件自带 taskId（P3）：不再从全局 activeTaskId 反推归属，两个任务并行时不会串。
+        const taskId = event.taskId
         if (event.type === 'agent_session') {
-          const taskId = event.taskId || this.deps.getActiveTaskId()
-          if (taskId) store.updateTask(taskId, { qoderSessionId: event.sessionId })
+          store.updateTask(taskId, { qoderSessionId: event.sessionId })
         }
         if (event.type === 'agent_start' || event.type === 'agent_end') {
-          emitPi({ type: event.type, provider: 'qoder', taskId: this.deps.getActiveTaskId(), phase: event.phase })
+          emitPi({ type: event.type, provider: 'qoder', taskId, phase: event.phase })
           return
         }
-        if (event.type === 'agent_text' && this.deps.getActiveTaskId()) {
-          addTaskEvent({
-            taskId: this.deps.getActiveTaskId()!,
-            kind: 'message',
-            title: 'Qoder Agent',
-            detail: event.text
-          })
+        if (event.type === 'agent_text') {
+          addTaskEvent({ taskId, kind: 'message', title: 'Qoder Agent', detail: event.text })
           return
         }
-        if (event.type === 'agent_error' && this.deps.getActiveTaskId()) {
-          addTaskEvent({
-            taskId: this.deps.getActiveTaskId()!,
-            kind: 'error',
-            title: 'Qoder Agent 错误',
-            detail: event.message
-          })
+        if (event.type === 'agent_error') {
+          addTaskEvent({ taskId, kind: 'error', title: 'Qoder Agent 错误', detail: event.message })
         }
       },
       resolveMemoryContext,
@@ -239,10 +207,12 @@ export class QoderOrchestrator {
         }
         // 执行期不再按 HITL 档位弹框：一律走与 Pi 路径同源的 L1 判定，
         // 命中即直接 deny 并把原因回给模型（模型会换界内做法），不请用户裁决。
+        // phase 与 Pi 侧一样取自任务状态机，两条引擎的阶段约束因此同源（P4）。
         const repos = this.deps.store.listTaskRepositories(taskId)
         const decision = evaluateExecutionPermission(toolName, toolInput, {
           roots: taskRoots(repos),
-          cwd: repos[0]?.worktreePath ?? repos[0]?.localPath ?? process.cwd()
+          cwd: repos[0]?.worktreePath ?? repos[0]?.localPath ?? process.cwd(),
+          phase: executionPhaseOf(this.deps.store.getTask(taskId)?.state)
         })
         if (decision.action === 'allow') return 'allow'
         const detail = describeToolAction(toolName, toolInput)
@@ -269,7 +239,6 @@ export class QoderOrchestrator {
     const task = await this.deps.taskWorkflow.prepare(taskId, signal)
     const repos = this.deps.store.listTaskRepositories(task.id)
     if (repos.length === 0) throw new Error('任务未关联代码仓库')
-    this.deps.setActiveTaskId(task.id)
     signal?.throwIfAborted()
     this.deps.addTaskEvent({
       taskId,
@@ -278,16 +247,16 @@ export class QoderOrchestrator {
       detail: '使用应用随附运行时,并在已配置仓库目录中执行'
     })
     try {
-      await this.agent.runImplementation({
+      const { responseTexts } = await this.agent.runStage({
         task,
         repos,
+        phase: 'implementation',
         signal,
         ...(resumeSessionId ? { resumeSessionId } : {}),
         ...(extraPrompt ? { extraPrompt } : {}),
         ...(traceMark?.trigger ? { trigger: traceMark.trigger } : {}),
         ...(traceMark?.round !== undefined ? { round: traceMark.round } : {})
       })
-      const { responseTexts } = this.agent.collectResult(taskId, 'implementation')
       await this.deps.finishImplementation(task.id, responseTexts, signal)
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
@@ -312,19 +281,16 @@ export class QoderOrchestrator {
     const repos = this.deps.store.listTaskRepositories(task.id)
     if (repos.length === 0) throw new Error('任务未关联代码仓库')
 
-    this.deps.setActiveTaskId(task.id)
-    this._activePlanningTaskId = task.id
-    this._activePlanText = ''
     signal?.throwIfAborted()
     try {
-      await this.agent.runPlan({
+      const { responseTexts } = await this.agent.runStage({
         task,
         repos,
+        phase: 'planning',
         signal,
         ...(feedback ? { feedback } : {}),
         ...(trigger ? { trigger } : {})
       })
-      const { responseTexts } = this.agent.collectResult(taskId, 'plan')
       await this.deps.savePlanDecision(taskId, responseTexts)
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
@@ -336,8 +302,6 @@ export class QoderOrchestrator {
         this.deps.updateState(current, 'failed')
       }
       throw error
-    } finally {
-      this._activePlanningTaskId = undefined
     }
   }
 
@@ -348,12 +312,9 @@ export class QoderOrchestrator {
     if (!task || task.state !== 'generating_tests') throw new Error('当前任务不能生成测试用例')
     const repos = this.deps.store.listTaskRepositories(task.id)
     if (repos.length === 0) throw new Error('任务未关联代码仓库')
-    this.deps.setActiveTaskId(task.id)
     this.deps.addTaskEvent({ taskId, kind: 'status', title: '正在生成测试用例' })
     signal?.throwIfAborted()
-    if (!this.agent.runTestGeneration) throw new Error('当前 Agent 运行时不支持测试用例生成')
-    await this.agent.runTestGeneration({ task, repos, signal })
-    const { responseTexts } = this.agent.collectResult(taskId, 'test')
+    const { responseTexts } = await this.agent.runStage({ task, repos, phase: 'test_generation', signal })
     return parseTestCaseGeneration(responseTexts)
   }
 
@@ -695,7 +656,8 @@ export class QoderOrchestrator {
     this.deps.store.updateTask(taskId, { sessionUsage: undefined })
   }
 
-  collectResult(taskId: string, phase: 'implementation' | 'plan' | 'test') {
+  /** 阶段产物缓冲（driver 侧按 `${taskId}:${phase}` 累积，`runStage` 返回值的同一份）。 */
+  collectResult(taskId: string, phase: TaskAgentPhase) {
     return this.agent.collectResult(taskId, phase)
   }
 

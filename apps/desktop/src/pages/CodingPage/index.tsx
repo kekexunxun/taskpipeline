@@ -179,7 +179,7 @@ export default function CodingPage() {
             onStart={() => {
               setStartOpen(true)
             }}
-            onAbort={() => runAction(() => api.abortTask())}
+            onAbort={() => runAction(() => api.abortTask(tasks.selectedId ?? undefined))}
             onPause={() => {
               if (tasks.selectedId) runAction(() => api.pauseTask(tasks.selectedId!))
             }}

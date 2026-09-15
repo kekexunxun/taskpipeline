@@ -557,6 +557,10 @@ export class TaskWorkflow {
       reviewFixCount: undefined,
       commitMessage: undefined,
       piSessionPath: undefined,
+      // 两轮实现是两条独立链路：旧会话指针不清，新一轮 Exec 会 resume 上一轮的完整轨迹
+      // （含已被推翻的计划与旧改动推理），与「重置」的语义相反。Pi 侧清了 piSessionPath，
+      // Qoder 侧必须同步清 qoderSessionId。
+      qoderSessionId: undefined,
       sessionUsage: undefined
     })
     const reset = this.transitionTo(taskId, 'preparing')

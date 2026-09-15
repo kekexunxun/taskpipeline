@@ -11,6 +11,9 @@
 // ── 会话引擎 ────────────────────────────────────────────────
 export { QoderSession, QoderSessionRegistry } from './qoder-session.js'
 
+// ── 会话回收（P4，§4.4） ─────────────────────────────────────
+export { sweepOrphanTaskSessions, purgeTaskSessions, DEFAULT_MAX_AGE_DAYS } from './session-sweep.js'
+
 // ── Task Agent Driver ───────────────────────────────────────
 export { QoderTaskAgentDriver, stripQoderModelPrefix } from './qoder-task-agent.js'
 export type { QoderTaskAgentDeps } from './qoder-task-agent.js'

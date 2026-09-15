@@ -29,19 +29,23 @@ export type TaskAgentPhase = 'planning' | 'implementation' | 'test_generation'
 
 /**
  * driver 推给上层的事件。main.ts 处理每个事件:
- *  - agent_start / agent_end: 切换 activeTaskId / 状态;
+ *  - agent_start / agent_end: 阶段边界（Trace / 渲染层切段）;
  *  - agent_text: 写入 task event (UI 显示);
  *  - agent_log: 写入 Qoder 日志文件;
  *  - agent_session: 持久化 sessionId 供后续续接;
  *  - agent_error: 写 error event + 推 failed。
+ *
+ * 每个事件都自带 `taskId`（P3）：此前靠 main.ts 的全局 activeTaskId 归因，
+ * 两个任务并行时事件会串到别人的 Timeline / 会话指针上。
  */
 export type TaskAgentEvent =
-  | { type: 'agent_start'; phase: TaskAgentPhase }
-  | { type: 'agent_end'; phase: TaskAgentPhase }
-  | { type: 'agent_text'; phase: TaskAgentPhase; text: string }
+  | { type: 'agent_start'; taskId: string; phase: TaskAgentPhase }
+  | { type: 'agent_end'; taskId: string; phase: TaskAgentPhase }
+  | { type: 'agent_text'; taskId: string; phase: TaskAgentPhase; text: string }
   | { type: 'agent_session'; taskId: string; sessionId: string }
   | {
       type: 'agent_usage'
+      taskId: string
       inputTokens: number
       outputTokens: number
       cacheReadTokens: number
@@ -50,45 +54,53 @@ export type TaskAgentEvent =
       durationMs?: number
       turns?: number
     }
-  | { type: 'agent_log'; message: unknown }
-  | { type: 'agent_error'; message: string }
+  | { type: 'agent_log'; taskId: string; message: unknown }
+  | { type: 'agent_error'; taskId: string; message: string }
 
-/** 阶段产物 — driver 在 collectResult 时返回。 */
+/** 阶段产物 —— `runStage` 的返回值（旧 `collectResult` 仍保留为只读访问器）。 */
 export type TaskAgentResult = {
   /** driver 在执行阶段累积的 assistant / result 文本。 */
   responseTexts: string[]
-  /** Qoder SDK 输出的 session id (用于失败后续接)。 */
+  /** 本阶段实例的会话 id（Qoder sessionId / Pi sessionFile），用于失败后续接与对账。 */
   sessionId?: string
+  /** 本阶段实际使用的阶段实例 id（一个阶段实例 = 一个会话）。 */
+  stageInstanceId?: string
+  /** driver 实际采用的会话启动方式（new/continue/resume/fork），降级后以最后一档为准。 */
+  sessionMode?: 'new' | 'continue' | 'resume' | 'fork'
 }
 
-export type RunPlanInput = {
+/**
+ * driver 能力声明（§6）：编排层据此选降级链，不再靠「调一下看它 throw」协商。
+ *
+ * - `fork`：阶段边界能从一个会话分叉出新会话（阶段边界 = 会话边界）；
+ * - `truncateAt`：fork 时能把继承范围截断到指定条目（Qoder `resumeSessionAt` / Pi `createBranchedSession(leafId)`）；
+ * - `perPhasePermission`：能否按阶段实例给不同工具权限（Plan 只读 / Exec 可写）。
+ */
+export type TaskAgentCapabilities = {
+  fork: boolean
+  truncateAt: boolean
+  perPhasePermission: boolean
+}
+
+/**
+ * 一次「按阶段实例执行」的入参：三个旧 `runPlan/runImplementation/runTestGeneration`
+ * 的并集，字段按阶段取用（多余的字段对不相关阶段就是缺省）。
+ */
+export type TaskStageInput = {
   task: Task
   repos: TaskRepository[]
+  phase: TaskAgentPhase
   signal?: AbortSignal
-  /** "修订计划" 路径下,把上一版计划的调整意见追加到 prompt。 */
+  /** "修订计划" 路径下，把上一版计划的调整意见追加到 prompt。 */
   feedback?: string
-  /** 恢复/续接标记：resumeTask 计划失败重跑 Plan 时传 'resume'，写入阶段 span meta 供展示层区分。 */
-  trigger?: 'resume' | 'followup'
-}
-
-export type RunImplementationInput = {
-  task: Task
-  repos: TaskRepository[]
-  signal?: AbortSignal
-  /** 失败后续接:driver 用 resume 恢复原会话,避免重复注入完整上下文。 */
+  /** 失败后续接：driver 用 resume 恢复原会话，避免重复注入完整上下文。 */
   resumeSessionId?: string
-  /** 续接时附加给 agent 的指令(实现阶段)。 */
+  /** 续接时附加给 agent 的指令（实现阶段）。 */
   extraPrompt?: string
   /** 恢复/续接标记：resumeTask/resumePausedTask 传 'resume'，sendTaskMessage 追加指令传 'followup'。 */
   trigger?: 'resume' | 'followup'
   /** auto-fix 重跑轮次（reviewFixCount）：渲染层据此区分 Exec / ReExec #n。 */
   round?: number
-}
-
-export type RunTestGenerationInput = {
-  task: Task
-  repos: TaskRepository[]
-  signal?: AbortSignal
 }
 
 /** TaskAgentDriver 构造时需要的依赖。 */
@@ -106,29 +118,32 @@ export type TaskAgentDeps = {
   resolveAgentContext?: (task: Task, repos: TaskRepository[]) => Promise<{ sections: string[] }>
 }
 
+/**
+ * 任务阶段运行时的统一契约（§6）。
+ *
+ * Qoder 与 Pi 两条运行时都必须实现它：阶段边界、产物交接、降级与权限的差异
+ * 全部由 `capabilities()` + `runStage` 内部承担，编排层不再写 `provider === 'qoder'` 分支。
+ */
 export interface TaskAgentDriver {
   readonly id: TaskAgentId
   readonly displayName: string
+  /** driver 支持到哪一步（不支持 fork 的运行时会被编排层降为「同任务单会话」）。 */
+  capabilities(): TaskAgentCapabilities
   /**
-   * 执行"计划"阶段。driver 内部: 拼 prompt、起 query、解析 plan JSON。
-   * 完成后通过 collectResult("plan") 拿到 responseTexts,主流程再 parsePlanDecision。
+   * 按阶段实例执行一次：拼 prompt、起会话（新建/续接/fork）、收集文本、推事件。
+   *
+   * 返回本阶段产物；上层拿 `responseTexts` 去 parse 各种决策 JSON。
    */
-  runPlan(input: RunPlanInput): Promise<void>
+  runStage(input: TaskStageInput): Promise<TaskAgentResult>
   /**
-   * 执行"实现"阶段。driver 内部: 拼 prompt、起 query (permissionMode=acceptEdits)、
-   * 收集 assistant / result 文本、流式推到 emit。失败后续接走 resumeSessionId。
+   * 只读访问已累积的阶段产物（`runStage` 的返回值同一份）。保留是为了 Trace /
+   * 重入路径能在 `runStage` 之外拿到缓冲，新代码应直接用 `runStage` 的返回值。
    */
-  runImplementation(input: RunImplementationInput): Promise<void>
-  /**
-   * 执行"测试用例生成"阶段（可选）。
-   * 由系统配置 / 任务级开关决定是否调用；driver 实现方可选择不予支持。
-   */
-  runTestGeneration?(input: RunTestGenerationInput): Promise<void>
-  /**
-   * 取出 driver 内部累积的阶段产物。driver 是进程级单例,可能同时服务多个任务:
-   * 产物按 (taskId, phase) 隔离,主流程拿 responseTexts 去 parse 各种决策 JSON。
-   */
-  collectResult(taskId: string, phase: 'plan' | 'implementation' | 'test'): TaskAgentResult
+  collectResult(taskId: string, phase: TaskAgentPhase): TaskAgentResult
+  /** 释放一个阶段实例的会话（阶段结束后不必再占着）；不级联到同任务的其它阶段。 */
+  releaseStage(stageInstanceId: string): void
+  /** 关闭指定任务的全部阶段会话（任务终态 / 重置时级联）。 */
+  closeSession(taskId: string): void
   /** 释放 driver 持有的资源。 */
   dispose(): void
 }

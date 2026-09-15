@@ -31,7 +31,7 @@ contextBridge.exposeInMainWorld('agentApi', {
   sendTaskIntake: (taskId: string, message: string) => ipcRenderer.invoke('tasks:intake-message', taskId, message),
   resolveDraftSuggestion: (taskId: string, eventId: string, action: 'apply' | 'discard', keys?: string[]) =>
     ipcRenderer.invoke('tasks:resolve-draft-suggestion', taskId, eventId, action, keys),
-  abortTask: () => ipcRenderer.invoke('tasks:abort'),
+  abortTask: (taskId?: string) => ipcRenderer.invoke('tasks:abort', taskId),
   cancelTask: (taskId: string) => ipcRenderer.invoke('tasks:cancel', taskId),
   runReview: (taskId: string) => ipcRenderer.invoke('tasks:review', taskId),
   resetReview: (taskId: string) => ipcRenderer.invoke('tasks:reset-review', taskId),

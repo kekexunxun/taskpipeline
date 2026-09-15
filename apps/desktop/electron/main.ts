@@ -22,7 +22,7 @@ import {
   type SettingResolver
 } from '@task-pipeline/core'
 import { redactSecrets } from '@task-pipeline/integrations'
-import { QoderOrchestrator, QoderTraceBuilder } from './pi-extension/qoder/index.js'
+import { QoderOrchestrator, QoderTraceBuilder, sweepOrphanTaskSessions } from './pi-extension/qoder/index.js'
 import { initAutoUpdater } from './auto-updater.js'
 import { TracePipeline } from './trace/bus/trace-pipeline.js'
 import type { PiTraceBuilder } from './trace/instrument/pi-trace-builder.js'
@@ -70,15 +70,15 @@ import { detectVendor } from './chat/drivers/model-providers.js'
 import {
   initPiSession,
   emitPi,
-  stopPi,
+  releaseAllPiSessions,
   syncPiModelConfig,
   requestUi,
   handleAskUserQuestion,
-  getActiveTaskId,
-  setActiveTaskId,
-  getPiSession,
+  getPiSessionForTask,
   getPendingUi
 } from './task/pi-session.js'
+import { initPiTaskAgent } from './task/pi-task-agent.js'
+import { sweepOrphanPiSessions } from './task/pi-session-sweep.js'
 import {
   initTaskLifecycle,
   taskWorkspace,
@@ -143,7 +143,7 @@ function addTaskEvent(event: Omit<AgentEvent, 'id' | 'createdAt'>): void {
   emitTaskChanged(event.taskId)
 }
 function updatePiUsage(taskId: string): void {
-  const piSession = getPiSession()
+  const piSession = getPiSessionForTask(taskId)
   if (!piSession) return
   const stats = piSession.getSessionStats()
   store.updateTask(taskId, {
@@ -251,12 +251,7 @@ initPiSession({
   emitTaskChanged,
   sendTaskEvent,
   piTraceBuilders,
-  getMainWindow: () => mainWindow,
-  onFinishImplementation: (taskId, responseTexts) => {
-    void runTaskOperation(taskId, (signal) => finishImplementation(taskId, responseTexts, signal)).catch((error) =>
-      emitPi({ type: 'agent_error', message: error instanceof Error ? error.message : String(error) })
-    )
-  }
+  getMainWindow: () => mainWindow
 })
 
 // ── 下沉模块实例 ─────────────────────────────────────────────────────────────
@@ -326,8 +321,6 @@ qoderOrch = new QoderOrchestrator({
   handleAskUserQuestion,
   updateState,
   runTaskOperation,
-  runtimeProvider,
-  providerForTask,
   resolveAgentContext: async (task, repos) => {
     const context = await agentService.resolveAgentContext(task, repos)
     if (context.sections.length)
@@ -350,8 +343,6 @@ qoderOrch = new QoderOrchestrator({
     return { sections }
   },
   resolveMemoryContext: taskMemoryContext,
-  getActiveTaskId: () => getActiveTaskId(),
-  setActiveTaskId: (id) => setActiveTaskId(id),
   finishImplementation,
   resolveOpenAIModelValue: () => resolveOpenAIModelValue(),
   syncSystemDefaultModel: () => syncSystemDefaultModel(),
@@ -389,8 +380,15 @@ initTaskLifecycle({
   defaultOpenAIProfile,
   openAIApiKeyFor
 })
+// Pi 侧阶段 driver（与 Qoder 的 QoderTaskAgentDriver 同一契约）：阶段边界、等回合、取产物
+// 都在它里面，所以必须在 `initTaskLifecycle` 之后接线（它反向要用到状态机入口）。
+initPiTaskAgent({
+  store,
+  logStage: (taskId, title, detail) => addTaskEvent({ taskId, kind: 'status', title, detail })
+})
 initTaskRunner({
   store,
+  dataDir,
   protectedValue,
   addTaskEvent: addTaskEvent as (event: Omit<AgentEvent, 'id' | 'createdAt'>) => void,
   emitPi,
@@ -431,7 +429,6 @@ registerIpc({
   keyStore,
   taskCardsWithCurrentChanges: taskCardsWithCurrentChanges as never,
   getActiveTaskOperations: getActiveTaskOperations as never,
-  getActiveTaskId,
   startTask,
   resumeTask,
   pauseTask,
@@ -576,6 +573,32 @@ app.whenReady().then(() => {
     6 * 60 * 60 * 1000
   )
   retentionTimer.unref()
+  // 会话回收（P4，§4.4）：qodercli 不删自己的会话文件（V6），阶段实例化后只会多得更密；
+  // Pi 侧同理（一个任务只存一个指针，fork 前驱永远没人认）。
+  // 只清「任务已删 + 超活动期」的会话；延后首跑是为了不跟启动期的 DB / 窗口初始化抢 IO。
+  const runSessionSweep = () => {
+    const workspacesRoots = [join(dataDir, 'workspaces'), join(dataDir, 'worktrees')]
+    const listTaskIds = () => store.listTasks().map((task) => task.id)
+    try {
+      sweepOrphanPiSessions({
+        piSessionsDir: join(dataDir, 'pi-sessions'),
+        workspacesRoots,
+        listTaskIds,
+        log: (message) => console.log('[session-sweep]', message)
+      })
+    } catch (error) {
+      console.warn('[session-sweep] pi sweep failed:', error)
+    }
+    void sweepOrphanTaskSessions({
+      workspacesRoots,
+      listTaskIds,
+      log: (message) => console.log('[session-sweep]', message)
+    }).catch((error) => console.warn('[session-sweep] failed:', error))
+  }
+  const sweepKickoff = setTimeout(runSessionSweep, 60_000)
+  sweepKickoff.unref()
+  const sessionSweepTimer = setInterval(runSessionSweep, 12 * 60 * 60 * 1000)
+  sessionSweepTimer.unref()
   app.on('browser-window-focus', () => {
     void mergeRefresher.refresh()
   })
@@ -614,12 +637,12 @@ app.on('before-quit', (event) => {
       } catch {
         /* ignore */
       }
-      void stopPi()
+      void releaseAllPiSessions()
       safeCloseStore()
       app.quit()
     })()
     return
   }
-  void stopPi()
+  void releaseAllPiSessions()
   safeCloseStore()
 })

@@ -24,6 +24,8 @@ function asyncIterFromArray<T>(items: T[]): AsyncIterable<T> {
 }
 
 vi.mock('@qoder-ai/qoder-agent-sdk', () => ({
+  // 会话创建时读它判定 transport（诊断字段）；mock 不补会抛「export is not defined」。
+  DEFAULT_RUNTIME_TRANSPORT: 'worker',
   accessToken: (token: string) => ({ token }),
   QoderCliProcessError: class QoderCliProcessError extends Error {
     readonly code = 'QODER_CLI_PROCESS_ERROR' as const
@@ -89,7 +91,7 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => ({
   }
 }))
 
-const { QoderPlanModeProvider } = await import('../../pi-extension/qoder/qoder-plan-mode.js')
+const { QoderPlanModeProvider } = await import('../../../pi-extension/qoder/qoder-plan-mode.js')
 
 const TEST_CTX: PlanModeContext = {
   task: {

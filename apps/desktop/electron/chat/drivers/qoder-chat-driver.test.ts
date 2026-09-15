@@ -138,6 +138,8 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
     for (const w of scriptWaiters.splice(0)) w()
   }
   return {
+    // 会话创建时读它判定 transport（诊断字段）；mock 不补会抛「export is not defined」。
+    DEFAULT_RUNTIME_TRANSPORT: 'worker',
     accessToken: (token: string) => ({ token }),
     query: (args: { prompt?: string; options?: Record<string, unknown> }) => {
       captured.push({ options: args.options ?? {}, prompt: args.prompt })

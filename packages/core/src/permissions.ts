@@ -1,5 +1,6 @@
 import { homedir } from 'node:os'
-import { resolve, sep } from 'node:path'
+import { normalize, relative, resolve, sep } from 'node:path'
+import type { TaskState } from './types.js'
 
 /**
  * 执行期权限 —— 任务链路的两条引擎路径（Qoder 的 `canUseTool` 回调、Pi 的 `tool_call` 事件）
@@ -7,8 +8,8 @@ import { resolve, sep } from 'node:path'
  *
  * 三层规则（设计说明见 docs/task-fixed-pipeline-plan.md §4.6）：
  *
- * - **L1 硬阻断**：越出本任务 worktree 集合的写 / 移动 / 删除、不可逆破坏性命令、凭据类敏感路径。
- *   不可配置，也不得被任何 HITL 档位绕过。
+ * - **L1 硬阻断**：越出本任务 worktree 集合的写 / 移动 / 删除、不可逆破坏性命令、凭据类敏感路径，
+ *   以及**阶段级只读 / 测试路径约束**（P4）。不可配置，也不得被任何 HITL 档位绕过。
  * - **L2 交付动作**（`git commit` / `git push` / `mr create`）不在执行期弹框：是否自动提交由任务链路
  *   末尾的交付配置决定，因此这里一律放行。
  * - **L3 其余全部放行**：含 worktree 内的 `mv` / `rm`、覆盖写、联网与依赖安装。
@@ -16,6 +17,24 @@ import { resolve, sep } from 'node:path'
  */
 
 export type ExecutionPermission = { action: 'allow' | 'block'; reason?: string }
+
+/**
+ * 执行期阶段（P4）：把「Plan 只读」「Test 只改测试文件」从 prompt 里的口头约束
+ * 变成 L1 判定的一部分。
+ *
+ * 取值来自**任务状态机**而不是会话字段：两条引擎都能从 DB 拿到 state，因此
+ * 不需要把阶段信息穿过 CLI / Pi 子进程边界（那条路上根本没有可靠的注入口）。
+ */
+export type ExecutionPhase = 'planning' | 'implementation' | 'test' | 'other'
+
+/** 任务状态 → 执行期阶段；非执行态（草稿 / 评审 / 交付）按 `other` 处理，不附加阶段约束。 */
+export function executionPhaseOf(state: TaskState | undefined): ExecutionPhase {
+  if (state === 'planning') return 'planning'
+  if (state === 'generating_tests') return 'test'
+  if (['preparing', 'implementing', 'awaiting_input', 'validating', 'validation_failed'].includes(state ?? ''))
+    return 'implementation'
+  return 'other'
+}
 
 /** 命令串里的破坏性形态：不可逆且破坏面超出单个文件。 */
 const DESTRUCTIVE_COMMANDS: Array<{ pattern: RegExp; reason: string }> = [
@@ -167,39 +186,84 @@ export function taskRoots(repositories: Array<{ worktreePath?: string; localPath
 }
 
 /**
+ * 测试产物路径（P4：Test 阶段的写入白名单）。
+ *
+ * 按「目录名 + 文件名后缀」两类形态宽松匹配：各语言/框架的约定都在里面，
+ * 宁可宽一点 —— 拦错会让 Test 阶段直接跑不下去，放宽只少一层约束。
+ */
+const TEST_PATH_PATTERN =
+  /(^|[/\\])(tests?|__tests__|spec|specs|testfixtures?|fixtures?)([/\\]|$)|\.(test|spec)\.(tsx?|jsx?|mts|cts|mjs|cjs|vue|svelte)$|_test\.(go|py|rb|java)$|(^|[/\\])test_[^/\\]+\.py$/i
+
+/** 是否为测试相关路径（相对路径与绝对路径都按字符串形态判断）。 */
+export function isTestArtifactPath(path: string): boolean {
+  return TEST_PATH_PATTERN.test(expandHome(path))
+}
+
+/**
+ * 先换成「仓库内相对路径」再判测试路径。
+ *
+ * 不能直接拿绝对路径去匹配：工作区路径自己带 `test` / `spec` 字样时（`~/test/repo`）会把
+ * 整个仓库洗成“测试目录”，约束直接失效。
+ */
+function repoRelativeTarget(path: string, roots: string[], cwd: string): string {
+  const absolute = normalize(resolve(cwd, expandHome(path)))
+  const root = roots.find((candidate) => isInsideRoots(path, [candidate], cwd))
+  if (!root) return absolute
+  return relative(normalize(resolve(cwd, expandHome(root))), absolute) || absolute
+}
+
+/**
  * 执行期权限判定。
  *
  * @param toolName 工具名（Qoder 内置工具、MCP 工具名、Pi 工具名都适用）
  * @param input 工具入参
  * @param options.roots 本任务允许的 worktree 根目录集合
  * @param options.cwd 当前工作目录（相对路径的解析基准）
+ * @param options.phase 执行期阶段（P4）：缺省 `other` = 不附加阶段约束，行为与加参数前完全一致
  */
 export function evaluateExecutionPermission(
   toolName: string,
   input: unknown,
-  options: { roots: string[]; cwd: string }
+  options: { roots: string[]; cwd: string; phase?: ExecutionPhase }
 ): ExecutionPermission {
-  const { roots, cwd } = options
+  const { roots, cwd, phase = 'other' } = options
   const name = toolName.toLowerCase()
   const paths = pathArgumentsOf(toolName, input)
+  const isWriteTool = WRITE_TOOL_FRAGMENT.test(name)
 
   // 1) 越出任务工作区的写 / 删 / 移动
-  if (WRITE_TOOL_FRAGMENT.test(name)) {
+  if (isWriteTool) {
     const escaped = paths.filter((path) => !isInsideRoots(path, roots, cwd))
     if (escaped.length > 0)
       return { action: 'block', reason: `文件操作超出本任务工作区：${escaped.slice(0, 2).join('、')}` }
   }
 
-  // 2) 凭据路径：任何工具、任何档位都阻断（读也拦，避免把密钥内容带进上下文）
+  // 2) 凭据路径：任何工具、任何档位、任何阶段都阻断（读也拦，避免把密钥内容带进上下文）
   if (paths.some((path) => isSensitivePath(path))) return { action: 'block', reason: '禁止访问凭据与密钥类路径' }
 
-  // 3) 命令执行类工具
+  // 3) 阶段级约束（P4）。
+  //    Plan：任何写 / 删 / 移动都拦 —— Qoder 侧另有 `disallowedTools` 硬边界，但那只是 CLI 层，
+  //    Pi 运行时没有等价原语（`capabilities().perPhasePermission === false`），只读必须由这里保证。
+  //    Test：只允许改测试产物 —— 它不该动业务逻辑（§2.2）。
+  if (phase === 'planning' && isWriteTool)
+    return { action: 'block', reason: '计划阶段只读：不得改动文件，请把结论写进计划正文' }
+  if (phase === 'test' && isWriteTool) {
+    const outside = paths.filter((path) => !isTestArtifactPath(repoRelativeTarget(path, roots, cwd)))
+    if (outside.length > 0)
+      return { action: 'block', reason: `测试阶段只允许改动测试文件：${outside.slice(0, 2).join('、')} 不是测试路径` }
+  }
+
+  // 4) 命令执行类工具
   const command = commandOf(toolName, input)
   if (COMMAND_TOOL_FRAGMENT.test(name) || command !== '') {
     if (!command) return { action: 'allow' }
     const destructive = DESTRUCTIVE_COMMANDS.find((item) => item.pattern.test(command))
     if (destructive) return { action: 'block', reason: destructive.reason }
     if (commandTouchesSensitive(command)) return { action: 'block', reason: '禁止访问凭据与密钥类路径' }
+    // Plan 阶段的命令只允许只读探索：任何会改动工作区的命令都拦（含 `>` 重定向与依赖安装）。
+    // 放在越界判定之前：阶段约束比「落在哪个路径」更优先，报错也更好解释。
+    if (phase === 'planning' && MUTATING_COMMANDS.test(command))
+      return { action: 'block', reason: '计划阶段只读：该命令会改动工作区，请改为只读探索' }
     if (MUTATING_COMMANDS.test(command)) {
       const escaped = escapedPathsInCommand(command, roots, cwd)
       if (escaped.length > 0)
@@ -207,6 +271,6 @@ export function evaluateExecutionPermission(
     }
   }
 
-  // 4) 读类工具碰到的凭据路径已由第 2 条覆盖，其余一律放行
+  // 5) 读类工具碰到的凭据路径已由第 2 条覆盖，其余一律放行
   return { action: 'allow' }
 }

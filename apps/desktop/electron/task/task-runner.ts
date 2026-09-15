@@ -28,12 +28,14 @@ import type { ChatDriverId } from '../chat/chat-types.js'
 import type { MemoryService } from '../memory/memory-service.js'
 import { implementationOutcomeInstruction } from './task-readiness.js'
 import { parsePlanDecision } from './plan-content.js'
+import { exportPlanArtifact } from './stage-artifacts.js'
 import { nextStepForPlan } from './task-readiness.js'
 
 // ── 依赖注入 ─────────────────────────────────────────────────────────────────
 
 interface TaskRunnerDeps {
   store: TaskStore
+  dataDir: string
   protectedValue: (key: string) => string | undefined
   addTaskEvent: (event: Omit<AgentEvent, 'id' | 'createdAt'>) => void
   emitPi: (event: unknown) => void
@@ -456,9 +458,32 @@ async function runTestCoverageCheck(taskId: string, signal?: AbortSignal): Promi
 
 // ── 计划决策 ─────────────────────────────────────────────────────────────────
 
+/**
+ * 计划落库后导出阶段产物（§4.1）：`plan.v<n>.md` 是 DB 的导出视图 + Exec 的可读输入。
+ *
+ * 导出失败不阻断链路：Exec 起跑前还会 `reconcilePlanArtifact` 补一次，
+ * 真补不上则阶段失败 —— 这里只把第一次失败说清楚。
+ */
+async function exportPlanArtifactSafe(task: Task, outcome: string): Promise<void> {
+  try {
+    await exportPlanArtifact(deps.dataDir, task, { editedBy: 'agent', outcome })
+  } catch (error) {
+    deps.addTaskEvent({
+      taskId: task.id,
+      kind: 'error',
+      title: '计划产物导出失败',
+      detail: `${error instanceof Error ? error.message : String(error)}\n执行阶段起跑前会重试导出；仍失败则该阶段不会开始。`
+    })
+  }
+}
+
 async function savePlanDecision(taskId: string, texts: string[]): Promise<Task> {
   const decision = parsePlanDecision(texts)
-  if (decision.outcome === 'changes_required') return deps.taskWorkflow.setPlan(taskId, decision.content)
+  if (decision.outcome === 'changes_required') {
+    const planned = deps.taskWorkflow.setPlan(taskId, decision.content)
+    await exportPlanArtifactSafe(planned, decision.outcome)
+    return planned
+  }
 
   let changedFiles: Awaited<ReturnType<typeof deps.taskChangedFiles>>
   try {
@@ -481,6 +506,7 @@ async function savePlanDecision(taskId: string, texts: string[]): Promise<Task> 
       title: '无法确认计划阶段的文件改动',
       detail: error instanceof Error ? error.message : String(error)
     })
+    await exportPlanArtifactSafe(pending, decision.outcome)
     return pending
   }
 
@@ -510,6 +536,7 @@ async function savePlanDecision(taskId: string, texts: string[]): Promise<Task> 
     title: '计划结论与文件变化不一致',
     detail: `Agent 返回无需修改，但系统检测到 ${changedFiles.length} 个文件变化，任务不会自动完成。`
   })
+  await exportPlanArtifactSafe(pending, decision.outcome)
   return pending
 }
 

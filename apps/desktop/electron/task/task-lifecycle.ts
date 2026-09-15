@@ -4,7 +4,7 @@
  * 从 main.ts 提取的核心任务逻辑：
  *  - 状态流转：updateState / taskStateLabels
  *  - 执行流程：startTask / resumeTask / pauseTask / resumePausedTask / cancelTask / deleteTask
- *  - 计划流程：runOpenAIPlan / failPlanGeneration / approveTaskPlan / reviseTaskPlan
+ *  - 计划流程：runPiPlan / failPlanGeneration / approveTaskPlan / reviseTaskPlan
  *  - 实现收尾：finishImplementation / runReviewWithAutoFix / runTestCaseGenerationThenValidate
  *  - 辅助：buildAgentPrompt / qoderTokenGuard / runOperationAgent / taskChangedFiles 等
  *
@@ -35,6 +35,7 @@ import type {
   RepositoryCommandMap
 } from '@task-pipeline/integrations'
 import type { AgentService, OperationKind } from '../agents/agent-service.js'
+import type { TaskAgentResult } from '../agents/task-agent/task-agent-driver.js'
 import {
   adoptDraftFields,
   closeTaskIntake,
@@ -43,19 +44,22 @@ import {
   runTaskIntakeTurn
 } from '../agents/task-intake/task-intake.js'
 import type { QoderOrchestrator } from '../pi-extension/qoder/index.js'
-import { closeQoderQuerySafely, stripQoderModelPrefix } from '../pi-extension/qoder/index.js'
+import { closeQoderQuerySafely, purgeTaskSessions, stripQoderModelPrefix } from '../pi-extension/qoder/index.js'
 import type { TracePipeline } from '../trace/bus/trace-pipeline.js'
 import type { PiTraceBuilder } from '../trace/instrument/pi-trace-builder.js'
 import type { TraceService } from '../trace/trace-service.js'
 import type { MemoryService } from '../memory/memory-service.js'
 import { consolidateTaskMemory } from '../memory/memory-context.js'
 import { stripOpenAIModelPrefix, resolveLiteModel } from '../chat/model-profile.js'
+import { parseTestCaseGeneration } from '../agents/task-agent/parsers/test-case-parser.js'
+import type { TestCaseGenerationResult } from '../agents/task-agent/parsers/test-case-parser.js'
 import {
   assertDraftIntake,
   implementationOutcomeInstruction,
   isExplicitNoChangeCompletionRequest,
   nextStepForImplementation,
-  parseImplementationDecision
+  parseImplementationDecision,
+  testCaseGenerationInstruction
 } from './task-readiness.js'
 import {
   callOpenAIForPrompt,
@@ -68,18 +72,17 @@ import {
   buildReviewFixPrompt
 } from './task-runner.js'
 import {
-  emitPi,
-  startPi,
-  stopPi,
-  getActiveTaskId,
-  setActiveTaskId as _setActiveTaskId,
-  setActivePlanningTaskId,
-  setActivePlanText,
-  getActivePlanText,
-  setActivePlanError,
-  getActivePlanError,
-  getPiSession
-} from './pi-session.js'
+  PLAN_SECTION_REQUIREMENT,
+  exportPlanArtifact,
+  readExecSummary,
+  removeTaskArtifacts,
+  writeExecSummary,
+  writeTestCases
+} from './stage-artifacts.js'
+import { deletePiTaskSessionFile, emitPi, releasePiSession } from './pi-session.js'
+import { purgePiTaskSessionFiles } from './pi-session-sweep.js'
+import type { PiStageInput } from './pi-task-agent.js'
+import { piTaskAgent } from './pi-task-agent.js'
 
 // ── 依赖注入 ─────────────────────────────────────────────────────────────────
 
@@ -271,25 +274,64 @@ export async function runOperationAgent(
 
 // ── 计划生成 ─────────────────────────────────────────────────────────────────
 
-async function runOpenAIPlan(taskId: string, prompt: string, signal: AbortSignal): Promise<void> {
+/**
+ * 任务走哪条运行时（§6）：入口判定只看这一个函数。
+ *
+ * 阶段级差异（能不能 fork、权限怎么给）由 `capabilities()` 承担，不在阶段代码里
+ * 写 `provider === 'qoder'`：两条运行时都是「一个 driver + runStage」。
+ */
+function usesQoder(task: Task): boolean {
+  return d().runtimeProvider(task) === 'qoder'
+}
+
+/**
+ * Pi 运行时的一轮阶段执行（与 Qoder 侧 `QoderOrchestrator.run*` 同构）。
+ *
+ * 阶段边界 / 等回合 / 取产物都在 `PiTaskAgent` 里；本层只负责「拼阶段正文」与
+ * 「把产物交回状态机」，不再直接拿会话对象发 prompt。
+ */
+async function runPiStage(input: PiStageInput): Promise<TaskAgentResult> {
+  return piTaskAgent().runStage(input)
+}
+
+/** 实现阶段跑完 → 进收尾（与 Qoder 一样：由编排层显式调，不靠事件层反向驱动）。 */
+async function runPiImplementation(
+  task: Task,
+  body: string,
+  options?: { signal?: AbortSignal; trigger?: 'resume' | 'followup'; round?: number }
+): Promise<void> {
+  const result = await runPiStage({
+    taskId: task.id,
+    phase: 'implementation',
+    body,
+    ...(options?.signal ? { signal: options.signal } : {}),
+    ...(options?.trigger ? { trigger: options.trigger } : {}),
+    ...(options?.round ? { round: options.round } : {})
+  })
+  await finishImplementation(task.id, result.responseTexts, options?.signal)
+}
+
+/** 实现阶段正文：`lead` + 任务信息 + 计划 + 验收标准（`withOutcome` 控制是否附收尾指令）。 */
+function implementationBody(task: Task, lead: string, options?: { withOutcome?: boolean }): string {
+  const criteria = `Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join('\n')}`
+  return [
+    lead,
+    task.title,
+    task.description,
+    task.planContent ? `Approved implementation plan:\n${task.planContent}` : '',
+    criteria,
+    options?.withOutcome === false ? '' : implementationOutcomeInstruction
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+async function runPiPlan(taskId: string, prompt: string, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted()
-  setActivePlanningTaskId(taskId)
-  setActivePlanText('')
-  setActivePlanError(undefined)
-  try {
-    await startPi(taskId)
-    if (!getPiSession()) throw new Error('OpenAI agent session is unavailable')
-    await getPiSession()!.prompt(prompt, { source: 'rpc' })
-    signal.throwIfAborted()
-    const planError = getActivePlanError()
-    if (planError) throw new Error(planError)
-    const plan = getActivePlanText().trim()
-    if (!plan) throw new Error('Agent 未返回有效计划')
-    await savePlanDecision(taskId, [plan])
-  } finally {
-    setActivePlanningTaskId(undefined)
-    setActivePlanError(undefined)
-  }
+  const result = await runPiStage({ taskId, phase: 'planning', body: prompt, signal })
+  const plan = result.responseTexts.join('').trim()
+  if (!plan) throw new Error('Agent 未返回有效计划')
+  await savePlanDecision(taskId, [plan])
 }
 
 function failPlanGeneration(taskId: string, error: unknown): void {
@@ -335,7 +377,7 @@ async function runReviewWithAutoFix(taskId: string, signal?: AbortSignal): Promi
       )
       .join('\n')
   })
-  if (d().runtimeProvider(task) === 'qoder') {
+  if (usesQoder(task)) {
     await d()
       .qoderOrch.runAutoFix(taskId, fixPrompt, signal, used + 1)
       .catch((error: unknown) =>
@@ -344,14 +386,13 @@ async function runReviewWithAutoFix(taskId: string, signal?: AbortSignal): Promi
     return
   }
   signal?.throwIfAborted()
-  await startPi(taskId)
-  if (!getPiSession()) throw new Error('OpenAI agent session is unavailable')
-  await getPiSession()!.prompt(
-    await buildAgentPrompt(
-      task,
-      `${fixPrompt}\n\n${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ''}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join('\n')}`
-    ),
-    { source: 'rpc' }
+  await runPiImplementation(
+    task,
+    await buildAgentPrompt(task, implementationBody(task, fixPrompt, { withOutcome: false })),
+    {
+      ...(signal ? { signal } : {}),
+      round: used + 1
+    }
   )
 }
 
@@ -383,6 +424,21 @@ async function finishImplementation(taskId: string, responseTexts: string[], sig
     return
   }
   const nextStep = nextStepForImplementation(decision.outcome, changedFiles.length)
+  // 交接产物（§4.1）：先把「实际改了什么」落盘。Test 自 P2 起是独立阶段实例，
+  // 不再继承整段实现推理，只看这份摘要 + 改动清单。
+  await writeExecSummary(
+    d().dataDir,
+    taskId,
+    [
+      '## 实现结论',
+      '',
+      decision.content || `Agent 结论：${decision.outcome}`,
+      '',
+      `## 改动文件（${changedFiles.length}）`,
+      '',
+      ...changedFiles.map((file) => `- ${file.repositoryName}: ${file.path} (${file.status})`)
+    ].join('\n')
+  ).catch(() => undefined)
   if (nextStep === 'complete_without_changes') {
     d().taskWorkflow.completeImplementationWithoutChanges(
       taskId,
@@ -419,10 +475,24 @@ async function finishImplementation(taskId: string, responseTexts: string[], sig
 }
 
 async function runTestCaseGenerationThenValidate(taskId: string, signal?: AbortSignal): Promise<void> {
+  const task = d().store.getTask(taskId)
+  if (!task) return
   try {
     d().taskWorkflow.beginTestCaseGeneration(taskId)
-    const result = await d().qoderOrch.runTestCases(taskId, signal)
+    // 阶段级 provider 分支：Test 与 Plan/Exec 一样属于任务执行链路，必须跟着任务的运行时走。
+    // 此前无条件借 Qoder 编排器跑，Pi 任务要么抛「运行时不支持」，要么悄悄在另一条链路上生成用例。
+    const result =
+      d().runtimeProvider(task) === 'qoder'
+        ? await d().qoderOrch.runTestCases(taskId, signal)
+        : await runPiTestCaseGeneration(task, signal)
     d().taskWorkflow.finishTestCaseGeneration(taskId, result)
+    // 用例清单也是阶段产物：Review / 重跑不需要重新解析模型输出就能对账。
+    await writeTestCases(d().dataDir, taskId, {
+      files: result.files,
+      ...(result.commitSha ? { commitSha: result.commitSha } : {}),
+      summary: result.summary,
+      finishedAt: new Date().toISOString()
+    }).catch(() => undefined)
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     d().addTaskEvent({ taskId, kind: 'error', title: '测试用例生成失败', detail })
@@ -432,6 +502,36 @@ async function runTestCaseGenerationThenValidate(taskId: string, signal?: AbortS
   }
   const validated = await d().taskWorkflow.runValidation(taskId, signal)
   await advanceAfterValidation(taskId, validated.state, signal)
+}
+
+/**
+ * OpenAI(Pi) 任务的测试用例生成：一个独立阶段实例，输入是 `exec.summary.md` + 计划。
+ *
+ * 与 Qoder 侧 `runTestGenerationStage` 同一契约：不让测试阶段靠「继承整段实现推理」
+ * 来知道改了什么，而是递给它产物摘要（fork 失败时这份输入就是全部上下文）。
+ */
+async function runPiTestCaseGeneration(task: Task, signal?: AbortSignal): Promise<TestCaseGenerationResult> {
+  signal?.throwIfAborted()
+  d().addTaskEvent({ taskId: task.id, kind: 'status', title: '正在生成测试用例' })
+  const execSummary = await readExecSummary(d().dataDir, task.id).catch(() => undefined)
+  const body = [
+    `任务:${task.title}`,
+    task.description,
+    task.planContent ? `Approved implementation plan:\n${task.planContent}` : '',
+    execSummary ? `本次实现实际改动（exec.summary.md）:\n${execSummary}` : '',
+    testCaseGenerationInstruction
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  const result = await runPiStage({
+    taskId: task.id,
+    phase: 'test_generation',
+    body: await buildAgentPrompt(task, body),
+    ...(signal ? { signal } : {})
+  })
+  const text = result.responseTexts.join('')
+  if (!text.trim()) throw new Error('Agent 未返回测试用例生成结果')
+  return parseTestCaseGeneration([text])
 }
 
 // ── 任务文件变更 ─────────────────────────────────────────────────────────────
@@ -535,14 +635,7 @@ export async function startTask(
   try {
     await runTaskOperation(taskId, async (signal) => {
       signal.throwIfAborted()
-      await runOpenAIPlan(
-        taskId,
-        await buildAgentPrompt(
-          task,
-          `你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${task.title}\n${task.description}`
-        ),
-        signal
-      )
+      await runPiPlan(taskId, await buildAgentPrompt(task, planBody(task)), signal)
     })
   } catch (error) {
     failPlanGeneration(taskId, error)
@@ -552,6 +645,11 @@ export async function startTask(
 
 const resumeImplementationInstruction =
   '任务此前执行失败/中断。请先检查当前工作区与代码状态（已完成的改动应保留），定位失败原因后继续完成剩余工作；不要重新执行已完成的部分，也不要重复安装依赖或重建环境。'
+
+/** 计划阶段正文：只读约束 + §4.3 三段契约 + 任务信息（三条入口共用，避免文案漂移）。 */
+function planBody(task: Task, extra?: string): string {
+  return `你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${PLAN_SECTION_REQUIREMENT}\n\n${extra ?? `任务：${task.title}\n${task.description}`}`
+}
 
 async function resumeTask(taskId: string): Promise<void> {
   const current = d().store.getTask(taskId)
@@ -573,14 +671,7 @@ async function resumeTask(taskId: string): Promise<void> {
     }
     await runTaskOperation(taskId, async (signal) => {
       signal.throwIfAborted()
-      await runOpenAIPlan(
-        taskId,
-        await buildAgentPrompt(
-          task,
-          `你处于只读计划模式。禁止修改文件、安装依赖或运行会改变工作区的命令。最终只输出 JSON：代码已满足要求时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${task.title}\n${task.description}`
-        ),
-        signal
-      )
+      await runPiPlan(taskId, await buildAgentPrompt(task, planBody(task)), signal)
     }).catch((error) => {
       failPlanGeneration(taskId, error)
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
@@ -588,7 +679,7 @@ async function resumeTask(taskId: string): Promise<void> {
     return
   }
   const task = await runTaskOperation(taskId, (signal) => d().taskWorkflow.prepare(taskId, signal))
-  if (d().runtimeProvider(task) === 'qoder') {
+  if (usesQoder(task)) {
     void runTaskOperation(taskId, (signal) => d().qoderOrch.resume(taskId, signal)).catch((error: unknown) =>
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     )
@@ -596,14 +687,10 @@ async function resumeTask(taskId: string): Promise<void> {
   }
   await runTaskOperation(taskId, async (signal) => {
     signal.throwIfAborted()
-    await startPi(taskId)
-    if (!getPiSession()) throw new Error('OpenAI agent session is unavailable')
-    await getPiSession()!.prompt(
-      await buildAgentPrompt(
-        task,
-        `${resumeImplementationInstruction}\n\n${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ''}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join('\n')}\n\n${implementationOutcomeInstruction}`
-      ),
-      { source: 'rpc' }
+    await runPiImplementation(
+      task,
+      await buildAgentPrompt(task, implementationBody(task, resumeImplementationInstruction)),
+      { signal, trigger: 'resume' }
     )
   })
 }
@@ -615,12 +702,9 @@ async function pauseTask(taskId: string): Promise<void> {
   updateState(task, 'paused')
   const operation = activeTaskOperations.get(taskId)
   operation?.controller.abort(new Error('任务已暂停'))
-  if (getActiveTaskId() === taskId) {
-    d().qoderOrch.pause(taskId)
-    await stopPi()
-    _setActiveTaskId(undefined)
-    d().store.setSetting('activeTaskId', '')
-  }
+  // 暂停只停这个任务自己的会话（旧写法靠「当前活动任务」判定，并行任务会误停别人）。
+  d().qoderOrch.pause(taskId)
+  await releasePiSession(taskId)
   try {
     const events = d().store.listEvents(taskId)
     const toolUseIds = new Set<string>()
@@ -704,7 +788,7 @@ async function resumePausedTask(taskId: string): Promise<void> {
   qoderTokenGuard(current)
   const task = updateState(current, 'implementing')
   d().addTaskEvent({ taskId, kind: 'status', title: '任务已恢复执行' })
-  if (d().runtimeProvider(task) === 'qoder') {
+  if (usesQoder(task)) {
     void runTaskOperation(taskId, (signal) => d().qoderOrch.resumePaused(taskId, signal)).catch((error: unknown) =>
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     )
@@ -712,14 +796,10 @@ async function resumePausedTask(taskId: string): Promise<void> {
   }
   await runTaskOperation(taskId, async (signal) => {
     signal.throwIfAborted()
-    await startPi(taskId)
-    if (!getPiSession()) throw new Error('OpenAI agent session is unavailable')
-    await getPiSession()!.prompt(
-      await buildAgentPrompt(
-        task,
-        `${resumeImplementationInstruction}\n\n${task.title}\n\n${task.description}\n\n${task.planContent ? `Approved implementation plan:\n${task.planContent}\n\n` : ''}Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join('\n')}\n\n${implementationOutcomeInstruction}`
-      ),
-      { source: 'rpc' }
+    await runPiImplementation(
+      task,
+      await buildAgentPrompt(task, implementationBody(task, resumeImplementationInstruction)),
+      { signal, trigger: 'resume' }
     )
   })
 }
@@ -735,6 +815,18 @@ async function updateTaskPlan(taskId: string, planContent: string): Promise<void
   const revision = (task.planRevision ?? 0) + 1
   d().store.updateTask(taskId, { planContent: content, planRevision: revision })
   d().addTaskEvent({ taskId, kind: 'status', title: '计划已手动编辑', detail: `第 ${revision} 版` })
+  // 人工闸门也是阶段接口（§4.2）：立即重新导出新版产物并标 editedBy:'user'，
+  // Exec 阶段据此写明「用户已编辑，以本版为准」，而不是只靠会话里的旧讨论。
+  const edited = d().store.getTask(taskId)
+  if (edited)
+    await exportPlanArtifact(d().dataDir, edited, { editedBy: 'user' }).catch((error: unknown) => {
+      d().addTaskEvent({
+        taskId,
+        kind: 'error',
+        title: '计划产物导出失败',
+        detail: `${error instanceof Error ? error.message : String(error)}\n执行阶段起跑前会重试导出。`
+      })
+    })
 }
 
 async function approveTaskPlan(taskId: string): Promise<void> {
@@ -744,23 +836,19 @@ async function approveTaskPlan(taskId: string): Promise<void> {
   const approval = d().store.addApproval({ taskId, kind: 'plan', context: before.planContent })
   d().store.resolveApproval(approval.id, 'approved')
   const task = await runTaskOperation(taskId, (signal) => d().taskWorkflow.approvePlan(taskId, signal))
-  if (d().runtimeProvider(task) === 'qoder') {
+  if (usesQoder(task)) {
     void runTaskOperation(taskId, (signal) => d().qoderOrch.approvePlan(taskId, signal)).catch((error: unknown) =>
       emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
     )
     return
   }
-  await runTaskOperation(taskId, async (signal) => {
-    signal.throwIfAborted()
-    await startPi(taskId)
-    await getPiSession()!.prompt(
-      await buildAgentPrompt(
-        task,
-        `${task.title}\n\n${task.description}\n\nApproved implementation plan:\n${task.planContent}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join('\n')}\n\n${implementationOutcomeInstruction}`
-      ),
-      { source: 'rpc' }
-    )
-  })
+  // 计划批准 = Plan → Exec 的阶段边界：`PiTaskAgent` 会看计划三段齐不齐，
+  // 齐则从计划会话 fork 一个新阶段实例，缺则不拆（存量任务不重探仓库）。
+  void runTaskOperation(taskId, async (signal) =>
+    runPiImplementation(task, await buildAgentPrompt(task, implementationBody(task, '')), { signal })
+  ).catch((error: unknown) =>
+    emitPi({ type: 'agent_error', taskId, message: error instanceof Error ? error.message : String(error) })
+  )
 }
 
 async function reviseTaskPlan(taskId: string, feedback: string): Promise<void> {
@@ -777,11 +865,11 @@ async function reviseTaskPlan(taskId: string, feedback: string): Promise<void> {
   try {
     await runTaskOperation(taskId, async (signal) => {
       signal.throwIfAborted()
-      await runOpenAIPlan(
+      await runPiPlan(
         taskId,
         await buildAgentPrompt(
           task,
-          `你处于只读计划模式。根据调整意见重新判断，禁止修改文件。最终只输出 JSON：无需修改时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n任务：${task.title}\n${task.description}\n\n上一版计划：\n${task.planContent ?? ''}\n\n调整意见：\n${feedback}`
+          `你处于只读计划模式。根据调整意见重新判断，禁止修改文件。最终只输出 JSON：无需修改时输出 {"outcome":"already_satisfied","summary":"判断依据和验证建议"}；需要修改时输出 {"outcome":"changes_required","plan":"完整实施计划"}。\n\n${PLAN_SECTION_REQUIREMENT}\n\n任务：${task.title}\n${task.description}\n\n上一版计划：\n${task.planContent ?? ''}\n\n调整意见：\n${feedback}`
         ),
         signal
       )
@@ -959,10 +1047,10 @@ async function sendTaskMessage(taskId: string, message: string): Promise<void> {
   }
   await runTaskOperation(taskId, async (signal) => {
     signal.throwIfAborted()
-    if (!getPiSession() || getActiveTaskId() !== taskId) await startPi(taskId)
-    await getPiSession()!.prompt(`${message}\n\n${implementationOutcomeInstruction}`, {
-      source: 'rpc',
-      ...(getPiSession()!.isStreaming ? { streamingBehavior: 'followUp' as const } : {})
+    // 追加消息 = 实现阶段内的续接（不拆阶段实例），跑完同样交回收尾状态机。
+    await runPiImplementation(task, `${message}\n\n${implementationOutcomeInstruction}`, {
+      signal,
+      trigger: 'followup'
     })
   })
 }
@@ -976,23 +1064,19 @@ export async function stopTaskOperations(taskId: string, markFailed: boolean): P
   d().qoderOrch.closeSession(taskId)
   // 澄清会话不在 qoderOrch 手里（它只持执行会话），停止 / 取消 / 删除时要单独丢。
   closeTaskIntake(taskId)
-  if (getActiveTaskId() === taskId) {
-    const result = await d().qoderOrch.stop(taskId, markFailed)
-    const qoderAbort = result.abortedController
-    const qoderQuery = result.abortedQuery
-    _setActiveTaskId(undefined)
-    setActivePlanningTaskId(undefined)
-    setActivePlanText('')
-    d().store.setSetting('activeTaskId', '')
-    qoderAbort?.abort(new Error(markFailed ? '任务已停止' : '任务已删除'))
-    try {
-      await qoderQuery?.interrupt()
-    } catch {
-      /* The query may already be closed. */
-    }
-    if (qoderQuery) await closeQoderQuerySafely(qoderQuery, 5_000)
-    await stopPi()
+  // 停止只影响这个任务：旧写法用「当前活动任务」当闸门，并行任务时会连它人的会话一起关。
+  const result = await d().qoderOrch.stop(taskId, markFailed)
+  const qoderAbort = result.abortedController
+  const qoderQuery = result.abortedQuery
+  qoderAbort?.abort(new Error(markFailed ? '任务已停止' : '任务已删除'))
+  try {
+    await qoderQuery?.interrupt()
+  } catch {
+    /* The query may already be closed. */
   }
+  if (qoderQuery) await closeQoderQuerySafely(qoderQuery, 5_000)
+  await releasePiSession(taskId)
+  piTaskAgent().forgetTask(taskId)
   try {
     await operation?.promise
   } catch {
@@ -1014,6 +1098,45 @@ async function cancelTask(taskId: string): Promise<void> {
 }
 
 export type TaskRemovalMode = 'workspace' | 'all'
+
+/**
+ * 任务级会话即时回收（§4.4）：删任务 / 重新执行时把两条运行时的会话一起清掉。
+ *
+ * Qoder 侧只删 worktree / 工作区目录下的会话：任务的 `localPath`（用户仓库本身）也会出现在
+ * 会话 cwd 里，带上它就会把用户自己的对话会话一并删掉（`purgeTaskSessions` 里还有一道护栏）。
+ * Pi 侧先按会话文件首行 header.cwd 归因删（一个任务只存一个 `piSessionPath`，fork 前驱靠指针始终管不到），
+ * 再按 DB 指针补删一份。
+ * 回收不干净的交给 main.ts 的周期 sweep 兜底，但失败必须落事件（不静默）。
+ */
+export async function purgeTaskSessionsFor(taskId: string): Promise<void> {
+  const dataDir = d().dataDir
+  const workspacesRoots = [join(dataDir, 'workspaces'), join(dataDir, 'worktrees')]
+  const pi = purgePiTaskSessionFiles({
+    piSessionsDir: join(dataDir, 'pi-sessions'),
+    workspacesRoots,
+    taskId
+  })
+  deletePiTaskSessionFile(taskId)
+  const dirs = [
+    taskWorkspace(taskId),
+    join(dataDir, 'worktrees', taskId),
+    ...d()
+      .store.listTaskRepositories(taskId)
+      .map((repo) => repo.worktreePath ?? '')
+  ].filter(Boolean)
+  const result = await purgeTaskSessions({ dirs, workspacesRoots })
+  const failed = [
+    ...result.failed.map((item) => `${item.sessionId}：${item.error}`),
+    ...pi.failed.map((item) => `${item.file}：${item.error}`)
+  ]
+  if (failed.length === 0) return
+  d().addTaskEvent({
+    taskId,
+    kind: 'status',
+    title: '旧会话未能全部回收',
+    detail: failed.join('\n').slice(0, 2000)
+  })
+}
 
 async function removeTaskWorkspace(taskId: string, repositories: TaskRepository[]): Promise<void> {
   const git = d().gitService
@@ -1063,10 +1186,14 @@ async function deleteTask(taskId: string, mode: TaskRemovalMode = 'all'): Promis
     })
     return
   }
+  // 会话先于任务行回收：它要从 DB 拿 worktree 路径当查找目录。
+  await purgeTaskSessionsFor(taskId)
   d().store.deleteTask(taskId)
   await d().traceService.deleteTrace(taskId)
   d().memoryService.deleteConversationMemories(`task:${taskId}`)
-  if (getActiveTaskId() === taskId) _setActiveTaskId(undefined)
+  // 阶段产物随任务一起走：DB 删了留着一堆 md 只会误导复盘（§4.4）。
+  await removeTaskArtifacts(d().dataDir, taskId)
+  piTaskAgent().forgetTask(taskId)
 }
 
 // ── 编辑器 / 合并 / 导出 ────────────────────────────────────────────────────
