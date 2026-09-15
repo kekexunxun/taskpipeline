@@ -315,6 +315,13 @@ Pi 侧还有一个**覆盖不到而不是写错了**的形状：`piWorkspaceCwd(
 任务删除时的即时级联对它无效（只能等 `deletePiTaskSessionFile` 按指针删当前那一份）。不能改成“按 localPath 也删”：
 那会直接撞上用户自己的对话会话（§4.4 那条护栏的原始理由）。
 
+依赖版本这条本期一并收了。`@earendil-works/pi-coding-agent` 曾在磁盘上有两份：根 0.84.2（`apps/desktop` 声明 `^0.84.2`，
+被 hoist 到根）与 `packages/pi-package/node_modules` 里的 0.82.1（该包精确锁，与根版本不兼容所以嵌套落地）。
+线上其实只有根那份生效 —— desktop 经 workspace 符号链接加载 pi-package，它的 import 依然向上命中根；0.82.1 只在
+`packages/pi-package/` 目录内起效，也就是**它的单测长期跑在比线上旧两格的 SDK 上**（它值 import 了 `createReadTool` /
+`createWriteTool`，不是纯类型引用）。现已三处统一到 `0.85.1`（`apps/desktop` 去掉 caret、`packages/pi-package`、
+`docker/Dockerfile` 的 `PI_VERSION`），磁盘上只剩一份，测试与线上同源。
+
 ### 7.6 未落地 / P5 候选
 
 P4 复测后新识别的三项 —— Pi 会话孤儿 sweep、`forkPiStage` 降级链、`skills` 落进 span meta —— **已补做完成**，
@@ -376,3 +383,19 @@ QODER_CONFIG_DIR=$TMP node scripts/qoder-session-store-probe.mjs synthetic \
 3. 判定：`seesA && !seesB` = 截断生效；`seesA && seesB` = 继承生效；`Resume rejected by --resume-drops-turn` = anchor 选错。
 4. 顺带采集 `getContextUsage()` 与 `result.usage.context_usage_ratio` / `modelUsage[*].credits`。
    ⚠️ 会话会永久留在 `~/.qoder/projects/`，验证完记得 `qodercli --list-sessions` / `deleteSession` 回收。
+
+### 版本前提（升到 0.85.1 时已复跑）
+
+Pi SDK 升到 `0.85.1` 后重新验了一遍两条前提，结论未变：
+
+- `node scripts/pi-fork-probe.mjs` 三条语义全部复现 —— `forkFrom` 整段继承（条目 id 与父完全一致、新文件、`header.parentSession` 指父）、
+  `createBranchedSession(anchor)` 含自身截断、同一父可重复 fork。
+- 首行 header 仍是 `type,version,id,timestamp,cwd,parentSession`（`version: 3`），且 **fork 产物的 header 同样带 `cwd`** ——
+  §4.4 的 Pi sweep 全靠这个字段归因，两者任一变了都要重判。
+
+探针不打印自己用的 SDK 版本，重跑前先对一眼：`node -pe "require('./node_modules/@earendil-works/pi-coding-agent/package.json').version"`。
+
+踩坑一条，别再用错方法：`import.meta.resolve(spec, parentURL)` 传入的 parent 若不在当前模块图里（临时拼的 `file://` 路径），
+Node 会**静默忽略它并退化到 `process.cwd()`** 起算 —— 拿它测「某个文件会命中哪份嵌套依赖」会得出完全相反的结论，
+而且换个 shell 目录重跑就自相矛盾。要验归属只能把真文件复制进目标目录、真 `import` 一次，再读被加载包自己的 `package.json`。
+（`vitest` 里连这条路都不通：vite 把 `import.meta.resolve` 摘掉了。）

@@ -1,7 +1,7 @@
 FROM node:24-bookworm-slim
 
-ARG PI_VERSION=0.82.1
-ARG OCR_VERSION=1.8.0
+ARG PI_VERSION=0.85.1
+ARG OCR_VERSION=1.12.1
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates curl git openssh-client ripgrep \
