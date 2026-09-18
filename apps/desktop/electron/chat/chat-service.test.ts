@@ -1,12 +1,26 @@
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { BrowserWindow } from 'electron'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TaskStore } from '@task-pipeline/core'
-import { ChatService, buildPlanDocRelPath, collectPlanText, shouldPersistPlanDoc } from './chat-service.js'
+import {
+  ChatService,
+  CHAT_DRIVER_STALL_MS,
+  CHAT_STREAM_HEARTBEAT_MS,
+  buildPlanDocRelPath,
+  collectPlanText,
+  shouldPersistPlanDoc
+} from './chat-service.js'
 import { ChatDriverRegistry } from './drivers/driver-registry.js'
 import type { ChatDriver } from './drivers/chat-driver.js'
 import type { ChatModelInfo, ChatStreamChunk, DriverPart, StoredMessage } from './chat-types.js'
+
+/**
+ * driver 挂死检测的 HITL 豁免探针：pi-session 的真实实现依赖主进程接线，测试里用
+ * 模块级开关替换 `hasPendingUiFor`（整模块替换：本测试图只有 chat-service 消费该模块）。
+ */
+let mockUiPending = false
+vi.mock('../task/pi-session.js', () => ({ hasPendingUiFor: () => mockUiPending }))
 
 /**
  * 假的 ChatDriver:用脚本化的 part 序列驱动 streamChat 行为。
@@ -21,6 +35,8 @@ type FakeDriverOptions = {
   models?: ChatModelInfo[]
   /** 非空时 streamChat 直接抛错(模拟驱动接口异常) */
   throwOnStream?: string
+  /** 永不产出 chunk、直到 signal abort(模拟子进程挂死的 driver)。 */
+  hangUntilAbort?: boolean
 }
 
 function createFakeDriver(opts: FakeDriverOptions): ChatDriver & {
@@ -71,6 +87,13 @@ function createFakeDriver(opts: FakeDriverOptions): ChatDriver & {
         mcpServices: input.mcpServices
       })
       if (opts.throwOnStream) throw new Error(opts.throwOnStream)
+      if (opts.hangUntilAbort) {
+        await new Promise<void>((resolve) => {
+          if (input.signal.aborted) resolve()
+          else input.signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+        return
+      }
       const script = opts.scripts[scriptIndex++] ?? { emit: [] }
       for (const chunk of script.emit) yield chunk
     },
@@ -765,5 +788,116 @@ describe('计划正文兼底落盘助手', () => {
       { driverId: 'qoder', type: 'text', text: '## 步骤' }
     ]
     expect(collectPlanText(parts)).toBe('# 计划\n## 步骤')
+  })
+})
+
+describe('ChatService driver 挂死检测（主进程侧静默探活）', () => {
+  let dataDir: string
+  beforeEach(() => {
+    dataDir = join(tmpdir(), `chat-stall-${crypto.randomUUID()}`)
+    mockUiPending = false
+  })
+
+  function createStallService() {
+    const driver = createFakeDriver({
+      id: 'qoder',
+      displayName: 'Qoder',
+      scripts: [],
+      hangUntilAbort: true,
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
+    })
+    const registry = new ChatDriverRegistry()
+    registry.register(driver)
+    const sent: ChatStreamChunk[] = []
+    const win = {
+      webContents: {
+        send: (_channel: string, payload: { chunk?: ChatStreamChunk }) => {
+          if (payload.chunk) sent.push(payload.chunk)
+        }
+      }
+    } as unknown as BrowserWindow
+    const service = new ChatService(fakeStore(), dataDir, registry, () => win)
+    return { service, sent }
+  }
+
+  /** 分段推进虚拟时钟：每段之间让出真实事件循环（setImmediate 未被 fake），
+   * 保证 ChatStorage 的 fs I/O 回调能完成，流真正跑到心跳阶段而不是停在启动前的落盘。 */
+  async function advance(totalMs: number): Promise<void> {
+    let left = totalMs
+    while (left > 0) {
+      const step = Math.min(60_000, left)
+      await vi.advanceTimersByTimeAsync(step)
+      for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve))
+      left -= step
+    }
+  }
+
+  function stallTimers(): void {
+    // 只 fake 定时器与 Date：保留真实 setImmediate 作为 I/O 让位手段。
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
+  }
+
+  it('driver 静默超阈值：停发心跳、dispatch error 并主动 abort 本轮', async () => {
+    stallTimers()
+    try {
+      const { service, sent } = createStallService()
+      const conv = await service.createChat('qoder', 'qoder:test')
+      const pending = service.startChatStream({
+        streamId: 'stream-1',
+        chatId: conv.id,
+        driverId: 'qoder',
+        model: 'qoder:test',
+        message: { id: 'u1', text: 'hello', createdAt: new Date().toISOString() }
+      })
+      await advance(CHAT_DRIVER_STALL_MS + CHAT_STREAM_HEARTBEAT_MS * 3)
+      await pending
+      // 静默期内心跳照常发（证明不是提前误杀），超阈值后出现唯一一条 error。
+      expect(sent.filter((c) => c.type === 'heartbeat').length).toBeGreaterThan(0)
+      const errors = sent.filter((c) => c.type === 'error') as Extract<ChatStreamChunk, { type: 'error' }>[]
+      expect(errors).toHaveLength(1)
+      expect(errors[0]?.message).toContain('已自动中止')
+      // 挂死中止走的是 abort 路径：收尾 done 带 aborted 状态，前端据此清理在飞态。
+      expect(sent.at(-1)).toMatchObject({ type: 'done', status: 'aborted' })
+      expect(sent.filter((c) => c.type === 'heartbeat').length).toBeLessThan(
+        Math.ceil((CHAT_DRIVER_STALL_MS + CHAT_STREAM_HEARTBEAT_MS * 3) / CHAT_STREAM_HEARTBEAT_MS)
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('HITL 弹窗在飞属正常静默：豁免期间不判挂死，用户答完后重新计时', async () => {
+    stallTimers()
+    try {
+      const { service, sent } = createStallService()
+      const conv = await service.createChat('qoder', 'qoder:test')
+      mockUiPending = true
+      const pending = service.startChatStream({
+        streamId: 'stream-1',
+        chatId: conv.id,
+        driverId: 'qoder',
+        model: 'qoder:test',
+        message: { id: 'u1', text: 'hello', createdAt: new Date().toISOString() }
+      })
+      // 用户思考超过阈值：只要弹窗还在飞，就不能误杀（否则长思考用户永远无法完成确认）。
+      await advance(CHAT_DRIVER_STALL_MS + CHAT_STREAM_HEARTBEAT_MS * 3)
+      // 前置断言：确实已流过起来（有 start + 持续心跳），避免「没跑起来所以没 error」的空断言。
+      // 阈值保守：心跳条数取决于流启动相对于虚拟时钟的时机，只要能证明跨过了静默窗口即可。
+      expect(sent.some((c) => c.type === 'start')).toBe(true)
+      expect(sent.filter((c) => c.type === 'heartbeat').length).toBeGreaterThan(10)
+      expect(sent.some((c) => c.type === 'error')).toBe(false)
+      expect(sent.some((c) => c.type === 'done')).toBe(false)
+      // 用户答完（弹窗撤回）：静默基准从答完时刻重新起算，再超阈值才判挂死。
+      mockUiPending = false
+      await advance(CHAT_DRIVER_STALL_MS - CHAT_STREAM_HEARTBEAT_MS)
+      expect(sent.some((c) => c.type === 'error')).toBe(false)
+      await advance(CHAT_DRIVER_STALL_MS / 2)
+      await pending
+      expect(sent.some((c) => c.type === 'error')).toBe(true)
+      expect(sent.at(-1)).toMatchObject({ type: 'done', status: 'aborted' })
+    } finally {
+      vi.useRealTimers()
+      mockUiPending = false
+    }
   })
 })

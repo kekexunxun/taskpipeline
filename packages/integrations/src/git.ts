@@ -1,6 +1,6 @@
 import { randomInt } from 'node:crypto'
 import { readdir, readFile } from 'node:fs/promises'
-import { join, relative } from 'node:path'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import { execa } from 'execa'
 
 export type GitRunner = (args: string[], cwd: string, timeoutMs?: number, signal?: AbortSignal) => Promise<string>
@@ -28,6 +28,16 @@ function originBranchRef(baseBranch: string): string {
     .replace(/^origin\//, '')
   if (!branch) throw new Error('Repository base branch is required')
   return `refs/remotes/origin/${branch}`
+}
+
+/**
+ * 归一化 diff 文件路径：兼容绝对路径（如对话变更 Tab 传入工具 input 的 `file_path`）。
+ * git 命令（`show HEAD:<path>` 等）只认仓库相对路径，readFile 需要真实绝对路径。
+ */
+function resolveDiffPaths(cwd: string, filePath: string): { rel: string; abs: string } {
+  const abs = isAbsolute(filePath) ? filePath : join(cwd, filePath)
+  const rel = relative(cwd, abs).split(sep).join('/')
+  return { rel, abs }
 }
 
 function parseNameStatus(value: string): GitChangedFile[] {
@@ -110,18 +120,19 @@ export class GitService {
   diff(cwd: string): Promise<string> {
     return this.run(['diff', 'HEAD'], cwd)
   }
-  /** 获取单个文件的 diff（支持 untracked / modified / deleted 文件）。 */
+  /** 获取单个文件的 diff（支持 untracked / modified / deleted 文件；filePath 可为绝对路径）。 */
   async diffFile(cwd: string, filePath: string, status: string): Promise<string> {
+    const { rel, abs } = resolveDiffPaths(cwd, filePath)
     // 未追踪文件（?? 或 ?）：读取内容生成伪 diff
     if (status.includes('?')) {
       try {
-        const content = await readFile(join(cwd, filePath), 'utf-8')
+        const content = await readFile(abs, 'utf-8')
         const lines = content.split('\n')
         return [
-          `diff --git a/${filePath} b/${filePath}`,
+          `diff --git a/${rel} b/${rel}`,
           'new file mode 100644',
           '--- /dev/null',
-          `+++ b/${filePath}`,
+          `+++ b/${rel}`,
           `@@ -0,0 +1,${lines.length} @@`,
           ...lines.map((l) => `+${l}`)
         ].join('\n')
@@ -131,22 +142,23 @@ export class GitService {
     }
     // 已追踪文件：git diff HEAD（包含 staged + unstaged 变更）
     try {
-      return await this.run(['diff', '--no-color', 'HEAD', '--', filePath], cwd)
+      return await this.run(['diff', '--no-color', 'HEAD', '--', rel], cwd)
     } catch {
       // 如果 HEAD 不存在（首次提交前），尝试不带 HEAD
-      return this.run(['diff', '--no-color', '--', filePath], cwd)
+      return this.run(['diff', '--no-color', '--', rel], cwd)
     }
   }
-  /** 获取文件的原始内容（HEAD）和当前内容（工作区），用于 CodeMirror MergeView。 */
+  /** 获取文件的原始内容（HEAD）和当前内容（工作区），用于 CodeMirror MergeView。filePath 可为绝对路径。 */
   async diffFileContents(
     cwd: string,
     filePath: string,
     status: string
   ): Promise<{ original: string; current: string }> {
+    const { rel, abs } = resolveDiffPaths(cwd, filePath)
     // 未追踪文件：原始为空，当前为文件内容
     if (status.includes('?')) {
       try {
-        const current = await readFile(join(cwd, filePath), 'utf-8')
+        const current = await readFile(abs, 'utf-8')
         return { original: '', current }
       } catch {
         return { original: '', current: '' }
@@ -155,7 +167,7 @@ export class GitService {
     // 已删除文件：原始为 HEAD 内容，当前为空
     if (status.includes('D')) {
       try {
-        const original = await this.run(['show', `HEAD:${filePath}`], cwd)
+        const original = await this.run(['show', `HEAD:${rel}`], cwd)
         return { original, current: '' }
       } catch {
         return { original: '', current: '' }
@@ -165,13 +177,13 @@ export class GitService {
     let original = ''
     let current = ''
     try {
-      original = await this.run(['show', `HEAD:${filePath}`], cwd)
+      original = await this.run(['show', `HEAD:${rel}`], cwd)
     } catch {
       // HEAD 不存在（首次提交前）
       original = ''
     }
     try {
-      current = await readFile(join(cwd, filePath), 'utf-8')
+      current = await readFile(abs, 'utf-8')
     } catch {
       current = ''
     }

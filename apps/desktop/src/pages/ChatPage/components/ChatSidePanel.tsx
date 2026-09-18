@@ -12,13 +12,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { BundledLanguage } from 'shiki'
 import { useChatChangedFiles } from '../hooks/useChatChangedFiles'
-import {
-  changeOperationKind,
-  useConversationChanges,
-  type ConversationChangeFile,
-  type ConversationChangeOperation
-} from '../conversation-changes'
-import { DeleteToolBlock, EditToolBlock, WriteToolBlock } from '../drivers/parts/ToolBlocks'
+import { changeOperationKind, useConversationChanges, type ConversationChangeFile } from '../conversation-changes'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -89,7 +83,11 @@ export function ChatSidePanel({
         </div>
 
         <TabsContent value="conversation" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
-          <ConversationChangesContent files={conversationFiles} workingDirectory={workingDirectory} />
+          <ConversationChangesContent
+            files={conversationFiles}
+            workingDirectory={workingDirectory}
+            streaming={streaming}
+          />
         </TabsContent>
 
         <TabsContent value="changes" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -107,47 +105,74 @@ function extractDirPath(filePath: string): string {
 }
 
 /**
- * 「对话变更」Tab 内容：文件名 + 浅色目录路径，
- * 下方优先展示 git diff 视图（HEAD vs 当前内容）；
- * 当 git 无原始数据时（新文件未提交/首次提交前等），回退展示对话操作记录（ToolBlocks）。
+ * 「对话变更」Tab 内容：展示方案与「工作区变更」对齐——
+ * 整列去重文件行（文件名 + 浅色目录 + 状态标签，标签按最后一次操作类型推导），
+ * 点击文件行在下方展开 git diff（HEAD vs 当前内容），再次点击收起。
  * 文件列表由消息 parts 纯推导（标识「本次对话碰过哪些文件」）。
+ * 注意：diff 只在「选中路径变化 / 流式结束」时拉取，messages 流式更新不触发，避免闪屏。
  */
 function ConversationChangesContent({
   files,
-  workingDirectory
+  workingDirectory,
+  streaming
 }: {
   files: ConversationChangeFile[]
   workingDirectory?: string
+  streaming?: boolean
 }) {
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
   const [diffContents, setDiffContents] = useState<DiffContents>({ original: '', current: '' })
   const [diffLoading, setDiffLoading] = useState(false)
-  // 选中项不存在时回退首个文件，避免流式新增/消失后出现空白态
-  const selected = files.find((f) => f.path === selectedPath) ?? files[0] ?? null
+  // diff 内容归属的文件路径：与当前选中不一致时先显示 loading 而不是旧内容
+  const [diffFor, setDiffFor] = useState<string | null>(null)
+  const diffReqSeq = useRef(0)
+  const selected = files.find((f) => f.path === selectedPath) ?? null
 
   const loadDiff = useCallback(
-    async (file: ConversationChangeFile) => {
+    async (path: string) => {
       if (!workingDirectory) return
+      const seq = ++diffReqSeq.current
       setDiffLoading(true)
       try {
         // 对话变更的文件统一按「修改」状态取 diff（不依赖 git status）
-        const contents = await api.getFileDiffContents(workingDirectory, file.path, 'M')
+        const contents = await api.getFileDiffContents(workingDirectory, path, 'M')
+        if (seq !== diffReqSeq.current) return
         setDiffContents(contents)
       } catch {
+        if (seq !== diffReqSeq.current) return
         setDiffContents({ original: '', current: '' })
       } finally {
-        setDiffLoading(false)
+        if (seq === diffReqSeq.current) {
+          setDiffFor(path)
+          setDiffLoading(false)
+        }
       }
     },
     [workingDirectory]
   )
 
-  // 选中文件变化时加载 diff
+  // 仅选中路径变化时拉取 diff（对象身份变化不重拉，流式期间 messages 高频更新不受影响）
   useEffect(() => {
-    if (selected) {
-      loadDiff(selected)
-    }
-  }, [selected, loadDiff])
+    if (selectedPath) void loadDiff(selectedPath)
+  }, [selectedPath, loadDiff])
+
+  // 流式结束后刷新一次当前 diff（AI 可能在流式期间继续改了同一文件）
+  const prevStreaming = useRef(streaming)
+  useEffect(() => {
+    if (prevStreaming.current && !streaming && selectedPath) void loadDiff(selectedPath)
+    prevStreaming.current = streaming
+  }, [streaming, selectedPath, loadDiff])
+
+  const handleFileClick = useCallback((path: string) => {
+    setSelectedPath((prev) => {
+      if (prev === path) {
+        setDiffFor(null)
+        setDiffContents({ original: '', current: '' })
+        return null
+      }
+      return path
+    })
+  }, [])
 
   if (!files.length) {
     return <div className="py-4 text-center text-xs text-muted-foreground/50">本次对话暂无文件变更</div>
@@ -156,14 +181,14 @@ function ConversationChangesContent({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* 文件列表 */}
-      <div className="thin-scrollbar max-h-[40%] min-h-[72px] shrink-0 overflow-y-auto px-2 py-2">
+      <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-2 py-2">
         <div className="space-y-0.5">
           {files.map((file) => (
             <ChangeFileItem
               key={file.path}
               file={file}
-              selected={selected?.path === file.path}
-              onClick={() => setSelectedPath(file.path)}
+              selected={selectedPath === file.path}
+              onClick={() => handleFileClick(file.path)}
             />
           ))}
         </div>
@@ -176,33 +201,26 @@ function ConversationChangesContent({
             <span className="truncate font-mono text-xs text-muted-foreground" title={selected.displayPath}>
               {selected.displayPath}
             </span>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="h-5 w-5 text-muted-foreground/60 hover:text-muted-foreground"
+              onClick={() => handleFileClick(selected.path)}
+              title="关闭"
+            >
+              <XIcon size={11} />
+            </Button>
           </div>
           <div className="thin-scrollbar min-h-0 flex-1 overflow-auto">
-            {diffLoading ? (
+            {diffLoading && diffFor !== selected.path ? (
               <div className="flex h-full items-center justify-center py-8 text-muted-foreground/60">
                 <Loader2Icon size={14} className="mr-2 animate-spin" />
                 加载中...
               </div>
-            ) : diffContents.original ? (
-              /* 有 git 基线 → diff 视图 */
-              diffContents.current ? (
-                <ShikiDiffView
-                  original={diffContents.original}
-                  current={diffContents.current}
-                  filePath={selected.path}
-                />
-              ) : (
-                <div className="py-8 text-center text-xs text-muted-foreground/50">无变更内容</div>
-              )
+            ) : diffContents.current || diffContents.original ? (
+              <ShikiDiffView original={diffContents.original} current={diffContents.current} filePath={selected.path} />
             ) : (
-              /* git 无基线（新文件/未提交/首次提交前）→ 回退展示操作记录 */
-              <div className="min-h-0 space-y-1.5 overflow-y-auto px-2 py-2">
-                {selected.operations
-                  .filter((op) => op.status !== 'error')
-                  .map((op) => (
-                    <OperationBlock key={op.toolCallId} op={op} />
-                  ))}
-              </div>
+              <div className="py-8 text-center text-xs text-muted-foreground/50">无变更内容</div>
             )}
           </div>
         </div>
@@ -211,7 +229,7 @@ function ConversationChangesContent({
   )
 }
 
-/** 「对话变更」列表行：文件名 + 浅色目录路径。 */
+/** 「对话变更」列表行：与「工作区变更」同款视觉（文件名 + 浅色目录路径 + 状态标签）。 */
 function ChangeFileItem({
   file,
   selected,
@@ -223,8 +241,12 @@ function ChangeFileItem({
 }) {
   const nonErrorOps = file.operations.filter((op) => op.status !== 'error')
   const lastKind = nonErrorOps.length > 0 ? changeOperationKind(nonErrorOps[nonErrorOps.length - 1]!.tool) : 'edit'
-  const Icon = lastKind === 'delete' ? FileXIcon : lastKind === 'write' ? FilePlusIcon : FileEditIcon
-  const iconColor = lastKind === 'delete' ? 'text-red-400' : lastKind === 'write' ? 'text-emerald-500' : 'text-blue-400'
+  // 状态标签按最后一次操作类型推导：write=A(新增) / delete=D(删除) / edit=M(修改)
+  const status = lastKind === 'write' ? 'A' : lastKind === 'delete' ? 'D' : 'M'
+  const Icon = lastKind === 'write' ? FilePlusIcon : lastKind === 'delete' ? FileXIcon : FileEditIcon
+  const iconColor = fileChangeIconColor(status)
+  const tagText = fileChangeLabel(status)
+  const tagColor = fileChangeTagColor(status)
   const fileName = file.displayPath.split('/').filter(Boolean).pop() || file.displayPath
   const dirPath = extractDirPath(file.displayPath)
 
@@ -243,6 +265,7 @@ function ChangeFileItem({
         <span className="text-foreground/80">{fileName}</span>
         {dirPath && <span className="ml-1.5 text-muted-foreground/40">{dirPath}</span>}
       </span>
+      <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[10px]', tagColor)}>{tagText}</span>
     </button>
   )
 }
@@ -279,15 +302,6 @@ function FileItem({ file, selected, onClick }: { file: ChangedFile; selected: bo
   )
 }
 
-/** 单条操作渲染：pending 映射为 running，复用对话流 ToolBlocks 视觉。 */
-function OperationBlock({ op }: { op: ConversationChangeOperation }) {
-  const status = op.status === 'pending' ? ('running' as const) : op.status
-  const kind = changeOperationKind(op.tool)
-  if (kind === 'write') return <WriteToolBlock input={op.input} output={op.output} status={status} />
-  if (kind === 'delete') return <DeleteToolBlock input={op.input} status={status} />
-  return <EditToolBlock input={op.input} output={op.output} status={status} />
-}
-
 function ChangedFilesContent({
   files,
   loading,
@@ -300,16 +314,26 @@ function ChangedFilesContent({
   const [selectedFile, setSelectedFile] = useState<ChangedFile | null>(null)
   const [diffContents, setDiffContents] = useState<DiffContents>({ original: '', current: '' })
   const [diffLoading, setDiffLoading] = useState(false)
+  // diff 内容归属的文件 key：与当前选中不一致时先显示 loading 而不是旧内容
+  const [diffFor, setDiffFor] = useState<string | null>(null)
+  const diffReqSeq = useRef(0)
   const loadDiff = useCallback(async (file: ChangedFile) => {
     if (!file.root) return
+    const key = fileKey(file)
+    const seq = ++diffReqSeq.current
     setDiffLoading(true)
     try {
       const contents = await api.getFileDiffContents(file.root, file.path, file.status)
+      if (seq !== diffReqSeq.current) return
       setDiffContents(contents)
     } catch {
+      if (seq !== diffReqSeq.current) return
       setDiffContents({ original: '', current: '' })
     } finally {
-      setDiffLoading(false)
+      if (seq === diffReqSeq.current) {
+        setDiffFor(key)
+        setDiffLoading(false)
+      }
     }
   }, [])
 
@@ -317,20 +341,21 @@ function ChangedFilesContent({
     (file: ChangedFile) => {
       if (selectedFile && fileKey(selectedFile) === fileKey(file)) {
         setSelectedFile(null)
+        setDiffFor(null)
         setDiffContents({ original: '', current: '' })
       } else {
         setSelectedFile(file)
-        loadDiff(file)
       }
     },
-    [selectedFile, loadDiff]
+    [selectedFile]
   )
 
+  // 仅选中文件变化时拉取 diff；files 列表刷新（流式结束自动刷新）不重拉，避免闪屏
   useEffect(() => {
     if (selectedFile) {
       loadDiff(selectedFile)
     }
-  }, [files, selectedFile, loadDiff])
+  }, [selectedFile, loadDiff])
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -399,7 +424,7 @@ function ChangedFilesContent({
             </Button>
           </div>
           <div className="thin-scrollbar min-h-0 flex-1 overflow-auto">
-            {diffLoading ? (
+            {diffLoading && diffFor !== fileKey(selectedFile) ? (
               <div className="flex h-full items-center justify-center py-8 text-muted-foreground/60">
                 <Loader2Icon size={14} className="mr-2 animate-spin" />
                 加载中...

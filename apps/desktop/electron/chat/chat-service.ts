@@ -3,6 +3,7 @@ import { promises as fsp } from 'node:fs'
 import * as path from 'node:path'
 import type { BrowserWindow } from 'electron'
 import type { TaskStore } from '@task-pipeline/core'
+import { hasPendingUiFor } from '../task/pi-session.js'
 import { ChatStorage } from './chat-storage.js'
 import { ChatPlanStorage } from './chat-plan-storage.js'
 import type { ChatDriverRegistry } from './drivers/driver-registry.js'
@@ -120,8 +121,18 @@ export type ChatStagePhase = 'keyword' | 'chat' | 'memory'
  * 用于重置前端 60s 流看门狗——推理模型长思考、或模型正在流式生成超大工具参数（如 write_plan 的
  * 整篇计划正文）期间，driver 可能连续数十秒不向渲染层吐任何事件，会被看门狗误判为死流而 abort。
  * 心跳由主进程发出：主进程崩溃 / IPC 断连时心跳随之停止，看门狗仍能如期兜底真正的死流。
+ * 注意：心跳只探「主进程 IPC 投递能力」，探不到「主进程活着但 driver 子进程挂死」，
+ * 后者由下方 CHAT_DRIVER_STALL_MS 的 driver 静默检测负责（同一心跳回调内顺带判定）。
  */
-const CHAT_STREAM_HEARTBEAT_MS = 20_000
+export const CHAT_STREAM_HEARTBEAT_MS = 20_000
+
+/**
+ * driver 静默挂死阈值：连续无任何 driver chunk 超过该时长、且没有 HITL 弹窗在等用户决策，
+ * 判定子进程 / SDK 挂死：停发心跳、给前端 dispatch 明确 error、主动 abort 本轮。
+ * 阈值必须大于最长合法静默段（单个长构建/测试工具执行可安静 ~10 分钟），取 15 分钟：
+ * 漏判代价 = 用户多等几分钟；误判代价 = 杀死一个正常长工具回合，显然后者更糟。
+ */
+export const CHAT_DRIVER_STALL_MS = 15 * 60_000
 
 /** 计划正文达到该长度才视为「真正的计划」（过滤模型只说“我这就写”这类开场白）。 */
 export const PLAN_DOC_MIN_CHARS = 240
@@ -590,6 +601,9 @@ export class ChatService {
     const parts: DriverPart[] = []
     // 流存活心跳定时器（本方法局部，多对话并发各自独立；finally 中清除）。
     let heartbeat: ReturnType<typeof setInterval> | undefined
+    // 最后一次「driver 真实活动」时刻：每个 driver chunk 刷新；HITL 弹窗在飞期间心跳顺带刷新
+    // （等用户决策属正常静默，答完重新计时）。距现在超 CHAT_DRIVER_STALL_MS 即判挂死。
+    let lastDriverActivityAt = Date.now()
     let status: ChatMessageMetadata['status'] = 'done'
     let capturedSessionId: string | undefined
     let streamUsage: ChatUsage | undefined
@@ -738,9 +752,27 @@ export class ChatService {
       // 流式期间每 3 秒把已累积的 parts 覆盖写入磁盘，崩溃/强杀最多丢 3 秒内容。
       this.startPartialPersist(input.chatId, assistantId, parts, now, effective)
 
-      // 流存活心跳：只要本轮在飞就周期性发一个无副作用的 heartbeat，重置前端 60s 看门狗，
-      // 避免推理模型长思考 / 生成超大工具参数这类「活着但安静」的流被误判为死流而 abort。
+      // 流存活心跳 + driver 挂死检测：默认每 20s 发一个无副作用 heartbeat 重置前端 60s 看门狗，
+      // 避免推理模型长思考 / 生成超大工具参数这类「活着但安静」的流被误杀；但 driver 连续安静
+      // 超 CHAT_DRIVER_STALL_MS 且无 HITL 弹窗在等用户时，判定子进程挂死：停发心跳、
+      // dispatch 明确 error、主动 abort（前端看门狗只能探 IPC 断连，探不到这种「主进程活、driver 死」）。
       heartbeat = setInterval(() => {
+        if (hasPendingUiFor(input.chatId)) {
+          lastDriverActivityAt = Date.now()
+        } else if (Date.now() - lastDriverActivityAt > CHAT_DRIVER_STALL_MS) {
+          if (heartbeat) {
+            clearInterval(heartbeat)
+            heartbeat = undefined
+          }
+          const silentSec = Math.round((Date.now() - lastDriverActivityAt) / 1000)
+          console.warn(`[chat] driver 静默 ${silentSec}s 判定挂死，自动中止本轮: chat=${input.chatId}`)
+          this.dispatch(effective, {
+            type: 'error',
+            message: `模型运行时连续 ${Math.round(CHAT_DRIVER_STALL_MS / 60000)} 分钟无任何响应（子进程可能挂死），已自动中止本轮，请重新发送。`
+          })
+          abort.abort(new Error(`chat driver stalled: no activity for ${silentSec}s`))
+          return
+        }
         this.dispatch(effective, { type: 'heartbeat' })
       }, CHAT_STREAM_HEARTBEAT_MS)
 
@@ -772,6 +804,8 @@ export class ChatService {
           chatMode: effectiveChatMode
         })) {
           if (abort.signal.aborted) break
+          // driver 产出任何 chunk 都是真实活动：刷新挂死检测的静默基准。
+          lastDriverActivityAt = Date.now()
           // 累积 parts
           if (chunk.type === 'part') {
             parts.push(chunk.part)

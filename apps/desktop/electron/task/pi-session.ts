@@ -106,6 +106,13 @@ export type PiCapturePhase = Extract<TaskAgentPhase, 'planning' | 'test_generati
 /** 正在回捞文本的阶段：`planning` / `test_generation` 期间不把 `agent_end` 当成实现收尾。 */
 const capturing = new Map<string, PiCapturePhase>()
 const pendingUi = new Map<string, (response: Record<string, unknown>) => void>()
+/** UI 上下文（对话 conversationId / 任务 taskId）→ 在飞未响应的弹窗数：HITL「等人决策」是合法静默，不能算流卡死。 */
+const pendingUiCountByContext = new Map<string, number>()
+
+/** 该对话/任务上下文是否有用户尚未响应的 HITL 弹窗（chat-service 的 driver 挂死检测据此豁免）。 */
+export function hasPendingUiFor(context: string): boolean {
+  return (pendingUiCountByContext.get(context) ?? 0) > 0
+}
 
 /** 正在跑 Pi 会话的任务（UI / 停止入口据此判定「该不该动这个任务」，不再靠单例猜）。 */
 export function getPiTaskIds(): string[] {
@@ -296,15 +303,27 @@ export function requestUi<T>(
   const id = randomUUID()
   return new Promise((resolve) => {
     let abortListener: () => void = () => undefined
+    // 归属上下文：对话路径带 conversationId，任务路径带 taskId（payload 或 options），两者取其一。
+    const contextId =
+      (typeof payload.conversationId === 'string' && payload.conversationId) ||
+      (typeof payload.taskId === 'string' && payload.taskId) ||
+      options?.taskId
     const finish = (response: Record<string, unknown>) => {
       if (options?.signal) options.signal.removeEventListener('abort', abortListener)
-      pendingUi.delete(id)
+      // delete 返回 true 才计数减一：finish 可能被「用户响应 + abort 信号」双路触发，计数不能穿底。
+      const wasPending = pendingUi.delete(id)
       pendingUiOwner.delete(id)
+      if (wasPending && contextId) {
+        const left = (pendingUiCountByContext.get(contextId) ?? 1) - 1
+        if (left > 0) pendingUiCountByContext.set(contextId, left)
+        else pendingUiCountByContext.delete(contextId)
+      }
       if (response.cancelled) resolve(undefined)
       else if (method === 'confirm') resolve(Boolean(response.confirmed) as T)
       else resolve(response.value as T | undefined)
     }
     pendingUi.set(id, finish)
+    if (contextId) pendingUiCountByContext.set(contextId, (pendingUiCountByContext.get(contextId) ?? 0) + 1)
     if (options?.taskId) pendingUiOwner.set(id, options.taskId)
     emitPi({
       type: 'extension_ui_request',

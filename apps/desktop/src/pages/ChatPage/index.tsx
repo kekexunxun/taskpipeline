@@ -59,7 +59,9 @@ function contextBarClass(percent: number): string {
 /**
  * 汇总当前会话用量（从新到旧遍历 assistant）：
  *  - usedTokens / contextRatio = 最近一条有值者（上下文占用属“当前状态”）；
- *  - costUsd / credits = 逐轮累加（每轮全量计费，属“累计花费”）。
+ *  - costUsd = 逐轮累加（每轮全量计费，属“累计花费”）；
+ *  - credits = 取最大者（Qoder 的 modelUsage.credits 是「会话累计」而非单轮增量，
+ *    单调递增，最新一条即本会话总消耗；若逐轮求和会把累计值重复累加，导致成倍虚高）。
  */
 function collectConversationUsage(messages: ChatMessage[]): {
   usedTokens?: number
@@ -79,7 +81,7 @@ function collectConversationUsage(messages: ChatMessage[]): {
     if (usedTokens === undefined && usage.inputTokens > 0) usedTokens = usage.inputTokens
     if (contextRatio === undefined && usage.contextUsageRatio !== undefined) contextRatio = usage.contextUsageRatio
     if (usage.costUsd !== undefined) costUsd = (costUsd ?? 0) + usage.costUsd
-    if (usage.credits !== undefined) credits = (credits ?? 0) + usage.credits
+    if (usage.credits !== undefined) credits = Math.max(credits ?? 0, usage.credits)
   }
   return { usedTokens, contextRatio, costUsd, credits }
 }
