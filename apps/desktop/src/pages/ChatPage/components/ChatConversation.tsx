@@ -13,16 +13,23 @@ export function ChatConversation({
   messages,
   streaming,
   hint,
+  compacting,
+  planActionsDisabled,
   approvals,
   answered,
   onRespondApproval,
   onExecuteJira,
-  onExecutePlan
+  onExecutePlan,
+  onCancelPlan
 }: {
   messages: ChatMessage[]
   streaming?: boolean
   /** 阶段提示（关键词提取/记忆检索中…），仅展示在最后一条在飞消息上。 */
   hint?: string
+  /** 上下文压缩进行中（瞬时态）：在消息流末尾渲染一条系统提示行，压缩完成即消失。 */
+  compacting?: boolean
+  /** 压缩进行中等：置灰计划卡的执行/取消按钮（不伪造 streaming）。 */
+  planActionsDisabled?: boolean
   /** 该对话待确认的 HITL 请求（内联卡片，渲染在消息流底部）。 */
   approvals?: ChatApprovalRequest[]
   /** 该对话已回答的 AskUserQuestion（保留展示已选结果）。 */
@@ -31,6 +38,8 @@ export function ChatConversation({
   onExecuteJira?(taskKey: string): Promise<void>
   /** 执行计划回调：切换 chatMode 为 normal 并发送执行指令。 */
   onExecutePlan?(plan: ChatPlan): void
+  /** 取消计划回调：把 pending 计划标记为已取消并落盘。 */
+  onCancelPlan?(plan: ChatPlan): void
 }) {
   const lastIndex = messages.length - 1
 
@@ -101,6 +110,8 @@ export function ChatConversation({
             hint={index === lastIndex ? hint : undefined}
             onExecuteJira={onExecuteJira}
             onExecutePlan={onExecutePlan}
+            onCancelPlan={onCancelPlan}
+            planActionsDisabled={planActionsDisabled}
             turnIndex={turnMap.get(message.id)}
             followingUserTexts={userTextAfter[index]}
           />
@@ -141,6 +152,12 @@ export function ChatConversation({
           <div className="flex items-center gap-2 px-1 py-2 text-xs text-muted-foreground">
             <DiamondIcon className="size-3.5 shrink-0 animate-spin" />
             <span>正在处理...</span>
+          </div>
+        )}
+        {compacting && (
+          <div className="flex items-center justify-center gap-2 px-1 py-2 text-xs text-muted-foreground/80">
+            <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+            <span>上下文压缩中…</span>
           </div>
         )}
       </ConversationContent>

@@ -125,6 +125,9 @@ function systemSubtype(
   } as SdkMessage
 }
 
+/** SDK 用户消息的最小形态（只取断言委派标记需要的字段）。 */
+type SdkUserLike = { message?: { content?: Array<{ type?: string; text?: string }> } }
+
 vi.mock('@qoder-ai/qoder-agent-sdk', () => {
   // 把脚本化的 SDKMessage 数组喂给 driver。
   // 输出流是"常驻"的:脚本消息耗尽后挂起等待新脚本(模拟真实 SDK 会话在回合间保持),
@@ -132,6 +135,8 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
   const scripts: Array<{ messages: SdkMessage[]; cursor: number }> = []
   const scriptWaiters: Array<() => void> = []
   const captured: Array<{ options: Record<string, unknown>; prompt?: string }> = []
+  /** 会话输入流（用户消息）被排空后记下的文本，供断言「计划轮次的委派标记」。 */
+  const userMessages: string[] = []
   let closed = false
   let generation = 0
   const wake = () => {
@@ -141,8 +146,23 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
     // 会话创建时读它判定 transport（诊断字段）；mock 不补会抛「export is not defined」。
     DEFAULT_RUNTIME_TRANSPORT: 'worker',
     accessToken: (token: string) => ({ token }),
-    query: (args: { prompt?: string; options?: Record<string, unknown> }) => {
-      captured.push({ options: args.options ?? {}, prompt: args.prompt })
+    query: (args: { prompt?: unknown; options?: Record<string, unknown> }) => {
+      captured.push({ options: args.options ?? {}, prompt: args.prompt as string | undefined })
+      // 真实 SDK 会消费 inputStream（异步用户消息流）；mock 也顺带排空并记下文本，
+      // 否则测试无法知道本轮递给 CLI 的用户消息写了什么（委派标记就落在里面）。
+      const input = args.prompt as AsyncIterable<SdkUserLike> | undefined
+      if (input && typeof input[Symbol.asyncIterator] === 'function') {
+        void (async () => {
+          try {
+            for await (const msg of input) {
+              const blocks = msg.message?.content ?? []
+              userMessages.push(blocks.map((block) => block.text ?? '').join(''))
+            }
+          } catch {
+            /* 会话关闭 */
+          }
+        })()
+      }
       return {
         [Symbol.asyncIterator]() {
           const myGen = generation
@@ -194,9 +214,11 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
     },
     __getLastQueryOptions: () => captured[captured.length - 1]?.options,
     __getLastQueryPrompt: () => captured[captured.length - 1]?.prompt,
+    __getUserMessages: () => [...userMessages],
     __getQueryCallCount: () => captured.length,
     __resetCaptured: () => {
       captured.length = 0
+      userMessages.length = 0
       scripts.length = 0
       closed = false
       generation++
@@ -210,6 +232,7 @@ const { QoderChatDriver } = await import('../../pi-extension/qoder/qoder-chat-dr
 const sdkMock = (await import('@qoder-ai/qoder-agent-sdk')) as unknown as {
   __pushScript: (script: { messages: SdkMessage[] }) => void
   __getLastQueryOptions: () => Record<string, unknown> | undefined
+  __getUserMessages: () => string[]
   __getLastQueryPrompt: () => string | undefined
   __getQueryCallCount: () => number
   __resetCaptured: () => void
@@ -1249,5 +1272,66 @@ describe('QoderChatDriver MCP 服务注入', () => {
     const result = await canUseTool('mcp__jira__jira_get_issue', {}, { signal: aborted.signal })
     expect(result).toMatchObject({ behavior: 'deny' })
     expect(handler).not.toHaveBeenCalled()
+  })
+})
+
+describe('QoderChatDriver 计划模式：委派 planner 子代理，主会话不限权', () => {
+  /** 跑一轮并返回会话创建时的 SDK options。 */
+  async function runTurn(
+    d: InstanceType<typeof QoderChatDriver>,
+    conversationId: string,
+    text: string,
+    sessionId: string,
+    chatMode?: 'plan' | 'normal'
+  ) {
+    sdkMock.__pushScript({ messages: [textDelta(text, sessionId), resultMessage(text, sessionId)] })
+    return collect(
+      d.streamChat({
+        conversationId,
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text, createdAt: new Date().toISOString() },
+        signal: new AbortController().signal,
+        ...(chatMode ? { chatMode } : {})
+      })
+    )
+  }
+
+  it('planner 写类工具硬禁只落在子代理身上；主会话无 disallowedTools、permissionMode=default', async () => {
+    await runTurn(driver(), 'c-plan-agent', '帮我拆个计划', 'sess-plan-1', 'plan')
+    const options = sdkMock.__getLastQueryOptions()!
+    const agents = options.agents as Record<
+      string,
+      { description?: string; prompt?: string; disallowedTools?: string[] }
+    >
+    expect(Object.keys(agents ?? {})).toEqual(['planner'])
+    expect(agents.planner?.disallowedTools).toEqual(['Edit', 'Write', 'NotebookEdit'])
+    expect(agents.planner?.prompt).toContain('你是 planner 子代理')
+    // 主会话：阶段级禁写与 plan 权限模式一概不得出现在这里（旧实现的主线限权就源于此）。
+    expect(options.disallowedTools).toBeUndefined()
+    expect(options.permissionMode).toBe('default')
+    // Agent 工具预授权：委派子代理不该再弹一层确认框。
+    expect(options.allowedTools).toContain('Agent')
+  })
+
+  it('主会话系统提示常驻「规划委派」，不 bake planner 角色', async () => {
+    // 常驻会话的 systemPrompt 创建即冻结、逐轮改不了，所以它必须与 chatMode 无关：
+    // planner 角色提示只能出现在子代理定义里（上一用例），不能漏进主线。
+    await runTurn(driver(), 'c-plan-sys', '规划一下', 'sess-plan-sys', 'plan')
+    const systemPrompt = sdkMock.__getLastQueryOptions()?.systemPrompt as string
+    expect(systemPrompt).toContain('【规划委派】')
+    expect(systemPrompt).not.toContain('你是 planner 子代理')
+  })
+
+  it('计划轮只给消息打委派标记；下一轮普通请求原文递送且复用同一会话', async () => {
+    const d = driver()
+    await runTurn(d, 'c-plan-mark', '帮我重构登录模块', 'sess-mark', 'plan')
+    await runTurn(d, 'c-plan-mark', '执行这个计划', 'sess-mark')
+    const messages = sdkMock.__getUserMessages()
+    expect(messages[0]).toBe('[计划模式]\n帮我重构登录模块')
+    expect(messages[1]).toBe('执行这个计划')
+    // 模式切换不重建会话（一次 query = 一个常驻会话），也不带入任何限权。
+    expect(sdkMock.__getQueryCallCount()).toBe(1)
+    expect(sdkMock.__getLastQueryOptions()?.disallowedTools).toBeUndefined()
   })
 })

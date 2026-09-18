@@ -1,12 +1,30 @@
 import { randomUUID } from 'node:crypto'
+import { promises as fsp } from 'node:fs'
+import * as path from 'node:path'
 import type { BrowserWindow } from 'electron'
 import type { TaskStore } from '@task-pipeline/core'
 import { ChatStorage } from './chat-storage.js'
 import { ChatPlanStorage } from './chat-plan-storage.js'
 import type { ChatDriverRegistry } from './drivers/driver-registry.js'
-import { createProjectQueryToolSource } from './drivers/project-query-tools.js'
+import { createProjectQueryToolSource, WRITE_PLAN_TOOL } from './drivers/project-query-tools.js'
 import type { ToolSource } from './drivers/tool-source.js'
 import { isModelAvailable, pickGroupModel, pickSystemDefaultModel } from './system-default-model.js'
+import {
+  budgetForModel,
+  contextWindowForModel,
+  estimateRecordTokens,
+  estimateTokens,
+  trimHistoryToBudget
+} from './context-budget.js'
+import {
+  buildCompaction,
+  buildCompactionTranscript,
+  COMPACT_CONTEXT_USAGE_RATIO,
+  excludeCoveredRecords,
+  makeSummarySystemRecord,
+  shouldCompact,
+  summarizeOverflow
+} from './context-compaction.js'
 import type { ChatDriver } from './drivers/chat-driver.js'
 import type {
   AbortChatStreamInput,
@@ -96,6 +114,65 @@ export type ChatStagePhase = 'keyword' | 'chat' | 'memory'
  *  4. 流结束后用 `driver.serializeAssistantMessage` 把累积的 parts 落盘;
  *  5. 单会话切换 driver:历史 messages 按各自 driverId 反序列化渲染,新消息用新 driverId 生成。
  */
+
+/**
+ * 流存活心跳间隔（毫秒）：只要一轮流在飞，就按此间隔向渲染层发一个 heartbeat chunk。
+ * 用于重置前端 60s 流看门狗——推理模型长思考、或模型正在流式生成超大工具参数（如 write_plan 的
+ * 整篇计划正文）期间，driver 可能连续数十秒不向渲染层吐任何事件，会被看门狗误判为死流而 abort。
+ * 心跳由主进程发出：主进程崩溃 / IPC 断连时心跳随之停止，看门狗仍能如期兜底真正的死流。
+ */
+const CHAT_STREAM_HEARTBEAT_MS = 20_000
+
+/** 计划正文达到该长度才视为「真正的计划」（过滤模型只说“我这就写”这类开场白）。 */
+export const PLAN_DOC_MIN_CHARS = 240
+
+/**
+ * 把计划落盘到工作区仓库的相对路径：`docs/<清洗后的标题>-开发计划.md`。
+ * 标题里的路径分隔符 / 控制字符 / Windows 非法字符会被替换为空格（防目录穿越与非法文件名）。
+ */
+export function buildPlanDocRelPath(title: string, chatId: string): string {
+  const cleaned = (title ?? '')
+    .replace(/[\\/:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  // 去掉不可见控制字符（不用字面量控制区间正则，避开 no-control-regex）。
+  const base = Array.from(cleaned)
+    .filter((c) => c.codePointAt(0)! >= 0x20)
+    .join('')
+    .slice(0, 60)
+  const name = base ? `${base}-开发计划` : `plan-${(chatId ?? '').slice(0, 8) || 'chat'}-开发计划`
+  return `docs/${name}.md`
+}
+
+/**
+ * 是否兜底把计划正文写入工作区仓库：仅当绑定了工作目录、本轮模型未自行调用 write_plan、
+ * 且捕获到的计划正文足够长时。避免重复落盘、避免把一句开场白写成“计划”。
+ */
+export function shouldPersistPlanDoc(opts: {
+  workingDirectory?: string
+  usedWritePlan: boolean
+  planText: string
+  minChars?: number
+}): boolean {
+  if (!opts.workingDirectory) return false
+  if (opts.usedWritePlan) return false
+  return opts.planText.trim().length >= (opts.minChars ?? PLAN_DOC_MIN_CHARS)
+}
+
+/**
+ * 提取计划正文：只取主流程的 text part。
+ *
+ * 计划模式现在是「委派 planner 子代理」实现：子代理在子任务里流式输出的正文会带
+ * `parentTaskId`，主线的转述才是这份回复的正式文本。两者都收会导致计划卡里同一份
+ * 计划重复两遍，因此带 parentTaskId 的子任务内部文本一律排除。
+ */
+export function collectPlanText(parts: DriverPart[]): string {
+  return parts
+    .filter((p): p is Extract<DriverPart, { type: 'text' }> => p.type === 'text' && !p.parentTaskId)
+    .map((p) => p.text)
+    .join('')
+}
+
 export class ChatService {
   private readonly storage: ChatStorage
   private readonly planStorage: ChatPlanStorage
@@ -262,6 +339,41 @@ export class ChatService {
     return this.storage.updateMeta(id, { hitlMode })
   }
 
+  /**
+   * 取消一条待执行计划：把该 assistant 消息里 plan part 的状态改写为 cancelled 并落盘。
+   * 计划状态直接随消息 part 持久化（openai driver 原样存 parts），故重启/重载后仍为已取消。
+   * 仅 pending 计划可取消；非 pending / 未找到时幂等返回。
+   */
+  async cancelPlan(chatId: string, messageId: string): Promise<ChatConversation | undefined> {
+    const current = await this.storage.getConversation(chatId)
+    if (!current) return undefined
+    const index = current.messages.findIndex((m) => m.id === messageId)
+    if (index < 0) return undefined
+    const record = current.messages[index]!
+    const driver = this.driverRegistry.tryGet(record.driverId)
+    if (!driver) return undefined
+    const message = driver.deserializeMessage(record)
+    let changed = false
+    const parts = message.parts.map((part) => {
+      if (part.type === 'plan' && part.plan.status === 'pending') {
+        changed = true
+        return { ...part, plan: { ...part.plan, status: 'cancelled' as const } }
+      }
+      return part
+    })
+    if (!changed) return current
+    const nextRecord = driver.serializeAssistantMessage({
+      id: record.id,
+      parts,
+      createdAt: record.createdAt,
+      ...(record.usage ? { usage: record.usage } : {})
+    })
+    const nextMessages = [...current.messages]
+    nextMessages[index] = nextRecord
+    await this.storage.replaceMessages(chatId, nextMessages)
+    return this.storage.getConversation(chatId)
+  }
+
   abortChat(input: AbortChatStreamInput): void {
     const active = this.activeStreams.get(input.chatId)
     if (active?.streamId === input.streamId) active.abort.abort()
@@ -326,6 +438,95 @@ export class ChatService {
     }
   }
 
+  /**
+   * 多目录工作区：找出 `workingDirectory` 所属 workspace 分组的全部目录，作为只读查询工具的可访问根。
+   * 不属于任何 workspace（普通单目录对话）或查询失败时，只含自身——与旧行为一致。
+   */
+  async resolveWorkspaceRoots(workingDirectory: string): Promise<string[]> {
+    try {
+      const groups = await this.storage.listGroups()
+      const ws = groups.find((g) => g.chatType === 'workspace' && g.directories.includes(workingDirectory))
+      return ws && ws.directories.length > 0 ? ws.directories : [workingDirectory]
+    } catch {
+      return [workingDirectory]
+    }
+  }
+
+  /**
+   * 上下文滚动摘要（问题 2-B）：溢出轮次达阈值时跑一次辅助 LLM 调用，把「已有摘要 + 溢出轮次」
+   * 压成新的 compaction 并持久化。任何异常只记日志、不阻断对话（降级为仅 2-A 裁剪）。
+   */
+  private async maybeCompactConversation(input: {
+    chatId: string
+    driver: ChatDriver
+    driverId: ChatDriverId
+    model: string
+    existingSummary?: string
+    overflow: StoredMessageRecord[]
+    contextReached?: boolean
+    /** 触发压缩时本轮的上下文占用估算与窗口（用于压缩后向前端推送下调后的估算值）。 */
+    contextUsedTokens?: number
+    contextWindowTokens?: number
+    traceId?: string
+    signal: AbortSignal
+  }): Promise<void> {
+    if (!input.overflow.length || !shouldCompact(input.overflow, { contextReached: input.contextReached })) return
+    try {
+      const transcript = buildCompactionTranscript(input.driver, input.overflow)
+      if (!transcript.trim()) return
+      // 压缩进行时的界面瞬时提示（走独立常驻 IPC，因其在 finish 后执行、stream 会话已关）。
+      this.emitCompaction(input.chatId, 'start')
+      let projectedContext: { usedTokens: number; windowTokens: number } | undefined
+      try {
+        const summary = await summarizeOverflow({
+          driver: input.driver,
+          driverId: input.driverId,
+          model: input.model,
+          ...(input.existingSummary ? { existingSummary: input.existingSummary } : {}),
+          transcript,
+          signal: input.signal,
+          ...(input.traceId ? { traceId: input.traceId } : {})
+        })
+        if (!summary) return
+        const compaction = buildCompaction(input.overflow, summary)
+        if (!compaction) return
+        await this.storage.updateMeta(input.chatId, { compaction })
+        // 压缩成功：估算下一轮实际发送的上下文（本轮占用 − 被摘要覆盖的溢出轮次 + 摘要本身），
+        // 随 end 广播下发，让头部占用率立即回落而不必等到下一条 assistant 实测值。
+        if (input.contextUsedTokens != null && input.contextWindowTokens != null) {
+          const overflowTokens = input.overflow.reduce((acc, r) => acc + estimateRecordTokens(r), 0)
+          const usedTokens = Math.max(0, input.contextUsedTokens - overflowTokens + estimateTokens(summary))
+          projectedContext = { usedTokens, windowTokens: input.contextWindowTokens }
+        }
+      } finally {
+        this.emitCompaction(input.chatId, 'end', projectedContext)
+      }
+    } catch (reason) {
+      console.warn('[compaction] chat compaction failed:', reason)
+    }
+  }
+
+  /** 向渲染层广播一次上下文压缩状态（start/end）；纯瞬时 UI 提示，不落库、不持久。 */
+  private emitCompaction(
+    chatId: string,
+    phase: 'start' | 'end',
+    context?: { usedTokens: number; windowTokens: number }
+  ): void {
+    this.getMainWindow()?.webContents.send('chat:compaction', { chatId, phase, ...(context ? { context } : {}) })
+  }
+
+  /**
+   * 把计划正文兼底写入工作区仓库（调用方已用 shouldPersistPlanDoc 把关）。
+   * 路径固定为 `workingDirectory/docs/...`（文件名已在 buildPlanDocRelPath 清洗，无分隔符/穿越风险），
+   * 父目录 mkdir -p；返回写入的相对路径。失败向上抛出，由调用方吞掉不阻断本轮。
+   */
+  private async writePlanDoc(workingDirectory: string, relPathPosix: string, content: string): Promise<string> {
+    const abs = path.join(workingDirectory, ...relPathPosix.split('/'))
+    await fsp.mkdir(path.dirname(abs), { recursive: true })
+    await fsp.writeFile(abs, content, 'utf8')
+    return relPathPosix
+  }
+
   async startChatStream(input: StartChatStreamInput): Promise<void> {
     if (this.isQuitting) throw new Error('应用正在退出')
     const conversation = await this.storage.getConversation(input.chatId)
@@ -387,6 +588,8 @@ export class ChatService {
       : [...existing, userRecord]
     const assistantId = randomUUID()
     const parts: DriverPart[] = []
+    // 流存活心跳定时器（本方法局部，多对话并发各自独立；finally 中清除）。
+    let heartbeat: ReturnType<typeof setInterval> | undefined
     let status: ChatMessageMetadata['status'] = 'done'
     let capturedSessionId: string | undefined
     let streamUsage: ChatUsage | undefined
@@ -395,12 +598,31 @@ export class ChatService {
     // 本轮是否执行了记忆提取注入（整轮成功后写 conversation.memoryInjected；
     // 失败/中止不置位，重试仍会重新提取 —— 避免首轮失败后记忆注入永久丢失）。
     let memoryInjectedThisTurn = false
+    // 本轮组装时被裁掉的溢出轮次（问题 2-B）：回合结束后达阈值则滚动摘要。
+    let overflowRecords: StoredMessageRecord[] = []
+    // 本轮上下文占用是否已达窗口 80%：达阈时回合结束只要有溢出即摘要，不等攒批。
+    let contextReachedLimit = false
+    // 本轮上下文占用估算与模型窗口（供压缩后向前端推送下调估算值，finally 闭包内读取）。
+    let contextUsedTokensEstimate: number | undefined
+    let contextWindowTokensEstimate: number | undefined
+    // 实际生效的对话模式：try 内解析，finally 落盘前也要读取（计划模式失败时需据此把
+    // 文本转成失败计划卡），故提到 try 之外声明。
+    let effectiveChatMode: ChatConversationMode = 'normal'
     const taskBackend = input.mode === 'task-create' ? this.resolveTaskBackend?.() : undefined
     // task-create 优先注入任务后端工具（Jira 等）；否则项目对话（绑定了工作目录）注入只读
     // 查询工具集，让模型能真正读取代码回答项目问题；普通对话仍无工具（行为不变）。
+    // 多目录工作区：把对话所属 workspace 分组的全部目录作为可访问根传入，否则工具沙箱只认
+    // 单一 workingDirectory，模型按 system prompt 里的工作区描述访问兄弟目录时会被误判越界。
     const toolSource: ToolSource | undefined =
       taskBackend?.toToolSource() ??
-      (conversation.workingDirectory ? createProjectQueryToolSource(conversation.workingDirectory) : undefined)
+      (conversation.workingDirectory
+        ? createProjectQueryToolSource(
+            conversation.workingDirectory,
+            await this.resolveWorkspaceRoots(conversation.workingDirectory),
+            // 注入 write_plan：它只属于 planner 子回合（driver 从主链路工具集里剔除）。
+            { includePlanWrite: true }
+          )
+        : undefined)
 
     try {
       const isFirstUserMessage = !conversation.messages.some((m) => m.role === 'user')
@@ -462,10 +684,35 @@ export class ChatService {
       }
       const historyRecords =
         systemMessages.length > 0 ? [...messages.slice(0, -1), ...systemMessages, userRecord] : messages
-      const history = historyRecords.map((record) => this.deserializeRecord(record))
+      // 问题 2-B：排除已被滚动摘要覆盖的更早轮次，把摘要作为 system 注入到最前。
+      const compaction = conversation.compaction
+      const withCompaction = excludeCoveredRecords(historyRecords, compaction?.coveredUntilMessageId)
+      const historyRecordsForModel = compaction?.summary
+        ? [makeSummarySystemRecord(input.chatId, compaction.summary, effective.driverId, now), ...withCompaction]
+        : withCompaction
+      // 问题 2-A：按 token 预算裁剪到保留窗口（system + 最近若干轮），防爆窗。
+      // 取该对话最近一轮实测 input token 作为触发下限（估算漏算工具定义/system 时仍能兜底）。
+      const lastUsageTokens = [...conversation.messages]
+        .reverse()
+        .find((m) => m.role === 'assistant' && m.usage?.inputTokens)?.usage?.inputTokens
+      const trimmed = trimHistoryToBudget({
+        records: historyRecordsForModel,
+        budgetTokens: budgetForModel(this.store, effective.model),
+        ...(lastUsageTokens ? { lastUsageTokens } : {})
+      })
+      // 上下文占用判定：实测上轮 input 与裁剪前全量估算取大，达窗口 80% 即标记触发压缩。
+      const estimatedFull = historyRecordsForModel.reduce((acc, r) => acc + estimateRecordTokens(r), 0)
+      const contextUsedTokens = Math.max(estimatedFull, lastUsageTokens ?? 0)
+      const contextWindowTokens = contextWindowForModel(this.store, effective.model)
+      contextUsedTokensEstimate = contextUsedTokens
+      contextWindowTokensEstimate = contextWindowTokens
+      contextReachedLimit = contextUsedTokens >= contextWindowTokens * COMPACT_CONTEXT_USAGE_RATIO
+      // 溢出（超出保留窗口、尚未被摘要覆盖）的更早轮次：留待回合结束后滚动摘要。
+      overflowRecords = trimmed.dropped
+      const history = trimmed.kept.map((record) => this.deserializeRecord(record))
 
       // 解析实际生效的对话模式（前端指定 > 自动检测 > 对话持久化值 > 默认 normal）
-      let effectiveChatMode: ChatConversationMode = input.chatMode ?? conversation.chatMode ?? 'normal'
+      effectiveChatMode = input.chatMode ?? conversation.chatMode ?? 'normal'
       if (effectiveChatMode === 'normal') {
         const autoDetected = detectPlanModeNeeded(input.message.text)
         if (autoDetected) {
@@ -490,6 +737,12 @@ export class ChatService {
 
       // 流式期间每 3 秒把已累积的 parts 覆盖写入磁盘，崩溃/强杀最多丢 3 秒内容。
       this.startPartialPersist(input.chatId, assistantId, parts, now, effective)
+
+      // 流存活心跳：只要本轮在飞就周期性发一个无副作用的 heartbeat，重置前端 60s 看门狗，
+      // 避免推理模型长思考 / 生成超大工具参数这类「活着但安静」的流被误判为死流而 abort。
+      heartbeat = setInterval(() => {
+        this.dispatch(effective, { type: 'heartbeat' })
+      }, CHAT_STREAM_HEARTBEAT_MS)
 
       // 计划模式：通知前端将后续内容渲染为 PlanCard
       if (effectiveChatMode === 'plan') {
@@ -540,13 +793,31 @@ export class ChatService {
       if (status === 'done' && parts.length === 0) throw new Error('模型返回了空响应')
       // 计划模式：流成功后提取计划内容并保存为文件
       if (status === 'done' && effectiveChatMode === 'plan') {
-        const planContent = parts
-          .filter((p): p is Extract<DriverPart, { type: 'text' }> => p.type === 'text')
-          .map((p) => p.text)
-          .join('')
+        const planContent = collectPlanText(parts)
         if (planContent.trim()) {
           try {
             const plan = await this.planStorage.savePlan(input.chatId, assistantId, planContent)
+            // 兜底落盘：本轮模型未自行调用 write_plan 时，把捕获到的完整计划正文写入工作区仓库，
+            // 使「计划落库」不再依赖模型成功 stream 超长工具参数（历史正是被前端 60s 看门狗探杀）。
+            const usedWritePlan = parts.some((p) => p.type === 'openai.tool-call' && p.name === WRITE_PLAN_TOOL)
+            if (
+              shouldPersistPlanDoc({
+                workingDirectory: conversation.workingDirectory,
+                usedWritePlan,
+                planText: planContent
+              })
+            ) {
+              try {
+                const relPath = await this.writePlanDoc(
+                  conversation.workingDirectory as string,
+                  buildPlanDocRelPath(title, input.chatId),
+                  planContent
+                )
+                this.dispatch(effective, { type: 'status', text: `开发计划已写入仓库 ${relPath}` })
+              } catch (error) {
+                console.warn('[chat] failed to persist plan doc to workspace:', error)
+              }
+            }
             // 将文本 parts 替换为计划 part（保留文件路径供执行时使用）
             const planPart: DriverPart = {
               driverId: effective.driverId,
@@ -593,6 +864,11 @@ export class ChatService {
         this.dispatch(effective, { type: 'error', message })
       }
     } finally {
+      // 停止流存活心跳：本轮已结束（成功 / 失败 / abort），不再需要重置看门狗。
+      if (heartbeat) {
+        clearInterval(heartbeat)
+        heartbeat = undefined
+      }
       // 清除增量持久化定时器：后续由 finally 的 appendMessage 统一落盘。
       if (this.streamPersistInterval) {
         clearInterval(this.streamPersistInterval)
@@ -604,6 +880,30 @@ export class ChatService {
           await this.storage.updateMeta(input.chatId, { memoryInjected: true })
         } catch {
           /* 标记写入失败不影响本轮 */
+        }
+      }
+      // 计划模式但本轮未成功产出计划（模型异常 / 被中止）：把已累积的文本转成「失败 / 已取消」
+      // 的计划卡。既让前端实时看到正确终态（而非永远停在「生成中」），也随消息一起落盘，
+      // 保证重新加载 / 继续对话后卡片不再消失（旧的临时卡只存在于渲染层、从不落盘）。
+      if (effectiveChatMode === 'plan' && status !== 'done') {
+        const planText = collectPlanText(parts)
+        if (planText.trim()) {
+          const failedPlanPart: DriverPart = {
+            driverId: effective.driverId,
+            type: 'plan',
+            plan: {
+              id: assistantId,
+              chatId: input.chatId,
+              createdAt: now,
+              status: status === 'aborted' ? 'cancelled' : 'failed',
+              content: planText,
+              filePath: ''
+            }
+          }
+          const newParts = [...parts.filter((p) => p.type !== 'text'), failedPlanPart]
+          parts.length = 0
+          parts.push(...newParts)
+          this.dispatch(effective, { type: 'plan-part', parts: newParts })
         }
       }
       // 用量/模型已在 done chunk 里随 dispatch 透传给前端，此处只负责落盘（见下方 serializeAssistantMessage）。
@@ -674,6 +974,20 @@ export class ChatService {
               } catch (reason) {
                 console.warn('[memory] chat consolidate failed:', reason)
               } finally {
+                // 上下文滚动摘要（问题 2-B）：溢出轮次达阈值则压入 compaction，失败不阻断（内部吞异常）。
+                await this.maybeCompactConversation({
+                  chatId: input.chatId,
+                  driver,
+                  driverId: effective.driverId,
+                  model: effective.model,
+                  existingSummary: conversation.compaction?.summary,
+                  overflow: overflowRecords,
+                  contextReached: contextReachedLimit,
+                  contextUsedTokens: contextUsedTokensEstimate,
+                  contextWindowTokens: contextWindowTokensEstimate,
+                  traceId: turnTraceId,
+                  signal: abort.signal
+                })
                 this.traceManager?.endTurn(input.chatId, turnKey)
               }
             })()
@@ -794,12 +1108,27 @@ function detectPlanModeNeeded(messageText: string): boolean {
     '列个计划',
     '先做计划',
     '先规划',
+    '规划一下',
     '计划一下',
+    '出份计划',
+    '输出一份计划',
+    '输出计划',
+    '生成计划',
+    '生成一份计划',
+    '写一份计划',
+    '写个计划',
+    '开发计划',
+    '实现计划',
+    '实施计划',
+    '计划文档',
     '出个方案',
     '给个方案',
     '做个方案',
     '制定方案',
     '设计方案',
+    '实现方案',
+    '技术方案',
+    '实施方案',
     '出方案',
     '先别动手',
     '先不要改代码',
@@ -810,7 +1139,14 @@ function detectPlanModeNeeded(messageText: string): boolean {
     'draft a plan',
     'plan first',
     'propose a plan',
-    'give me a plan'
+    'give me a plan',
+    'generate a plan',
+    'output a plan',
+    'development plan',
+    'implementation plan',
+    'implementation approach',
+    'technical plan',
+    'technical approach'
   ]
   if (planIntentKeywords.some((kw) => text.includes(kw))) return true
   // 2. 超长消息 + 大规模修改意图：仅长文本（日志/上下文粘贴）不触发

@@ -59,7 +59,8 @@ vi.mock('@/api', () => ({
     onChatStreamEvent: vi.fn((callback: (event: unknown) => void) => {
       mockApi.chatListeners.add(callback)
       return () => mockApi.chatListeners.delete(callback)
-    })
+    }),
+    onChatCompaction: vi.fn(() => () => undefined)
   }
 }))
 

@@ -230,6 +230,12 @@ export type QoderSessionOptions = {
   hooks?: SdkQueryOptions['hooks']
   allowedTools?: SdkQueryOptions['allowedTools']
   /**
+   * 具名子代理注册表（会话级，随 initialize 一次性下发）。
+   * chat 计划模式的 `planner` 由此注册：主会话权限不变，遇到规划轮次用 `Agent` 工具
+   * 按名委派。必须在会话创建时就给定 —— 常驻会话无法逐轮改 options。
+   */
+  agents?: SdkQueryOptions['agents']
+  /**
    * 阶段级工具硬边界（P4）：Plan 阶段禁掉写类工具，模型侧根本看不到这些工具，
    * 比 prompt 里的口头约束和 `canUseTool` 事后 deny 都强（见 §5 表）。
    */
@@ -310,6 +316,7 @@ export class QoderSession {
         ...(options.settings ? { settings: options.settings } : {}),
         ...(options.hooks ? { hooks: options.hooks } : {}),
         ...(options.allowedTools && options.allowedTools.length ? { allowedTools: options.allowedTools } : {}),
+        ...(options.agents ? { agents: options.agents } : {}),
         ...(options.disallowedTools && options.disallowedTools.length
           ? { disallowedTools: options.disallowedTools }
           : {}),

@@ -42,14 +42,25 @@ const LINE_MAX = 300
 const GREP_MAX_FILE_BYTES = 2 * 1024 * 1024
 
 /**
- * 把用户给的路径解析到 cwd 内；越界（目录穿越 / 绝对路径指向外部）直接拒绝。
+ * 计划模式专属的「写计划文档」工具名。全只读工具集中唯一带写盘能力的工具，
+ * 供 driver 按计划/普通模式白名单过滤（普通 chat 不得获得此能力）。
+ */
+export const WRITE_PLAN_TOOL = 'write_plan'
+
+/**
+ * 把用户给的路径解析到允许的工作区根目录集合内；越界（目录穿越 / 绝对路径指向外部）直接拒绝。
+ * 相对路径以 `cwd` 为锚点解析（`../sibling` 指向 `cwd` 的兄弟目录），但边界判定放行
+ * 「落在任意一个 `roots` 内」的结果——多目录工作区下，兄弟根目录同样可访问。
  * 返回绝对路径；目录不存在等错误由调用方通过 fs 报出。
  */
-function resolveWithin(cwd: string, p: string): string {
+function resolveWithin(cwd: string, p: string, roots: string[] = [cwd]): string {
   const resolved = path.resolve(cwd, p)
-  const rel = path.relative(cwd, resolved)
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`路径越界，拒绝访问: ${p}（只能访问工作目录内的文件）`)
+  const inside = roots.some((root) => {
+    const rel = path.relative(path.resolve(root), resolved)
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+  })
+  if (!inside) {
+    throw new Error(`路径越界，拒绝访问: ${p}（只能访问工作区目录内的文件）`)
   }
   return resolved
 }
@@ -169,14 +180,14 @@ function globSegmentToRegex(segment: string): RegExp {
  * 基于路径段的 glob 扫描：先切出通配符前的固定前缀目录，再从该目录递归，
  * 剩余段逐个用段正则匹配；`**` 段匹配任意层目录。返回相对 cwd 的路径列表。
  */
-async function globScan(cwd: string, pattern: string): Promise<string[]> {
+async function globScan(cwd: string, pattern: string, roots: string[] = [cwd]): Promise<string[]> {
   const segments = pattern.split('/').filter((s) => s.length > 0)
   if (segments.length === 0) return []
   // 固定前缀：第一个含通配符的段之前的所有段
   const firstWildcard = segments.findIndex((s) => /[*?[]/.test(s))
   if (firstWildcard === -1) {
     // 纯字面量路径：存在即返回，否则空
-    const abs = resolveWithin(cwd, pattern)
+    const abs = resolveWithin(cwd, pattern, roots)
     try {
       const stats = await fs.promises.stat(abs)
       return stats.isFile() || stats.isDirectory() ? [relPath(cwd, abs)] : []
@@ -269,9 +280,9 @@ async function listDirRecursive(absDir: string, baseRel: string, depth: number):
 }
 
 /**
- * 项目查询工具集：只读访问工作目录内的文件。
+ * 项目查询工具集：只读访问工作区根目录内的文件（支持多目录工作区的兄弟根）。
  *
- * 工具（全部 `readOnlyHint`，路径相对 cwd）：
+ * 工具（全部 `readOnlyHint`，路径以 `cwd` 为锚点解析、按 `roots` 集合校验边界）：
  *  - read_file(path, offset?, limit?)：读取文件内容，支持行区间；>1MB 截断提示。
  *  - grep(pattern, path?, maxResults?)：递归正则搜索文本文件，返回 `文件:行号: 内容` 摘要。
  *  - glob(pattern)：glob 通配匹配文件 / 目录路径（支持 `**` / `*` / `?` / `[...]`）。
@@ -281,17 +292,43 @@ export class ProjectQueryToolSource implements ToolSource {
   readonly id = 'project' as const
   readonly displayName = '项目查询'
 
-  constructor(private readonly cwd: string) {}
+  constructor(
+    private readonly cwd: string,
+    /** 允许访问的根目录集合（多目录工作区含兄弟根）；缺省退化为单一 `cwd`。 */
+    private readonly roots: string[] = [cwd],
+    /**
+     * 是否暴露写盘工具 `write_plan`。默认 false，保持本工具集「全只读」不变量
+     * （task-intake / task-creation-agent 等消费方依赖此保证）；仅 chat 计划模式路径传 true。
+     */
+    private readonly includePlanWrite = false
+  ) {}
 
   systemPrompt(): string {
     return [
-      '你可以使用以下只读工具查询当前工作目录内的代码与文件：',
+      '你可以使用以下只读工具查询工作区内的代码与文件：',
       '- read_file(path, offset?, limit?)：读取文件内容（支持行区间 offset/limit，行号从 0 起）。',
       '- grep(pattern, path?, maxResults?)：按正则搜索文件内容，返回 文件:行号: 内容 摘要。',
       '- glob(pattern)：按通配符模式匹配文件路径（支持 **、*、?、[a-z]）。',
       '- list_dir(path?, depth?)：列出目录条目（名称 + 是否目录 + 大小）。',
-      '约束：这些工具只能读取，不能修改任何文件；所有路径均相对工作目录解析，越界路径会被拒绝。'
+      ...(this.includePlanWrite
+        ? [
+            `- ${WRITE_PLAN_TOOL}(path, content)：仅计划模式可用——把开发计划文档落盘为工作区内的 \`.md\` 文件（如 docs/xxx-开发计划.md）；除该 \`.md\` 外不得写任何文件。`
+          ]
+        : []),
+      this.includePlanWrite
+        ? '约束：除 write_plan 落盘计划文档外，这些工具只能读取，不能修改任何文件。'
+        : '约束：这些工具只能读取，不能修改任何文件。',
+      this.workspaceConstraint()
     ].join('\n')
+  }
+
+  /** 路径解析与越界约束：单目录直接说「越界拒绝」，多目录工作区列出可访问的兄弟根。 */
+  private workspaceConstraint(): string {
+    const primary = path.resolve(this.cwd)
+    const extra = this.roots.map((r) => path.resolve(r)).filter((r) => r !== primary)
+    if (extra.length === 0) return '所有路径均相对工作目录解析，越界路径会被拒绝。'
+    const names = extra.map((r) => `${r}（相对路径 ${relPath(this.cwd, r)}）`)
+    return `本对话绑定了多目录工作区，除工作目录（${this.cwd}）外还可访问以下兄弟根目录：${names.join('、')}。路径以工作目录为锚点解析（如 ${relPath(this.cwd, extra[0] ?? primary)} 指向兄弟根），落在任一工作区根内即允许，越出所有根才会被拒绝。`
   }
 
   tools(): ToolDeclaration[] {
@@ -345,6 +382,18 @@ export class ProjectQueryToolSource implements ToolSource {
         execute: async (input) => this.listDir(input)
       }
     ]
+    if (this.includePlanWrite) {
+      tools.push({
+        name: WRITE_PLAN_TOOL,
+        description: `仅计划模式使用：把开发计划文档写入工作区内的 \`.md\` 文件（如 docs/参赛协议改造-开发计划.md）。path 相对工作目录、必须以 .md 结尾；content 为完整 Markdown 计划正文。除 .md 计划文档外不能写任何文件。`,
+        schema: {
+          path: z.string().describe('相对工作目录的目标路径，必须以 .md 结尾'),
+          content: z.string().describe('要写入的 Markdown 计划正文（完整）')
+        },
+        annotations: { readOnlyHint: false, destructiveHint: false },
+        execute: async (input) => this.writePlan(input)
+      })
+    }
     return tools
   }
 
@@ -361,7 +410,7 @@ export class ProjectQueryToolSource implements ToolSource {
   private async readFile(input: Record<string, unknown>): Promise<unknown> {
     const filePath = typeof input.path === 'string' ? input.path : ''
     if (!filePath) throw new Error('缺少 path 参数')
-    const abs = resolveWithin(this.cwd, filePath)
+    const abs = resolveWithin(this.cwd, filePath, this.roots)
     const { content, truncated } = await readFileContent(abs)
     // 去掉末尾换行避免产生空行（行号与内容都更直观）
     const text = content.endsWith('\n') ? content.slice(0, -1) : content
@@ -391,7 +440,7 @@ export class ProjectQueryToolSource implements ToolSource {
       throw new Error(`非法正则: ${error instanceof Error ? error.message : String(error)}`)
     }
     const subPath = typeof input.path === 'string' && input.path ? input.path : '.'
-    const root = resolveWithin(this.cwd, subPath)
+    const root = resolveWithin(this.cwd, subPath, this.roots)
     const maxResults =
       typeof input.maxResults === 'number' && Number.isInteger(input.maxResults)
         ? Math.min(Math.max(input.maxResults, 1), GREP_HARD_MAX)
@@ -412,21 +461,38 @@ export class ProjectQueryToolSource implements ToolSource {
     if (pattern.includes('\\')) {
       throw new Error('glob 模式不支持反斜杠，请使用正斜杠分隔路径')
     }
-    return globScan(this.cwd, pattern)
+    return globScan(this.cwd, pattern, this.roots)
   }
 
   private async listDir(input: Record<string, unknown>): Promise<unknown> {
     const subPath = typeof input.path === 'string' && input.path ? input.path : '.'
     const depth =
       typeof input.depth === 'number' && Number.isInteger(input.depth) ? Math.min(Math.max(input.depth, 0), 3) : 1
-    const abs = resolveWithin(this.cwd, subPath)
+    const abs = resolveWithin(this.cwd, subPath, this.roots)
     const stats = await fs.promises.stat(abs)
     if (!stats.isDirectory()) throw new Error(`${subPath} 不是目录`)
     return listDirRecursive(abs, '', depth)
   }
+
+  /** 受限写盘：只允许把计划文档写入工作区内的 `.md` 文件（越界/非 .md 一律拒绝）。 */
+  private async writePlan(input: Record<string, unknown>): Promise<unknown> {
+    const filePath = typeof input.path === 'string' ? input.path.trim() : ''
+    if (!filePath) throw new Error('缺少 path 参数')
+    if (!/\.md$/i.test(filePath)) throw new Error('write_plan 只能写入 .md 计划文档，其它文件类型被拒绝')
+    const content = typeof input.content === 'string' ? input.content : ''
+    if (!content.trim()) throw new Error('缺少 content 参数（计划正文为空）')
+    const abs = resolveWithin(this.cwd, filePath, this.roots)
+    await fs.promises.mkdir(path.dirname(abs), { recursive: true })
+    await fs.promises.writeFile(abs, content, 'utf8')
+    return { path: relPath(this.cwd, abs), bytes: Buffer.byteLength(content, 'utf8'), written: true }
+  }
 }
 
-/** 工厂：为指定工作目录创建项目查询工具集（chat-service 注入用）。 */
-export function createProjectQueryToolSource(cwd: string): ToolSource {
-  return new ProjectQueryToolSource(cwd)
+/** 工厂：为指定工作目录创建项目查询工具集（chat-service 注入用）；`roots` 为多目录工作区的可访问根集合，缺省退化为单一 `cwd`；`opts.includePlanWrite` 为 true 时额外暴露 write_plan（仅 chat 计划模式用）。 */
+export function createProjectQueryToolSource(
+  cwd: string,
+  roots?: string[],
+  opts?: { includePlanWrite?: boolean }
+): ToolSource {
+  return new ProjectQueryToolSource(cwd, roots, opts?.includePlanWrite ?? false)
 }

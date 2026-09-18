@@ -26,6 +26,8 @@ function ChatMessageImpl({
   hint,
   onExecuteJira,
   onExecutePlan,
+  onCancelPlan,
+  planActionsDisabled,
   turnIndex,
   followingUserTexts
 }: {
@@ -36,6 +38,10 @@ function ChatMessageImpl({
   onExecuteJira?(taskKey: string): Promise<void>
   /** 执行计划回调：点击“执行计划”按钮时触发，切换 chatMode 并发送执行指令。 */
   onExecutePlan?(plan: ChatPlan): void
+  /** 取消计划回调：把 pending 计划标记为已取消。 */
+  onCancelPlan?(plan: ChatPlan): void
+  /** 压缩进行中等：置灰计划卡的执行/取消按钮。 */
+  planActionsDisabled?: boolean
   /** 轮次索引（user+agent 为一轮），用于右侧进度条定位 */
   turnIndex?: number
   /** 本消息之后的用户消息文本：非空 = 对话已推进，pending 计划自动失效。 */
@@ -151,6 +157,8 @@ function ChatMessageImpl({
                     message={message}
                     isAnimating={isStreaming}
                     onExecutePlan={onExecutePlan}
+                    onCancelPlan={onCancelPlan}
+                    planActionsDisabled={planActionsDisabled}
                     followingUserTexts={followingUserTexts}
                   />
                 )}
@@ -223,11 +231,17 @@ function DriverMessageBody({
   message,
   isAnimating,
   onExecutePlan,
+  onCancelPlan,
+  planActionsDisabled,
   followingUserTexts
 }: {
   message: ChatMessage
   isAnimating?: boolean
   onExecutePlan?: (plan: ChatPlan) => void
+  /** 取消计划回调。 */
+  onCancelPlan?: (plan: ChatPlan) => void
+  /** 压缩进行中等：置灰计划卡操作按钮。 */
+  planActionsDisabled?: boolean
   /** 本消息之后的用户消息文本：供 pending 计划失效判定。 */
   followingUserTexts?: string[]
 }) {
@@ -237,6 +251,8 @@ function DriverMessageBody({
         message={message}
         isAnimating={isAnimating}
         onExecutePlan={onExecutePlan}
+        onCancelPlan={onCancelPlan}
+        planActionsDisabled={planActionsDisabled}
         followingUserTexts={followingUserTexts}
       />
     )
@@ -247,6 +263,8 @@ function DriverMessageBody({
         message={message}
         isAnimating={isAnimating}
         onExecutePlan={onExecutePlan}
+        onCancelPlan={onCancelPlan}
+        planActionsDisabled={planActionsDisabled}
         followingUserTexts={followingUserTexts}
       />
     )

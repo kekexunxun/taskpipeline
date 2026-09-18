@@ -98,6 +98,8 @@ type OpenAIDraft = {
   isDefault: boolean
   /** 用户显式声明的参数能力；缺省 = driver 按 vendor 自动推断。 */
   capabilities?: CapabilityKey[]
+  /** 上下文窗口 token 上限（供对话头部展示占用率 + 参与裁剪预算）。 */
+  contextWindowTokens?: number
 }
 /** 按厂商分块（顺序 = MODEL_VENDORS 注册表；缺失/未知 vendor 归入「其它兼容端点」）。 */
 function groupProfilesByVendor(
@@ -900,7 +902,8 @@ export function SettingsDialog({
                 // 历史数据缺 id 的配置视为默认（与主进程读取约定一致：无 id/默认 → 回退 modelApiKey）
                 isDefault: item.isDefault ?? !(item as { id?: string }).id,
                 // 用户显式声明的参数能力（缺省 = driver 按 vendor 自动推断）
-                capabilities: (item as { capabilities?: CapabilityKey[] }).capabilities
+                capabilities: (item as { capabilities?: CapabilityKey[] }).capabilities,
+                contextWindowTokens: (item as { contextWindowTokens?: number }).contextWindowTokens
               }))
             // 每个 profile 的 API Key 是否已配置：优先 `modelApiKey:<id>`，默认配置回退历史 `modelApiKey`
             const keyStates = await Promise.all(
@@ -1017,6 +1020,7 @@ export function SettingsDialog({
     apiKey: string | undefined
     isDefault: boolean
     capabilities?: CapabilityKey[]
+    contextWindowTokens?: number
   }) => {
     try {
       const id = input.id ?? `openai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -1036,23 +1040,27 @@ export function SettingsDialog({
         displayName: input.displayName ?? '',
         apiKeyConfigured: input.apiKey ? true : (openAIProfiles.find((p) => p.id === id)?.apiKeyConfigured ?? false),
         isDefault: willBeDefault,
-        capabilities: input.capabilities
+        capabilities: input.capabilities,
+        contextWindowTokens: input.contextWindowTokens
       })
       // key 始终按 profile 存 `modelApiKey:<id>`（默认/非默认一致，切换默认无需迁移）；历史 `modelApiKey` 仅作读取回退
       if (input.apiKey !== undefined) await api.setSetting(`modelApiKey:${id}`, input.apiKey, true)
       await api.setSetting(
         'modelProfiles',
         JSON.stringify(
-          next.map(({ id: pid, vendor, baseUrl, model, displayName, isDefault, capabilities }) => ({
-            id: pid,
-            provider: 'company-openai',
-            vendor,
-            baseUrl,
-            model,
-            displayName,
-            isDefault,
-            capabilities
-          }))
+          next.map(
+            ({ id: pid, vendor, baseUrl, model, displayName, isDefault, capabilities, contextWindowTokens }) => ({
+              id: pid,
+              provider: 'company-openai',
+              vendor,
+              baseUrl,
+              model,
+              displayName,
+              isDefault,
+              capabilities,
+              ...(contextWindowTokens ? { contextWindowTokens } : {})
+            })
+          )
         )
       )
       setOpenAIProfiles(next)
@@ -1074,16 +1082,19 @@ export function SettingsDialog({
       await api.setSetting(
         'modelProfiles',
         JSON.stringify(
-          next.map(({ id: pid, vendor, baseUrl, model, displayName, isDefault, capabilities }) => ({
-            id: pid,
-            provider: 'company-openai',
-            vendor,
-            baseUrl,
-            model,
-            displayName,
-            isDefault,
-            capabilities
-          }))
+          next.map(
+            ({ id: pid, vendor, baseUrl, model, displayName, isDefault, capabilities, contextWindowTokens }) => ({
+              id: pid,
+              provider: 'company-openai',
+              vendor,
+              baseUrl,
+              model,
+              displayName,
+              isDefault,
+              capabilities,
+              ...(contextWindowTokens ? { contextWindowTokens } : {})
+            })
+          )
         )
       )
       setOpenAIProfiles(next)
@@ -1220,7 +1231,8 @@ export function SettingsDialog({
         displayName: openAIDialog.editing.displayName || undefined,
         apiKeyConfigured: openAIDialog.editing.apiKeyConfigured,
         isDefault: openAIDialog.editing.isDefault,
-        capabilities: openAIDialog.editing.capabilities
+        capabilities: openAIDialog.editing.capabilities,
+        contextWindowTokens: openAIDialog.editing.contextWindowTokens
       }
     : undefined
 

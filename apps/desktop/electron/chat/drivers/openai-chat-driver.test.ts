@@ -11,7 +11,10 @@ type StreamChunk = { type: string; [key: string]: unknown }
 type StreamTextOptions = {
   messages: Array<{ role: string }>
   system?: string
+  tools?: Record<string, unknown>
   providerOptions?: Record<string, Record<string, unknown>>
+  stopWhen?: { __stepCount: number }
+  prepareStep?: (arg: { stepNumber: number }) => { tools?: Record<string, unknown>; system?: string }
 }
 
 /** 可脚本化的流:noFinish=true 时省略 finish chunk(模拟底层静默中断)。 */
@@ -75,7 +78,7 @@ vi.mock('@ai-sdk/openai', () => ({
 }))
 
 // 必须在 vi.mock 之后 import driver
-const { OpenAIChatDriver } = await import('./openai-chat-driver.js')
+const { OpenAIChatDriver, MAX_CHAT_STEPS } = await import('./openai-chat-driver.js')
 const aiMock = (await import('ai')) as unknown as {
   __pushStreamScript: (s: StreamScript) => void
   __streamCalls: StreamTextOptions[]
@@ -387,6 +390,64 @@ describe('OpenAIChatDriver', () => {
     }
   })
 
+  it('emits a paired openai.tool-result when streamText reports a tool-error chunk (no dangling call)', async () => {
+    aiMock.__pushStreamScript({
+      chunks: [
+        { type: 'tool-call', toolCallId: 'tc-1', toolName: 'list_dir', input: { path: '../cw-main' } },
+        { type: 'tool-error', toolCallId: 'tc-1', toolName: 'list_dir', error: new Error('路径越界') }
+      ]
+    })
+    const events = await collect(
+      driver({ profile: { baseUrl: 'https://api.example.com', model: 'gpt-5' } }).streamChat({
+        conversationId: 'c',
+        model: 'openai:default',
+        history: [],
+        userInput: { id: 'u1', text: 'ls', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const parts = events.flatMap((e) => (e.type === 'part' ? [e.part] : []))
+    expect(parts.some((p) => p.type === 'openai.tool-call')).toBe(true)
+    const result = parts.find((p) => p.type === 'openai.tool-result')
+    expect(result).toBeDefined()
+    // 错误以 { error } 形式落成结果，保证 call 与 result 配对。
+    expect((result as { output?: { error?: string } }).output?.error).toContain('路径越界')
+  })
+
+  it('backfills a placeholder tool result for dangling tool-calls when rebuilding history', async () => {
+    aiMock.__pushStreamScript({ chunks: [{ type: 'text-delta', text: 'hi' }] })
+    const d = driver({ profile: { baseUrl: 'https://api.example.com', model: 'gpt-5' } })
+    // 历史里一条 assistant 只有 tool-call、没有 tool-result（旧版 tool-error 未落结果遗留的坏数据）。
+    const danglingAssistant = d.deserializeMessage({
+      id: 'a1',
+      role: 'assistant',
+      createdAt: 't',
+      driverId: 'openai',
+      raw: {
+        kind: 'assistant',
+        parts: [
+          { driverId: 'openai', type: 'openai.tool-call', toolCallId: 'call_dangling', name: 'list_dir', input: {} }
+        ]
+      }
+    })
+    await collect(
+      d.streamChat({
+        conversationId: 'c',
+        model: 'openai:default',
+        history: [danglingAssistant],
+        userInput: { id: 'u1', text: '继续', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const opts = aiMock.__streamCalls.at(-1)!
+    const toolMsg = opts.messages.find((m) => m.role === 'tool') as
+      | { content?: Array<{ toolCallId?: string; output?: { value?: { error?: string } } }> }
+      | undefined
+    expect(toolMsg).toBeDefined()
+    // 悬空调用被补了一条占位结果，避免 provider 以「Tool results are missing」拒绝。
+    expect(toolMsg?.content?.some((c) => c.toolCallId === 'call_dangling')).toBe(true)
+  })
+
   it('moves system content from history into the system option (ai-sdk 7 requirement)', async () => {
     aiMock.__pushStreamScript({ chunks: [{ type: 'text-delta', text: 'hi' }] })
     const d = driver({ profile: { baseUrl: 'https://api.example.com', model: 'gpt-5' } })
@@ -670,6 +731,130 @@ describe('OpenAIChatDriver', () => {
     expect(aiMock.__streamCalls.at(-1)?.providerOptions).toBeUndefined()
   })
 
+  it('raises the step hard cap to MAX_CHAT_STEPS via stopWhen', async () => {
+    aiMock.__pushStreamScript({ chunks: [{ type: 'text-delta', text: 'hi' }] })
+    await collect(
+      driver({ profile: { baseUrl: 'https://api.example.com', model: 'gpt-5' } }).streamChat({
+        conversationId: 'c',
+        model: 'openai:default',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const opts = aiMock.__streamCalls.at(-1)!
+    expect(opts.stopWhen?.__stepCount).toBe(MAX_CHAT_STEPS)
+  })
+
+  it('wind-down: prepareStep keeps tools until the last step, then disables them with a wrap-up instruction', async () => {
+    aiMock.__pushStreamScript({ chunks: [{ type: 'text-delta', text: 'hi' }] })
+    await collect(
+      driver({ profile: { baseUrl: 'https://api.example.com', model: 'gpt-5' } }).streamChat({
+        conversationId: 'c',
+        model: 'openai:default',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const opts = aiMock.__streamCalls.at(-1)!
+    expect(typeof opts.prepareStep).toBe('function')
+    // 未到最后一步：不改动工具（返回空对象）。
+    expect(opts.prepareStep!({ stepNumber: MAX_CHAT_STEPS - 2 })).toEqual({})
+    // 倒数第二步（stepNumber >= MAX-1）：摘掉工具逼本步只出文本。
+    const windDown = opts.prepareStep!({ stepNumber: MAX_CHAT_STEPS - 1 })
+    expect(windDown.tools).toEqual({})
+    expect(windDown.system).toContain('已达到工具调用上限')
+  })
+
+  // 计划模式的新语义：计划 = 一次独立的 planner 子回合（只读工具 + write_plan），
+  // 主链路工具集与提示词全程不被裁剪 —— 下面这组用例锁定两边各自的集合。
+  function projectToolSource() {
+    return {
+      id: 'project' as const,
+      displayName: '项目查询',
+      systemPrompt: () => '',
+      tools: () => [
+        {
+          name: 'read_file',
+          description: '',
+          schema: {},
+          annotations: { readOnlyHint: true },
+          execute: async () => 'ok'
+        },
+        {
+          name: 'write_file',
+          description: '',
+          schema: {},
+          annotations: { readOnlyHint: false },
+          execute: async () => ({ written: true })
+        },
+        {
+          name: 'write_plan',
+          description: '',
+          schema: {},
+          annotations: { readOnlyHint: false },
+          execute: async () => ({ written: true })
+        }
+      ],
+      describeResult: () => undefined,
+      close: () => undefined
+    }
+  }
+
+  /** 跑一轮，返回这轮流式请求实际拿到的 tools / system。 */
+  async function streamOnce(
+    d: InstanceType<typeof OpenAIChatDriver>,
+    chatMode: 'plan' | 'normal',
+    text = 'hi'
+  ): Promise<{ toolNames: string[]; system: string }> {
+    aiMock.__pushStreamScript({ chunks: [{ type: 'text-delta', text }] })
+    await collect(
+      d.streamChat({
+        conversationId: 'c',
+        model: 'openai:default',
+        history: [],
+        userInput: { id: 'u1', text, createdAt: new Date().toISOString() },
+        signal: new AbortController().signal,
+        toolSource: projectToolSource(),
+        chatMode
+      })
+    )
+    const opts = aiMock.__streamCalls.at(-1)!
+    return { toolNames: Object.keys(opts.tools ?? {}), system: String(opts.system ?? '') }
+  }
+
+  it('plan 轮走 planner 子回合：只读工具 + write_plan，写类工具进不了这个集合', async () => {
+    const d = driver({ profile: { baseUrl: 'https://api.example.com', model: 'gpt-5' } })
+    const { toolNames, system } = await streamOnce(d, 'plan')
+    expect(toolNames).toContain('read_file')
+    expect(toolNames).toContain('write_plan')
+    expect(toolNames).not.toContain('write_file')
+    // planner 角色提示只给子回合
+    expect(system).toContain('你是 planner 子代理')
+  })
+
+  it('普通轮只从主链路剔除 write_plan，写类工具照旧可用', async () => {
+    const d = driver({ profile: { baseUrl: 'https://api.example.com', model: 'gpt-5' } })
+    const { toolNames, system } = await streamOnce(d, 'normal')
+    expect(toolNames).toContain('read_file')
+    expect(toolNames).toContain('write_file')
+    expect(toolNames).not.toContain('write_plan')
+    // 主链路只挂「复杂度自检 + 建议」，不得 bake planner 角色指令
+    expect(system).toContain('【任务复杂度自检】')
+    expect(system).not.toContain('你是 planner 子代理')
+  })
+
+  it('计划轮之后的普通轮不限权：写类工具与主线提示词回到完整形态', async () => {
+    // 回归旧 bug：旧实现按 chatMode 裁剪主线，计划轮被打断后模式残留，
+    // 后续执行轮次跟着丢工具。现在两回合完全独立。
+    const d = driver({ profile: { baseUrl: 'https://api.example.com', model: 'gpt-5' } })
+    await streamOnce(d, 'plan', '帮我重构')
+    const { toolNames, system } = await streamOnce(d, 'normal', '执行这个计划')
+    expect(toolNames).toContain('write_file')
+    expect(system).not.toContain('你是 planner 子代理')
+  })
+
   it('routes official DeepSeek baseUrl to @ai-sdk/deepseek', async () => {
     resetCalledModels()
     aiMock.__pushStreamScript({ chunks: [{ type: 'text-delta', text: 'hi' }] })
@@ -903,5 +1088,45 @@ describe('OpenAIChatDriver', () => {
     // span.name 与 meta.traceLabel 双写：读时转换按 meta.traceLabel 出标题，缺它会回退成模型名
     expect(llm?.name).toBe('关键词提取')
     expect(llm?.traceLabel).toBe('关键词提取')
+  })
+
+  it('trace：plan 轮的 llm span 标出它属于 planner 子代理', async () => {
+    const started: Array<{ name?: string; traceLabel?: unknown; subagent?: unknown }> = []
+    const pipeline = {
+      beginTrace: () => undefined,
+      ensureActive: () => undefined,
+      startSpan: (_traceId: string, init: { name?: string; meta?: Record<string, unknown> }) => {
+        started.push({ name: init.name, traceLabel: init.meta?.traceLabel, subagent: init.meta?.subagent })
+        return { spanId: `span-${started.length}`, status: 'started' as const }
+      },
+      endSpan: () => undefined,
+      endTrace: () => undefined
+    } as unknown as TracePipeline
+    aiMock.__pushStreamScript({
+      chunks: [
+        { type: 'start-step' },
+        { type: 'text-delta', text: '## 问题分析' },
+        { type: 'finish-step', finishReason: 'stop', usage: { inputTokens: 3, outputTokens: 1 } }
+      ]
+    })
+    const d = new OpenAIChatDriver(
+      fakeStore({ baseUrl: 'https://api.example.com', model: 'gpt-5' }),
+      () => 'key',
+      pipeline
+    )
+    await collect(
+      d.streamChat({
+        conversationId: 'c-plan-trace',
+        model: 'openai:gpt-5',
+        history: [],
+        userInput: { id: 'u1', text: '出个计划', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal,
+        traceId: 'turn-plan-1',
+        chatMode: 'plan'
+      })
+    )
+    const llm = started.find((s) => s.subagent === 'planner')
+    expect(llm?.name).toBe('planner 子代理')
+    expect(llm?.traceLabel).toBe('planner 子代理')
   })
 })

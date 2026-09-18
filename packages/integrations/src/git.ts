@@ -1,6 +1,6 @@
 import { randomInt } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readdir, readFile } from 'node:fs/promises'
+import { join, relative } from 'node:path'
 import { execa } from 'execa'
 
 export type GitRunner = (args: string[], cwd: string, timeoutMs?: number, signal?: AbortSignal) => Promise<string>
@@ -215,10 +215,46 @@ export class GitService {
    */
   async workingTreeStatus(cwd: string): Promise<GitChangedFile[]> {
     const files = new Map<string, GitChangedFile>()
-    for (const file of parseWorkingStatus(await this.run(['status', '--short', '-z'], cwd))) {
+    for (const file of parseWorkingStatus(await this.run(['status', '--short', '--untracked-files=all', '-z'], cwd))) {
       files.set(file.path, file)
     }
-    return [...files.values()].sort((a, b) => a.path.localeCompare(b.path))
+    const expanded = await this.expandUntrackedDirs(cwd, [...files.values()])
+    return expanded.sort((a, b) => a.path.localeCompare(b.path))
+  }
+
+  /**
+   * git 对未跟踪目录（尤其嵌套 git 仓库 / 子模块）即便 `-uall` 也可能只回一条 `dir/` 记录。
+   * 列表与交付都不该出现「目录」这种点不开的死条目：把残留的目录条目展开为其内部真实文件（跳过 .git）。
+   * 空目录展开后无文件 → 该条目自然消失。
+   */
+  private async expandUntrackedDirs(cwd: string, files: GitChangedFile[]): Promise<GitChangedFile[]> {
+    const out: GitChangedFile[] = []
+    for (const file of files) {
+      if (!/[/\\]$/.test(file.path)) {
+        out.push(file)
+        continue
+      }
+      const relDir = file.path.replace(/[/\\]+$/, '')
+      for (const rel of await this.walkFiles(join(cwd, relDir), cwd)) out.push({ path: rel, status: '??' })
+    }
+    return out
+  }
+
+  /** 递归列出目录下的文件（相对 cwd、统一 `/` 分隔），跳过 `.git`。 */
+  private async walkFiles(absDir: string, cwd: string): Promise<string[]> {
+    try {
+      const entries = await readdir(absDir, { withFileTypes: true })
+      const result: string[] = []
+      for (const entry of entries) {
+        if (entry.name === '.git') continue
+        const abs = join(absDir, entry.name)
+        if (entry.isDirectory()) result.push(...(await this.walkFiles(abs, cwd)))
+        else if (entry.isFile() || entry.isSymbolicLink()) result.push(relative(cwd, abs).replaceAll('\\', '/'))
+      }
+      return result
+    } catch {
+      return []
+    }
   }
 
   async changedFiles(cwd: string, baseBranch: string, signal?: AbortSignal): Promise<GitChangedFile[]> {
@@ -232,9 +268,12 @@ export class GitService {
     } catch {
       /* The worktree may not have a resolvable base branch yet. */
     }
-    for (const file of parseWorkingStatus(await this.run(['status', '--short', '-z'], cwd, undefined, signal)))
+    for (const file of parseWorkingStatus(
+      await this.run(['status', '--short', '--untracked-files=all', '-z'], cwd, undefined, signal)
+    ))
       files.set(file.path, file)
-    return [...files.values()].sort((a, b) => a.path.localeCompare(b.path))
+    const expanded = await this.expandUntrackedDirs(cwd, [...files.values()])
+    return expanded.sort((a, b) => a.path.localeCompare(b.path))
   }
   currentBranch(cwd: string): Promise<string> {
     return this.run(['branch', '--show-current'], cwd)

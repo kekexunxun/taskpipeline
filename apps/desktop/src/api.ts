@@ -29,7 +29,7 @@ export type UserFileAttachment = {
 
 export type ChangedFile = { repositoryId: string; repositoryName: string; path: string; status: string }
 /** 对话级 Git 文件变更（仅工作区状态，不依赖 baseBranch）。 */
-export type ChatChangedFile = { path: string; status: string }
+export type ChatChangedFile = { path: string; status: string; root: string }
 export type TaskDetail = {
   task?: Task
   /** 主进程 activeTaskOperations 判定的运行中标记（应用重启后前端据此恢复 running，避免误显示"继续生成计划"）。 */
@@ -310,12 +310,16 @@ export type ChatPlan = {
 /** 计划状态。 */
 export type ChatPlanStatus = 'pending' | 'executing' | 'completed' | 'failed' | 'cancelled'
 
-/** 单条消息的流式用量（openai driver 从 ai-sdk finish chunk 收集；qoder 暂无数据）。 */
+/** 单条消息的流式用量（openai 从 ai-sdk finish 收集 + 单价表估算 costUsd；qoder 用 contextUsageRatio/credits）。 */
 export type ChatUsage = {
   inputTokens: number
   outputTokens: number
   totalTokens: number
   costUsd?: number
+  /** Qoder: 本回合后的上下文占用比例（0~1）。 */
+  contextUsageRatio?: number
+  /** Qoder: 本回合消耗的 credits（成本口径）。 */
+  credits?: number
 }
 
 /** 持久化形态: driver 自己的 raw + 共用元数据。 */
@@ -398,6 +402,18 @@ export type ChatConversationMeta = {
    * 重试仍会重新提取）。持久化保证应用重启后不重复提取。
    */
   memoryInjected?: boolean
+  /** 上下文滚动摘要（问题 2-B）：溢出轮次压缩后的摘要与覆盖边界；缺省 = 尚未压缩。 */
+  compaction?: ChatCompaction
+}
+
+/**
+ * 上下文滚动摘要（与 electron/chat/chat-types.ts 同步）：把溢出保留窗口的更早轮次压成摘要，
+ * 注入为 system，并在重建 history 时排除 coveredUntilMessageId 及其之前的非 system 消息。
+ */
+export type ChatCompaction = {
+  summary: string
+  coveredUntilMessageId: string
+  updatedAt: string
 }
 
 export type ChatConversation = ChatConversationMeta & { messages: StoredMessageRecord[] }
@@ -430,6 +446,8 @@ export type ChatModelInfo = {
   priceFactor?: number
   /** 该模型支持的运行时可调参数；缺省 = 无可调参数。 */
   capabilities?: ModelCapability[]
+  /** 上下文窗口 token 上限（profile 配置，供对话头部展示占用率；缺省 = 回落默认 128k）。 */
+  contextWindowTokens?: number
 }
 
 /**
@@ -498,6 +516,8 @@ export type ChatStreamChunk =
   | { type: 'plan-start' }
   /** 计划模式：用计划卡片替换消息的所有文本 parts。 */
   | { type: 'plan-part'; parts: DriverPart[] }
+  /** 流存活心跳：主进程活跃流期间的固定间隔信号，仅用于重置前端流看门狗，渲染无副作用。 */
+  | { type: 'heartbeat' }
 
 export type ChatStreamEvent = {
   streamId: string
@@ -506,6 +526,14 @@ export type ChatStreamEvent = {
   chunk?: ChatStreamChunk
   error?: string
   done?: boolean
+}
+
+/** 上下文压缩瞬时状态事件：主进程在压缩起止各广播一次，供前端渲染临时提示（不持久）。end 可带压缩后的上下文估算。 */
+export type ChatCompactionEvent = {
+  chatId: string
+  phase: 'start' | 'end'
+  /** 压缩成功后的上下文占用估算（usedTokens 已扣除被摘要覆盖的溢出轮次）；仅 end 携带。 */
+  context?: { usedTokens: number; windowTokens: number }
 }
 
 // === Memory API surface ===
@@ -740,6 +768,8 @@ export type AgentApi = {
   deleteChat(id: string): Promise<void>
   /** 绑定/解绑对话的工作目录(undefined = 解绑,回到普通对话)。 */
   setChatDirectory(id: string, workingDirectory?: string): Promise<ChatConversation | undefined>
+  /** 取消一条待执行计划（把消息内 plan part 状态改为 cancelled 并落盘）。 */
+  cancelChatPlan(chatId: string, messageId: string): Promise<ChatConversation | undefined>
   listChatModels(): Promise<ChatModelGroup[]>
   /** 系统默认模型（Qoder 优先，否则 OpenAI）；无任何可用模型时 undefined。 */
   getDefaultModel(): Promise<SystemDefaultModel | undefined>
@@ -755,6 +785,8 @@ export type AgentApi = {
     mediaType: string
   ): Promise<UserFileAttachment>
   onChatStreamEvent(callback: (event: ChatStreamEvent) => void): () => void
+  /** 上下文压缩瞬时状态（start/end），供渲染临时提示；主进程经 chat:compaction 通道广播。 */
+  onChatCompaction(callback: (event: ChatCompactionEvent) => void): () => void
   /** 对话级 Git 文件变更（根据 workingDirectory 查询工作区状态）。 */
   getChatChangedFiles(workingDirectory?: string): Promise<ChatChangedFile[]>
   /** 单文件 diff（支持 untracked / modified / deleted）。 */
@@ -1519,11 +1551,19 @@ export const api: AgentApi = window.agentApi ?? {
   async injectChatGuidance() {
     // 内存实现：引导消息无持久化需求，静默忽略
   },
+  async cancelChatPlan(_chatId, _messageId) {
+    // 内存实现：无落盘，静默忽略
+    return undefined
+  },
   onChatStreamEvent(callback) {
     memoryListeners.add(callback)
     return () => {
       memoryListeners.delete(callback)
     }
+  },
+  onChatCompaction() {
+    // 内存实现：无压缩事件源，返回空解绑。
+    return () => {}
   },
   async getChatChangedFiles() {
     return []

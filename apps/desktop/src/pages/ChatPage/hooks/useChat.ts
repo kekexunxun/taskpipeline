@@ -104,6 +104,15 @@ export function useChat() {
   const [messagesByChat, setMessagesByChat] = useState<Record<string, ChatMessage[]>>({})
   /** 正在生成的对话集合(并行流)。 */
   const [streamingChatIds, setStreamingChatIds] = useState<ReadonlySet<string>>(new Set())
+  /** 正在进行上下文压缩的对话集合（纯瞬时 UI 态，不写入消息、不落库；主进程 chat:compaction 广播驱动）。 */
+  const [compactingChatIds, setCompactingChatIds] = useState<ReadonlySet<string>>(new Set())
+  /**
+   * chatId → 压缩后的上下文占用估算（主进程 chat:compaction end 下发）。
+   * 头部优先展示它，直到下一条真实 assistant usage 到达（done chunk）即失效。
+   */
+  const [contextOverrideByChat, setContextOverrideByChat] = useState<
+    Record<string, { usedTokens: number; windowTokens: number }>
+  >({})
   /** chatId → 草稿(隔离,避免切换对话时输入内容串台)。 */
   const [draftsByChat, setDraftsByChat] = useState<Record<string, string>>({})
   /** chatId → 阶段提示(关键词提取/记忆检索中…),仅对当前对话展示。 */
@@ -123,6 +132,11 @@ export function useChat() {
   useEffect(() => {
     pendingMessagesByChatRef.current = pendingMessagesByChat
   }, [pendingMessagesByChat])
+  /** compactingChatIds 的同步 ref（send 守卫在压缩进行中直接拦截新流，避免与主进程压缩抢同一份会话存储）。 */
+  const compactingChatIdsRef = useRef<ReadonlySet<string>>(new Set())
+  useEffect(() => {
+    compactingChatIdsRef.current = compactingChatIds
+  }, [compactingChatIds])
   /** 活跃流表(key = chatId,同一对话同时只允许一个流)。 */
   const activeStreams = useRef<Map<string, ActiveStream>>(new Map())
   /** 流看门狗:每个流一个 timer,收到事件时重置;超时(主进程崩溃/IPC 断连)则清理残留流状态。 */
@@ -223,6 +237,27 @@ export function useChat() {
     const resolved = resolveModelValue(undefined, modelGroups)
     if (resolved) setModelAndDriver(resolved)
   }, [modelGroups, model, setModelAndDriver])
+
+  // 上下文压缩瞬时提示：主进程在压缩起止各广播一次 chat:compaction（其在流结束后执行，
+  // 无法复用已关闭的 stream 事件），此处维护 per-chat 临时态供消息流末尾渲染"压缩中…"。
+  useEffect(() => {
+    return api.onChatCompaction(({ chatId, phase, context }) => {
+      // end 携带压缩后的上下文估算时，写入头部覆盖值（下一条真实 usage 到达前生效）。
+      if (phase === 'end' && context) {
+        setContextOverrideByChat((current) => ({ ...current, [chatId]: context }))
+      }
+      setCompactingChatIds((current) => {
+        const has = current.has(chatId)
+        if (phase === 'start' && !has) return new Set([...current, chatId])
+        if (phase === 'end' && has) {
+          const next = new Set(current)
+          next.delete(chatId)
+          return next
+        }
+        return current
+      })
+    })
+  }, [])
 
   /** 拉取并缓存一个对话(消息 + 元信息)。返回元信息供 select 恢复配置。 */
   const loadConversation = useCallback(
@@ -400,6 +435,10 @@ export function useChat() {
       setHintsByChat((current) => ({ ...current, [chatId]: chunk.text }))
       return
     }
+    if (chunk.type === 'heartbeat') {
+      // 主进程流存活心跳：到达即已在 onEvent 重置看门狗，此处无副作用（不触发消息列表重渲染）。
+      return
+    }
     setMessagesByChat((current) => {
       const list = current[chatId] ?? []
       return {
@@ -434,12 +473,26 @@ export function useChat() {
             } as ChatMessageMetadata
             return { ...message, metadata }
           }
-          if (chunk.type === 'done' && chunk.status === 'error') {
-            // 兆底:如 error chunk 未送达(理论上不会),done(status=error) 也能让消息进入错误态。
-            const metadata = { ...(message.metadata ?? {}), status: 'error' } as ChatMessageMetadata
-            return { ...message, metadata }
+          if (chunk.type === 'done') {
+            // done 携带本轮 usage/model：写回到在飞消息，让头部上下文占用率无需切走重载即可实时更新。
+            // 真实 usage 已到达 → 失效此前的压缩估算覆盖值。
+            if (chunk.usage) {
+              setContextOverrideByChat((current) => {
+                if (!current[chatId]) return current
+                const next = { ...current }
+                delete next[chatId]
+                return next
+              })
+            }
+            // 兜底:如 error chunk 未送达(理论上不会),done(status=error) 也能让消息进入错误态。
+            const metadata = {
+              ...(message.metadata ?? {}),
+              ...(chunk.status === 'error' ? { status: 'error' as const } : {}),
+              ...(chunk.usage ? { usage: chunk.usage } : {})
+            } as ChatMessageMetadata
+            return { ...message, ...(chunk.usage ? { usage: chunk.usage } : {}), metadata }
           }
-          // 其它 chunk (start / model / task-created / done) 不影响 parts。
+          // 其它 chunk (start / model / task-created) 不影响 parts。
           return message
         })
       }
@@ -564,6 +617,35 @@ export function useChat() {
     }))
   }, [])
 
+  /**
+   * 取消一条待执行计划：乐观更新内存中该消息的 plan part 为 cancelled，再落盘。
+   * 计划状态随消息 part 持久化，重载后仍为已取消。
+   */
+  const cancelPlan = useCallback(async (chatId: string, messageId: string) => {
+    setMessagesByChat((current) => {
+      const list = current[chatId]
+      if (!list) return current
+      const next = list.map((message) => {
+        if (message.id !== messageId) return message
+        let changed = false
+        const parts = message.parts.map((part) => {
+          if (part.type === 'plan' && part.plan.status === 'pending') {
+            changed = true
+            return { ...part, plan: { ...part.plan, status: 'cancelled' as const } }
+          }
+          return part
+        })
+        return changed ? { ...message, parts } : message
+      })
+      return { ...current, [chatId]: next }
+    })
+    try {
+      await api.cancelChatPlan(chatId, messageId)
+    } catch {
+      /* 主进程落盘失败不影响内存展示 */
+    }
+  }, [])
+
   /** 从待发送队列中移除指定消息。 */
   const removePendingMessage = useCallback((chatId: string, messageId: string) => {
     setPendingMessagesByChat((current) => {
@@ -587,6 +669,8 @@ export function useChat() {
       // 同一对话只允许一个流(并行:不同对话互不影响)。
       const existing = activeIdRef.current ? activeStreams.current.get(activeIdRef.current) : undefined
       if (existing) return undefined
+      // 上下文压缩进行中：拦截发送/执行，等压缩结束再放行（压缩会改写会话存储，抢跑会打架）。
+      if (activeIdRef.current && compactingChatIdsRef.current.has(activeIdRef.current)) return undefined
 
       // 没有当前对话时,自动创建一个。
       let targetId = activeIdRef.current
@@ -803,6 +887,8 @@ export function useChat() {
   )
   /** 当前对话的模式（无 activeId 时使用默认模式）。 */
   const chatMode: ChatConversationMode = activeId ? (chatModeByChat[activeId] ?? defaultChatMode) : defaultChatMode
+  /** 当前对话的压缩后上下文占用覆盖值（有值时头部优先展示）。 */
+  const contextUsageOverride = activeId ? contextOverrideByChat[activeId] : undefined
   /** 当前选中模型是否支持视觉/多模态输入（控制附件入口显隐）。 */
   const modelSupportsVision = useMemo(() => {
     if (!model) return false
@@ -826,6 +912,10 @@ export function useChat() {
       hint,
       /** 正在生成的对话集合（侧边栏生成状态用）。 */
       streamingChatIds,
+      /** 正在进行上下文压缩的对话集合（瞬时"压缩中…"提示用）。 */
+      compactingChatIds,
+      /** 当前对话的压缩后上下文占用覆盖值（头部瞬时展示）。 */
+      contextUsageOverride,
       /** 当前对话待确认的 HITL 请求（内联卡片用）。 */
       approvals,
       /** 当前对话已回答的 AskUserQuestion（保留展示已选结果）。 */
@@ -862,6 +952,7 @@ export function useChat() {
       respondApproval,
       enqueuePending,
       removePendingMessage,
+      cancelPlan,
       refreshMetas
     }),
     [
@@ -875,6 +966,8 @@ export function useChat() {
       status,
       hint,
       streamingChatIds,
+      compactingChatIds,
+      contextUsageOverride,
       approvals,
       answered,
       pendingMessages,
@@ -908,6 +1001,7 @@ export function useChat() {
       respondApproval,
       enqueuePending,
       removePendingMessage,
+      cancelPlan,
       refreshMetas
     ]
   )

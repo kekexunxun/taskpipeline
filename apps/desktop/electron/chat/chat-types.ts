@@ -122,12 +122,16 @@ export type DriverPart =
       parentTaskId?: string
     }
 
-/** 单条消息的流式用量（openai driver 从 ai-sdk finish chunk 收集；qoder 暂无数据）。 */
+/** 单条消息的流式用量（openai 从 ai-sdk finish 收集 + 单价表估算 costUsd；qoder 用 contextUsageRatio/credits）。 */
 export type ChatUsage = {
   inputTokens: number
   outputTokens: number
   totalTokens: number
   costUsd?: number
+  /** Qoder: 本回合后的上下文占用比例（0~1）；token 口径不可得时的替代。 */
+  contextUsageRatio?: number
+  /** Qoder: 本回合消耗的 credits（成本口径）。 */
+  credits?: number
 }
 
 /** 持久化形态: driver 自己的 raw + 共用元数据。 */
@@ -192,6 +196,9 @@ export type ChatStreamChunk =
   | { type: 'plan-start' }
   /** 计划模式：用计划卡片替换消息的所有文本 parts。 */
   | { type: 'plan-part'; parts: DriverPart[] }
+  /** 流存活心跳：主进程在活跃流期间按固定间隔发送，仅用于重置前端流看门狗（防止长思考 / 大工具参数
+   *  生成这类「活着但安静」的流被误判为死流而 abort）。前端渲染时无副作用。 */
+  | { type: 'heartbeat' }
 
 /**
  * 模型可调参数能力声明（driver 自描述，schema 驱动）。
@@ -218,6 +225,8 @@ export type ChatModelInfo = {
   priceFactor?: number
   /** 该模型支持的运行时可调参数；缺省 = 无可调参数。 */
   capabilities?: ModelCapability[]
+  /** 上下文窗口 token 上限（profile 配置，供前端展示占用率；缺省 = 前端回落保守默认）。 */
+  contextWindowTokens?: number
 }
 export type ChatModelGroup = {
   driverId: ChatDriverId
@@ -248,6 +257,20 @@ export type ChatPlan = {
 
 /** 计划状态。 */
 export type ChatPlanStatus = 'pending' | 'executing' | 'completed' | 'failed' | 'cancelled'
+
+/**
+ * 上下文滚动摘要（问题 2-B）：把溢出保留窗口的更早轮次压成一段摘要，注入为 system，
+ * 并在重建 history 时排除 `coveredUntilMessageId` 及其之前的非 system 消息。
+ * 随对话持久化（`chats-v4/<id>.json`）；缺省 = 尚未压缩。
+ */
+export type ChatCompaction = {
+  /** 已覆盖轮次的滚动摘要正文（注入为 system）。 */
+  summary: string
+  /** 摘要已覆盖到的最后一条消息 id：重建 history 时该消息及其之前的非 system 轮次被排除。 */
+  coveredUntilMessageId: string
+  /** 最近一次摘要更新时间（ISO）。 */
+  updatedAt: string
+}
 
 /**
  * 可选的 MCP 服务 id（Chat 页 MCP 选择器与 driver 注入共用）。
@@ -290,6 +313,8 @@ export type ChatConversationMeta = {
    * 重试仍会重新提取）。持久化保证应用重启后不重复提取。
    */
   memoryInjected?: boolean
+  /** 上下文滚动摘要（问题 2-B）：溢出轮次压缩后的摘要与覆盖边界；缺省 = 尚未压缩。 */
+  compaction?: ChatCompaction
 }
 /**
  * 对话完整形态。`messages` 是 driver 透传的 record 列表(不包含运行时 `parts`),

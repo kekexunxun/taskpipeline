@@ -128,7 +128,9 @@ export function PartRenderer({
   messageStatus,
   followingUserTexts,
   planWaiting,
-  onExecutePlan
+  onExecutePlan,
+  onCancelPlan,
+  planActionsDisabled
 }: {
   parts: DriverPart[]
   isStreaming?: boolean
@@ -141,6 +143,10 @@ export function PartRenderer({
   /** 对话是否处于“等待处理计划”存活态：仅当前会话内刚生成且未结束时为 true。 */
   planWaiting?: boolean
   onExecutePlan?: (plan: ChatPlan) => void
+  /** 取消计划回调：把 pending 计划标记为已取消。 */
+  onCancelPlan?: (plan: ChatPlan) => void
+  /** 压缩进行中等：与 isStreaming 一起置灰计划卡执行/取消按钮（不伪造 streaming）。 */
+  planActionsDisabled?: boolean
 }) {
   // 合并相邻的同类型流式增量 part:
   //  - qoder.thinking:SDK 按 thinking_delta 拆分,每条渲染一个折叠块会刷屏(8+ 个空标题块);
@@ -241,7 +247,15 @@ export function PartRenderer({
       // 计划模式本身就是“生成完计划即结束本轮”，回合结束后计划保持 pending 等待
       // 用户执行；只有用户显式取消才算 cancelled，不能因流结束而降级。
       const plan = resolvePlanDisplayStatus(part.plan, followingUserTexts, planWaiting)
-      return <PlanCard key={key} plan={plan} onExecute={onExecutePlan} disabled={isStreaming} />
+      return (
+        <PlanCard
+          key={key}
+          plan={plan}
+          onExecute={onExecutePlan}
+          onCancel={onCancelPlan}
+          disabled={isStreaming || planActionsDisabled}
+        />
+      )
     }
     if (part.type === 'qoder.thinking' || part.type === 'openai.thinking') {
       return <ThinkingPart key={key} part={part} isStreaming={isStreaming} />
@@ -260,6 +274,8 @@ export function PartRenderer({
       // 按工具名路由到专用渲染器（大小写不敏感：Qoder 用首字母大写 Write/Edit/Read…，
       // Pi 用小写 write/edit/read…，统一匹配以让两套工具链路走同一套专用渲染器）。
       const toolNameLower = part.name.toLowerCase()
+      // write_plan：计划正文已由 PlanCard（plan part）承载，工具行不重复展示。
+      if (toolNameLower === 'write_plan' || toolNameLower === 'writeplan') return null
       if (toolNameLower === 'write') {
         return <WriteToolBlock key={key} input={part.input} output={result?.output} status={status} />
       }
@@ -458,13 +474,14 @@ export function PartRenderer({
       .map((p) => p.text)
       .join('')
     if (textContent.trim()) {
-      // 流式进行中 → 生成中；流结束后默认待执行（用户尚未操作，不能标为已取消），
-      // 仅当消息是被用户主动中止时才标为已取消。
+      // 流式进行中 → 生成中；流已结束却仍停留在计划模式（未收到 plan-part = 计划未成功产出）
+      // 时不能继续伪装成“生成中”：被用户中止 → 已取消，其余（模型异常 / 计划落盘失败）→ 生成失败。
       const planStatus = isStreaming
         ? ('executing' as const)
         : messageStatus === 'aborted'
           ? ('cancelled' as const)
-          : ('pending' as const)
+          : ('failed' as const)
+      const planStatusText = isStreaming ? '生成中' : messageStatus === 'aborted' ? '已取消' : '生成失败'
       return (
         <PlanCard
           plan={{
@@ -477,7 +494,7 @@ export function PartRenderer({
           }}
           onExecute={onExecutePlan}
           disabled={true}
-          statusText="生成中"
+          statusText={planStatusText}
         />
       )
     }

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { LoaderIcon, PanelRightCloseIcon, PanelRightOpenIcon } from 'lucide-react'
 import { ChatHistoryList } from './components/ChatHistoryList'
@@ -19,7 +19,8 @@ import { UiRequestDialog } from '@/pages/CodingPage/components/UiRequestDialog'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { api } from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
-import type { ChatPlan, UserFileAttachment } from '@/api'
+import { cn } from '@/lib/utils'
+import type { ChatMessage, ChatPlan, UserFileAttachment } from '@/api'
 
 export default function ChatPage() {
   return (
@@ -27,6 +28,60 @@ export default function ChatPage() {
       <ChatPageInner />
     </ErrorBoundary>
   )
+}
+
+/** 上下文窗口缺省估算值（与主进程 context-budget.ts 的 DEFAULT_CONTEXT_WINDOW_TOKENS 对齐）。 */
+const CONTEXT_WINDOW_FALLBACK_TOKENS = 128_000
+
+/** token 数简写：12300 → 12.3k；≥1M → M。 */
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}k`
+  return String(n)
+}
+
+/** 成本金额简写：小额（<$0.01）保留 4 位，否则 2 位。 */
+function formatCost(n: number): string {
+  if (n <= 0) return '$0'
+  return `$${n < 0.01 ? n.toFixed(4) : n.toFixed(2)}`
+}
+
+/** credits 简写（Qoder 自有计费单位 credit）：去掉多余的尾零。 */
+function formatCredits(n: number): string {
+  return `${Number(n.toFixed(2))} credit`
+}
+
+/** 占用条颜色：≥ 85% 红、≥ 60% 琥珀、否则绿。 */
+function contextBarClass(percent: number): string {
+  return percent >= 85 ? 'bg-red-500' : percent >= 60 ? 'bg-amber-500' : 'bg-emerald-500'
+}
+
+/**
+ * 汇总当前会话用量（从新到旧遍历 assistant）：
+ *  - usedTokens / contextRatio = 最近一条有值者（上下文占用属“当前状态”）；
+ *  - costUsd / credits = 逐轮累加（每轮全量计费，属“累计花费”）。
+ */
+function collectConversationUsage(messages: ChatMessage[]): {
+  usedTokens?: number
+  contextRatio?: number
+  costUsd?: number
+  credits?: number
+} {
+  let usedTokens: number | undefined
+  let contextRatio: number | undefined
+  let costUsd: number | undefined
+  let credits: number | undefined
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (!message || message.role !== 'assistant') continue
+    const usage = message.usage ?? message.metadata?.usage
+    if (!usage) continue
+    if (usedTokens === undefined && usage.inputTokens > 0) usedTokens = usage.inputTokens
+    if (contextRatio === undefined && usage.contextUsageRatio !== undefined) contextRatio = usage.contextUsageRatio
+    if (usage.costUsd !== undefined) costUsd = (costUsd ?? 0) + usage.costUsd
+    if (usage.credits !== undefined) credits = (credits ?? 0) + usage.credits
+  }
+  return { usedTokens, contextRatio, costUsd, credits }
 }
 
 function ChatPageInner() {
@@ -56,6 +111,14 @@ function ChatPageInner() {
       }
       const executeMessage = `请按照计划文件执行：\`${plan.filePath}\`\n\n请先读取该文件，然后按照计划逐步执行。`
       void chat.send(executeMessage)
+    },
+    [chat]
+  )
+
+  // 取消计划回调：计划 ID 与产出它的 assistant 消息 ID 一致，交由 useChat 乐观更新 + 落盘。
+  const handleCancelPlan = useCallback(
+    (plan: ChatPlan) => {
+      if (chat.activeId) void chat.cancelPlan(chat.activeId, plan.id)
     },
     [chat]
   )
@@ -102,6 +165,8 @@ function ChatPageInner() {
   }
 
   const handleSend = async (value: string, files?: UserFileAttachment[]) => {
+    // 上下文压缩进行中：禁止发送（压缩会改写会话存储，抢跑会与压缩打架），等压缩结束再发。
+    if (chat.activeId && chat.compactingChatIds.has(chat.activeId)) return
     // 对话进行中，将消息加入待发送队列（本轮结束后自动发送）
     if (chat.streaming && chat.activeId) {
       chat.enqueuePending(chat.activeId, value, files)
@@ -145,6 +210,8 @@ function ChatPageInner() {
   }
 
   const hasModel = chat.modelGroups.some((group) => group.models.length)
+  // 当前对话是否处于上下文压缩中：压缩期间禁发送 + 置灰计划卡执行/取消，压缩结束自动恢复。
+  const compacting = Boolean(chat.activeId && chat.compactingChatIds.has(chat.activeId))
   // 欢迎页显示条件：没有活跃对话，或者正在从欢迎页过渡
   const isEmpty = !chat.activeId || isTransitioning
   // 右侧面板显示条件：有活跃对话且绑定了工作目录且面板已打开
@@ -153,6 +220,38 @@ function ChatPageInner() {
     ? '输入消息即可自动创建新对话'
     : // : `${chat.messages.length} 条消息 · ${hasModel ? `${chat.modelGroups.length} 个 Provider` : '未配置模型'}`
       `${chat.messages.length} 条消息`
+
+  // 对话级用量：上下文占用（当前状态：token/窗口 或 Qoder ratio）+ 成本（累计：OpenAI $ / Qoder credits）。
+  const usageSummary = useMemo(() => {
+    const { usedTokens: derivedUsed, contextRatio, costUsd, credits } = collectConversationUsage(chat.messages)
+    // 压缩后的估算覆盖值优先于消息派生值（下一条真实 usage 到达前生效）。
+    const override = chat.contextUsageOverride
+    const usedTokens = override?.usedTokens ?? derivedUsed
+    let configuredWindow: number | undefined
+    for (const group of chat.modelGroups) {
+      const found = group.models.find((m) => m.value === chat.model)
+      if (found) {
+        configuredWindow = found.contextWindowTokens
+        break
+      }
+    }
+    const windowTokens = override?.windowTokens ?? configuredWindow ?? CONTEXT_WINDOW_FALLBACK_TOKENS
+    const contextPercent =
+      usedTokens != null
+        ? Math.min(100, Math.round((usedTokens / windowTokens) * 100))
+        : contextRatio != null
+          ? Math.min(100, Math.round(contextRatio * 100))
+          : undefined
+    return {
+      usedTokens,
+      windowTokens,
+      configured: configuredWindow != null,
+      contextRatio,
+      contextPercent,
+      costUsd,
+      credits
+    }
+  }, [chat.messages, chat.model, chat.modelGroups, chat.contextUsageOverride])
 
   return (
     <div
@@ -241,7 +340,46 @@ function ChatPageInner() {
                 <h1 className="truncate text-sm font-semibold tracking-tight">
                   {chat.conversation?.title ?? '新建对话'}
                 </h1>
-                <p className="mt-1 truncate text-xs text-muted-foreground">{headerSubtitle}</p>
+                <p className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-muted-foreground">
+                  <span>{headerSubtitle}</span>
+                  {usageSummary.contextPercent != null && (
+                    <span
+                      className="inline-flex items-center gap-1.5"
+                      title={
+                        usageSummary.usedTokens != null
+                          ? usageSummary.configured
+                            ? `已用上下文约 ${usageSummary.usedTokens.toLocaleString()} / 窗口 ${usageSummary.windowTokens.toLocaleString()} tokens`
+                            : `已用上下文约 ${usageSummary.usedTokens.toLocaleString()} tokens（窗口未配置，按 ${usageSummary.windowTokens.toLocaleString()} 估算）`
+                          : `上下文占用约 ${usageSummary.contextPercent}%（Qoder 口径）`
+                      }
+                    >
+                      <span className="inline-block h-1 w-14 overflow-hidden rounded-full bg-muted">
+                        <span
+                          className={cn(
+                            'block h-full rounded-full transition-all',
+                            contextBarClass(usageSummary.contextPercent)
+                          )}
+                          style={{ width: `${Math.max(4, usageSummary.contextPercent)}%` }}
+                        />
+                      </span>
+                      <span className="font-mono text-[10px]">
+                        {usageSummary.usedTokens != null
+                          ? `${formatTokenCount(usageSummary.usedTokens)}/${formatTokenCount(usageSummary.windowTokens)} · ${usageSummary.contextPercent}%`
+                          : `上下文 ${usageSummary.contextPercent}%`}
+                      </span>
+                    </span>
+                  )}
+                  {usageSummary.costUsd != null && (
+                    <span className="font-mono text-[10px]" title="本会话累计成本（按单价表估算）">
+                      {formatCost(usageSummary.costUsd)}
+                    </span>
+                  )}
+                  {usageSummary.costUsd == null && usageSummary.credits != null && (
+                    <span className="font-mono text-[10px]" title="本会话累计消耗 credit">
+                      {formatCredits(usageSummary.credits)}
+                    </span>
+                  )}
+                </p>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
                 {chat.streaming && (
@@ -267,6 +405,8 @@ function ChatPageInner() {
               messages={chat.messages}
               streaming={chat.streaming}
               hint={chat.hint}
+              compacting={compacting}
+              planActionsDisabled={compacting}
               approvals={chat.approvals}
               answered={chat.answered}
               onRespondApproval={(id, response) => void chat.respondApproval(id, response)}
@@ -280,6 +420,7 @@ function ChatPageInner() {
                 }
               }}
               onExecutePlan={handleExecutePlan}
+              onCancelPlan={handleCancelPlan}
             />
 
             <div className="shrink-0 border-t bg-background/95 px-4 pt-2 pb-2.5">
@@ -357,16 +498,19 @@ function ChatPageInner() {
                 onSend={handleSend}
                 onStop={() => void chat.stop()}
                 disabled={!hasModel}
+                sendDisabled={compacting}
                 placeholder={
                   !hasModel
                     ? '请先在设置中配置可用模型'
-                    : chat.streaming
-                      ? chat.pendingMessages.length > 0
-                        ? '继续输入，排队等待发送'
-                        : '输入消息，将在当前对话结束后自动发送'
-                      : chat.taskCreationEnabled
-                        ? '描述准备创建的 Jira 任务，Agent 会补齐必要信息'
-                        : undefined
+                    : compacting
+                      ? '上下文压缩中，请稍候…'
+                      : chat.streaming
+                        ? chat.pendingMessages.length > 0
+                          ? '继续输入，排队等待发送'
+                          : '输入消息，将在当前对话结束后自动发送'
+                        : chat.taskCreationEnabled
+                          ? '描述准备创建的 Jira 任务，Agent 会补齐必要信息'
+                          : undefined
                 }
                 streaming={chat.streaming}
                 hitlContextType="conversation"

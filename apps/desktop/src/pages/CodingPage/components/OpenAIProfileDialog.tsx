@@ -30,6 +30,8 @@ export type OpenAIProfile = {
   isDefault?: boolean
   /** 用户显式声明的可调参数能力；缺省 = 按 vendor 自动推断。 */
   capabilities?: CapabilityKey[]
+  /** 上下文窗口 token 上限（供对话头部展示占用率；缺省 = 前端回落默认 128k）。 */
+  contextWindowTokens?: number
 }
 
 /** 能力多选项（与 driver 端 capabilitiesForProfile 的自动推断语义对齐）。 */
@@ -69,6 +71,7 @@ export function OpenAIProfileDialog({
     apiKey: string | undefined
     isDefault: boolean
     capabilities?: CapabilityKey[]
+    contextWindowTokens?: number
   }): void
   onDeleted?(): void
   onError?(reason: unknown): void
@@ -81,6 +84,7 @@ export function OpenAIProfileDialog({
   const [isDefault, setIsDefault] = useState(false)
   const [manualCapabilities, setManualCapabilities] = useState(false)
   const [capabilities, setCapabilities] = useState<CapabilityKey[]>([])
+  const [contextWindow, setContextWindow] = useState('')
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   useEffect(() => {
@@ -93,6 +97,7 @@ export function OpenAIProfileDialog({
     setIsDefault(initial?.isDefault ?? false)
     setManualCapabilities(initial?.capabilities !== undefined)
     setCapabilities(initial?.capabilities ?? [])
+    setContextWindow(initial?.contextWindowTokens ? String(initial.contextWindowTokens) : '')
   }, [open, initial])
   const trimmedBase = baseUrl.trim()
   const trimmedModel = model.trim()
@@ -112,7 +117,8 @@ export function OpenAIProfileDialog({
         displayName: displayName.trim() || undefined,
         apiKey: apiKeyValue,
         isDefault,
-        capabilities: manualCapabilities ? capabilities : undefined
+        capabilities: manualCapabilities ? capabilities : undefined,
+        contextWindowTokens: Number(contextWindow) > 0 ? Math.round(Number(contextWindow)) : undefined
       })
     } catch (reason) {
       onError?.(reason)
@@ -221,6 +227,20 @@ export function OpenAIProfileDialog({
             </Field>
             <Field label="设为默认（组内默认 profile）">
               <Switch checked={isDefault} onCheckedChange={setIsDefault} />
+            </Field>
+            <Field label="上下文窗口 (tokens)">
+              <Input
+                type="number"
+                min={0}
+                step={1000}
+                inputMode="numeric"
+                value={contextWindow}
+                onChange={(event) => setContextWindow(event.target.value)}
+                placeholder="如 200000（留空 = 默认 128000）"
+              />
+              <p className="text-[11px] leading-4 text-muted-foreground">
+                用于对话头部展示上下文占用率，并参与自动裁剪预算；不确定可留空。
+              </p>
             </Field>
             <Field label="参数能力（选择器可调参数）">
               <div className="flex items-center gap-2">

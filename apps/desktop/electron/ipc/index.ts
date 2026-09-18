@@ -768,6 +768,9 @@ export function registerIpc(d: IpcDeps): void {
   ipcMain.handle('chats:set-directory', async (_event, id: string, workingDirectory?: string) => {
     return chatService.setChatWorkingDirectory(id, workingDirectory)
   })
+  ipcMain.handle('chats:cancel-plan', async (_event, chatId: string, messageId: string) =>
+    chatService.cancelPlan(chatId, messageId)
+  )
   ipcMain.handle('chats:list-models', async () => {
     const groups = await chatService.listModels()
     const status = qoderOrch?.getCachedStatus()
@@ -798,7 +801,19 @@ export function registerIpc(d: IpcDeps): void {
   ipcMain.handle('chats:changed-files', async (_event, workingDirectory?: string) => {
     if (!workingDirectory) return []
     try {
-      return await gitService.workingTreeStatus(workingDirectory)
+      const roots = await chatService.resolveWorkspaceRoots(workingDirectory)
+      const perRoot = await Promise.all(
+        roots.map(async (root) => {
+          try {
+            const files = (await gitService.workingTreeStatus(root)) as Array<{ path: string; status: string }>
+            return files.map((file) => ({ ...file, root }))
+          } catch {
+            /* 非 git 仓库或权限问题：跳过该目录，不影响其余根目录展示 */
+            return []
+          }
+        })
+      )
+      return perRoot.flat().sort((a, b) => a.root.localeCompare(b.root) || a.path.localeCompare(b.path))
     } catch {
       return []
     }

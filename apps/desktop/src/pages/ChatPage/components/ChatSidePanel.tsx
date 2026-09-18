@@ -27,7 +27,7 @@ import { fileChangeLabel, fileChangeTagColor, fileChangeIconColor } from '@/util
 import { api, type StoredMessage } from '@/api'
 import { CodeBlockContent } from '@/components/ai-elements/code-block'
 
-type ChangedFile = { path: string; status: string }
+type ChangedFile = { path: string; status: string; root: string }
 type DiffContents = { original: string; current: string }
 
 /**
@@ -93,12 +93,7 @@ export function ChatSidePanel({
         </TabsContent>
 
         <TabsContent value="changes" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
-          <ChangedFilesContent
-            files={files}
-            loading={loading}
-            onRefresh={refresh}
-            workingDirectory={workingDirectory}
-          />
+          <ChangedFilesContent files={files} loading={loading} onRefresh={refresh} />
         </TabsContent>
       </Tabs>
     </section>
@@ -255,7 +250,7 @@ function ChangeFileItem({
 /** 「工作区变更」列表行：文件名 + 浅色目录路径 + 状态标签。 */
 function FileItem({ file, selected, onClick }: { file: ChangedFile; selected: boolean; onClick: () => void }) {
   const fileName = extractFilename(file.path)
-  const dirPath = extractDirPath(file.path)
+  const dirPath = [extractRootName(file.root), extractDirPath(file.path)].filter(Boolean).join('/')
   const isAdded = file.status.includes('?') || file.status.includes('A')
   const isDeleted = file.status.includes('D')
 
@@ -296,36 +291,31 @@ function OperationBlock({ op }: { op: ConversationChangeOperation }) {
 function ChangedFilesContent({
   files,
   loading,
-  onRefresh,
-  workingDirectory
+  onRefresh
 }: {
   files: ChangedFile[]
   loading: boolean
   onRefresh: () => void
-  workingDirectory?: string
 }) {
   const [selectedFile, setSelectedFile] = useState<ChangedFile | null>(null)
   const [diffContents, setDiffContents] = useState<DiffContents>({ original: '', current: '' })
   const [diffLoading, setDiffLoading] = useState(false)
-  const loadDiff = useCallback(
-    async (file: ChangedFile) => {
-      if (!workingDirectory) return
-      setDiffLoading(true)
-      try {
-        const contents = await api.getFileDiffContents(workingDirectory, file.path, file.status)
-        setDiffContents(contents)
-      } catch {
-        setDiffContents({ original: '', current: '' })
-      } finally {
-        setDiffLoading(false)
-      }
-    },
-    [workingDirectory]
-  )
+  const loadDiff = useCallback(async (file: ChangedFile) => {
+    if (!file.root) return
+    setDiffLoading(true)
+    try {
+      const contents = await api.getFileDiffContents(file.root, file.path, file.status)
+      setDiffContents(contents)
+    } catch {
+      setDiffContents({ original: '', current: '' })
+    } finally {
+      setDiffLoading(false)
+    }
+  }, [])
 
   const handleFileClick = useCallback(
     (file: ChangedFile) => {
-      if (selectedFile?.path === file.path) {
+      if (selectedFile && fileKey(selectedFile) === fileKey(file)) {
         setSelectedFile(null)
         setDiffContents({ original: '', current: '' })
       } else {
@@ -375,9 +365,9 @@ function ChangedFilesContent({
           <div className="space-y-0.5">
             {files.map((file) => (
               <FileItem
-                key={file.path}
+                key={fileKey(file)}
                 file={file}
-                selected={selectedFile?.path === file.path}
+                selected={!!selectedFile && fileKey(selectedFile) === fileKey(file)}
                 onClick={() => handleFileClick(file)}
               />
             ))}
@@ -389,8 +379,11 @@ function ChangedFilesContent({
       {selectedFile && (
         <div className="flex min-h-0 flex-1 flex-col border-t">
           <div className="flex shrink-0 items-center justify-between border-b bg-muted/30 px-3 py-1.5">
-            <span className="truncate font-mono text-xs text-muted-foreground" title={selectedFile.path}>
-              {selectedFile.path}
+            <span
+              className="truncate font-mono text-xs text-muted-foreground"
+              title={`${selectedFile.root}/${selectedFile.path}`}
+            >
+              {[extractRootName(selectedFile.root), selectedFile.path].filter(Boolean).join('/')}
             </span>
             <Button
               variant="ghost"
@@ -514,36 +507,42 @@ function ShikiDiffView({ original, current, filePath }: { original: string; curr
   const lineChanges = useMemo(() => computeLineChanges(original, current), [original, current])
   const lines = useMemo(() => current.split('\n'), [current])
 
-  // 测量 <code> 相对于 overlay 父容器（relative div）的实际顶部偏移
+  // 测量 <code> 顶部偏移（gutter 对齐用）与逐行实际位置（diff 色块用）
   const codeAreaRef = useRef<HTMLDivElement>(null)
   const [prePadding, setPrePadding] = useState(16)
+  const [lineRects, setLineRects] = useState<{ top: number; height: number }[]>([])
 
   useLayoutEffect(() => {
     const el = codeAreaRef.current
     if (!el) return
-    const codeEl = el.querySelector('code')
-    const relativeDiv = el.firstElementChild as HTMLElement | null
-    if (codeEl && relativeDiv) {
+    const measure = () => {
+      const codeEl = el.querySelector('code')
+      const relativeDiv = el.firstElementChild as HTMLElement | null
+      if (!codeEl || !relativeDiv) return
       const codeTop = codeEl.getBoundingClientRect().top
       const containerTop = relativeDiv.getBoundingClientRect().top
       setPrePadding(codeTop - containerTop)
+      // 逐行取实际渲染位置：色块用实体 div 定位，不再依赖固定行高假设。
+      // offsetTop 已是相对定位祖先（代码容器）的布局坐标，与 overlay 的 absolute top 同一坐标系，不可再减 containerTop（视口坐标），否则色块会随滚动偏移。
+      const lineEls = codeEl.querySelectorAll(':scope > span')
+      const rects: { top: number; height: number }[] = []
+      for (const lineEl of lineEls) {
+        const span = lineEl as HTMLElement
+        rects.push({ top: span.offsetTop, height: span.offsetHeight })
+      }
+      setLineRects(rects)
+    }
+    measure()
+    // shiki 高亮是异步回填的，行内容变化会改变布局，用 ResizeObserver 兜底重测
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    return () => {
+      observer.disconnect()
     }
   }, [current, language])
 
-  // 构建逐行 gradient：固定行高 + 实际 padding → 精确对齐
-  const gradientStops = lines
-    .map((_, i) => {
-      const changeType = lineChanges.get(i)
-      if (!changeType) return null
-      const color = changeType === 'added' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(251, 191, 36, 0.15)'
-      const top = prePadding + i * CODE_LINE_HEIGHT
-      return `${color} ${top}px, ${color} ${top + CODE_LINE_HEIGHT}px`
-    })
-    .filter(Boolean)
-    .join(', ')
-  const overlayBg = gradientStops
-    ? `linear-gradient(to bottom, transparent ${prePadding}px, ${gradientStops}, transparent ${prePadding + lines.length * CODE_LINE_HEIGHT}px)`
-    : undefined
+  const diffColor = (changeType: 'added' | 'modified') =>
+    changeType === 'added' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(251, 191, 36, 0.15)'
 
   return (
     <div className="flex font-mono text-[10px]!">
@@ -578,11 +577,23 @@ function ShikiDiffView({ original, current, filePath }: { original: string; curr
           )
         })}
       </div>
-      {/* 右侧代码区：固定行高 + CodeBlockContent 语法高亮 + gradient overlay diff 背景色 */}
+      {/* 右侧代码区：固定行高 + CodeBlockContent 语法高亮 + 逐行实体色块 overlay（避免 gradient 在行间产生渐变） */}
       <div ref={codeAreaRef} className="thin-scrollbar min-w-0 flex-1 overflow-auto leading-[18px]">
         <div className="relative">
           <CodeBlockContent code={current} language={language} />
-          {overlayBg && <div className="pointer-events-none absolute inset-0" style={{ background: overlayBg }} />}
+          {lines.map((_, i) => {
+            const changeType = lineChanges.get(i)
+            if (!changeType) return null
+            const rect = lineRects[i]
+            if (!rect) return null
+            return (
+              <div
+                key={`diff-${i}`}
+                className="pointer-events-none absolute inset-x-0"
+                style={{ top: rect.top, height: rect.height, backgroundColor: diffColor(changeType) }}
+              />
+            )
+          })}
         </div>
       </div>
     </div>
@@ -595,4 +606,16 @@ function ShikiDiffView({ original, current, filePath }: { original: string; curr
 function extractFilename(filePath: string): string {
   const idx = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
   return idx >= 0 ? filePath.slice(idx + 1) : filePath
+}
+
+/** 取工作区根目录名（末段），用于多文件夹工作区区分文件归属。 */
+function extractRootName(root: string): string {
+  const trimmed = root.replace(/[/\\]+$/, '')
+  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed
+}
+
+/** 多根目录下 `path` 可能跨仓库重复，用 `root:path` 作为唯一标识。 */
+function fileKey(file: ChangedFile): string {
+  return `${file.root}:${file.path}`
 }

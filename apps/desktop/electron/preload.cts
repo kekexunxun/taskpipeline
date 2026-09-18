@@ -100,6 +100,8 @@ contextBridge.exposeInMainWorld('agentApi', {
   deleteChat: (id: string) => ipcRenderer.invoke('chats:delete', id),
   setChatDirectory: (id: string, workingDirectory?: string) =>
     ipcRenderer.invoke('chats:set-directory', id, workingDirectory),
+  /** 取消一条待执行计划（把消息内 plan part 状态改为 cancelled 并落盘）。 */
+  cancelChatPlan: (chatId: string, messageId: string) => ipcRenderer.invoke('chats:cancel-plan', chatId, messageId),
   listChatModels: () => ipcRenderer.invoke('chats:list-models'),
   getDefaultModel: () => ipcRenderer.invoke('chats:default-model'),
   startChatStream: (input: unknown) => ipcRenderer.invoke('chats:start-stream', input),
@@ -127,6 +129,25 @@ contextBridge.exposeInMainWorld('agentApi', {
     const listener = (_: unknown, event: unknown) => callback(event)
     ipcRenderer.on('chat:stream-event', listener)
     return () => ipcRenderer.removeListener('chat:stream-event', listener)
+  },
+  /** 上下文压缩瞬时状态广播（start/end），供前端渲染临时提示，不持久。end 可带压缩后的上下文估算。 */
+  onChatCompaction: (
+    callback: (event: {
+      chatId: string
+      phase: 'start' | 'end'
+      context?: { usedTokens: number; windowTokens: number }
+    }) => void
+  ) => {
+    const listener = (_: unknown, event: unknown) =>
+      callback(
+        event as {
+          chatId: string
+          phase: 'start' | 'end'
+          context?: { usedTokens: number; windowTokens: number }
+        }
+      )
+    ipcRenderer.on('chat:compaction', listener)
+    return () => ipcRenderer.removeListener('chat:compaction', listener)
   },
   // === Trace 页面(v2：AgentSpan 管道) ===========================================
   listTrace: () => ipcRenderer.invoke('trace:list'),

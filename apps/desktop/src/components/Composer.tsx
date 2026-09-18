@@ -24,6 +24,8 @@ type Props = {
   onSend(value?: string, files?: UserFileAttachment[]): void
   onStop?(): void
   disabled?: boolean
+  /** 仅禁用发送（输入框仍可编辑）：上下文压缩进行中用，区别于 disabled 的整体禁用。 */
+  sendDisabled?: boolean
   streaming?: boolean
   submitting?: boolean
   placeholder?: string
@@ -48,6 +50,7 @@ function Controlled({
   onSend,
   onStop,
   disabled,
+  sendDisabled,
   streaming,
   submitting,
   placeholder,
@@ -70,7 +73,7 @@ function Controlled({
   const trimmed = value.trim()
   const busy = submitting
   const hasAttachments = controller.attachments.files.length > 0
-  const canSend = !disabled && (trimmed.length > 0 || hasAttachments)
+  const canSend = !disabled && !sendDisabled && (trimmed.length > 0 || hasAttachments)
   const showStop = streaming && onStop
   const defaultPlaceholder = disabled
     ? '等待执行器就绪'
@@ -100,7 +103,7 @@ function Controlled({
   }
 
   const handleSend = async () => {
-    if (disabled || busy) return
+    if (disabled || sendDisabled || busy) return
     const payload = (controller.textInput.value || '').trim()
     if (!payload && !hasAttachments) return
     const cachedFiles = hasAttachments ? await saveAttachmentsToCache() : undefined
@@ -127,7 +130,7 @@ function Controlled({
         onSubmit={async ({ text }) => {
           const payload = text.trim()
           if (!payload && !hasAttachments) return
-          if (disabled || busy) return
+          if (disabled || sendDisabled || busy) return
           const cachedFiles = hasAttachments ? await saveAttachmentsToCache() : undefined
           onChange('')
           onSend(payload, cachedFiles?.length ? cachedFiles : undefined)
@@ -200,6 +203,7 @@ export function Composer({
   onSend,
   onStop,
   disabled,
+  sendDisabled,
   streaming,
   submitting,
   placeholder,
@@ -220,6 +224,7 @@ export function Composer({
         onSend={onSend}
         onStop={onStop}
         disabled={disabled}
+        sendDisabled={sendDisabled}
         streaming={streaming}
         submitting={submitting}
         placeholder={placeholder}

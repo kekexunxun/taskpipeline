@@ -8,6 +8,8 @@ export function ChatComposer(props: {
   onSend(value: string, files?: UserFileAttachment[]): void
   onStop?(): void
   disabled?: boolean
+  /** 仅禁用发送（输入框仍可编辑）：上下文压缩进行中用。 */
+  sendDisabled?: boolean
   streaming?: boolean
   placeholder?: string
   leftSlot?: ReactNode

@@ -14,11 +14,16 @@ export function QoderMessageView({
   message,
   isAnimating,
   onExecutePlan,
+  onCancelPlan,
+  planActionsDisabled,
   followingUserTexts
 }: {
   message: ChatMessage
   isAnimating?: boolean
   onExecutePlan?: (plan: ChatPlan) => void
+  onCancelPlan?: (plan: ChatPlan) => void
+  /** 压缩进行中等：置灰计划卡操作按钮。 */
+  planActionsDisabled?: boolean
   /** 本消息之后的用户消息文本：供 pending 计划失效判定。 */
   followingUserTexts?: string[]
 }) {
@@ -32,6 +37,8 @@ export function QoderMessageView({
       followingUserTexts={followingUserTexts}
       planWaiting={message.metadata?.planWaiting === true}
       onExecutePlan={onExecutePlan}
+      onCancelPlan={onCancelPlan}
+      planActionsDisabled={planActionsDisabled}
     />
   )
 }

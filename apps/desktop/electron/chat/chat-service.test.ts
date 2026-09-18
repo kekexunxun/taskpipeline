@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import type { BrowserWindow } from 'electron'
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { TaskStore } from '@task-pipeline/core'
-import { ChatService } from './chat-service.js'
+import { ChatService, buildPlanDocRelPath, collectPlanText, shouldPersistPlanDoc } from './chat-service.js'
 import { ChatDriverRegistry } from './drivers/driver-registry.js'
 import type { ChatDriver } from './drivers/chat-driver.js'
 import type { ChatModelInfo, ChatStreamChunk, DriverPart, StoredMessage } from './chat-types.js'
@@ -733,5 +733,37 @@ describe('ChatService (driver-based)', () => {
     expect((await service.getChat(conv.id))?.conversation.workingDirectory).toBeUndefined()
     release()
     await streamPromise
+  })
+})
+
+describe('计划正文兼底落盘助手', () => {
+  it('buildPlanDocRelPath：清洗标题中的路径分隔符 / 非法字符，落到 docs/ 下', () => {
+    expect(buildPlanDocRelPath('参赛协议/动态配置:改造', 'chat-abc12345')).toBe(
+      'docs/参赛协议 动态配置 改造-开发计划.md'
+    )
+    expect(buildPlanDocRelPath('  多  空格\t标题  ', 'chat-x')).toBe('docs/多 空格 标题-开发计划.md')
+  })
+
+  it('buildPlanDocRelPath：空标题回落到 chatId 前缀命名', () => {
+    expect(buildPlanDocRelPath('', 'abcdef12345')).toBe('docs/plan-abcdef12-开发计划.md')
+    expect(buildPlanDocRelPath('   ', '')).toBe('docs/plan-chat-开发计划.md')
+  })
+
+  it('shouldPersistPlanDoc：仅绑定工作目录 + 未用 write_plan + 正文足够长才兼底', () => {
+    const long = 'x'.repeat(300)
+    expect(shouldPersistPlanDoc({ workingDirectory: '/repo', usedWritePlan: false, planText: long })).toBe(true)
+    expect(shouldPersistPlanDoc({ usedWritePlan: false, planText: long })).toBe(false)
+    expect(shouldPersistPlanDoc({ workingDirectory: '/repo', usedWritePlan: true, planText: long })).toBe(false)
+    expect(shouldPersistPlanDoc({ workingDirectory: '/repo', usedWritePlan: false, planText: '我这就写' })).toBe(false)
+  })
+
+  it('collectPlanText：只取主线文本，planner 子任务内部正文（带 parentTaskId）不计入', () => {
+    const parts: DriverPart[] = [
+      { driverId: 'qoder', type: 'qoder.session', sessionId: 's1' },
+      { driverId: 'qoder', type: 'text', text: '子代理正文', parentTaskId: 't-1' },
+      { driverId: 'qoder', type: 'text', text: '# 计划\n' },
+      { driverId: 'qoder', type: 'text', text: '## 步骤' }
+    ]
+    expect(collectPlanText(parts)).toBe('# 计划\n## 步骤')
   })
 })

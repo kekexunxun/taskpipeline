@@ -23,6 +23,7 @@ import type {
   ChatConversationMode,
   ChatDriverId,
   ChatStreamChunk,
+  ChatUsage,
   ChatModelInfo,
   DriverPart,
   McpServiceId,
@@ -84,8 +85,10 @@ export type StreamChatInput = {
    */
   traceLabel?: string
   /**
-   * 对话模式。driver 据此调整行为：plan 模式下只读分析，不执行修改。
-   * Qoder driver 走 permissionMode: 'plan'；OpenAI driver 走 system prompt + 工具过滤。
+   * 对话模式。`plan` = 本轮的规划工作交给 planner 子代理，**不是**给主会话限权：
+   * - Qoder driver：往本轮消息打委派标记，planner 子代理在会话创建时已注册进 SDK `agents`；
+   * - OpenAI driver：走一次独立的嵌套只读子回合（只读工具 + write_plan）。
+   * 两者都不裁剪主链路工具，下一条消息（含「执行这个计划」）依旧拿全量能力。
    */
   chatMode?: ChatConversationMode
 }
@@ -124,6 +127,7 @@ export interface ChatDriver {
     parts: DriverPart[]
     createdAt: string
     sessionId?: string
+    usage?: ChatUsage
   }): StoredMessageRecord
   /**
    * 流式生成。driver 内部负责:

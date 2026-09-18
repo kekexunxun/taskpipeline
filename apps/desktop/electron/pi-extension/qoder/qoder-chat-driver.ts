@@ -17,13 +17,22 @@
  * 上层 (ChatService) 完全不感知 SDK 协议。
  */
 
-import { planModeInstruction } from '@task-pipeline/core'
+import {
+  PLANNER_AGENT_NAME,
+  PLANNER_DISALLOWED_TOOLS,
+  markPlanRequest,
+  planDelegationInstruction,
+  planModeInstruction,
+  planSuggestionGuidance,
+  plannerAgentDescription
+} from '@task-pipeline/core'
 import { type CanUseToolOptions, type McpServerConfig, type PermissionResult } from '@qoder-ai/qoder-agent-sdk'
 import type { ChatAttachmentCache } from '../../chat/chat-attachment-cache.js'
 import type { ChatDriver, StreamChatInput } from '../../chat/drivers/chat-driver.js'
 import type {
   ChatModelInfo,
   ChatStreamChunk,
+  ChatUsage,
   DriverPart,
   StoredMessage,
   StoredMessageRecord,
@@ -199,6 +208,7 @@ export class QoderChatDriver implements ChatDriver {
     parts: DriverPart[]
     createdAt: string
     sessionId?: string
+    usage?: ChatUsage
   }): StoredMessageRecord {
     return {
       id: input.id,
@@ -209,7 +219,8 @@ export class QoderChatDriver implements ChatDriver {
         kind: 'assistant',
         parts: input.parts,
         ...(input.sessionId ? { sessionId: input.sessionId } : {})
-      } satisfies QoderRawMessage
+      } satisfies QoderRawMessage,
+      ...(input.usage ? { usage: input.usage } : {})
     }
   }
 
@@ -230,7 +241,8 @@ export class QoderChatDriver implements ChatDriver {
     // 历史末尾有 qoder.session 时自动 resume(底层能力,应用重启后上下文不丢)。
     // mcpServers 在会话创建时固化:本轮 MCP 选择与会话创建时不一致则关闭重建
     // (上下文经 resume 恢复),保证勾选变化真正生效。
-    // chatMode 通过系统提示注入，每次请求都生效，不需要重建会话。
+    // chatMode 不在此列:规划靠逐轮打委派标记(PLAN_REQUEST_MARK),子代理定义又与会话
+    // 同生命周期,所以模式切换不需要重建会话。
     const mcpKey = [...(input.mcpServices ?? [])].sort().join(',')
     let session = this.sessions.get(input.conversationId)
     if (session && this.sessionMcpKeys.get(input.conversationId) !== mcpKey) {
@@ -286,9 +298,12 @@ export class QoderChatDriver implements ChatDriver {
     }
 
     // 一个回合:消息入队 → 实时转发输出 → result / error / abort 收尾。
+    // 计划模式：只给本轮消息打委派标记，让主会话把规划工作交给 planner 子代理；
+    // 主会话的权限、工具集、系统提示一概不变 —— 后续「执行计划」的轮次不会被限权。
+    const isPlanTurn = (input.chatMode ?? 'normal') === 'plan'
     try {
       for await (const chunk of session.turn({
-        text: input.userInput.text,
+        text: isPlanTurn ? markPlanRequest(input.userInput.text) : input.userInput.text,
         files: input.userInput.files,
         attachmentCache: this.attachmentCache,
         toolSource: input.toolSource,
@@ -315,7 +330,20 @@ export class QoderChatDriver implements ChatDriver {
       }
     }
     if (!input.signal.aborted) {
-      yield { type: 'done', status: 'done' }
+      // Qoder 不回填绝对 token，只有 context_usage_ratio（上下文占比）与 credits（成本）：
+      // 用这两个口径作为本回合用量，交给 ChatService 落盘 + 透传前端展示。
+      const turnUsage = session.getTurnUsage()
+      const usage: ChatUsage | undefined =
+        turnUsage.contextUsageRatio !== undefined || turnUsage.credits !== undefined
+          ? {
+              inputTokens: 0,
+              outputTokens: 0,
+              totalTokens: 0,
+              ...(turnUsage.contextUsageRatio !== undefined ? { contextUsageRatio: turnUsage.contextUsageRatio } : {}),
+              ...(turnUsage.credits !== undefined ? { credits: turnUsage.credits } : {})
+            }
+          : undefined
+      yield { type: 'done', status: 'done', ...(usage ? { usage } : {}) }
     }
   }
 
@@ -367,22 +395,32 @@ export class QoderChatDriver implements ChatDriver {
       systemParts.push(input.workspaceContext)
     }
     const baseSystemPrompt = systemParts.length > 0 ? systemParts.join('\n\n') : undefined
-    // 计划模式：追加共享指令模板，让 LLM 只读分析并输出计划
-    const chatMode = input.chatMode ?? 'normal'
-    const isPlanMode = chatMode === 'plan'
-    const systemPrompt = isPlanMode
-      ? baseSystemPrompt
-        ? `${baseSystemPrompt}\n\n${planModeInstruction()}`
-        : planModeInstruction()
-      : baseSystemPrompt
+    // 计划模式不再拼进主会话系统提示：常驻会话的 systemPrompt 在创建时冻结，逐轮改模式
+    // 本就无效（旧实现的隐藏 bug）。改为：常驻「委派规则」+「复杂度自检建议」，
+    // 规划轮次只逐轮给消息打委派标记；真正的 planner 角色提示只给子代理（见 agents）。
+    const systemPrompt = [
+      ...(baseSystemPrompt ? [baseSystemPrompt] : []),
+      planDelegationInstruction(),
+      planSuggestionGuidance()
+    ].join('\n\n')
     return {
       token,
       cwd: input.cwd ?? process.cwd(),
       model: input.model.startsWith('qoder:') ? input.model.slice(6) : input.model,
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
-      // Chat 计划模式：只通过系统提示约束 LLM 行为（只读分析），不使用 SDK 的 permissionMode: 'plan'
-      // （后者会期望 ExitPlanMode 工具，适用于 Coding 场景而非 Chat）
+      // 主会话常驻 default：不用 SDK 的 permissionMode:'plan'（那是 Coding 场景的主线计划态，
+      // 会期望 ExitPlanMode 并反过来限制主线）——计划的只读边界全部下沉到 planner 子代理。
       permissionMode: 'default' as const,
+      // planner 子代理（与会话同生命周期注册，不随 chatMode 开关重建）：写类工具在子代理
+      // 层面硬禁，主会话不吃任何限制 —— 这是「计划不改主线权限」的实现点。
+      agents: {
+        [PLANNER_AGENT_NAME]: {
+          description: plannerAgentDescription(),
+          prompt: planModeInstruction(),
+          disallowedTools: [...PLANNER_DISALLOWED_TOOLS],
+          permissionMode: 'default' as const
+        }
+      },
       // HITL 确认需要用户人工决策，不设超时上限（SDK 条件：<=0 则不启动 setTimeout）。
       // 安全兜底由前端流看门狗（STREAM_WATCHDOG_MS 无事件 → abort 死流 → flushApprovals 拒绝）
       // + 用户主动停止按钮承担；应用退出时 pendingUi 统一 resolve cancelled。
@@ -398,12 +436,16 @@ export class QoderChatDriver implements ChatDriver {
         }
       },
       ...(systemPrompt ? { systemPrompt } : {}),
+      // allowedTools = 预授权名单（不是能力上限，其余工具仍走 canUseTool HITL）。
+      // 始终预授权 `Agent`：委派 planner 子代理不该再弹一层确认框。
       ...(taskSource && mcpSetup
         ? {
-            allowedTools: mcpSetup.toolNames,
+            allowedTools: ['Agent', ...mcpSetup.toolNames],
             maxTurns: 10
           }
-        : {}),
+        : {
+            allowedTools: ['Agent']
+          }),
       ...(serverNames.length
         ? {
             mcpServers,
@@ -449,10 +491,10 @@ export class QoderChatDriver implements ChatDriver {
               // AskUserQuestion:用户回答通过 allow + updatedInput 注入(官方 SDK 协议),
               // answers 的 key 是完整的 question 文本,SDK 据此生成正常的 tool_result(非 error)。
               if (typeof decision === 'object' && decision.type === 'askUser') {
-                const questions = (toolInput as any).questions
+                const questions = (toolInput as { questions?: Array<{ question?: string }> }).questions
                 const answers: Record<string, string> = {}
                 if (Array.isArray(questions)) {
-                  questions.forEach((q: any, i: number) => {
+                  questions.forEach((q, i) => {
                     if (q.question && decision.answers[i] !== undefined) {
                       answers[q.question] = decision.answers[i]
                     }

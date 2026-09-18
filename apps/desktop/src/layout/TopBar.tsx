@@ -16,6 +16,7 @@ import { useCredentialStatusContext } from '../hooks/useCredentialStatusContext'
 import type { CredentialOverall } from '../hooks/useCredentialStatus'
 import { useTheme } from '@/hooks/useTheme'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
@@ -176,6 +177,18 @@ export function TopBar({
           <Code2Icon size={13} />
         </span>
         <strong className="font-semibold">TaskPipeline</strong>
+        {/*
+          dev 标识。dev 与打包版共用同一 bundle 名与图标（Dock/顶栏完全一致），
+          同时开着无法分辨哪个是本地开发实例，故在这里显式打标。
+          判定语义：`import.meta.env.DEV` 跟的是「是否跑在 vite dev server 下」，
+          与 --mode 无关——只有 `npm run dev` 命中，任何打包版（含本地 package）都是 false。
+          此时该常量被静态替换为 false，esbuild 会把整块从 bundle 中消除（与 MemorySearchProbe 同一手法）。
+        */}
+        {import.meta.env.DEV && (
+          <Badge variant="warning" className="px-1 py-0 font-mono text-[10px] leading-4">
+            DEV
+          </Badge>
+        )}
       </div>
       <div className="window-no-drag flex items-center gap-1">
         <UpdateIndicator />

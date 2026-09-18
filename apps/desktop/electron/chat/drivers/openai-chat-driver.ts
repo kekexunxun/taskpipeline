@@ -15,7 +15,7 @@
 import { jsonSchema, stepCountIs, streamText, tool as aiTool, type ModelMessage } from 'ai'
 import { z } from 'zod'
 import type { AgentSpan, TaskStore } from '@task-pipeline/core'
-import { planModeInstruction } from '@task-pipeline/core'
+import { PLANNER_AGENT_NAME, planModeInstruction, planSuggestionGuidance, estimateCostUsd } from '@task-pipeline/core'
 import { McpClient } from '@task-pipeline/integrations'
 import type {
   ChatModelInfo,
@@ -34,6 +34,7 @@ import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
 import type { ChatAttachmentCache } from '../chat-attachment-cache.js'
 import { createWebFetchAiTool } from '../web-fetch-tool.js'
 import { detectVendor, createVendorModel, type ModelVendor } from './model-providers.js'
+import { WRITE_PLAN_TOOL } from './project-query-tools.js'
 import { isOpenAIModelValue, prefixOfVendor, stripModelPrefix } from './model-value.js'
 import type { ChatDriver, StreamChatInput } from './chat-driver.js'
 import type { ToolSource } from './tool-source.js'
@@ -55,7 +56,21 @@ type OpenAIProfile = {
   isVl?: boolean
   /** 用户显式声明的可调参数能力；缺省时按 vendor 自动推断。 */
   capabilities?: CapabilityKey[]
+  /** 上下文窗口 token 上限（用户在设置页配置；缺省 = 前端/裁剪回落保守默认）。 */
+  contextWindowTokens?: number
 }
+
+/**
+ * agentic 循环的**每轮**硬步数上限（1 step = 1 次模型往返，同一步可并行多个 tool_call）。
+ * 复杂多步查证允许更多步；末步（stepNumber >= MAX_CHAT_STEPS-1）由 `prepareStep` 摘工具 +
+ * 注入收尾指令，逼模型以「完整文本结论」自然收尾，而非撞上硬上限停在半句工具调用上。
+ * TODO: 后续可接到 profile/modelParams 允许逐模型覆盖。
+ */
+export const MAX_CHAT_STEPS = 15
+
+/** 末步收敛时追加到 system 尾部的强制收尾指令。 */
+const WIND_DOWN_INSTRUCTION =
+  '\n\n【收尾】已达到工具调用上限，禁止再调用任何工具；请基于以上已核实的信息，立即输出完整、可交付的最终结论。'
 
 /** 能力 key → 前端渲染用的 schema 描述。 */
 function capabilityOf(key: CapabilityKey): ModelCapability {
@@ -353,22 +368,29 @@ function historyToModelMessages(
       (p): p is Extract<DriverPart, { type: 'openai.tool-result' }> => p.type === 'openai.tool-result'
     )
     const correspondingCalls = new Map<string, string>()
-    for (const tc of openaiParts.filter(
-      (p): p is Extract<DriverPart, { type: 'openai.tool-call' }> => p.type === 'openai.tool-call'
-    )) {
+    for (const tc of toolCalls) {
       correspondingCalls.set(tc.toolCallId, tc.name)
     }
-    if (toolResults.length) {
-      const toolMessage: ModelMessage = {
-        role: 'tool',
-        content: toolResults.map((tr) => ({
+    if (toolCalls.length || toolResults.length) {
+      const resultIds = new Set(toolResults.map((tr) => tr.toolCallId))
+      const content = toolResults.map((tr) => ({
+        type: 'tool-result' as const,
+        toolCallId: tr.toolCallId,
+        toolName: correspondingCalls.get(tr.toolCallId) ?? 'tool',
+        output: { type: 'json' as const, value: tr.output as never }
+      }))
+      // 兜底：历史里存在「有 call 无 result」的悬空调用（旧版 tool-error 未落结果 / 中断遗留）时，
+      // 补一条占位结果，避免整条请求被 provider 以「Tool results are missing」拒绝而使对话永久卡死。
+      for (const tc of toolCalls) {
+        if (resultIds.has(tc.toolCallId)) continue
+        content.push({
           type: 'tool-result' as const,
-          toolCallId: tr.toolCallId,
-          toolName: correspondingCalls.get(tr.toolCallId) ?? 'tool',
-          output: { type: 'json' as const, value: tr.output as never }
-        }))
+          toolCallId: tc.toolCallId,
+          toolName: tc.name,
+          output: { type: 'json' as const, value: { error: '工具结果缺失（该调用未返回结果）' } as never }
+        })
       }
-      out.push(toolMessage)
+      out.push({ role: 'tool', content } as ModelMessage)
     }
   }
   return { messages: out, systemText: systemParts.join('\n\n') }
@@ -419,6 +441,9 @@ export class OpenAIChatDriver implements ChatDriver {
         vendor: profile.vendor ?? detectVendor(profile.baseUrl),
         isDefault: profile.isDefault === true,
         isVl,
+        ...(typeof profile.contextWindowTokens === 'number' && profile.contextWindowTokens > 0
+          ? { contextWindowTokens: profile.contextWindowTokens }
+          : {}),
         ...(capabilities.length ? { capabilities } : {})
       }
     })
@@ -547,25 +572,26 @@ export class OpenAIChatDriver implements ChatDriver {
         sections.push(`<system-reminder>\n${skillContent}\n</system-reminder>`)
       }
     }
-    // 5. 计划模式指令（plan 模式下追加共享提示模板）
+    // 5. 规划提示按角分路：主链路只挂「复杂度自检 + 建议」，planner 角色指令只进计划子回合。
     const chatMode = input.chatMode ?? 'normal'
-    const isPlanMode = chatMode === 'plan'
-    if (isPlanMode) {
-      sections.push(planModeInstruction())
-    }
-    // 拼接为单一系统提示
-    const system = sections.join('\n\n')
-    // 计划模式：过滤写入类工具，只保留只读工具（ProjectQueryToolSource 的 read_file/grep/glob/list_dir、web_fetch、readOnlyHint MCP 工具）
-    let effectiveTools = mergedTools
-    if (isPlanMode && mergedTools && taskSource) {
-      const writeToolNames = new Set(
-        taskSource
-          .tools()
-          .filter((t) => !t.annotations?.readOnlyHint)
-          .map((t) => t.name)
-      )
-      effectiveTools = Object.fromEntries(Object.entries(mergedTools).filter(([name]) => !writeToolNames.has(name)))
-    }
+    const contextSystem = sections.join('\n\n')
+    const system = contextSystem ? `${contextSystem}\n\n${planSuggestionGuidance()}` : planSuggestionGuidance()
+    const plannerSystem = contextSystem ? `${contextSystem}\n\n${planModeInstruction()}` : planModeInstruction()
+    // 工具集拆为两套（关键是主链路不再按计划模式裁剪）：
+    //  - mainTools：只排除 write_plan（它只属于 planner）。旧实现按 chatMode 裁剪主线，
+    //    计划轮被打断/失败后模式残留，后续执行轮次跟着丢工具。
+    //  - plannerTools：只读工具 + write_plan，写类工具进不了子回合这个集合。
+    const writeToolNames = new Set(
+      (taskSource?.tools() ?? []).filter((t) => !t.annotations?.readOnlyHint).map((t) => t.name)
+    )
+    const mainTools = mergedTools
+      ? Object.fromEntries(Object.entries(mergedTools).filter(([name]) => name !== WRITE_PLAN_TOOL))
+      : undefined
+    const plannerTools = mergedTools
+      ? Object.fromEntries(
+          Object.entries(mergedTools).filter(([name]) => name === WRITE_PLAN_TOOL || !writeToolNames.has(name))
+        )
+      : undefined
     // 当前用户消息已由编排层（ChatService）写入 history（history 末尾即本条提问）：
     // 直接 push 会造成 prompt 里两条一模一样的 user 消息，这里只在确实缺失时才追加。
     const last = messages.at(-1)
@@ -595,6 +621,83 @@ export class OpenAIChatDriver implements ChatDriver {
       }
     }
 
+    // 对话 trace：对话级 traceId（一个对话 = 一个 Trace）。主对话由 ChatService 传 traceId（join），
+    // 辅助 LLM 调用（关键词提取/记忆整理）也 join 同一回合；无 traceId 时自建独立 trace。
+    const traceId = input.traceId ?? `chat-${input.conversationId}-${input.userInput.id}`
+    const join = Boolean(input.traceId)
+
+    if (chatMode === 'plan') {
+      // 计划模式：主线不参与规划，派一次 planner 子回合（一次性、只读 + write_plan）。
+      // 子回合的正文沿同一 generator 回流，ChatService 照旧捕获它出计划卡；
+      // 主链路的工具集与提示词全程未被动过，下一轮「执行它」权限完整。
+      yield* this.runTurn({
+        input,
+        model,
+        modelName,
+        vendor,
+        system: plannerSystem,
+        messages,
+        tools: plannerTools,
+        taskSource,
+        mcpClients,
+        traceId,
+        join,
+        spanLabel: `${PLANNER_AGENT_NAME} 子代理`,
+        spanMeta: { subagent: PLANNER_AGENT_NAME }
+      })
+      return
+    }
+
+    yield* this.runTurn({
+      input,
+      model,
+      modelName,
+      vendor,
+      system,
+      messages,
+      tools: mainTools,
+      taskSource,
+      mcpClients,
+      traceId,
+      join
+    })
+  }
+
+  /**
+   * 跑一次模型回合 —— 主链路轮与 planner 子回合共用同一条流式管线（抽出来是为了让
+   * 「计划是一次独立的子回合」不必复制那 300 行工具/trace/用量处理）。
+   */
+  private async *runTurn(t: {
+    input: StreamChatInput
+    model: ReturnType<typeof createVendorModel>
+    modelName: string
+    vendor: ModelVendor
+    system: string
+    messages: ModelMessage[]
+    tools: Record<string, ReturnType<typeof aiTool>> | undefined
+    taskSource: ToolSource | undefined
+    mcpClients: McpClient[]
+    traceId: string
+    join: boolean
+    /** llm span 语义名：计划子回合标 'planner 子代理'，普通轮沿用 input.traceLabel。 */
+    spanLabel?: string
+    /** 追加到 llm span meta（在执行树里把子回合与主回合区分开）。 */
+    spanMeta?: Record<string, unknown>
+  }): AsyncGenerator<ChatStreamChunk> {
+    const {
+      input,
+      model,
+      modelName,
+      vendor,
+      system,
+      messages,
+      tools: effectiveTools,
+      taskSource,
+      mcpClients,
+      traceId,
+      join
+    } = t
+    const spanLabel = t.spanLabel ?? input.traceLabel
     const parts: DriverPart[] = []
     let taskCreated: ChatTaskCreationResult | undefined
     let streamUsage: ChatUsage | undefined
@@ -604,10 +707,6 @@ export class OpenAIChatDriver implements ChatDriver {
     // toolCallId → 调用发起时间戳：tool-result 到达时算耗时 durationMs 落 part。
     const toolStartedAt = new Map<string, number>()
 
-    // 对话 trace：对话级 traceId（一个对话 = 一个 Trace）。主对话由 ChatService 传 traceId（join），
-    // 辅助 LLM 调用（关键词提取/记忆整理）也 join 同一回合；无 traceId 时自建独立 trace。
-    const traceId = input.traceId ?? `chat-${input.conversationId}-${input.userInput.id}`
-    const join = Boolean(input.traceId)
     const traceTools = new Map<string, AgentSpan>()
     // llm span 按 ai-sdk step 边界切分：start-step 创建 / finish-step 收尾，
     // 每轮 API 调用一个 span——不再用一个覆盖全程的巨 span（多步工具循环下
@@ -648,7 +747,25 @@ export class OpenAIChatDriver implements ChatDriver {
       ...(system ? { system } : {}),
       ...(providerOptions ? { providerOptions: providerOptions as never } : {}),
       // 任务工具与 MCP 桥接工具合并注入；只有 MCP 工具（无 taskSource）时同样启用多步循环。
-      ...(effectiveTools ? { tools: effectiveTools, stopWhen: stepCountIs(10) } : {})
+      ...(effectiveTools ? { tools: effectiveTools, stopWhen: stepCountIs(MAX_CHAT_STEPS) } : {}),
+      // 末步收敛：倒数第二步（stepNumber >= MAX_CHAT_STEPS-1）起返回空 tools，本步只能出
+      // 文本 → ai-sdk 循环条件「本步有工具调用」为假 → 自然退出；同时把收尾指令置后，
+      // 逼 deepseek 等指令遵循较弱的模型也老实输出结论，把「最后一格」留给综合结论。
+      ...(effectiveTools
+        ? {
+            prepareStep: ({
+              stepNumber
+            }: {
+              stepNumber: number
+            }): { tools?: Record<string, unknown>; system?: string } => {
+              if (stepNumber < MAX_CHAT_STEPS - 1) return {}
+              return {
+                tools: {},
+                system: `${system ?? ''}${WIND_DOWN_INSTRUCTION}`
+              }
+            }
+          }
+        : {})
     })
 
     try {
@@ -662,13 +779,18 @@ export class OpenAIChatDriver implements ChatDriver {
           if (this.tracePipeline) {
             stepLlm = this.tracePipeline.startSpan(traceId, {
               type: 'llm.generate',
-              // 辅助调用（关键词提取/记忆整理）用语义名，模型仍在 model 字段（tooltip/指标用）。
+              // 辅助调用（关键词提取/记忆整理）与 planner 子回合都用语义名，模型仍在 model 字段（tooltip/指标用）。
               // traceLabel 同步落 meta：读时转换（spansToAgentEvents 标题 / Waterfall 标签）
               // 只认 meta.traceLabel，仅写 span.name 会导致执行 Tab 回退成「LLM 调用 · 模型名」。
-              name: input.traceLabel ?? modelName,
+              name: spanLabel ?? modelName,
               model: modelName,
               ...(stepIndex === 0 ? { input: { messages, system } } : {}),
-              meta: { source: 'openai', stepIndex, ...(input.traceLabel ? { traceLabel: input.traceLabel } : {}) }
+              meta: {
+                source: 'openai',
+                stepIndex,
+                ...(spanLabel ? { traceLabel: spanLabel } : {}),
+                ...(t.spanMeta ?? {})
+              }
             })
             stepText = []
             stepIndex += 1
@@ -760,6 +882,32 @@ export class OpenAIChatDriver implements ChatDriver {
               yield { type: 'task-created', result: described }
             }
           }
+        } else if (chunk.type === 'tool-error' && 'toolCallId' in chunk) {
+          // 工具 execute 抛错时 ai-sdk 产出 tool-error chunk（而非 tool-result）。
+          // 必须为它落一条配对的 openai.tool-result part，否则落盘的 assistant 消息里
+          // 只有 openai.tool-call 没有结果，下一轮 historyToModelMessages 重建历史时
+          // 会发出「有 tool_calls 却无对应 tool 结果」的请求，被 provider 直接拒绝
+          // （"Tool results are missing for tool calls ..."），且该对话此后每轮都坏掉。
+          const te = chunk as unknown as { toolCallId: string; toolName?: string; error?: unknown }
+          const startedAt = toolStartedAt.get(te.toolCallId)
+          toolStartedAt.delete(te.toolCallId)
+          const message = te.error instanceof Error ? te.error.message : String(te.error ?? '工具执行失败')
+          const part: DriverPart = {
+            driverId: 'openai',
+            type: 'openai.tool-result',
+            toolCallId: te.toolCallId,
+            output: { error: message },
+            ...(startedAt !== undefined ? { durationMs: Math.max(0, Date.now() - startedAt) } : {})
+          }
+          parts.push(part)
+          if (this.tracePipeline) {
+            const toolSpan = traceTools.get(te.toolCallId)
+            if (toolSpan) {
+              traceTools.delete(te.toolCallId)
+              this.tracePipeline.endSpan(traceId, toolSpan, { status: 'error', error: { message } })
+            }
+          }
+          yield { type: 'part', part }
         } else if (chunk.type === 'error' && 'error' in chunk) {
           // ai-sdk 流错误 chunk（TextStreamErrorPart）：网络中断 / 服务端异常等
           // 不会让 fullStream 抛异常，而是产出 error chunk；不处理会被静默吞掉
@@ -783,6 +931,9 @@ export class OpenAIChatDriver implements ChatDriver {
               outputTokens: u.outputTokens ?? 0,
               totalTokens: u.totalTokens ?? (u.inputTokens ?? 0) + (u.outputTokens ?? 0)
             }
+            // provider 不回填 costUsd：按 core 单价表估算本轮成本（每轮全量重发历史，逐轮累加即真实总花费）。
+            const cost = estimateCostUsd(modelName, streamUsage.inputTokens, streamUsage.outputTokens)
+            if (cost !== undefined) streamUsage.costUsd = cost
           }
         }
       }

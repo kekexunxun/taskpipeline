@@ -38,15 +38,23 @@ describe('ProjectQueryToolSource 元信息', () => {
     expect(source.systemPrompt()).toContain('相对工作目录')
   })
 
-  it('tools() 全部只读且 schema 为单层 zod 字段', async () => {
+  it('tools() 默认全只读；仅 includePlanWrite 时额外暴露 write_plan', async () => {
     const source = createProjectQueryToolSource(cwd)
     const tools = source.tools()
+    // 默认（task-intake / 普通对话）：四个只读查询工具，无 write_plan。
     expect(tools.map((t) => t.name)).toEqual(['read_file', 'grep', 'glob', 'list_dir'])
     for (const tool of tools) {
       expect(tool.annotations?.readOnlyHint).toBe(true)
-      // execute 返回 Promise
       expect(typeof tool.execute).toBe('function')
     }
+    // opt-in：多一个 write_plan（非只读）。
+    const planSource = createProjectQueryToolSource(cwd, undefined, { includePlanWrite: true })
+    const planTools = planSource.tools()
+    expect(planTools.map((t) => t.name)).toEqual(['read_file', 'grep', 'glob', 'list_dir', 'write_plan'])
+    expect(planTools.at(-1)?.annotations?.readOnlyHint).toBe(false)
+    expect(planSource.systemPrompt()).toContain('write_plan')
+    // 默认源的 systemPrompt 不提及 write_plan。
+    expect(source.systemPrompt()).not.toContain('write_plan')
   })
 })
 
@@ -203,5 +211,74 @@ describe('list_dir', () => {
     expect(shallow.map((e) => e.name)).not.toContain('a/b/c.txt')
     const deep = (await listDir.execute({ depth: 3 })) as Array<{ name: string }>
     expect(deep.map((e) => e.name)).toContain('a/b/c.txt')
+  })
+})
+
+describe('多目录工作区（roots）', () => {
+  const createdSiblings: string[] = []
+  afterEach(() => {
+    for (const dir of createdSiblings.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  })
+  /** 在 cwd 的旁边创建一个兄弟根目录，写入一个文件，返回其绝对路径。 */
+  function makeSibling(name: string, fileRel: string, content: string): string {
+    const sibling = path.join(path.dirname(cwd), `${name}-${path.basename(cwd)}`)
+    const abs = path.join(sibling, fileRel)
+    fs.mkdirSync(path.dirname(abs), { recursive: true })
+    fs.writeFileSync(abs, content)
+    createdSiblings.push(sibling)
+    return sibling
+  }
+
+  it('带 roots 时允许访问兄弟根目录（../sibling 不再判越界）', async () => {
+    const sibling = makeSibling('cw-main', 'README.md', 'hello-main')
+    const source = createProjectQueryToolSource(cwd, [cwd, sibling])
+    const listDir = source.tools()[3]
+    const rel = path.relative(cwd, sibling).split(path.sep).join('/')
+    const entries = (await listDir.execute({ path: rel })) as Array<{ name: string }>
+    expect(entries.map((e) => e.name)).toContain('README.md')
+    // read_file 也能跨到兄弟根读取（同一锚点相对路径）
+    const read = source.tools()[0]
+    expect(await read.execute({ path: `${rel}/README.md` })).toBe('hello-main')
+  })
+
+  it('不带 roots（单一 cwd）时兄弟目录仍判越界', async () => {
+    const sibling = makeSibling('cw-main', 'README.md', 'hello-main')
+    const source = createProjectQueryToolSource(cwd)
+    const rel = path.relative(cwd, sibling).split(path.sep).join('/')
+    await expect(source.tools()[3].execute({ path: rel })).rejects.toThrow(/越界/)
+  })
+
+  it('越出所有根（如 ../../etc）仍拒绝', async () => {
+    const sibling = makeSibling('cw-main', 'README.md', 'x')
+    const source = createProjectQueryToolSource(cwd, [cwd, sibling])
+    await expect(source.tools()[3].execute({ path: '../../..', depth: 0 })).rejects.toThrow(/越界/)
+  })
+})
+
+describe('write_plan', () => {
+  it('将计划正文写入工作区内 .md 文件（含新建父目录）', async () => {
+    const source = createProjectQueryToolSource(cwd, undefined, { includePlanWrite: true })
+    const writePlan = source.tools().find((t) => t.name === 'write_plan')!
+    const result = (await writePlan.execute({ path: 'docs/开发计划.md', content: '# 计划\n步骤一' })) as {
+      path: string
+      bytes: number
+      written: boolean
+    }
+    expect(result.written).toBe(true)
+    expect(result.path).toBe('docs/开发计划.md')
+    expect(fs.readFileSync(path.join(cwd, 'docs/开发计划.md'), 'utf8')).toBe('# 计划\n步骤一')
+  })
+
+  it('拒绝非 .md 目标', async () => {
+    const source = createProjectQueryToolSource(cwd, undefined, { includePlanWrite: true })
+    const writePlan = source.tools().find((t) => t.name === 'write_plan')!
+    await expect(writePlan.execute({ path: 'src/index.ts', content: 'x' })).rejects.toThrow(/\.md/)
+  })
+
+  it('拒绝空正文与越界路径', async () => {
+    const source = createProjectQueryToolSource(cwd, undefined, { includePlanWrite: true })
+    const writePlan = source.tools().find((t) => t.name === 'write_plan')!
+    await expect(writePlan.execute({ path: 'docs/a.md', content: '   ' })).rejects.toThrow(/content/)
+    await expect(writePlan.execute({ path: '../out.md', content: 'x' })).rejects.toThrow(/越界/)
   })
 })
