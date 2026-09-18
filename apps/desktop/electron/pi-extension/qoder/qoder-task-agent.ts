@@ -42,6 +42,7 @@ import {
 } from '../../task/stage-artifacts.js'
 import type { PlanReconcile } from '../../task/stage-artifacts.js'
 import { QoderSession, QoderSessionRegistry } from './qoder-session.js'
+import { buildToolSourceMcp } from './tool-source-mcp.js'
 import {
   describeLaunch,
   hasSessionTranscript,
@@ -116,6 +117,16 @@ export type QoderTaskAgentDeps = TaskAgentDeps & {
 }
 
 const PLAN_TIMEOUT_MS = 5 * 60_000
+
+/** 任务会话注册的 `search_memory` MCP server 的 mcpServers 记录键。 */
+const MEMORY_MCP_KEY = 'memory_search'
+
+/**
+ * 静态记忆工具使用指引（不依赖检索结果,恒在）：提醒模型涉及项目历史约定/经验时
+ * 先调用 search_memory,而非凭空假设——取代旧的任务启动前记忆预注入。
+ */
+const MEMORY_SEARCH_TOOL_GUIDANCE =
+  '如需项目历史约定、编码规范或过往经验,先调用 search_memory 工具检索再据此行动,不要凭空假设项目约定。'
 
 /** 去掉 model value 上的 `qoder:` provider 前缀,让 qodercli 能识别。 */
 export function stripQoderModelPrefix(model: string | undefined): string | undefined {
@@ -326,24 +337,23 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
   }
 
   /**
-   * 任务上下文解析（记忆提取注入每任务只做一次）：
-   * - 首次：keyword 阶段容器内全量解析 —— LLM 关键词提取 + 记忆/Repowiki 检索注入 + Agent 指引；
-   * - 之后：仅组装 Agent 指引，跳过记忆检索（省掉重复的关键词提取 LLM 调用——Plan/Exec 重跑、
-   *   feedback 再触发时不再重复提取注入）；任务终态 finishTrace 清标记，任务重跑会重新提取。
+   * 任务上下文解析（Agent 指引注入每任务只做一次 trace 容器）：
+   * - 首次：keyword 阶段容器内解析 —— Agent 指引（记忆不再预注入，改由会话注册的
+   *   search_memory 工具按需检索）；
+   * - 之后：仅组装 Agent 指引；任务终态 finishTrace 清标记，任务重跑会重新解析。
    */
   private async resolveTaskContext(
     task: Task,
     repos: TaskRepository[]
-  ): Promise<{ memoryContext: string | undefined; agentContext: { sections: string[] } | undefined }> {
+  ): Promise<{ agentContext: { sections: string[] } | undefined }> {
     if (this.keywordInjected.has(task.id)) {
       const agentContext = await this.deps.resolveAgentContext?.(task, repos)
-      return { memoryContext: undefined, agentContext }
+      return { agentContext }
     }
     this.keywordInjected.add(task.id)
     return this.withKeywordStage(task.id, async () => {
-      const memoryContext = await this.deps.resolveMemoryContext?.(task, repos)
       const agentContext = await this.deps.resolveAgentContext?.(task, repos)
-      return { memoryContext, agentContext }
+      return { agentContext }
     })
   }
 
@@ -393,12 +403,12 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
         PLAN_SECTION_REQUIREMENT
       ].join('\n\n')
     }
-    // 全量重放（首次 plan / fork 不可用）：任务上下文只能在这里重新注入，记忆提取每任务只做一次。
-    const { memoryContext, agentContext } = await this.resolveTaskContext(task, repos)
-    report.injected.push('agentContext', 'memoryContext', 'taskContext', 'planSectionRequirement')
+    // 全量重放（首次 plan / fork 不可用）：任务上下文只能在这里重新注入，Agent 指引每任务只做一次。
+    const { agentContext } = await this.resolveTaskContext(task, repos)
+    report.injected.push('agentContext', 'taskContext', 'planSectionRequirement')
     return [
       ...(agentContext?.sections ?? []),
-      memoryContext ?? '',
+      MEMORY_SEARCH_TOOL_GUIDANCE,
       '请只读分析以下 Coding 任务。可委派内置 Plan 子代理(Agent 工具)协助制定计划,也可直接分析输出。',
       `任务:${task.title}`,
       task.description,
@@ -475,12 +485,12 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
         .join('\n')
     }
     // 全量重放(未经过 plan 直接执行,或 fork 降级到底):无会话可继承,全量上下文兜底。
-    const { agentContext, memoryContext } = await this.resolveTaskContext(task, repos)
-    report.injected.push('agentContext', 'memoryContext', 'taskContext')
+    const { agentContext } = await this.resolveTaskContext(task, repos)
+    report.injected.push('agentContext', 'taskContext')
     if (task.planContent) report.injected.push('planContent')
     return [
       ...(agentContext?.sections ?? []),
-      memoryContext ?? '',
+      MEMORY_SEARCH_TOOL_GUIDANCE,
       task.title,
       task.description,
       task.planContent ? `Approved implementation plan:\n${task.planContent}` : '',
@@ -689,6 +699,9 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     const permissionHooks = this.deps.onPermissionRequest
       ? buildPermissionHooks(this.deps.onPermissionRequest, task.id, deniedCallIds)
       : undefined
+    // 记忆检索工具：任务会话创建时注册为自定义 MCP 工具（取代旧的任务启动前预注入）。
+    const memoryDeclarations = this.deps.resolveMemoryTools?.(task, repos) ?? []
+    const memoryMcp = memoryDeclarations.length ? buildToolSourceMcp(MEMORY_MCP_KEY, memoryDeclarations) : undefined
     const session = new QoderSession(launch.stageInstanceId, {
       token,
       cwd: primary.worktreePath ?? primary.localPath,
@@ -699,7 +712,14 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
       ...(launch.resumeSessionAt ? { resumeSessionAt: launch.resumeSessionAt } : {}),
       ...permissionsForStage(stagePhase),
       // 预授权 Agent 工具:让模型可委派内置子代理(Plan 等);不限制其它默认工具。
-      allowedTools: ['Agent'],
+      // search_memory 由宿主自己检索、无副作用,同样预授权免弹框。
+      allowedTools: ['Agent', ...(memoryMcp?.toolNames ?? [])],
+      ...(memoryMcp
+        ? {
+            mcpServers: { [MEMORY_MCP_KEY]: memoryMcp.server },
+            allowedMcpServerNames: [MEMORY_MCP_KEY]
+          }
+        : {}),
       ...(permissionHooks ? { hooks: permissionHooks } : {}),
       onMessage: (message) => {
         // HITL 拒绝补标:hooks deny 时 SDK 不一定设 is_error,由 deniedCallIds 补标。

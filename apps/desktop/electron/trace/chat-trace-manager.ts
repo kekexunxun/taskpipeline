@@ -3,7 +3,7 @@
  *
  * - 一个对话 = 一个 Trace，跨回合重开续接（seq 水位、历史根复用、摘要累计）
  * - turnKey（`${chatId}:${seq}`）隔离各回合的阶段容器
- * - 阶段容器（keyword / chat / memory）与任务路径同构
+ * - 阶段容器（chat / memory）与任务路径同构
  */
 import type { AgentSpan } from '@task-pipeline/core'
 import type { ChatTraceManager, ChatStagePhase } from '../chat/chat-service.js'
@@ -21,8 +21,7 @@ const chatStageSpans = new Map<string, AgentSpan>()
 /** chatId → 本回合 driver source（阶段容器 meta.source 用，与任务路径阶段同构）。 */
 const chatStageSources = new Map<string, string>()
 /** 对话阶段 phase → 阶段名（与 stage-label 的 agentStageLabel 映射保持一致）。 */
-const chatStageNames: Record<'keyword' | 'chat' | 'memory', string> = {
-  keyword: '关键词提取并注入',
+const chatStageNames: Record<'chat' | 'memory', string> = {
   chat: '对话生成',
   memory: '记忆整理'
 }
@@ -112,7 +111,7 @@ export const chatTraceManager: ChatTraceManager = {
     // 与任务路径阶段容器同构：agent.run + meta.phase，期间的 span 按栈自动挂入。
     const span = tracePipeline.startSpan(traceId, {
       type: 'agent.run',
-      name: chatStageNames[phase as 'keyword' | 'chat' | 'memory'],
+      name: chatStageNames[phase as 'chat' | 'memory'],
       meta: { source: chatStageSources.get(chatId) ?? 'openai', phase }
     })
     chatStageSpans.set(turnKey, span)

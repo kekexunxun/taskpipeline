@@ -38,7 +38,7 @@ import {
   testMcpConnectionById
 } from './credential/credential-state.js'
 import { initTaskRunner, loadRepoContext, callOpenAIForPrompt, savePlanDecision } from './task/task-runner.js'
-import { taskMemoryContext } from './memory/memory-context.js'
+import { createMemorySearchTool } from './memory/memory-search-tool.js'
 import { AgentService } from './agents/agent-service.js'
 import { AGENT_TEMPLATES } from './agents/templates.js'
 import { buildAgentGenerationPrompt, parseAgentGenerationResult } from './agents/agent-generator.js'
@@ -342,7 +342,14 @@ qoderOrch = new QoderOrchestrator({
       addTaskEvent({ taskId: task.id, kind: 'status', title: '注入测试 Agent 上下文', detail: sections.join('\n\n') })
     return { sections }
   },
-  resolveMemoryContext: taskMemoryContext,
+  resolveMemoryTools: (task, repos) => [
+    createMemorySearchTool({
+      userId: memoryService.ensureUserId(),
+      repositoryIds: repos.map((repo) => repo.repositoryId),
+      conversationId: `task:${task.id}`,
+      memoryService
+    })
+  ],
   finishImplementation,
   resolveOpenAIModelValue: () => resolveOpenAIModelValue(),
   syncSystemDefaultModel: () => syncSystemDefaultModel(),

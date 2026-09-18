@@ -20,6 +20,7 @@
  */
 
 import type { Task, TaskRepository } from '@task-pipeline/core'
+import type { ToolDeclaration } from '../../chat/drivers/tool-source.js'
 
 /** 当前支持的 task agent 运行时。 */
 export type TaskAgentId = 'qoder'
@@ -109,8 +110,12 @@ export type TaskAgentDeps = {
   emit: (event: TaskAgentEvent) => void
   /** 任务级 model 覆盖(可选)。 */
   resolveModel?: (task: Task) => string | undefined
-  /** Qoder 提示词前置的记忆上下文(可选)。 */
-  resolveMemoryContext?: (task: Task, repos: TaskRepository[]) => Promise<string | undefined>
+  /**
+   * 任务会话创建时注册的 `search_memory` 工具声明列表(可选)。
+   * 不再像旧 `resolveMemoryContext` 那样在任务启动前无条件检索并拼进 prompt —— scope
+   * (userId / repositoryIds / conversationId) 由调用方在闭包里绑定,模型自主决定何时调用。
+   */
+  resolveMemoryTools?: (task: Task, repos: TaskRepository[]) => ToolDeclaration[]
   /**
    * 按任务关联仓库解析的 Agent 指引段(可选)。
    * 非 resume 场景注入到 prompt 最前;resume(真实续接)时由调用方不提供。

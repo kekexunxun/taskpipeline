@@ -370,10 +370,13 @@ export class QoderChatDriver implements ChatDriver {
     const resumeSessionId = extractLastSessionId(input.history)
     const taskSource = input.toolSource
     const mcpSetup = taskSource ? buildToolSourceMcp('task_creation', taskSource.tools()) : undefined
+    // 记忆检索工具（search_memory）：与 task_creation 并列、各自一个 MCP server,互不冲突。
+    const memoryMcp = input.memoryTools?.length ? buildToolSourceMcp('memory_search', input.memoryTools) : undefined
     // 用户勾选的外部 MCP 服务（gitlab/jira/confluence）→ SDK stdio mcpServers，
     // 凭据缺失的服务由 resolver 返回 undefined 直接跳过（不误注入空配置）。
     const mcpServers: Record<string, McpServerConfig> = {}
     if (taskSource && mcpSetup) mcpServers.task_creation = mcpSetup.server
+    if (memoryMcp) mcpServers.memory_search = memoryMcp.server
     for (const serviceId of input.mcpServices ?? []) {
       const profile = this.mcpProfileResolver?.(serviceId)
       if (!profile || profile.transport !== 'stdio' || !profile.command) continue
@@ -398,11 +401,18 @@ export class QoderChatDriver implements ChatDriver {
     // 计划模式不再拼进主会话系统提示：常驻会话的 systemPrompt 在创建时冻结，逐轮改模式
     // 本就无效（旧实现的隐藏 bug）。改为：常驻「委派规则」+「复杂度自检建议」，
     // 规划轮次只逐轮给消息打委派标记；真正的 planner 角色提示只给子代理（见 agents）。
-    const systemPrompt = [
+    const systemPromptParts = [
       ...(baseSystemPrompt ? [baseSystemPrompt] : []),
       planDelegationInstruction(),
       planSuggestionGuidance()
-    ].join('\n\n')
+    ]
+    // 记忆检索工具使用指引（静态、恒在,不依赖检索结果）：与 OpenAI 链路保持一致的提示。
+    if (memoryMcp) {
+      systemPromptParts.push(
+        '当问题涉及工程约定、编码规范、历史决策或仓库文档（repowiki）时,先调用 search_memory 工具检索相关记忆再作答,不要凭空假设项目约定。'
+      )
+    }
+    const systemPrompt = systemPromptParts.join('\n\n')
     return {
       token,
       cwd: input.cwd ?? process.cwd(),
@@ -439,14 +449,9 @@ export class QoderChatDriver implements ChatDriver {
       ...(systemPrompt ? { systemPrompt } : {}),
       // allowedTools = 预授权名单（不是能力上限，其余工具仍走 canUseTool HITL）。
       // 始终预授权 `Agent`：委派 planner 子代理不该再弹一层确认框。
-      ...(taskSource && mcpSetup
-        ? {
-            allowedTools: ['Agent', ...mcpSetup.toolNames],
-            maxTurns: 10
-          }
-        : {
-            allowedTools: ['Agent']
-          }),
+      // search_memory 由宿主自己检索、无副作用,同样预授权免弹框。
+      allowedTools: ['Agent', ...(mcpSetup?.toolNames ?? []), ...(memoryMcp?.toolNames ?? [])],
+      ...(taskSource && mcpSetup ? { maxTurns: 10 } : {}),
       ...(serverNames.length
         ? {
             mcpServers,

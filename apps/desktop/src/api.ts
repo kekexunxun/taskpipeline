@@ -397,11 +397,6 @@ export type ChatConversationMeta = {
   messageCount: number
   /** 绑定的本地工作目录(项目对话);无值 = 普通对话。 */
   workingDirectory?: string
-  /**
-   * 是否已做过记忆上下文提取注入（每对话只做一次；整轮成功后才置位，失败/中止不消耗资格，
-   * 重试仍会重新提取）。持久化保证应用重启后不重复提取。
-   */
-  memoryInjected?: boolean
   /** 上下文滚动摘要（问题 2-B）：溢出轮次压缩后的摘要与覆盖边界；缺省 = 尚未压缩。 */
   compaction?: ChatCompaction
 }

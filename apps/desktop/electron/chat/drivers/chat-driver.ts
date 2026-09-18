@@ -32,7 +32,7 @@ import type {
   StoredMessageRecord,
   UserFileAttachment
 } from '../chat-types.js'
-import type { ToolSource } from './tool-source.js'
+import type { ToolDeclaration, ToolSource } from './tool-source.js'
 
 /**
  * StreamChat 输入参数。
@@ -56,6 +56,12 @@ export type StreamChatInput = {
   signal: AbortSignal
   toolSource?: ToolSource
   /**
+   * 记忆检索工具声明（`search_memory`）。与 `toolSource` 平级、独立注入：不依赖是否绑定了
+   * 工作目录或任务创建后端，普通对话也始终可用。driver 负责把它翻译成自己协议的 tool，
+   * 由模型自主决定何时调用（不再像旧实现那样在对话开始前无条件检索并预注入）。
+   */
+  memoryTools?: ToolDeclaration[]
+  /**
    * 用户选中的 MCP 服务（gitlab / jira / confluence）。driver 负责真正注入：
    * Qoder 走 SDK mcpServers（stdio 子进程），OpenAI 走 MCP 客户端桥接成 ai-sdk 工具。
    */
@@ -74,12 +80,12 @@ export type StreamChatInput = {
   workspaceContext?: string
   /**
    * 加入已存在的对话回合 trace（一次用户提问 = 一个 Trace）。
-   * 主对话由 ChatService 传入；关键词提取 / 记忆整理等辅助 LLM 调用显式 join，
+   * 主对话由 ChatService 传入；记忆整理等辅助 LLM 调用显式 join，
    * 让一次提问下的多次 LLM 调用串联在同一棵执行树里。缺省时 driver 自建独立 trace。
    */
   traceId?: string
   /**
-   * trace 语义名：辅助 LLM 调用（关键词提取 / 记忆整理）的 span 名称覆盖。
+   * trace 语义名：辅助 LLM 调用（记忆整理）的 span 名称覆盖。
    * 否则 span 名直接用模型名，任务执行树里会出现与任务模型无关的
    * 「LLM deepseek-v4-flash」等条目，被误读为任务主体模型。
    */

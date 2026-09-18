@@ -451,13 +451,13 @@ describe('OpenAIChatDriver', () => {
   it('moves system content from history into the system option (ai-sdk 7 requirement)', async () => {
     aiMock.__pushStreamScript({ chunks: [{ type: 'text-delta', text: 'hi' }] })
     const d = driver({ profile: { baseUrl: 'https://api.example.com', model: 'gpt-5' } })
-    // 用 deserializeMessage 构造历史消息（与 ChatService 注入 memoryContext 后的真实路径一致）
+    // 用 deserializeMessage 构造历史消息：验证任意 system 角色消息都收敛到 system 选项。
     const systemHistory = d.deserializeMessage({
       id: 's1',
       role: 'system',
       createdAt: 't',
       driverId: 'openai',
-      raw: { kind: 'system', text: '记忆上下文: 用户偏好简洁回答' }
+      raw: { kind: 'system', text: '系统提示: 保持回答简洁' }
     })
     const userHistory = d.deserializeMessage({
       id: 'u0',
@@ -478,7 +478,44 @@ describe('OpenAIChatDriver', () => {
     const opts = aiMock.__streamCalls.at(-1)!
     // messages 里不允许 system 角色,全部收敛到 system 选项
     expect(opts.messages.map((m) => m.role)).toEqual(['user', 'user'])
-    expect(opts.system).toContain('记忆上下文: 用户偏好简洁回答')
+    expect(opts.system).toContain('系统提示: 保持回答简洁')
+  })
+
+  it('registers memoryTools search_memory as an ai-sdk tool with static usage guidance', async () => {
+    aiMock.__pushStreamScript({ chunks: [{ type: 'text-delta', text: 'hi' }] })
+    const d = driver({ profile: { baseUrl: 'https://api.example.com', model: 'gpt-5' } })
+    let searchArg: unknown
+    await collect(
+      d.streamChat({
+        conversationId: 'c',
+        model: 'openai:default',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal,
+        memoryTools: [
+          {
+            name: 'search_memory',
+            description: '检索记忆',
+            schema: {},
+            annotations: { readOnlyHint: true },
+            execute: async (input) => {
+              searchArg = input
+              return '【记忆】用户偏好简洁回答'
+            }
+          }
+        ]
+      })
+    )
+    const opts = aiMock.__streamCalls.at(-1)!
+    const tools = opts.tools as Record<string, { execute?: (i: unknown) => Promise<unknown> }> | undefined
+    // search_memory 作为普通工具注册进主链路工具集。
+    expect(tools?.search_memory).toBeDefined()
+    // system 提示包含静态使用指引（不依赖检索结果）。
+    expect(String(opts.system)).toContain('search_memory')
+    // 触发工具 execute → 委托给声明的 execute,返回值即渲染后的记忆文本。
+    const out = await tools!.search_memory.execute!({ query: '偏好' })
+    expect(searchArg).toEqual({ query: '偏好' })
+    expect(out).toContain('用户偏好简洁回答')
   })
 
   it('merges task source system prompt into the system option', async () => {

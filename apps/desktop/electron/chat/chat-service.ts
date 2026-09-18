@@ -8,7 +8,7 @@ import { ChatStorage } from './chat-storage.js'
 import { ChatPlanStorage } from './chat-plan-storage.js'
 import type { ChatDriverRegistry } from './drivers/driver-registry.js'
 import { createProjectQueryToolSource, WRITE_PLAN_TOOL } from './drivers/project-query-tools.js'
-import type { ToolSource } from './drivers/tool-source.js'
+import type { ToolDeclaration, ToolSource } from './drivers/tool-source.js'
 import { isModelAvailable, pickGroupModel, pickSystemDefaultModel } from './system-default-model.js'
 import {
   budgetForModel,
@@ -50,11 +50,12 @@ import type { TaskCreationBackend } from './task-backends/index.js'
 
 type ActiveStream = { streamId: string; abort: AbortController }
 type TaskBackendFactory = () => TaskCreationBackend | undefined
-type MemoryContextProvider = (input: {
-  conversationId: string
-  query: string
-  workingDirectory?: string
-}) => Promise<string | undefined>
+/**
+ * 记忆检索工具解析器：按对话归属（工作目录 -> repositoryIds / conversationId）产出本回合可用的
+ * `search_memory` 工具声明列表。不再像旧实现那样在模型调用前无条件检索并作为 system 文本
+ * 注入——现在改为把检索能力作为一个普通工具交给 driver，模型自己决定何时调用。
+ */
+type MemoryToolsResolver = (input: { conversationId: string; workingDirectory?: string }) => Promise<ToolDeclaration[]>
 type ConversationConsolidator = (input: {
   conversation: ChatConversation
   signal: AbortSignal
@@ -71,7 +72,7 @@ type WorkspaceContextResolver = (workingDirectory: string | undefined) => Promis
 
 /**
  * 对话回合 trace 管理器（对话级：一个对话 = 一个 Trace，回合间重开续接）。
- * 由主进程注入：回合 begin/end 控制 trace 生命周期，辅助 LLM 调用（关键词提取/记忆整理）
+ * 由主进程注入：回合 begin/end 控制 trace 生命周期，辅助 LLM 调用（记忆检索 / 记忆整理）
  * 通过 traceIdForChat 拿到 traceId 后 join 同一回合。
  */
 export type ChatTraceManager = {
@@ -101,8 +102,8 @@ export type ChatTraceManager = {
   endStage?(chatId: string, turnKey: string, status?: 'completed' | 'error'): void
 }
 
-/** 对话回合的阶段划分：关键词提取并注入 / 对话生成 / 记忆整理。 */
-export type ChatStagePhase = 'keyword' | 'chat' | 'memory'
+/** 对话回合的阶段划分：对话生成 / 记忆整理。 */
+export type ChatStagePhase = 'chat' | 'memory'
 
 /**
  * ChatService — 编排层。
@@ -208,7 +209,7 @@ export class ChatService {
     private readonly driverRegistry: ChatDriverRegistry,
     private readonly getMainWindow: () => BrowserWindow | undefined,
     private readonly resolveTaskBackend?: TaskBackendFactory,
-    private readonly memoryContext?: MemoryContextProvider,
+    private readonly resolveMemoryTools?: MemoryToolsResolver,
     private readonly consolidateConversation?: ConversationConsolidator,
     private readonly traceManager?: ChatTraceManager,
     private readonly resolveWorkspaceContext?: WorkspaceContextResolver
@@ -583,8 +584,8 @@ export class ChatService {
       ...(input.message.files?.length ? { files: input.message.files } : {})
     })
     const existing = conversation.messages.filter((message) => message.id !== userRecord.id)
-    // 选中 Agent 的 systemPrompt：以 system 消息插入本轮上下文（复用 memoryContext 的插入模式），
-    // 随 messages 一起落盘，保证注入内容进入模型上下文且历史加载后仍可见。
+    // 选中 Agent 的 systemPrompt：以 system 消息插入本轮上下文，随 messages 一起落盘，
+    // 保证注入内容进入模型上下文且历史加载后仍可见。
     const agentSystemRecord = input.systemPrompt
       ? ({
           id: randomUUID(),
@@ -609,9 +610,6 @@ export class ChatService {
     let streamUsage: ChatUsage | undefined
     let errorMessage: string | undefined
     let userPersisted = false
-    // 本轮是否执行了记忆提取注入（整轮成功后写 conversation.memoryInjected；
-    // 失败/中止不置位，重试仍会重新提取 —— 避免首轮失败后记忆注入永久丢失）。
-    let memoryInjectedThisTurn = false
     // 本轮组装时被裁掉的溢出轮次（问题 2-B）：回合结束后达阈值则滚动摘要。
     let overflowRecords: StoredMessageRecord[] = []
     // 本轮上下文占用是否已达窗口 80%：达阈时回合结束只要有溢出即摘要，不等攒批。
@@ -655,28 +653,11 @@ export class ChatService {
       })
       userPersisted = true
 
-      // keyword 阶段容器：关键词提取 + 记忆/Repowiki 检索（期间的 llm/tool span 挂入阶段）。
-      // 每对话只提取注入一次（conversation.memoryInjected 持久化判定）：后续轮次跳过，省掉每轮
-      // 一次的关键词提取 LLM 调用（对话回复变慢的主要来源之一）。提取期间推 status 提示，避免用户干等。
-      const memoryContext = !conversation.memoryInjected
-        ? await this.withStage(Boolean(turnTraceId), input.chatId, turnKey, 'keyword', async () => {
-            if (!this.memoryContext) return undefined
-            this.dispatch(effective, { type: 'status', text: '正在提取关键词并检索记忆上下文…' })
-            const ctx = await this.memoryContext?.({
-              conversationId: input.chatId,
-              query: input.message.text,
-              workingDirectory: conversation.workingDirectory
-            })
-            memoryInjectedThisTurn = true
-            this.dispatch(effective, { type: 'status', text: '记忆上下文已就绪' })
-            return ctx
-          })
-        : undefined
-      // 解析工作区上下文（多目录工作区描述 + agents.md 规范）
-      // OpenAI driver 用此构建分层系统提示；Qoder driver 通过 system 消息注入
+      // 记忆检索不再无条件预先注入：本回合把 search_memory 工具声明交给 driver（下面 streamChat
+      // 调用处），模型自己决定何时检索。工作区上下文（多目录描述 + agents.md 规范）仍按原逻辑
+      // 作为 system 消息注入——这与记忆无关，不受本次改造影响。
       const workspaceContext = await this.resolveWorkspaceContext?.(conversation.workingDirectory)
-      // 构建历史消息：注入工作区上下文和记忆上下文作为 system 消息
-      // OpenAI driver 会从 history 中提取 system 消息，融入其分层系统提示
+      // 构建历史消息：注入工作区上下文作为 system 消息（OpenAI driver 会从中提取并融入分层系统提示）
       const systemMessages: StoredMessageRecord[] = []
       if (workspaceContext) {
         systemMessages.push({
@@ -685,15 +666,6 @@ export class ChatService {
           createdAt: now,
           driverId: effective.driverId,
           raw: { kind: 'system', text: workspaceContext }
-        } as StoredMessageRecord)
-      }
-      if (memoryContext) {
-        systemMessages.push({
-          id: randomUUID(),
-          role: 'system',
-          createdAt: now,
-          driverId: effective.driverId,
-          raw: { kind: 'system', text: memoryContext }
         } as StoredMessageRecord)
       }
       const historyRecords =
@@ -781,6 +753,12 @@ export class ChatService {
         this.dispatch(effective, { type: 'plan-start' })
       }
 
+      // 记忆检索工具：不再预先注入，改为随本回合透传给 driver，模型自主决定何时调用 search_memory。
+      const memoryTools = await this.resolveMemoryTools?.({
+        conversationId: input.chatId,
+        workingDirectory: conversation.workingDirectory
+      })
+
       // chat 阶段容器：主对话生成（driver 流式期间的 llm/tool/subtask span 挂入阶段）。
       await this.withStage(Boolean(turnTraceId), input.chatId, turnKey, 'chat', async () => {
         for await (const chunk of driver.streamChat({
@@ -798,6 +776,7 @@ export class ChatService {
           cwd: conversation.workingDirectory,
           ...(turnTraceId ? { traceId: turnTraceId } : {}),
           ...(toolSource ? { toolSource } : {}),
+          ...(memoryTools?.length ? { memoryTools } : {}),
           ...(effective.mcpService?.length ? { mcpServices: effective.mcpService } : {}),
           ...(effective.skills?.length ? { skills: effective.skills } : {}),
           ...(workspaceContext ? { workspaceContext } : {}),
@@ -907,14 +886,6 @@ export class ChatService {
       if (this.streamPersistInterval) {
         clearInterval(this.streamPersistInterval)
         this.streamPersistInterval = undefined
-      }
-      // 整轮成功后才记「记忆已注入」：失败/中止（error/aborted/空响应）不消耗资格，重试仍会重新提取。
-      if (status === 'done' && memoryInjectedThisTurn && !conversation.memoryInjected) {
-        try {
-          await this.storage.updateMeta(input.chatId, { memoryInjected: true })
-        } catch {
-          /* 标记写入失败不影响本轮 */
-        }
       }
       // 计划模式但本轮未成功产出计划（模型异常 / 被中止）：把已累积的文本转成「失败 / 已取消」
       // 的计划卡。既让前端实时看到正确终态（而非永远停在「生成中」），也随消息一起落盘，

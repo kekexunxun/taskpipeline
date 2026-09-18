@@ -53,6 +53,10 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
     // 会话创建时读它判定 transport（诊断字段）；mock 不补会抛「export is not defined」。
     DEFAULT_RUNTIME_TRANSPORT: 'worker',
     accessToken: (token: string) => ({ token }),
+    // 自定义 MCP 工具（search_memory 等）经 buildToolSourceMcp 翻译成 SDK server/tool：
+    // 测试只需它不抛错并产出可识别的占位对象，供 options.mcpServers 断言。
+    createSdkMcpServer: (cfg: { name: string }) => ({ __mcpServer: cfg.name }),
+    tool: (name: string) => ({ __mcpTool: name }),
     query: (args: unknown) => {
       queryCalls.push(args)
       // closed 按 query 实例隔离:一次 close 只结束自己的会话,不影响新会话。
@@ -708,28 +712,25 @@ describe('QoderTaskAgentDriver', () => {
     expect(texts[0]).toContain('遵循项目约定')
   })
 
-  it('任务上下文提取注入每任务只做一次：续接阶段不重拼上下文', async () => {
-    let memoryCalls = 0
-    let agentCalls = 0
+  it('ensureSession 注册 search_memory：会话 options 含 memory_search MCP server 与预授权工具', async () => {
     sdkMock.__pushQueryScript({ messages: [assistantMsg('分析中', 'p-sess'), resultMsg('{}', 'p-sess')] })
     const { driver: d } = driver({
-      resolveMemoryContext: async () => {
-        memoryCalls += 1
-        return '记忆上下文'
-      },
-      resolveAgentContext: async () => {
-        agentCalls += 1
-        return { sections: ['## Agent 指引'] }
-      }
+      resolveMemoryTools: () => [
+        {
+          name: 'search_memory',
+          description: '检索记忆',
+          schema: {},
+          execute: async () => '记忆结果'
+        }
+      ]
     })
     await d.runStage({ phase: 'planning', task: fakeTask(), repos: fakeRepos() })
-    expect(memoryCalls).toBe(1)
-    expect(agentCalls).toBe(1)
-    sdkMock.__pushQueryScript({ messages: [assistantMsg('再分析', 'p-sess'), resultMsg('{}', 'p-sess')] })
-    await d.runStage({ phase: 'planning', task: fakeTask(), repos: fakeRepos() })
-    // 第二次 runStage(planning) 走同一阶段实例续接：上下文已在会话前缀里，记忆与 Agent 指引都不再重拼。
-    expect(memoryCalls).toBe(1)
-    expect(agentCalls).toBe(1)
+    const options = (sdkMock.__queryCalls[0] as { options?: Record<string, any> } | undefined)?.options
+    expect(Object.keys(options?.mcpServers ?? {})).toContain('memory_search')
+    expect(options?.allowedMcpServerNames).toContain('memory_search')
+    expect(options?.allowedTools).toContain('mcp__memory_search__search_memory')
+    // Agent 预授权仍在（委派内置子代理不受影响）。
+    expect(options?.allowedTools).toContain('Agent')
   })
 
   it('runStage(implementation) prepends agent context sections to the prompt', async () => {

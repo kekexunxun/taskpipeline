@@ -1,14 +1,15 @@
 /**
- * Memory 任务上下文：检索 / 注入 / 整理。
+ * Memory 任务上下文：模型选择 / 整理。
  *
  * - resolveTaskChatModel：按任务 runtime 选择 chat 驱动 + 模型；
- * - taskMemoryContext：为任务 prompt 检索记忆上下文；
  * - consolidateTaskMemory / consolidateChatMemory：任务/对话结束后整理长期记忆。
+ *
+ * 注：任务启动前的记忆检索预注入（旧 `taskMemoryContext`）已下线,改由任务会话注册的
+ * `search_memory` 工具按需检索（见 memory-search-tool.ts / qoder-task-agent.ts）。
  */
 import type {
   AgentEvent,
   AgentSpan,
-  MemoryScope,
   MemorySearchHit,
   RepoWikiSearchHit,
   Task,
@@ -16,7 +17,6 @@ import type {
 } from '@task-pipeline/core'
 import type { ChatDriverId } from '../chat/chat-types.js'
 import type { ChatConversation } from '../chat/chat-types.js'
-import { renderMemoryContext } from './memory-service.js'
 import { extractMemories } from './memory-extractor.js'
 
 // ── 依赖注入（main.ts 初始化时传入） ─────────────────────────────────────────
@@ -102,96 +102,6 @@ export async function resolveTaskChatModel(task?: Task): Promise<{ driverId: Cha
   if (!fallback) return primary
   if (fallback.provider === 'qoder') return { driverId: 'qoder', model: fallback.model.replace(/^qoder:/, '') }
   return { driverId: 'openai', model: fallback.model }
-}
-
-// ── 任务记忆检索 ─────────────────────────────────────────────────────────────
-
-export async function taskMemoryContext(task: Task, repos: TaskRepository[]): Promise<string | undefined> {
-  try {
-    // 新 MemoryEngine 检索路径零 LLM：直接 tokenize 走 FTS5 + RRF 融合，
-    // 不再需要 LLM 关键词提取。trace 记录检索结果（命中数、关键词）供调试。
-    const searchResult = await d().memoryService.search({
-      userId: d().memoryService.ensureUserId(),
-      repositoryIds: repos.map((repo) => repo.repositoryId),
-      conversationId: `task:${task.id}`,
-      query: `${task.title}\n${task.description}`
-    })
-    const { memories, wikiDocs, keywords } = searchResult
-    d().addTaskEvent({
-      taskId: task.id,
-      kind: 'status',
-      title: '检索记忆上下文',
-      // 零 LLM 检索：直接 tokenize + FTS5，记录关键词（fallbackKeywords 提取）和命中数。
-      detail: formatMemorySearchDetail(memories, wikiDocs, keywords)
-    })
-    const memoryContext = renderMemoryContext(memories, wikiDocs)
-    // 独立发一条「注入记忆上下文」:与「注入 Agent 上下文」对称,验证检索出的内容真的
-    // 进了 prompt。原实现只在「检索」上 addTaskEvent,不告诉调用方拼了什么,trace 上
-    // 看不到实际注入的文本(只能去 hooks / driver 里推)。
-    if (memoryContext) {
-      d().addTaskEvent({
-        taskId: task.id,
-        kind: 'status',
-        title: '注入记忆上下文',
-        detail:
-          memoryContext.length > 2000
-            ? `${memoryContext.slice(0, 2000)}\n…（已截断，原文 ${memoryContext.length} 字）`
-            : memoryContext
-      })
-    }
-    return memoryContext
-  } catch (error) {
-    console.warn('[memory] task context failed:', error)
-    return undefined
-  }
-}
-
-// ── 格式化辅助 ───────────────────────────────────────────────────────────────
-
-/**
- * 把 memoryService.search 返回结果格式化为可读的 trace detail。
- * - 按 scope 分组列出（用户 / 仓库 / 对话 / repowiki）；
- * - 每条带标题 + score + 200 字预览；
- * - 顶部拼接命中总数 + 关键词（零 LLM 检索，直接 tokenize + FTS5）。
- */
-function formatMemorySearchDetail(
-  memories: MemorySearchHit[],
-  wikiDocs: RepoWikiSearchHit[],
-  keywords: string[]
-): string {
-  const scopeLabel: Record<MemoryScope, string> = { user: '用户', repo: '仓库', conversation: '对话' }
-  const total = memories.length + wikiDocs.length
-  const header = [`检索引擎：MemoryEngine (FTS5 + RRF)`, `命中：${total} 条`]
-  if (total === 0) {
-    return [
-      ...header,
-      `未命中任何记忆（用户级 / 仓库级 / 对话级 / repowiki）。`,
-      `关键词：${keywords.length ? keywords.join('、') : '（空）'}`
-    ].join('\n')
-  }
-  const lines: string[] = [...header, `关键词：${keywords.join('、')}`]
-  const grouped = new Map<MemoryScope, MemorySearchHit[]>()
-  for (const m of memories) {
-    if (!grouped.has(m.scope)) grouped.set(m.scope, [])
-    grouped.get(m.scope)!.push(m)
-  }
-  for (const scope of ['user', 'repo', 'conversation'] as MemoryScope[]) {
-    const list = grouped.get(scope)
-    if (!list?.length) continue
-    lines.push(`\n[${scopeLabel[scope]}级] ${list.length} 条`)
-    for (const hit of list) {
-      const preview = hit.content.length > 200 ? `${hit.content.slice(0, 200)}…` : hit.content
-      lines.push(`- ${hit.title}（score ${hit.score.toFixed(1)}）\n  ${preview.replace(/\n+/g, ' ')}`)
-    }
-  }
-  if (wikiDocs.length) {
-    lines.push(`\n[repowiki] ${wikiDocs.length} 篇`)
-    for (const doc of wikiDocs) {
-      const preview = doc.content.length > 200 ? `${doc.content.slice(0, 200)}…` : doc.content
-      lines.push(`- ${doc.path}（score ${doc.score.toFixed(1)}）\n  ${preview.replace(/\n+/g, ' ')}`)
-    }
-  }
-  return lines.join('\n')
 }
 
 // ── 记忆整理 ─────────────────────────────────────────────────────────────────

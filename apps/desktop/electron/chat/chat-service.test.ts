@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import type { BrowserWindow } from 'electron'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TaskStore } from '@task-pipeline/core'
+import { createMemorySearchTool } from '../memory/memory-search-tool.js'
 import {
   ChatService,
   CHAT_DRIVER_STALL_MS,
@@ -13,6 +14,7 @@ import {
 } from './chat-service.js'
 import { ChatDriverRegistry } from './drivers/driver-registry.js'
 import type { ChatDriver } from './drivers/chat-driver.js'
+import type { ToolDeclaration } from './drivers/tool-source.js'
 import type { ChatModelInfo, ChatStreamChunk, DriverPart, StoredMessage } from './chat-types.js'
 
 /**
@@ -40,12 +42,20 @@ type FakeDriverOptions = {
 }
 
 function createFakeDriver(opts: FakeDriverOptions): ChatDriver & {
-  received: { history: StoredMessage[]; model: string; toolSource?: unknown; cwd?: string; mcpServices?: string[] }[]
+  received: {
+    history: StoredMessage[]
+    model: string
+    toolSource?: unknown
+    memoryTools?: ToolDeclaration[]
+    cwd?: string
+    mcpServices?: string[]
+  }[]
 } {
   const received: {
     history: StoredMessage[]
     model: string
     toolSource?: unknown
+    memoryTools?: ToolDeclaration[]
     cwd?: string
     mcpServices?: string[]
   }[] = []
@@ -83,6 +93,7 @@ function createFakeDriver(opts: FakeDriverOptions): ChatDriver & {
         history: input.history,
         model: input.model,
         toolSource: input.toolSource,
+        memoryTools: input.memoryTools,
         cwd: input.cwd,
         mcpServices: input.mcpServices
       })
@@ -101,7 +112,14 @@ function createFakeDriver(opts: FakeDriverOptions): ChatDriver & {
       /* noop */
     }
   } as ChatDriver & {
-    received: { history: StoredMessage[]; model: string; toolSource?: unknown; cwd?: string; mcpServices?: string[] }[]
+    received: {
+      history: StoredMessage[]
+      model: string
+      toolSource?: unknown
+      memoryTools?: ToolDeclaration[]
+      cwd?: string
+      mcpServices?: string[]
+    }[]
   }
 }
 
@@ -161,15 +179,28 @@ describe('ChatService (driver-based)', () => {
     expect(reloaded?.messages[1]?.parts[0]?.type).toBe('text')
   })
 
-  it('关键词提取只在首个用户消息执行一次：后续轮次跳过并发送 status 提示', async () => {
-    let memoryCalls = 0
-    const memoryContext: (input: {
-      conversationId: string
-      query: string
-    }) => Promise<string | undefined> = async () => {
-      memoryCalls += 1
-      return '【记忆】结算页相关经验'
+  it('记忆检索改为工具：每回合透传 search_memory 声明,execute 调 memoryService.search', async () => {
+    // 用真实的 createMemorySearchTool 工厂,注入 mock memoryService,验证 ChatService
+    // 不再预注入 system 文本,而是把工具声明列表透传给 driver,由 driver/模型按需调用。
+    const searchCalls: { query: string; userId: string; conversationId?: string }[] = []
+    const fakeMemoryService = {
+      ensureUserId: () => 'user-1',
+      search: async (input: { userId: string; conversationId?: string; query: string }) => {
+        searchCalls.push({ query: input.query, userId: input.userId, conversationId: input.conversationId })
+        return {
+          memories: [{ scope: 'user', title: '偏好', content: '用户偏好简洁回答', score: 1, keywords: [] }],
+          wikiDocs: [],
+          keywords: ['偏好']
+        }
+      }
     }
+    const resolveMemoryTools = async (input: { conversationId: string; workingDirectory?: string }) => [
+      createMemorySearchTool({
+        userId: fakeMemoryService.ensureUserId(),
+        conversationId: input.conversationId,
+        memoryService: fakeMemoryService as never
+      })
+    ]
     const driver = createFakeDriver({
       id: 'qoder',
       displayName: 'Qoder',
@@ -179,28 +210,21 @@ describe('ChatService (driver-based)', () => {
             { type: 'part', part: { driverId: 'qoder', type: 'text', text: 'hi' } satisfies DriverPart },
             { type: 'done', status: 'done' }
           ]
-        },
-        {
-          emit: [
-            { type: 'part', part: { driverId: 'qoder', type: 'text', text: 'again' } satisfies DriverPart },
-            { type: 'done', status: 'done' }
-          ]
         }
       ],
       models: [{ value: 'qoder:test', displayName: '测试模型' }]
     })
     const registry = new ChatDriverRegistry()
     registry.register(driver)
-    const sent: ChatStreamChunk[] = []
     const win = {
       webContents: {
-        send: (_channel: string, payload: { chunk?: ChatStreamChunk }) => {
-          if (payload.chunk) sent.push(payload.chunk)
+        send: () => {
+          /* noop */
         }
       }
     } as unknown as BrowserWindow
-    // memoryContext 是构造器第 6 个参数（resolveTaskBackend 之后）。
-    const service = new ChatService(fakeStore(), dataDir, registry, () => win, undefined, memoryContext)
+    // resolveMemoryTools 是构造器第 6 个参数（resolveTaskBackend 之后）。
+    const service = new ChatService(fakeStore(), dataDir, registry, () => win, undefined, resolveMemoryTools)
     const conv = await service.createChat('qoder', 'qoder:test')
     await service.startChatStream({
       streamId: 'stream-1',
@@ -209,96 +233,18 @@ describe('ChatService (driver-based)', () => {
       model: 'qoder:test',
       message: { id: 'u1', text: 'hello', createdAt: new Date().toISOString() }
     })
-    await service.startChatStream({
-      streamId: 'stream-2',
-      chatId: conv.id,
-      driverId: 'qoder',
-      model: 'qoder:test',
-      message: { id: 'u2', text: 'again', createdAt: new Date().toISOString() }
-    })
-    // 记忆提取只做一次（第二轮跳过，省掉一次关键词提取 LLM 调用）。
-    expect(memoryCalls).toBe(1)
-    // 首轮提取前后各一条 status 提示；第二轮不再发。
-    const statusTexts = sent
-      .filter((c): c is Extract<ChatStreamChunk, { type: 'status' }> => c.type === 'status')
-      .map((c) => c.text)
-    expect(statusTexts).toEqual(['正在提取关键词并检索记忆上下文…', '记忆上下文已就绪'])
-    // 首轮 driver 收到的历史含记忆 system 注入；第二轮不再注入。
-    expect(driver.received[0]?.history.some((m) => m.role === 'system')).toBe(true)
-    expect(driver.received[1]?.history.some((m) => m.role === 'system')).toBe(false)
-  })
-
-  it('首轮提取失败不消耗资格：重试仍会重新提取并注入，成功后后续轮次跳过', async () => {
-    let memoryCalls = 0
-    const memoryContext: (input: {
-      conversationId: string
-      query: string
-    }) => Promise<string | undefined> = async () => {
-      memoryCalls += 1
-      if (memoryCalls === 1) throw new Error('提取失败')
-      return '【记忆】结算页相关经验'
-    }
-    const driver = createFakeDriver({
-      id: 'qoder',
-      displayName: 'Qoder',
-      scripts: [
-        {
-          emit: [
-            { type: 'part', part: { driverId: 'qoder', type: 'text', text: 'retry1' } satisfies DriverPart },
-            { type: 'done', status: 'done' }
-          ]
-        },
-        {
-          emit: [
-            { type: 'part', part: { driverId: 'qoder', type: 'text', text: 'retry2' } satisfies DriverPart },
-            { type: 'done', status: 'done' }
-          ]
-        }
-      ],
-      models: [{ value: 'qoder:test', displayName: '测试模型' }]
-    })
-    const registry = new ChatDriverRegistry()
-    registry.register(driver)
-    const sent: ChatStreamChunk[] = []
-    const win = {
-      webContents: {
-        send: (_channel: string, payload: { chunk?: ChatStreamChunk }) => {
-          if (payload.chunk) sent.push(payload.chunk)
-        }
-      }
-    } as unknown as BrowserWindow
-    const service = new ChatService(fakeStore(), dataDir, registry, () => win, undefined, memoryContext)
-    const conv = await service.createChat('qoder', 'qoder:test')
-    await service.startChatStream({
-      streamId: 'stream-1',
-      chatId: conv.id,
-      driverId: 'qoder',
-      model: 'qoder:test',
-      message: { id: 'u1', text: 'hello', createdAt: new Date().toISOString() }
-    })
-    // 首轮提取抛错 → 整轮失败，不写 memoryInjected 标记。
-    expect(memoryCalls).toBe(1)
-    expect(sent.some((c) => c.type === 'error')).toBe(true)
-    await service.startChatStream({
-      streamId: 'stream-2',
-      chatId: conv.id,
-      driverId: 'qoder',
-      model: 'qoder:test',
-      message: { id: 'u2', text: 'again', createdAt: new Date().toISOString() }
-    })
-    // 重试成功：重新提取注入并写标记。
-    expect(memoryCalls).toBe(2)
-    expect(driver.received[0]?.history.some((m) => m.role === 'system')).toBe(true)
-    await service.startChatStream({
-      streamId: 'stream-3',
-      chatId: conv.id,
-      driverId: 'qoder',
-      model: 'qoder:test',
-      message: { id: 'u3', text: 'third', createdAt: new Date().toISOString() }
-    })
-    // 标记已写：第三轮不再提取、不再注入。
-    expect(memoryCalls).toBe(2)
-    expect(driver.received[1]?.history.some((m) => m.role === 'system')).toBe(false)
+    // driver 收到 memoryTools,含 search_memory 声明;历史里不再有记忆 system 预注入。
+    const memoryTool = driver.received[0]?.memoryTools?.find((t) => t.name === 'search_memory')
+    expect(memoryTool).toBeDefined()
+    expect(driver.received[0]?.history.some((m) => m.role === 'system')).toBe(false)
+    // 模型尚未调用时不会触发检索。
+    expect(searchCalls).toHaveLength(0)
+    // 调用工具 execute → 触发 mock memoryService.search,并渲染出命中记忆文本。
+    const output = await memoryTool!.execute({ query: '偏好' })
+    expect(searchCalls).toHaveLength(1)
+    expect(searchCalls[0]?.query).toBe('偏好')
+    expect(searchCalls[0]?.userId).toBe('user-1')
+    expect(output).toContain('用户偏好简洁回答')
   })
 
   it('回合 trace 契约：beginTurn 返回的 traceId 贯穿 endTurn / beginStage / endStage（回合隔离）', async () => {

@@ -37,7 +37,7 @@ import { detectVendor, createVendorModel, type ModelVendor } from './model-provi
 import { WRITE_PLAN_TOOL } from './project-query-tools.js'
 import { isOpenAIModelValue, prefixOfVendor, stripModelPrefix } from './model-value.js'
 import type { ChatDriver, StreamChatInput } from './chat-driver.js'
-import type { ToolSource } from './tool-source.js'
+import type { ToolDeclaration, ToolSource } from './tool-source.js'
 
 type OpenAITokenProvider = (profile?: OpenAIProfile) => string | undefined
 
@@ -266,14 +266,15 @@ function readProfiles(store: TaskStore): OpenAIProfile[] {
 }
 
 /**
- * 把 ToolSource 的声明翻译成 ai-sdk `tool({...})`。
+ * 把 `ToolDeclaration` 列表翻译成 ai-sdk `tool({...})`。
  *  - `schema` 是单层 record,需要 `z.object(...)` 包装;
  *  - `execute` 直接调 ToolDeclaration.execute(driver 不知道业务含义);
  *  - `description` / `annotations` 直接透传。
+ * `ToolSource.tools()` 与 `StreamChatInput.memoryTools` 共用这一份转换,不再各写一遍。
  */
-function buildAiTools(source: ToolSource): Record<string, ReturnType<typeof aiTool>> {
+function declarationsToAiTools(declarations: ToolDeclaration[]): Record<string, ReturnType<typeof aiTool>> {
   const tools: Record<string, ReturnType<typeof aiTool>> = {}
-  for (const decl of source.tools()) {
+  for (const decl of declarations) {
     // ai-sdk 的 `tool` 是强类型函数,需要把 schema 转成具体 zod object。
     // ToolDeclaration.schema 是单层 record (`z.object` 已经拆好字段),
     // 这里组合一次给 ai-sdk。schema 的实际形态在运行时由 driver 决定,
@@ -286,6 +287,10 @@ function buildAiTools(source: ToolSource): Record<string, ReturnType<typeof aiTo
     tools[decl.name] = built as unknown as ReturnType<typeof aiTool>
   }
   return tools
+}
+
+function buildAiTools(source: ToolSource): Record<string, ReturnType<typeof aiTool>> {
+  return declarationsToAiTools(source.tools())
 }
 
 /**
@@ -549,6 +554,10 @@ export class OpenAIChatDriver implements ChatDriver {
     }
     // 内置轻量级 web_fetch 工具：为 OpenAI 链路提供基础网页抓取能力（Qoder 链路走 CLI 内置 WebFetch）。
     mergedTools = { ...(mergedTools ?? {}), web_fetch: createWebFetchAiTool() as unknown as ReturnType<typeof aiTool> }
+    // 记忆检索工具（search_memory）：与 toolSource 平级、独立注入,由模型自主决定何时调用。
+    if (input.memoryTools?.length) {
+      mergedTools = { ...(mergedTools ?? {}), ...declarationsToAiTools(input.memoryTools) }
+    }
     // ai-sdk 7 起 system 内容必须走 `system` 选项,messages 里不允许 system 角色。
     // 构建单一分层系统提示，按顺序包含所有上下文信息。
     const { messages, systemText } = historyToModelMessages(input.history, this.attachmentCache)
@@ -561,9 +570,16 @@ export class OpenAIChatDriver implements ChatDriver {
     if (input.workspaceContext) {
       sections.push(input.workspaceContext)
     }
-    // 3. 记忆上下文
+    // 3. 历史里其他 system 角色消息（若有）作为通用上下文透传。
+    //    注意：记忆不再走这里预注入——改由下方 search_memory 工具指引 + 工具本身按需检索。
     if (systemText) {
-      sections.push(`<user_memories>\n${systemText}\n</user_memories>`)
+      sections.push(systemText)
+    }
+    // 3.1 记忆检索工具使用指引（静态、恒在,不依赖检索结果）。
+    if (input.memoryTools?.length) {
+      sections.push(
+        '当问题涉及工程约定、编码规范、历史决策或仓库文档（repowiki）时,先调用 search_memory 工具检索相关记忆再作答,不要凭空假设项目约定。'
+      )
     }
     // 4. Skills 等动态信息
     if (input.skills?.length && this.resolveSkillContent) {

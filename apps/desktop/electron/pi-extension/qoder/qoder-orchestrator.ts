@@ -92,7 +92,7 @@ export interface QoderOrchestratorDeps {
   resolveAgentContext: QoderTaskAgentDeps['resolveAgentContext']
   resolveModel: QoderTaskAgentDeps['resolveModel']
   resolveTestContext: QoderTaskAgentDeps['resolveTestContext']
-  resolveMemoryContext: QoderTaskAgentDeps['resolveMemoryContext']
+  resolveMemoryTools: QoderTaskAgentDeps['resolveMemoryTools']
 
   // 阶段产物回调（涉及 Pi 路径共享的 finishImplementation / savePlanDecision）
   finishImplementation: (taskId: string, responseTexts: string[], signal?: AbortSignal) => Promise<void>
@@ -155,7 +155,7 @@ export class QoderOrchestrator {
       resolveAgentContext,
       resolveModel,
       resolveTestContext,
-      resolveMemoryContext
+      resolveMemoryTools
     } = this.deps
     return new QoderTaskAgentDriver({
       store,
@@ -182,7 +182,7 @@ export class QoderOrchestrator {
           addTaskEvent({ taskId, kind: 'error', title: 'Qoder Agent 错误', detail: event.message })
         }
       },
-      resolveMemoryContext,
+      resolveMemoryTools,
       resolveAgentContext,
       resolveModel,
       resolveTestContext,

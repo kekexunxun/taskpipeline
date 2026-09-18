@@ -18,7 +18,7 @@ import {
 import { initCredentialState } from '../credential/credential-state.js'
 import { loadMcpServers } from '../mcp/mcp-config.js'
 import { createMcpServiceResolver } from '../mcp/mcp-services.js'
-import { renderMemoryContext } from '../memory/memory-service.js'
+import { createMemorySearchTool } from '../memory/memory-search-tool.js'
 import type { MemoryService } from '../memory/memory-service.js'
 import { initMemoryContext, consolidateChatMemory } from '../memory/memory-context.js'
 import { QoderChatDriver } from '../pi-extension/qoder/index.js'
@@ -209,7 +209,7 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
       if (resolveDefaultBackend() === 'jira') return new JiraTaskCreationBackend(atlassianFactory)
       return undefined
     },
-    async ({ conversationId, query, workingDirectory }) => {
+    async ({ conversationId, workingDirectory }) => {
       const turnTraceId = chatTraceManager.traceIdForChat(conversationId)
       const repositoryIds = workingDirectory
         ? store
@@ -217,34 +217,37 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
             .filter((repo) => workingDirectory === repo.localPath || workingDirectory.startsWith(repo.localPath + '/'))
             .map((repo) => repo.id)
         : []
-      const result = await memoryService.search({
-        userId: memoryService.ensureUserId(),
-        repositoryIds: repositoryIds.length ? repositoryIds : undefined,
-        conversationId,
-        query
-      })
-      if (turnTraceId && tracePipeline.isActive(turnTraceId)) {
-        const span = tracePipeline.startSpan(turnTraceId, {
-          type: 'tool.execute',
-          name: '记忆与 Repowiki 检索',
-          input: { query, keywords: result.keywords }
-        })
-        tracePipeline.endSpan(turnTraceId, span, {
-          output: {
-            memories: result.memories.map((m) => ({
-              scope: m.scope,
-              title: m.title,
-              snippet: m.content.slice(0, 200)
-            })),
-            wikiDocs: result.wikiDocs.map((doc) => ({
-              path: doc.path,
-              title: doc.title,
-              snippet: doc.content.slice(0, 200)
-            }))
+      return [
+        createMemorySearchTool({
+          userId: memoryService.ensureUserId(),
+          repositoryIds: repositoryIds.length ? repositoryIds : undefined,
+          conversationId,
+          memoryService,
+          // trace 采集下沉到工具实际被调用时（而不是预先无条件检索时）。
+          onSearched: (query, result) => {
+            if (!turnTraceId || !tracePipeline.isActive(turnTraceId)) return
+            const span = tracePipeline.startSpan(turnTraceId, {
+              type: 'tool.execute',
+              name: '记忆与 Repowiki 检索',
+              input: { query, keywords: result.keywords }
+            })
+            tracePipeline.endSpan(turnTraceId, span, {
+              output: {
+                memories: result.memories.map((m) => ({
+                  scope: m.scope,
+                  title: m.title,
+                  snippet: m.content.slice(0, 200)
+                })),
+                wikiDocs: result.wikiDocs.map((doc) => ({
+                  path: doc.path,
+                  title: doc.title,
+                  snippet: doc.content.slice(0, 200)
+                }))
+              }
+            })
           }
         })
-      }
-      return renderMemoryContext(result.memories, result.wikiDocs)
+      ]
     },
     consolidateChatMemory,
     chatTraceManager,
