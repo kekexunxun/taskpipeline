@@ -21,8 +21,9 @@ const chatStageSpans = new Map<string, AgentSpan>()
 /** chatId → 本回合 driver source（阶段容器 meta.source 用，与任务路径阶段同构）。 */
 const chatStageSources = new Map<string, string>()
 /** 对话阶段 phase → 阶段名（与 stage-label 的 agentStageLabel 映射保持一致）。 */
-const chatStageNames: Record<'chat' | 'memory', string> = {
+const chatStageNames: Record<ChatStagePhase, string> = {
   chat: '对话生成',
+  review: '代码审查',
   memory: '记忆整理'
 }
 
@@ -111,7 +112,7 @@ export const chatTraceManager: ChatTraceManager = {
     // 与任务路径阶段容器同构：agent.run + meta.phase，期间的 span 按栈自动挂入。
     const span = tracePipeline.startSpan(traceId, {
       type: 'agent.run',
-      name: chatStageNames[phase as 'chat' | 'memory'],
+      name: chatStageNames[phase],
       meta: { source: chatStageSources.get(chatId) ?? 'openai', phase }
     })
     chatStageSpans.set(turnKey, span)

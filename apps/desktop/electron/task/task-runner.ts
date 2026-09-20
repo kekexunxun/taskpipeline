@@ -372,21 +372,30 @@ function collectReviewComments(
   return []
 }
 
-/** 把 review 意见渲染成修订 prompt（追加给实现阶段的指令）。 */
-function buildReviewFixPrompt(
-  task: Task,
+/**
+ * 把 review 意见渲染成「编号 + [severity] 位置 — 描述」行。
+ * Task 与 Chat 共用同一渲染格式，保证修订 prompt 的意见列表一致。
+ */
+export function renderReviewFixLines(
   comments: Array<{ severity?: string; path?: string; line?: number; message?: string }>
-): string {
-  const lines = comments.map((comment, index) => {
+): string[] {
+  return comments.map((comment, index) => {
     const loc = comment.path
       ? `${comment.path}${typeof comment.line === 'number' ? `:${comment.line}` : ''}`
       : '（全局）'
     return `${index + 1}. [${comment.severity ?? 'high'}] ${loc} — ${comment.message ?? '(无描述)'}`
   })
+}
+
+/** 把 review 意见渲染成修订 prompt（追加给实现阶段的指令）。 */
+function buildReviewFixPrompt(
+  task: Task,
+  comments: Array<{ severity?: string; path?: string; line?: number; message?: string }>
+): string {
   return [
     'Code review 未通过，以下是需要修复的问题。请逐一修复，不要遗漏；不要引入与这些问题无关的改动。',
     '',
-    ...lines,
+    ...renderReviewFixLines(comments),
     '',
     implementationOutcomeInstruction
   ].join('\n')
@@ -545,6 +554,7 @@ async function savePlanDecision(taskId: string, texts: string[]): Promise<Task> 
 export {
   startTaskStageSpan,
   callQoderOrOpenAIReviewer,
+  buildReviewPromptForQoder,
   loadRepoContext,
   callOpenAIForPrompt,
   savePlanDecision,

@@ -8,7 +8,12 @@ import { existsSync, readFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { BrowserWindow } from 'electron'
 import type { TaskStore, AgentEvent, SettingResolver, Task } from '@task-pipeline/core'
-import type { AtlassianClientFactory } from '@task-pipeline/integrations'
+import type {
+  AtlassianClientFactory,
+  GitService,
+  OpenCodeReviewService,
+  OpenAICompatReviewer
+} from '@task-pipeline/integrations'
 import {
   describeToolAction,
   isDangerousTool,
@@ -34,6 +39,7 @@ import type { TracePipeline } from '../trace/bus/trace-pipeline.js'
 import type { AgentService } from '../agents/agent-service.js'
 import { ChatAttachmentCache } from './chat-attachment-cache.js'
 import { ChatService } from './chat-service.js'
+import type { ChatReviewInfra } from './chat-review.js'
 import { ChatDriverRegistry } from './drivers/driver-registry.js'
 import { OpenAIChatDriver } from './drivers/openai-chat-driver.js'
 import { JiraTaskCreationBackend } from './task-backends/jira.js'
@@ -57,6 +63,9 @@ export interface ChatSystemDeps {
   memoryService: MemoryService
   agentService: AgentService
   atlassianFactory: AtlassianClientFactory
+  gitService: GitService
+  ocrService: OpenCodeReviewService
+  openAIReviewer: OpenAICompatReviewer
   providerForTask: (taskId: string | undefined) => string
   modelProvider: () => string
   runtimeProvider: (task: Task) => string
@@ -84,6 +93,9 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
     memoryService,
     agentService,
     atlassianFactory,
+    gitService,
+    ocrService,
+    openAIReviewer,
     modelProvider,
     runtimeProvider,
     desktopResolver
@@ -217,6 +229,16 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
     return [{ dir: workingDirectory }]
   }
 
+  // Chat CodeReview 静态依赖（provider/model 由 ChatService 逐回合补全）。
+  const chatReview: ChatReviewInfra = {
+    gitService,
+    ocrService,
+    openAIReviewer,
+    agentService,
+    qoderOrchestrator: getQoderOrch(),
+    getSetting: (key: string) => store.getSetting(key)
+  }
+
   const chatService = new ChatService(
     store,
     dataDir,
@@ -322,7 +344,8 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
       } catch {
         return undefined
       }
-    }
+    },
+    chatReview
   )
 
   return {

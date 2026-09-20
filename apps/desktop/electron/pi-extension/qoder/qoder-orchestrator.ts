@@ -430,6 +430,80 @@ export class QoderOrchestrator {
     }
   }
 
+  /**
+   * Chat CodeReview 的「独立修订调用」：在对话工作目录里以 acceptEdits 权限跑一次
+   * Qoder query 修复 review 意见。不持久化会话、不进入对话历史、不占用户可见回合。
+   * 与 Task 的 runAutoFix 同源（同一编辑引擎），差异仅在 cwd 取对话工作目录、
+   * 工具集收窄到读写本地文件（不含 Bash），避免危险工具弹权限卡挂住。
+   */
+  async runChatFix(
+    prompt: string,
+    options: { cwd: string; signal?: AbortSignal; model?: string; onMessage?: (message: unknown) => void }
+  ): Promise<string> {
+    const { cwd, signal, model, onMessage } = options
+    const token = this.deps.protectedValue('qoderToken')
+    if (!token) throw new Error('请先配置 Qoder Token')
+    const abort = new AbortController()
+    const abortFromSignal = () => abort.abort(signal?.reason)
+    signal?.throwIfAborted()
+    signal?.addEventListener('abort', abortFromSignal, { once: true })
+    const q = query({
+      prompt,
+      options: {
+        auth: accessToken(token),
+        cwd,
+        abortController: abort,
+        persistSession: false,
+        permissionMode: 'acceptEdits',
+        controlRequestTimeoutMs: 15_000,
+        includePartialMessages: true,
+        allowedTools: ['Read', 'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'Glob', 'Grep'],
+        ...(model ? { model } : {})
+      }
+    })
+    const FIX_TIMEOUT_MS = 5 * 60_000
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        abort.abort(new Error(`qoder chat-fix 在 ${FIX_TIMEOUT_MS / 1000}s 内未返回,主动 abort`))
+        reject(new Error(`qoder chat-fix 在 ${FIX_TIMEOUT_MS / 1000}s 内未返回,主动 abort`))
+      }, FIX_TIMEOUT_MS)
+    })
+    try {
+      return await Promise.race([
+        (async () => {
+          let text = ''
+          for await (const message of q) {
+            onMessage?.(message)
+            if (message.type === 'assistant') {
+              const content = (message as unknown as { message?: { content?: Array<{ type: string; text?: string }> } })
+                .message?.content
+              if (Array.isArray(content))
+                text += content
+                  .filter((c) => c?.type === 'text' && c.text)
+                  .map((c) => c.text!)
+                  .join('\n')
+            } else if (message.type === 'result') {
+              const result = (message as unknown as { result?: string }).result
+              if (result) text += result
+            }
+          }
+          return text
+        })(),
+        timeoutPromise
+      ])
+    } finally {
+      signal?.removeEventListener('abort', abortFromSignal)
+      if (timer) clearTimeout(timer)
+      if (!abort.signal.aborted) abort.abort()
+      try {
+        await q.close()
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   async callForAgentGeneration(
     prompt: string,
     model: string,

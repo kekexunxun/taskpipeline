@@ -279,6 +279,7 @@ const pipeline = createReviewDeliveryPipeline({
 })
 const {
   gitService,
+  ocrService,
   openAIReviewer,
   buildReviewOrchestrator,
   taskWorkflow,
@@ -304,6 +305,9 @@ const { chatService, chatAttachmentCache } = createChatSystem({
   memoryService,
   agentService,
   atlassianFactory,
+  gitService,
+  ocrService,
+  openAIReviewer,
   providerForTask,
   modelProvider,
   runtimeProvider,

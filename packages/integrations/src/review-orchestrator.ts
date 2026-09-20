@@ -103,6 +103,78 @@ export function asReviewer(fn: ReviewerFunction): Reviewer {
   return { call: (input, taskId, model, signal, prompt) => fn(input, taskId, model, signal, prompt) }
 }
 
+/** 单个 comment 是否命中给定阻断级别集合（severity 归一小写比较）。 */
+export function isBlockingSeverity(severity: unknown, severities: string[]): boolean {
+  return severities.includes(String(severity ?? '').toLowerCase())
+}
+
+/**
+ * 按阻断级别筛出「阻断意见」。Task 与 Chat 共用同一判定口径：
+ * level 直接取系统设置 `reviewBlockingLevel`，两处不可各自硬编码，否则会出现
+ * 「按 high 判定阻断、却只拿 critical 去修」的空转。
+ */
+export function filterBlockingComments<T extends { severity?: unknown }>(
+  comments: T[],
+  level: 'critical' | 'high' | 'medium'
+): T[] {
+  const severities = blockingSeveritiesFor(level)
+  return comments.filter((comment) => isBlockingSeverity(comment.severity, severities))
+}
+
+/** `reviewPreparedDiff` 入参：已收集好 files + diff，只差跑规则 + LLM + 解析。 */
+export type PreparedReviewInput = {
+  ocr: OpenCodeReviewService
+  reviewer: Reviewer
+  /** 跑 `ocr delegate rule` 的工作目录（Task=worktree，Chat=对话工作目录）。 */
+  worktree: string
+  /** 展示/上下文用的仓库名。 */
+  repoName: string
+  /** 需求标题（Task=title，Chat=本轮用户消息），喂给 reviewer 做上下文。 */
+  taskTitle: string
+  /** 传给 `reviewer.call` 的 scope id（Task=task.id，Chat=chatId）：仅用于 trace/事件归属。 */
+  reviewScopeId: string
+  files: string[]
+  diff: string
+  model?: string
+  signal?: AbortSignal
+  /** 状态事件回调（Task 桥接 sink.addEvent，Chat 桥接 trace/对话事件）；title/detail 语义与原实现一致。 */
+  onStatus?: (title: string, detail?: string) => void
+}
+
+/**
+ * 委托模式评审的共用核心：拿到 `files` + `diff` 之后的全部逻辑
+ * （`ocr delegate rule` → redact 敏感信息 → LLM 审查 → 解析 ReviewResult）。
+ * Task 的 `ReviewOrchestrator.run` 与 Chat 的评审都调它，保证判定与文案完全同源。
+ * 异常向上抛，由调用方决定回退（Task 回 review_blocked / Chat 只记事件）。
+ */
+export async function reviewPreparedDiff(input: PreparedReviewInput): Promise<ReviewResult> {
+  const { ocr, reviewer, worktree, repoName, taskTitle, reviewScopeId, files, diff, model, signal, onStatus } = input
+  onStatus?.(`${repoName}: diff 长度 ${diff.length} 字符,调用 ocr delegate rule`)
+  let rules = ''
+  try {
+    rules = await ocr.rule(worktree, files, signal)
+  } catch (error) {
+    if (signal?.aborted) throw error
+    onStatus?.(`${repoName}: ocr rule 调用失败,继续走默认规则`, error instanceof Error ? error.message : String(error))
+  }
+  const redacted = redactSecrets(diff)
+  onStatus?.(`${repoName}: 调用 LLM 审查`)
+  try {
+    signal?.throwIfAborted()
+    const text = await reviewer.call(
+      { repo: repoName, task: taskTitle, files, rules, diff: redacted },
+      reviewScopeId,
+      model,
+      signal
+    )
+    onStatus?.(`${repoName}: LLM 审查返回`)
+    return parseReviewResult(text)
+  } catch (error) {
+    onStatus?.(`${repoName}: LLM 审查失败`)
+    throw error
+  }
+}
+
 /**
  * 把 DelegateReviewerInput 渲染成 LLM 提示词。
  * 沿用 desktop 原版,字段、顺序、文案不变,确保 timeline / 测试断言一致。
@@ -270,7 +342,7 @@ export class ReviewOrchestrator {
    * 暴露为公开方法,便于在 `TaskWorkflow.runReview` 末尾复用同一套规则。
    */
   isBlockingComment(comment: { severity?: unknown }): boolean {
-    return this.blockingSeverities.includes(String(comment.severity ?? '').toLowerCase())
+    return isBlockingSeverity(comment.severity, this.blockingSeverities)
   }
 
   /**
@@ -332,33 +404,22 @@ export class ReviewOrchestrator {
       kind: 'status',
       title: `${repo.name}: diff 长度 ${diff.length} 字符,调用 ocr delegate rule`
     })
-    let rules = ''
-    try {
-      rules = await ocr.rule(worktree, files, signal)
-    } catch (error) {
-      if (signal?.aborted) throw error
-      this.sink.addEvent({
-        taskId: task.id,
-        kind: 'status',
-        title: `${repo.name}: ocr rule 调用失败,继续走默认规则`,
-        detail: error instanceof Error ? error.message : String(error)
-      })
-    }
-    const redacted = redactSecrets(diff)
-    this.sink.addEvent({ taskId: task.id, kind: 'status', title: `${repo.name}: 调用 LLM 审查` })
-    try {
-      signal?.throwIfAborted()
-      const text = await this.opts.reviewer.call(
-        { repo: repo.name, task: task.title, files, rules, diff: redacted },
-        task.id,
-        task.qoderModel,
-        signal
-      )
-      this.sink.addEvent({ taskId: task.id, kind: 'status', title: `${repo.name}: LLM 审查返回` })
-      return parseReviewResult(text)
-    } catch (error) {
-      this.sink.addEvent({ taskId: task.id, kind: 'status', title: `${repo.name}: LLM 审查失败` })
-      throw error
-    }
+    // 取到 files + diff 之后的规则/LLM/解析逻辑与 Chat 完全同源，委托共用核心。
+    return reviewPreparedDiff({
+      ocr,
+      reviewer: this.opts.reviewer,
+      worktree,
+      repoName: repo.name,
+      taskTitle: task.title,
+      reviewScopeId: task.id,
+      files,
+      diff,
+      model: task.qoderModel,
+      signal,
+      onStatus: (title, detail) =>
+        this.sink.addEvent(
+          detail ? { taskId: task.id, kind: 'status', title, detail } : { taskId: task.id, kind: 'status', title }
+        )
+    })
   }
 }

@@ -47,6 +47,7 @@ import type {
   StoredMessageRecord
 } from './chat-types.js'
 import type { TaskCreationBackend } from './task-backends/index.js'
+import { runChatCodeReview, type ChatReviewInfra } from './chat-review.js'
 
 type ActiveStream = { streamId: string; abort: AbortController }
 type TaskBackendFactory = () => TaskCreationBackend | undefined
@@ -102,8 +103,8 @@ export type ChatTraceManager = {
   endStage?(chatId: string, turnKey: string, status?: 'completed' | 'error'): void
 }
 
-/** 对话回合的阶段划分：对话生成 / 记忆整理。 */
-export type ChatStagePhase = 'chat' | 'memory'
+/** 对话回合的阶段划分：对话生成 / 代码审查 / 记忆整理。 */
+export type ChatStagePhase = 'chat' | 'review' | 'memory'
 
 /**
  * ChatService — 编排层。
@@ -214,7 +215,8 @@ export class ChatService {
     private readonly resolveMemoryTools?: MemoryToolsResolver,
     private readonly consolidateConversation?: ConversationConsolidator,
     private readonly traceManager?: ChatTraceManager,
-    private readonly resolveWorkspaceContext?: WorkspaceContextResolver
+    private readonly resolveWorkspaceContext?: WorkspaceContextResolver,
+    private readonly chatReview?: ChatReviewInfra
   ) {
     this.dataDir = dataDir
     this.storage = new ChatStorage(dataDir)
@@ -467,6 +469,39 @@ export class ChatService {
       this.traceManager.endStage(chatId, turnKey, 'error')
       throw error
     }
+  }
+
+  /**
+   * CodeReview 编排（在 review 阶段容器内被调用）：解析工作区根、把状态事件桥接到前端，
+   * 委托 runChatCodeReview 完成评审 + 自动修订。逐回合补全 provider/model（随 stream 变化）。
+   */
+  private async runChatReview(
+    effective: StartChatStreamInput,
+    userText: string,
+    parts: DriverPart[],
+    workingDirectory: string,
+    signal: AbortSignal
+  ): Promise<void> {
+    if (!this.chatReview) return
+    const roots = await this.resolveWorkspaceRoots(workingDirectory)
+    const infra = this.chatReview
+    await runChatCodeReview(
+      {
+        ...infra,
+        providerForChat: () => effective.driverId,
+        modelForChat: () => effective.model
+      },
+      {
+        chatId: effective.chatId,
+        workingDirectory,
+        workspaceRoots: roots.length > 0 ? roots : [workingDirectory],
+        userText,
+        parts,
+        signal,
+        onStatus: (title, detail) =>
+          this.dispatch(effective, { type: 'status', text: detail ? `${title}：${detail}` : title })
+      }
+    )
   }
 
   /**
@@ -881,6 +916,23 @@ export class ChatService {
           } catch (error) {
             console.warn('[chat] failed to save plan:', error)
           }
+        }
+      }
+      // CodeReview：正常模式下、本轮存在文件变更时，复用 Task 判定口径做代码审查 + 自动修订。
+      // 评审异常绝不阻断对话落盘/收尾（与 Task review 失败回退同理），包在 review 阶段容器内。
+      if (status === 'done' && effectiveChatMode !== 'plan' && this.chatReview && conversation.workingDirectory) {
+        try {
+          await this.withStage(Boolean(turnTraceId), input.chatId, turnKey, 'review', () =>
+            this.runChatReview(
+              effective,
+              input.message.text,
+              parts,
+              conversation.workingDirectory as string,
+              abort.signal
+            )
+          )
+        } catch (reason) {
+          if (!abort.signal.aborted) console.warn('[chat] code review failed:', reason)
         }
       }
       // 最后才 dispatch done chunk（计划模式在 plan-part 之后）
