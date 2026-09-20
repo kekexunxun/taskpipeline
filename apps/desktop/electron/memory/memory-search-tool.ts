@@ -15,6 +15,7 @@
  *  - trace 采集（对话侧「记忆与 Repowiki 检索」span）通过 `onSearched` 回调旁路透出,
  *    不在这里直接依赖 `TracePipeline`,保持本文件与具体 trace 实现解耦。
  */
+import type { ToolDefinition } from '@earendil-works/pi-coding-agent'
 import { z } from 'zod'
 import type { ToolDeclaration } from '../chat/drivers/tool-source.js'
 import type { MemorySearchResult } from './memory-service.js'
@@ -69,6 +70,36 @@ export function createMemorySearchTool(deps: MemorySearchToolDeps): ToolDeclarat
       })
       deps.onSearched?.(query, result)
       return renderMemoryContext(result.memories, result.wikiDocs) ?? NO_HIT_TEXT
+    }
+  }
+}
+
+/** Pi 原生工具适配：复用检索与范围绑定，SDK 负责工具注册、提示词指引及执行事件。 */
+export function createPiMemorySearchTool(deps: MemorySearchToolDeps): ToolDefinition {
+  const declaration = createMemorySearchTool(deps)
+  const inputSchema = z.object(declaration.schema).strict()
+  return {
+    name: declaration.name,
+    label: '记忆检索',
+    description: declaration.description,
+    promptSnippet: '检索当前任务范围内的长期记忆与仓库 Wiki 文档',
+    promptGuidelines: [
+      '涉及工程约定、编码规范或历史决策时，先调用 search_memory 查询已有记忆；记忆与用户最新指令冲突时，以用户指令为准。'
+    ],
+    parameters: {
+      type: 'object',
+      properties: { query: { type: 'string', description: declaration.schema.query?.description } },
+      required: ['query'],
+      additionalProperties: false
+    },
+    execute: async (_toolCallId, input, signal) => {
+      signal?.throwIfAborted()
+      const result = await declaration.execute(inputSchema.parse(input))
+      signal?.throwIfAborted()
+      return {
+        content: [{ type: 'text', text: typeof result === 'string' ? result : (JSON.stringify(result) ?? '') }],
+        details: {}
+      }
     }
   }
 }

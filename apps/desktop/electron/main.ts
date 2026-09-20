@@ -38,7 +38,7 @@ import {
   testMcpConnectionById
 } from './credential/credential-state.js'
 import { initTaskRunner, loadRepoContext, callOpenAIForPrompt, savePlanDecision } from './task/task-runner.js'
-import { createMemorySearchTool } from './memory/memory-search-tool.js'
+import { createMemorySearchTool, createPiMemorySearchTool } from './memory/memory-search-tool.js'
 import { createCodebaseSearchTool } from './codeindex/codebase-search-tool.js'
 import { getCodeIndex, initCodeIndex } from './codeindex/codeindex-service.js'
 import { AgentService } from './agents/agent-service.js'
@@ -250,6 +250,14 @@ initPiSession({
   readOpenAIProfiles,
   defaultOpenAIProfile,
   openAIApiKeyFor,
+  resolveMemoryTools: (task, repos) => [
+    createPiMemorySearchTool({
+      userId: memoryService.ensureUserId(),
+      repositoryIds: repos.map((repo) => repo.repositoryId),
+      conversationId: `task:${task.id}`,
+      memoryService
+    })
+  ],
   providerForTask,
   updatePiUsage,
   emitTaskChanged,

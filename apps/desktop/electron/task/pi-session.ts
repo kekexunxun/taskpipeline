@@ -10,7 +10,12 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join, relative, sep } from 'node:path'
-import type { ExtensionUIDialogOptions, ExtensionUIContext, AgentSession } from '@earendil-works/pi-coding-agent'
+import type {
+  ExtensionUIDialogOptions,
+  ExtensionUIContext,
+  AgentSession,
+  ToolDefinition
+} from '@earendil-works/pi-coding-agent'
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -21,7 +26,7 @@ import {
   SessionManager,
   SettingsManager
 } from '@earendil-works/pi-coding-agent'
-import type { TaskStore } from '@task-pipeline/core'
+import type { Task, TaskRepository, TaskStore } from '@task-pipeline/core'
 import { lookupCostRate } from '@task-pipeline/core'
 import { redactSecrets } from '@task-pipeline/integrations'
 import type { TaskAgentPhase } from '../agents/task-agent/task-agent-driver.js'
@@ -39,6 +44,8 @@ interface PiSessionDeps {
   readOpenAIProfiles: () => ModelProfile[]
   defaultOpenAIProfile: () => ModelProfile | undefined
   openAIApiKeyFor: (profile: ModelProfile) => string | undefined
+  /** 按当前任务绑定检索范围；每次新建、恢复或阶段 fork 后重建工具。 */
+  resolveMemoryTools: (task: Task, repos: TaskRepository[]) => ToolDefinition[]
   providerForTask: (taskId: string | undefined) => string
   updatePiUsage: (taskId: string) => void
   emitTaskChanged: (taskId: string) => void
@@ -660,7 +667,8 @@ async function openPiTaskSession(taskId: string, context?: PiSessionContext): Pr
     resourceLoader,
     sessionManager,
     settingsManager,
-    modelRuntime
+    modelRuntime,
+    customTools: d().resolveMemoryTools(task, store.listTaskRepositories(taskId))
   })
   const session = created.session
   const handle = {
