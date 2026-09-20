@@ -20,6 +20,40 @@ import { ReflectionPipeline, type CandidateGenerator } from './reflection-pipeli
 import { RetentionService, type RetentionConfig } from './lifecycle/retention-service.js'
 import type { ContextPack } from './types.js'
 
+/** Knowledge 粒度层的 FTS 表（迁移/重建时需要逐个处理） */
+const KNOWLEDGE_FTS_TABLES = [
+  'knowledge_chunks_fts',
+  'knowledge_paragraphs_fts',
+  'knowledge_propositions_fts',
+  'knowledge_summaries_fts'
+] as const
+
+/**
+ * Knowledge FTS 表一次性迁移：旧版是独立 FTS（无 content= 关联），rowid 与粒度表
+ * 分别自增、删除重建后会错配。检测到旧版定义时直接 DROP，由幂等 DDL 重建为
+ * external content 表 + 触发器，再对存量数据执行 rebuild。
+ *
+ * 返回本次新建（或迁移重建）的 FTS 表名，调用方需要对这些表做 rebuild 回填存量行。
+ */
+function migrateKnowledgeFts(db: Database.Database): string[] {
+  const rows = db
+    .prepare(
+      `SELECT name, COALESCE(sql, '') AS sql FROM sqlite_master WHERE type = 'table' AND name IN (${KNOWLEDGE_FTS_TABLES.map(() => '?').join(',')})`
+    )
+    .all(...KNOWLEDGE_FTS_TABLES) as Array<{ name: string; sql: string }>
+  const known = new Set(rows.map((row) => row.name))
+  const legacy = rows.filter((row) => !/content\s*=/.test(row.sql))
+  for (const table of legacy) {
+    db.exec(`DROP TABLE IF EXISTS ${table.name}`)
+  }
+  // 本次不存在（全新或刚被 DROP）的表，DDL 后都需要 rebuild 回填存量粒度数据
+  const created: string[] = legacy.map((row) => row.name)
+  for (const table of KNOWLEDGE_FTS_TABLES) {
+    if (!known.has(table)) created.push(table)
+  }
+  return created
+}
+
 export class MemoryEngine {
   readonly memoryNodes: MemoryNodeStore
   readonly evidence: EvidenceStore
@@ -31,9 +65,17 @@ export class MemoryEngine {
     db.pragma('journal_mode = WAL')
     db.pragma('foreign_keys = ON')
 
+    // Knowledge FTS 旧版独立表迁移（需在幂等 DDL 前执行）
+    const rebuilt = migrateKnowledgeFts(db)
+
     // 初始化所有表
     for (const ddl of ALL_DDL) {
       db.exec(ddl)
+    }
+
+    // 新建/重建的 external content FTS 表回填存量数据（触发器只管未来变更）
+    for (const table of rebuilt) {
+      db.exec(`INSERT INTO ${table}(${table}) VALUES('rebuild')`)
     }
 
     this.memoryNodes = new MemoryNodeStore(db)

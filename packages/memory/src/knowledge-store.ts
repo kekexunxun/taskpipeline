@@ -3,7 +3,7 @@
  *
  * 设计原则：
  * - 与 MemoryNodeStore 保持一致的 better-sqlite3 同步 API 风格
- * - 每个粒度层有独立的 FTS5 索引（trigram 分词）
+ * - 每个粒度层有独立的 FTS5 索引（trigram 分词，external content 表，触发器自动同步）
  * - SHA-256 content hash 去重：相同内容不重复索引
  */
 import { createHash, randomUUID } from 'node:crypto'
@@ -170,13 +170,12 @@ export class KnowledgeStore {
     }
   }
 
-  /** 批量写入 chunks + FTS5 索引 */
+  /** 批量写入 chunks（FTS 索引由触发器同步） */
   insertChunks(chunks: Array<Omit<KnowledgeChunk, 'id'>>): KnowledgeChunk[] {
     const insertStmt = this.db.prepare(`
       INSERT INTO knowledge_chunks (id, document_id, content, token_count, start_line, end_line, symbol_names)
       VALUES (@id, @documentId, @content, @tokenCount, @startLine, @endLine, @symbolNames)
     `)
-    const ftsStmt = this.db.prepare('INSERT INTO knowledge_chunks_fts(content) VALUES (?)')
 
     const results: KnowledgeChunk[] = []
     for (const chunk of chunks) {
@@ -190,7 +189,6 @@ export class KnowledgeStore {
         endLine: chunk.endLine,
         symbolNames: chunk.symbolNames ? JSON.stringify(chunk.symbolNames) : null
       })
-      ftsStmt.run(chunk.content)
       results.push({ ...chunk, id })
     }
     return results
@@ -222,7 +220,6 @@ export class KnowledgeStore {
       INSERT INTO knowledge_paragraphs (id, document_id, content, heading_path, token_count)
       VALUES (@id, @documentId, @content, @headingPath, @tokenCount)
     `)
-    const ftsStmt = this.db.prepare('INSERT INTO knowledge_paragraphs_fts(content) VALUES (?)')
 
     const results: KnowledgeParagraph[] = []
     for (const para of paragraphs) {
@@ -234,7 +231,6 @@ export class KnowledgeStore {
         headingPath: para.headingPath,
         tokenCount: para.tokenCount
       })
-      ftsStmt.run(para.content)
       results.push({ ...para, id })
     }
     return results
@@ -267,7 +263,6 @@ export class KnowledgeStore {
       INSERT INTO knowledge_propositions (id, document_id, paragraph_id, content, proposition_type, source_pattern)
       VALUES (@id, @documentId, @paragraphId, @content, @propositionType, @sourcePattern)
     `)
-    const ftsStmt = this.db.prepare('INSERT INTO knowledge_propositions_fts(content) VALUES (?)')
 
     const results: KnowledgeProposition[] = []
     for (const prop of propositions) {
@@ -280,7 +275,6 @@ export class KnowledgeStore {
         propositionType: prop.propositionType,
         sourcePattern: prop.sourcePattern
       })
-      ftsStmt.run(prop.content)
       results.push({ ...prop, id })
     }
     return results
@@ -312,7 +306,6 @@ export class KnowledgeStore {
       INSERT INTO knowledge_summaries (id, document_id, content, key_symbols, token_count)
       VALUES (@id, @documentId, @content, @keySymbols, @tokenCount)
     `)
-    const ftsStmt = this.db.prepare('INSERT INTO knowledge_summaries_fts(content) VALUES (?)')
 
     const results: KnowledgeSummary[] = []
     for (const summary of summaries) {
@@ -324,7 +317,6 @@ export class KnowledgeStore {
         keySymbols: summary.keySymbols ? JSON.stringify(summary.keySymbols) : null,
         tokenCount: summary.tokenCount
       })
-      ftsStmt.run(summary.content)
       results.push({ ...summary, id })
     }
     return results
@@ -348,68 +340,71 @@ export class KnowledgeStore {
     return cleaned.map((kw) => (kw.length <= 2 ? `"${kw}"` : `"${kw}"*`)).join(' OR ')
   }
 
+  /**
+   * 拼装 FTS 检索 SQL：命中关键词 + 可选按文档归属仓库过滤。
+   * 不传 repositoryIds 时返回所有仓库的命中（跨仓库串扰），多仓库查询方应显式传入。
+   */
+  private buildFtsSearch(
+    ftsTable: 'knowledge_propositions_fts' | 'knowledge_paragraphs_fts' | 'knowledge_chunks_fts',
+    baseTable: 'knowledge_propositions' | 'knowledge_paragraphs' | 'knowledge_chunks',
+    alias: string,
+    repositoryIds?: string[]
+  ): string {
+    const repoFilter = repositoryIds?.length
+      ? `JOIN knowledge_documents kd ON kd.id = ${alias}.document_id AND kd.repository_id IN (${repositoryIds.map(() => '?').join(',')})`
+      : ''
+    return `
+      SELECT ${alias}.*, CAST(-bm25(${ftsTable}) * 100 AS INTEGER) AS score
+      FROM ${ftsTable}
+      JOIN ${baseTable} ${alias} ON ${alias}.rowid = ${ftsTable}.rowid
+      ${repoFilter}
+      WHERE ${ftsTable} MATCH ?
+      ORDER BY score DESC LIMIT ?
+    `
+  }
+
   /** FTS5 检索 propositions */
-  searchPropositions(keywords: string[], limit = 10): Array<KnowledgeProposition & { score: number }> {
+  searchPropositions(
+    keywords: string[],
+    limit = 10,
+    repositoryIds?: string[]
+  ): Array<KnowledgeProposition & { score: number }> {
     const query = this.ftsQuery(keywords)
     if (!query) return []
     const rows = this.db
-      .prepare(
-        `
-      SELECT kp.*, CAST(-bm25(knowledge_propositions_fts) * 100 AS INTEGER) AS score
-      FROM knowledge_propositions_fts
-      JOIN knowledge_propositions kp ON kp.rowid = knowledge_propositions_fts.rowid
-      WHERE knowledge_propositions_fts MATCH ?
-      ORDER BY score DESC LIMIT ?
-    `
-      )
-      .all(query, limit) as Array<Record<string, unknown>>
+      .prepare(this.buildFtsSearch('knowledge_propositions_fts', 'knowledge_propositions', 'kp', repositoryIds))
+      .all(...(repositoryIds ?? []), query, limit) as Array<Record<string, unknown>>
     return rows.map((r) => ({ ...this.parseProposition(r), score: Number(r.score) }))
   }
 
   /** FTS5 检索 paragraphs */
-  searchParagraphs(keywords: string[], limit = 10): Array<KnowledgeParagraph & { score: number }> {
+  searchParagraphs(
+    keywords: string[],
+    limit = 10,
+    repositoryIds?: string[]
+  ): Array<KnowledgeParagraph & { score: number }> {
     const query = this.ftsQuery(keywords)
     if (!query) return []
     const rows = this.db
-      .prepare(
-        `
-      SELECT kpar.*, CAST(-bm25(knowledge_paragraphs_fts) * 100 AS INTEGER) AS score
-      FROM knowledge_paragraphs_fts
-      JOIN knowledge_paragraphs kpar ON kpar.rowid = knowledge_paragraphs_fts.rowid
-      WHERE knowledge_paragraphs_fts MATCH ?
-      ORDER BY score DESC LIMIT ?
-    `
-      )
-      .all(query, limit) as Array<Record<string, unknown>>
+      .prepare(this.buildFtsSearch('knowledge_paragraphs_fts', 'knowledge_paragraphs', 'kpar', repositoryIds))
+      .all(...(repositoryIds ?? []), query, limit) as Array<Record<string, unknown>>
     return rows.map((r) => ({ ...this.parseParagraph(r), score: Number(r.score) }))
   }
 
   /** FTS5 检索 chunks */
-  searchChunks(keywords: string[], limit = 10): Array<KnowledgeChunk & { score: number }> {
+  searchChunks(keywords: string[], limit = 10, repositoryIds?: string[]): Array<KnowledgeChunk & { score: number }> {
     const query = this.ftsQuery(keywords)
     if (!query) return []
     const rows = this.db
-      .prepare(
-        `
-      SELECT kc.*, CAST(-bm25(knowledge_chunks_fts) * 100 AS INTEGER) AS score
-      FROM knowledge_chunks_fts
-      JOIN knowledge_chunks kc ON kc.rowid = knowledge_chunks_fts.rowid
-      WHERE knowledge_chunks_fts MATCH ?
-      ORDER BY score DESC LIMIT ?
-    `
-      )
-      .all(query, limit) as Array<Record<string, unknown>>
+      .prepare(this.buildFtsSearch('knowledge_chunks_fts', 'knowledge_chunks', 'kc', repositoryIds))
+      .all(...(repositoryIds ?? []), query, limit) as Array<Record<string, unknown>>
     return rows.map((r) => ({ ...this.parseChunk(r), score: Number(r.score) }))
   }
 
   // ── Internal ─────────────────────────────────────────────────────────────
 
-  /** 删除某个文档的所有粒度数据 */
+  /** 删除某个文档的所有粒度数据（FTS 索引为 external content 表，由触发器同步，无残留错配） */
   private deleteGranularData(documentId: string): void {
-    // FTS5 通过 content= 关联自动同步，但这里是独立 FTS（无 content= 关联），需手动删
-    // 由于独立 FTS 表没有 rowid 关联到主表，最简单的方式是重建 FTS
-    // 实际上我们用 content-less FTS（无 content= 参数），所以删除需要重建
-    // 这里先删主表数据，FTS 中的残留不影响正确性（检索时 JOIN 会过滤掉）
     this.db.prepare('DELETE FROM knowledge_chunks WHERE document_id = ?').run(documentId)
     this.db.prepare('DELETE FROM knowledge_paragraphs WHERE document_id = ?').run(documentId)
     this.db.prepare('DELETE FROM knowledge_propositions WHERE document_id = ?').run(documentId)

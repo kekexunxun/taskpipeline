@@ -198,6 +198,8 @@ export class ChatService {
    * 下一轮 streamChat 自然带入上下文。Qoder driver 走 SDK 原生注入，不经过此队列。
    */
   private readonly pendingGuidanceByChat = new Map<string, string[]>()
+  /** 回合结束后仍在后台执行的记忆整理/滚动摘要 promise：退出前由 waitForPendingConsolidations 兜底等待。 */
+  private readonly pendingConsolidations = new Set<Promise<void>>()
   /** 应用正在退出：阻止新流启动，abortAllActiveStreams 期间为 true。 */
   private isQuitting = false
   /** 流式期间增量持久化定时间隔 ID（finally 中清除）。 */
@@ -424,6 +426,23 @@ export class ChatService {
     const lifecycles = Array.from(this.activeStreamLifecycles.values())
     if (lifecycles.length === 0) return
     await Promise.race([Promise.allSettled(lifecycles), new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))])
+  }
+
+  /**
+   * 等待回合结束后仍在后台运行的记忆整理/滚动摘要（before-quit 链路）。
+   * 流式收尾时可能才启动新的整理，故轮询排空直至超时；超时放弃，
+   * 整理内部均有 try/catch + 写入侧查重，丢弃一次不影响正确性。
+   */
+  async waitForPendingConsolidations(timeoutMs = 10_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (this.pendingConsolidations.size > 0) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) return
+      await Promise.race([
+        Promise.allSettled([...this.pendingConsolidations]),
+        new Promise<void>((resolve) => setTimeout(resolve, Math.min(500, remaining)))
+      ])
+    }
   }
 
   /**
@@ -965,7 +984,7 @@ export class ChatService {
             // 记忆整理是回合的一部分：await 它完成后再 endTurn，确保整理 LLM 调用
             // 挂在同一 trace 下；consolidate 异常也 endTurn（兜底关闭）。
             // memory 阶段容器包裹整理过程（整理 LLM span 挂入阶段）。
-            void (async () => {
+            const consolidation = (async () => {
               try {
                 await this.withStage(Boolean(turnTraceId), input.chatId, turnKey, 'memory', async () => {
                   await this.consolidateConversation?.({
@@ -996,6 +1015,8 @@ export class ChatService {
                 this.traceManager?.endTurn(input.chatId, turnKey)
               }
             })()
+            this.pendingConsolidations.add(consolidation)
+            void consolidation.finally(() => this.pendingConsolidations.delete(consolidation))
           } else {
             this.traceManager?.endTurn(input.chatId, turnKey)
           }

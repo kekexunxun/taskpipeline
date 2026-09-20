@@ -21,7 +21,7 @@ import type { ToolDeclaration } from '../chat/drivers/tool-source.js'
 import type { MemorySearchResult } from './memory-service.js'
 import { renderMemoryContext } from './memory-service.js'
 
-/** 本工具只需要 `MemoryService.search`；收窄到这个方法签名，方便测试注入 fake。 */
+/** 本工具只需要 `MemoryService.search` / `recordRetrievalHits`；收窄到这两个方法签名，方便测试注入 fake。 */
 export type MemorySearchTarget = {
   search(options: {
     userId?: string
@@ -29,6 +29,8 @@ export type MemorySearchTarget = {
     conversationId?: string
     query: string
   }): Promise<MemorySearchResult>
+  /** 检索命中落库（效果反馈）；可选，fake/旧实现可不提供。 */
+  recordRetrievalHits?(memoryIds: string[], sourceId: string, query: string): number
 }
 
 export type MemorySearchToolDeps = {
@@ -38,8 +40,10 @@ export type MemorySearchToolDeps = {
   memoryService: MemorySearchTarget
   /**
    * 检索完成回调（旁路观测，不影响返回值）：对话侧用它记录 trace span；任务侧不需要。
+   * `info.injected`：命中结果是否真正渲染进了模型上下文（工具返回文本），
+   * 区分「检索命中」与「实际注入」两类信号，供 trace 页/效果分析分开统计。
    */
-  onSearched?: (query: string, result: MemorySearchResult) => void
+  onSearched?: (query: string, result: MemorySearchResult, info: { injected: boolean }) => void
 }
 
 /** 未命中时返回给模型的固定文案（区别于"没查"，让模型知道这次是查过了但没有结果）。 */
@@ -68,8 +72,18 @@ export function createMemorySearchTool(deps: MemorySearchToolDeps): ToolDeclarat
         conversationId: deps.conversationId,
         query
       })
-      deps.onSearched?.(query, result)
-      return renderMemoryContext(result.memories, result.wikiDocs) ?? NO_HIT_TEXT
+      // 命中即记录（效果反馈数据层）：sourceId 用工具绑定的会话归属
+      //（对话 id / `task:${taskId}`），任务验证通过时据此关联正向证据。
+      if (result.memories.length) {
+        deps.memoryService.recordRetrievalHits?.(
+          result.memories.map((m) => m.id),
+          deps.conversationId ?? 'unknown',
+          query
+        )
+      }
+      const rendered = renderMemoryContext(result.memories, result.wikiDocs)
+      deps.onSearched?.(query, result, { injected: rendered !== undefined })
+      return rendered ?? NO_HIT_TEXT
     }
   }
 }

@@ -109,6 +109,7 @@ import {
   runOperationAgent,
   submitMergeRequestsWithCredWatch,
   stopTaskOperations,
+  waitForPendingTaskMemory,
   taskCardsWithCurrentChanges
 } from './task/task-lifecycle.js'
 import type { TaskBackendId } from './chat/task-backends/index.js'
@@ -667,6 +668,9 @@ app.on('before-quit', (event) => {
       } catch {
         /* ignore */
       }
+      // 后台记忆整理/滚动摘要（chat + task）是浮空 promise：退出前兜底等待，
+      // 避免整理写库时 store 已关闭；各自内部超时后放弃，下次启动由写入侧查重兜底。
+      await Promise.allSettled([chatService.waitForPendingConsolidations(), waitForPendingTaskMemory()])
       void releaseAllPiSessions()
       await getCodeIndex()
         ?.shutdown()

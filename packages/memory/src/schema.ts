@@ -154,24 +154,33 @@ export const KNOWLEDGE_SUMMARIES_DDL = `
   CREATE INDEX IF NOT EXISTS idx_knowledge_summ_doc ON knowledge_summaries(document_id);
 `
 
-/** Knowledge FTS5 索引（每个粒度层各一张） */
-export const KNOWLEDGE_FTS_DDL = `
-  CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts USING fts5(
-    content, tokenize='trigram'
+/** Knowledge FTS5 索引（每个粒度层各一张，external content 表 + 触发器与主表 rowid 严格同步） */
+const KNOWLEDGE_FTS_TABLE_DDL = (name: string, base: string) => `
+  CREATE VIRTUAL TABLE IF NOT EXISTS ${name}_fts USING fts5(
+    content, content='${base}', content_rowid='rowid',
+    tokenize='trigram'
   );
 
-  CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_paragraphs_fts USING fts5(
-    content, tokenize='trigram'
-  );
+  CREATE TRIGGER IF NOT EXISTS ${name}_fts_ai AFTER INSERT ON ${base} BEGIN
+    INSERT INTO ${name}_fts(rowid, content) VALUES (new.rowid, new.content);
+  END;
 
-  CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_propositions_fts USING fts5(
-    content, tokenize='trigram'
-  );
+  CREATE TRIGGER IF NOT EXISTS ${name}_fts_ad AFTER DELETE ON ${base} BEGIN
+    INSERT INTO ${name}_fts(${name}_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+  END;
 
-  CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_summaries_fts USING fts5(
-    content, tokenize='trigram'
-  );
+  CREATE TRIGGER IF NOT EXISTS ${name}_fts_au AFTER UPDATE ON ${base} BEGIN
+    INSERT INTO ${name}_fts(${name}_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+    INSERT INTO ${name}_fts(rowid, content) VALUES (new.rowid, new.content);
+  END;
 `
+
+export const KNOWLEDGE_FTS_DDL = [
+  KNOWLEDGE_FTS_TABLE_DDL('knowledge_chunks', 'knowledge_chunks'),
+  KNOWLEDGE_FTS_TABLE_DDL('knowledge_paragraphs', 'knowledge_paragraphs'),
+  KNOWLEDGE_FTS_TABLE_DDL('knowledge_propositions', 'knowledge_propositions'),
+  KNOWLEDGE_FTS_TABLE_DDL('knowledge_summaries', 'knowledge_summaries')
+].join('\n')
 
 /** 增量索引 manifest 表 */
 export const INDEX_MANIFEST_DDL = `

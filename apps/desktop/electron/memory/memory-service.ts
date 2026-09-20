@@ -56,9 +56,6 @@ export type MemorySearchResult = { memories: MemorySearchHit[]; wikiDocs: RepoWi
 /** 受保护的 MemoryNode 类型集合 */
 const PROTECTED_TYPES: readonly MemoryNodeType[] = ['constraint', 'security_rule', 'architecture', 'decision']
 
-/** 参与检索的活跃 + 降权状态 */
-const SEARCHABLE_STATUSES = ['active', 'compacted', 'stale'] as const
-
 export class MemoryService {
   private readonly engine: MemoryEngine
 
@@ -83,9 +80,10 @@ export class MemoryService {
   listMemories(
     filter: { scope?: MemoryScope; scopes?: MemoryScope[]; repositoryId?: string; conversationId?: string } = {}
   ): Memory[] {
+    // 管理面列出不强制 userId：repo/conversation 记忆只带各自归属字段，
+    // 强制 userId 会把它们全部排除在设置页之外（单用户桌面，按 scope 展示即可）。
     const nodes = this.engine.memoryNodes.list({
       ...filter,
-      userId: this.ensureUserId(),
       statuses: ['active', 'candidate', 'stale', 'compacted']
     })
     return nodes.map((node) => this.nodeToMemory(node))
@@ -95,12 +93,13 @@ export class MemoryService {
     if (input.id) {
       const existing = this.engine.memoryNodes.get(input.id)
       if (existing) {
+        // 编辑不再用 pinned 改写生命周期状态；置顶是独立的展示优先级，存在 metadata.pinned。
         const updated = this.engine.memoryNodes.update(input.id, {
           title: input.title,
           summary: input.content,
           tags: input.tags,
           importance: input.importance,
-          status: input.pinned ? 'active' : 'candidate'
+          metadata: { ...(existing.metadata ?? {}), pinned: input.pinned }
         })
         return this.nodeToMemory(updated)
       }
@@ -114,26 +113,33 @@ export class MemoryService {
       userId: input.userId ?? this.ensureUserId(),
       repositoryId: input.repositoryId,
       conversationId: input.conversationId,
-      status: input.pinned ? 'active' : 'candidate',
+      // 手工新增是用户显式动作，直接 active 参与检索；只有自动提取的草稿才进 candidate 池。
+      status: 'active',
       importance: input.importance,
       tags: input.tags,
+      metadata: input.pinned ? { pinned: true } : null,
       source: input.source === 'imported' ? 'seed' : input.source
     })
     return this.nodeToMemory(node)
   }
 
   updateMemory(id: string, patch: Partial<Omit<Memory, 'id' | 'createdAt' | 'updatedAt'>>): Memory {
-    const node = this.engine.memoryNodes.update(id, {
+    const current = this.engine.memoryNodes.get(id)
+    if (!current) throw new Error(`MemoryNode not found: ${id}`)
+    const nextScope = patch.scope
+    const metadata = patch.pinned !== undefined ? { ...(current.metadata ?? {}), pinned: patch.pinned } : undefined
+    const updated = this.engine.memoryNodes.update(id, {
       ...(patch.title !== undefined ? { title: patch.title } : {}),
       ...(patch.content !== undefined ? { summary: patch.content } : {}),
       ...(patch.tags !== undefined ? { tags: patch.tags } : {}),
       ...(patch.importance !== undefined ? { importance: patch.importance } : {}),
       ...(patch.status !== undefined ? { status: patch.status as MemoryNode['status'] } : {}),
-      ...(patch.pinned !== undefined && patch.status === undefined
-        ? { status: patch.pinned ? 'active' : 'candidate' }
-        : {})
+      ...(metadata !== undefined ? { metadata } : {}),
+      // 作用域 / 归属字段允许修正（此前静默丢弃，UI 改了不生效）：
+      ...(nextScope !== undefined ? { scope: nextScope } : {}),
+      ...(nextScope !== undefined ? this.scopeOwnerPatch(current, nextScope, patch) : {})
     })
-    return this.nodeToMemory(node)
+    return this.nodeToMemory(updated)
   }
 
   deleteMemory(id: string): void {
@@ -256,17 +262,21 @@ export class MemoryService {
     const keywords = (options.keywordFallback ?? fallbackKeywords)(options.query)
     if (!keywords.length) return { memories: [], wikiDocs: [], keywords }
 
-    // 使用 RetrievalPipeline 检索记忆（多粒度 FTS5 + RRF 融合）
+    // OR 可见性契约：user/repo/conversation 各自命中自己的归属字段，repo 支持多仓库。
+    // （旧实现把 userId + repositoryIds[0] 平铺 AND，把只带单一身份字段的自动写入记忆全部排除在外。）
     const pack = this.engine.retrieve({
       query: options.query,
       taskIntent: 'general',
-      scopes: ['user', 'conversation', 'repo'],
-      userId: options.userId,
-      repositoryId: options.repositoryIds?.[0],
+      visibility: {
+        userId: options.userId,
+        repositoryIds: options.repositoryIds,
+        conversationId: options.conversationId
+      },
+      repositoryIds: options.repositoryIds,
       perChannelLimit: limit
     })
     // RetrievalHit 仅含 nodeId/metadata，需查回完整 MemoryNode
-    let memories: MemorySearchHit[] = pack.memories
+    const memories: MemorySearchHit[] = pack.memories
       .map((hit) => {
         if (!hit.nodeId) return null
         const node = this.engine.memoryNodes.get(hit.nodeId)
@@ -275,29 +285,16 @@ export class MemoryService {
       })
       .filter((h): h is MemorySearchHit => h !== null)
 
-    // 对话级记忆需按 conversationId 过滤（RetrievalPipeline 不支持 conversationId 参数）
-    if (options.conversationId) {
-      const convHits = this.searchConversationMemories(keywords, options.conversationId, limit)
-      memories = [
-        ...convHits,
-        ...memories.filter((m) => m.scope !== 'conversation' || m.conversationId === options.conversationId)
-      ]
-    }
-
-    // 按仓库过滤并补充仓库级记忆
-    if (options.repositoryIds?.length) {
-      const repoSet = new Set(options.repositoryIds)
-      memories = memories.filter((m) => m.scope !== 'repo' || (m.repositoryId && repoSet.has(m.repositoryId)))
-    }
-
     // Wiki 文档检索（按仓库，保持全文档粒度）
     const wikiDocs: RepoWikiSearchHit[] = []
     for (const repositoryId of options.repositoryIds ?? []) {
       wikiDocs.push(...this.searchRepoWikiDocs(repositoryId, options.query))
     }
 
+    // 置顶记忆优先注入（与设置页「置顶记忆在注入排序中优先」的契约一致）
+    const ranked = memories.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.score - a.score)
     return {
-      memories: memories.sort((a, b) => b.score - a.score).slice(0, limit),
+      memories: ranked.slice(0, limit),
       wikiDocs: wikiDocs.sort((a, b) => b.score - a.score).slice(0, Math.max(1, limit >> 1)),
       keywords
     }
@@ -310,7 +307,12 @@ export class MemoryService {
 
   // ── 记忆整理 + 反思晋升 ─────────────────────────────────────────────────
 
-  consolidateMemories(drafts: ExtractedMemoryDraft[], repositoryIds: string[], conversationId: string): number {
+  consolidateMemories(
+    drafts: ExtractedMemoryDraft[],
+    repositoryIds: string[],
+    conversationId: string,
+    opts?: { validation?: 'implementation' }
+  ): number {
     let saved = 0
     const batchSaved: Array<{ title: string; content: string }> = []
     const existingCache = new Map<string, Array<{ title: string; content: string }>>()
@@ -368,7 +370,10 @@ export class MemoryService {
         importance: 0.5,
         confidence: draft.confidence ?? 0.5, // TODO: 待 ExtractedMemoryDraft 增加 confidence 字段后由 LLM 输出透传
         tags,
-        source: 'auto'
+        source: 'auto',
+        // 任务实现阶段（验证前）提取的结论打标，反思阶段暂不晋升，
+        // 任务 completed 后由 verifyTaskMemories 翻转并批量晋升。
+        ...(opts?.validation ? { metadata: { validation: opts.validation } } : {})
       })
       // 关联证据：记录记忆来源（对话/任务）
       this.engine.evidence.create({
@@ -401,6 +406,9 @@ export class MemoryService {
    * - 标题相似度 > 0.3 → supersede（非受保护时替代旧节点，旧节点 active → superseded）
    * - 否则 → promote 为 active
    *
+   * 匹配只在同归属分区内进行（同 scope 且同仓库/同对话/同用户）：
+   * 不同仓库的同名约定是两个事实，跨分区合并会互相污染。
+   *
    * 注意：candidate 只能转换到 active / expired（状态机约束）。
    *
    * 返回处理结果统计。
@@ -410,9 +418,19 @@ export class MemoryService {
     const candidates = this.engine.memoryNodes.list({ status: 'candidate' })
     if (!candidates.length) return result
     const activeNodes = this.engine.memoryNodes.list({ statuses: ['active', 'stale'] })
+    const activeByPartition = new Map<string, MemoryNode[]>()
+    for (const node of activeNodes) {
+      const key = partitionKey(node)
+      const list = activeByPartition.get(key)
+      if (list) list.push(node)
+      else activeByPartition.set(key, [node])
+    }
 
     for (const candidate of candidates) {
-      const bestMatch = findBestMatch(candidate, activeNodes)
+      // 实现阶段结论延迟晋升：未经验证不进入 active，避免错误结论污染检索。
+      if (candidate.metadata?.validation === 'implementation') continue
+      const peers = activeByPartition.get(partitionKey(candidate)) ?? []
+      const bestMatch = findBestMatch(candidate, peers)
       if (!bestMatch || bestMatch.similarity <= 0.3) {
         this.engine.memoryNodes.update(candidate.id, {
           status: 'active',
@@ -463,6 +481,73 @@ export class MemoryService {
     return { expired: result.expired.length, stale: result.markedStale.length, archived: result.archived.length }
   }
 
+  /**
+   * 记录检索命中（效果反馈数据层）：search_memory 工具每次把命中的记忆
+   * 喂给模型时落一条 evidence（type='retrieval_hit'，source_id = 对话 id /
+   * `task:${taskId}`，content = 查询文本）。后续任务验证通过时由
+   * verifyTaskMemories 把这些节点关联为 outcome_verified 正向证据。
+   */
+  recordRetrievalHits(memoryIds: string[], sourceId: string, query: string): number {
+    let recorded = 0
+    for (const id of memoryIds) {
+      const node = this.engine.memoryNodes.get(id)
+      if (!node) continue
+      this.engine.evidence.create({
+        memoryNodeId: id,
+        evidenceType: 'retrieval_hit',
+        sourceId,
+        content: query.slice(0, 200)
+      })
+      recorded += 1
+    }
+    return recorded
+  }
+
+  /**
+   * 任务验证通过：把该任务留下的「实现阶段结论」翻转为 verified 并晋升。
+   *
+   * 任务在实现收尾（测试之前）就整理记忆，提取的结论尚未经验证，落库时打
+   * metadata.validation='implementation' 标记，反思阶段暂不晋升；任务
+   * completed 时经证据链（source_id = `task:${taskId}`）找到这些节点，翻转
+   * 为 'verified' 后立即参与晋升。failed/cancelled 任务保持暂缓（留给手动处理）。
+   *
+   * 同时完成效果反馈闭环：任务期间被检索命中（retrieval_hit）的记忆获得
+   * outcome_verified 正向证据，供后续重排/治理分析“哪些记忆真的帮上了忙”。
+   */
+  verifyTaskMemories(taskId: string): number {
+    const sourceId = `task:${taskId}`
+    const links = this.engine.evidence.listBySourceId(sourceId)
+    let flipped = 0
+    const hitNodeIds = new Set<string>()
+    for (const link of links) {
+      if (link.evidenceType === 'retrieval_hit') hitNodeIds.add(link.memoryNodeId)
+      const node = this.engine.memoryNodes.get(link.memoryNodeId)
+      if (!node || node.metadata?.validation !== 'implementation') continue
+      this.engine.memoryNodes.update(node.id, {
+        metadata: { ...(node.metadata ?? {}), validation: 'verified' }
+      })
+      flipped += 1
+    }
+    // 验证事件关联为证据：本次任务用过（命中且实际存在）的记忆各记一条正向信号
+    for (const nodeId of hitNodeIds) {
+      if (!this.engine.memoryNodes.get(nodeId)) continue
+      this.engine.evidence.create({
+        memoryNodeId: nodeId,
+        evidenceType: 'outcome_verified',
+        sourceId,
+        content: '所在任务验证通过（completed），该记忆曾被检索命中'
+      })
+    }
+    if (flipped > 0) {
+      try {
+        this.runReflection()
+      } catch (error) {
+        console.warn('[memory] post-verify reflection failed:', error)
+      }
+    }
+    return flipped
+  }
+
   // ── 启动迁移 ─────────────────────────────────────────────────────────────
 
   runLegacyMigration(): { memories: number; wikiDocs: number } | null {
@@ -508,7 +593,8 @@ export class MemoryService {
       title: node.title,
       content: node.summary ?? '',
       tags: node.tags,
-      pinned: node.status === 'active',
+      // 置顶是独立于生命周期的展示优先级（存在 metadata），不再与 status='active' 互相映射
+      pinned: Boolean(node.metadata?.pinned),
       importance: node.importance,
       source: node.source === 'seed' ? 'imported' : node.source,
       createdAt: node.createdAt,
@@ -531,53 +617,27 @@ export class MemoryService {
     }
   }
 
-  private searchMemoriesByScope(
-    keywords: string[],
-    input: { scopes: MemoryScope[]; userId?: string; repositoryId?: string; conversationId?: string; limit?: number }
-  ): MemorySearchHit[] {
-    if (input.scopes.includes('conversation') && input.conversationId) {
-      const convHits = this.searchConversationMemories(keywords, input.conversationId, input.limit ?? 5)
-      const otherScopes = input.scopes.filter((s) => s !== 'conversation')
-      if (otherScopes.length) {
-        const otherHits = this.engine.memoryNodes.searchFts({
-          keywords,
-          scopes: otherScopes,
-          userId: input.userId,
-          repositoryId: input.repositoryId,
-          limit: input.limit
-        })
-        return [...convHits, ...otherHits.map((n) => this.nodeToSearchHit(n))]
+  /** 作用域切换时清理与新 scope 不符的归属字段（可见性契约按 scope 分支命中）。 */
+  private scopeOwnerPatch(
+    current: MemoryNode,
+    scope: MemoryScope,
+    patch: { userId?: string; repositoryId?: string; conversationId?: string }
+  ): { userId: string | null; repositoryId: string | null; conversationId: string | null } {
+    if (scope === 'user') {
+      return {
+        userId: patch.userId ?? current.userId ?? this.ensureUserId(),
+        repositoryId: patch.repositoryId ?? null,
+        conversationId: patch.conversationId ?? null
       }
-      return convHits
     }
-    const nodes = this.engine.memoryNodes.searchFts({
-      keywords,
-      scopes: input.scopes,
-      userId: input.userId,
-      repositoryId: input.repositoryId,
-      limit: input.limit
-    })
-    return nodes.map((n) => this.nodeToSearchHit(n))
-  }
-
-  private searchConversationMemories(keywords: string[], conversationId: string, limit: number): MemorySearchHit[] {
-    const cleaned = keywords.map((kw) => kw.trim().replace(/"/g, '""')).filter((kw) => kw.length > 0)
-    if (!cleaned.length) return []
-    const query = cleaned.map((kw) => (kw.length <= 2 ? `"${kw}"` : `"${kw}"*`)).join(' OR ')
-    const statusList = SEARCHABLE_STATUSES
-    const rows = this.store.db
-      .prepare(
-        `SELECT memory_nodes.*, CAST(-bm25(memory_nodes_fts) * 100 AS INTEGER) AS score
-         FROM memory_nodes_fts
-         JOIN memory_nodes ON memory_nodes.rowid = memory_nodes_fts.rowid
-         WHERE memory_nodes_fts MATCH ?
-           AND memory_nodes.scope = 'conversation'
-           AND memory_nodes.conversation_id = ?
-           AND memory_nodes.status IN (${statusList.map(() => '?').join(',')})
-         ORDER BY score DESC LIMIT ?`
-      )
-      .all(query, conversationId, ...statusList, Math.min(limit, 50)) as Array<Record<string, unknown>>
-    return rows.map((row) => ({ ...this.nodeToMemory(parseNodeRow(row)), score: Number(row.score) }))
+    if (scope === 'repo') {
+      const repositoryId = patch.repositoryId ?? (current.scope === 'repo' ? current.repositoryId : null)
+      if (!repositoryId) throw new Error('仓库级记忆必须选择所属仓库')
+      return { userId: null, repositoryId, conversationId: null }
+    }
+    const conversationId = patch.conversationId ?? (current.scope === 'conversation' ? current.conversationId : null)
+    if (!conversationId) throw new Error('对话级记忆缺少所属对话')
+    return { userId: null, repositoryId: null, conversationId }
   }
 
   private nodeToSearchHit(node: MemoryNode & { score: number }): MemorySearchHit {
@@ -586,29 +646,6 @@ export class MemoryService {
 }
 
 // ── 模块级辅助函数 ───────────────────────────────────────────────────────────
-
-function parseNodeRow(row: Record<string, unknown>): MemoryNode {
-  return {
-    id: String(row.id),
-    parentId: row.parent_id ? String(row.parent_id) : null,
-    nodeType: String(row.node_type) as MemoryNodeType,
-    title: String(row.title),
-    summary: row.summary ? String(row.summary) : null,
-    status: String(row.status) as MemoryNode['status'],
-    confidence: Number(row.confidence),
-    importance: Number(row.importance),
-    scope: String(row.scope) as MemoryScope,
-    userId: row.user_id ? String(row.user_id) : null,
-    repositoryId: row.repository_id ? String(row.repository_id) : null,
-    conversationId: row.conversation_id ? String(row.conversation_id) : null,
-    branchName: row.branch_name ? String(row.branch_name) : null,
-    metadata: row.metadata ? JSON.parse(String(row.metadata)) : null,
-    tags: JSON.parse(String(row.tags ?? '[]')),
-    source: String(row.source) as MemoryNode['source'],
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at)
-  }
-}
 
 function inferNodeType(tags: string[]): MemoryNodeType {
   const lowerTags = tags.map((t) => t.toLowerCase())
@@ -622,14 +659,27 @@ function inferNodeType(tags: string[]): MemoryNodeType {
   return 'procedure'
 }
 
-/** 标题词集 Jaccard 相似度 */
+/** 反思匹配分区：只有同 scope 且同归属字段的节点才允许互并/互替 */
+function partitionKey(node: MemoryNode): string {
+  if (node.scope === 'repo') return `repo:${node.repositoryId ?? ''}`
+  if (node.scope === 'conversation') return `conversation:${node.conversationId ?? ''}`
+  return `user:${node.userId ?? ''}`
+}
+
+/** 标题相似度：词集 Jaccard 与字符 n-gram Jaccard 取大（CJK 标题无空格，纯词切分恒为 0） */
 function titleSimilarity(a: string, b: string): number {
   const wordsA = new Set(a.toLowerCase().split(/\s+/).filter(Boolean))
   const wordsB = new Set(b.toLowerCase().split(/\s+/).filter(Boolean))
-  if (!wordsA.size || !wordsB.size) return 0
-  let intersection = 0
-  for (const w of wordsA) if (wordsB.has(w)) intersection++
-  return intersection / (wordsA.size + wordsB.size - intersection)
+  let wordSim = 0
+  if (wordsA.size && wordsB.size) {
+    let intersection = 0
+    for (const w of wordsA) if (wordsB.has(w)) intersection++
+    wordSim = intersection / (wordsA.size + wordsB.size - intersection)
+  }
+  const normA = normalizeForDedupe(a)
+  const normB = normalizeForDedupe(b)
+  const gramSim = normA && normB ? jaccard(trigrams(normA), trigrams(normB)) : 0
+  return Math.max(wordSim, gramSim)
 }
 
 function findBestMatch(

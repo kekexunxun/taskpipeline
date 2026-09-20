@@ -158,3 +158,57 @@ describe('Pi 记忆检索工具', () => {
     }
   })
 })
+
+describe('检索命中记录与注入区分（P3 效果反馈）', () => {
+  const hitMemories = [
+    { id: 'node-1', scope: 'repo', title: '提交规范', content: '使用中文提交信息' },
+    { id: 'node-2', scope: 'user', title: '回复语言', content: '始终中文' }
+  ] as unknown as MemorySearchResult['memories']
+
+  it('有命中时按绑定作用域落 retrieval_hit 记录，无命中不记', async () => {
+    const recordRetrievalHits = vi.fn().mockReturnValue(2)
+    const search = vi.fn<MemorySearchTarget['search']>().mockResolvedValue({
+      memories: hitMemories,
+      wikiDocs: [],
+      keywords: ['提交规范']
+    })
+    const tool = createMemorySearchTool({
+      userId: 'user-1',
+      repositoryIds: ['repo-1'],
+      conversationId: 'task:task-9',
+      memoryService: { search, recordRetrievalHits }
+    })
+    await tool.execute({ query: '提交规范' })
+    expect(recordRetrievalHits).toHaveBeenCalledWith(['node-1', 'node-2'], 'task:task-9', '提交规范')
+
+    search.mockResolvedValue(emptyResult())
+    recordRetrievalHits.mockClear()
+    await tool.execute({ query: '不存在的词' })
+    expect(recordRetrievalHits).not.toHaveBeenCalled()
+  })
+
+  it('onSearched 透出 injected 区分命中与实际注入', async () => {
+    const search = vi.fn<MemorySearchTarget['search']>().mockResolvedValue({
+      memories: hitMemories,
+      wikiDocs: [],
+      keywords: ['提交规范']
+    })
+    const onSearched = vi.fn()
+    const tool = createMemorySearchTool({
+      userId: 'user-1',
+      memoryService: { search },
+      onSearched
+    })
+    const text = await tool.execute({ query: '提交规范' })
+    expect(text).toContain('提交规范')
+    expect(onSearched).toHaveBeenCalledWith('提交规范', expect.objectContaining({ memories: hitMemories }), {
+      injected: true
+    })
+
+    search.mockResolvedValue(emptyResult())
+    await tool.execute({ query: '查不到' })
+    expect(onSearched).toHaveBeenLastCalledWith('查不到', expect.objectContaining({ memories: [] }), {
+      injected: false
+    })
+  })
+})

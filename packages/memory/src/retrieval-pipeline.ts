@@ -18,6 +18,7 @@ import type {
   ContextPack,
   GranularityLayer,
   MemoryScope,
+  MemoryVisibility,
   RetrievalHit,
   RetrievalTraceEntry,
   TaskIntent
@@ -25,18 +26,27 @@ import type {
 import { getGranularityLayers } from './retrieval/granularity-router.js'
 import { reciprocalRankFusion } from './retrieval/rrf.js'
 import { buildContextPack } from './retrieval/context-pack.js'
+import { analyzeKeywords } from './retrieval/keywords.js'
 
 export interface RetrievalInput {
   /** 查询文本 */
   query: string
   /** 任务意图（决定粒度路由） */
   taskIntent: TaskIntent
-  /** 作用域过滤 */
+  /** 作用域过滤（平铺 AND 模式；与 visibility 二选一） */
   scopes?: MemoryScope[]
-  /** 仓库 ID */
+  /** 仓库 ID（单仓，平铺 AND 模式） */
   repositoryId?: string
-  /** 用户 ID */
+  /** 用户 ID（平铺 AND 模式） */
   userId?: string
+  /**
+   * OR 可见性契约（推荐）：user 记忆按 userId、repo 记忆按 repositoryIds、
+   * conversation 记忆按 conversationId 分支命中，与写入侧身份字段对齐。
+   * 传入后忽略 scopes / repositoryId / userId 平铺条件。
+   */
+  visibility?: MemoryVisibility
+  /** 知识层检索限定的仓库集合（不传时回落到 repositoryId；两者都缺省则不过滤） */
+  repositoryIds?: string[]
   /** 分支名（分支感知检索） */
   branchName?: string
   /** 每路检索上限（默认 10） */
@@ -66,7 +76,8 @@ export class RetrievalPipeline {
    * @returns ContextPack（含 memories / knowledge / totalTokens / retrievalTrace）
    */
   execute(input: RetrievalInput): ContextPack {
-    const keywords = tokenize(input.query)
+    // 中英混合分词：CJK 问句额外产 3 字 n-gram，保证 trigram 索引可命中
+    const keywords = analyzeKeywords(input.query)
     if (keywords.length === 0) {
       return { memories: [], knowledge: [], totalTokens: 0, retrievalTrace: [] }
     }
@@ -74,6 +85,11 @@ export class RetrievalPipeline {
     const limit = input.perChannelLimit ?? 10
     const layers = getGranularityLayers(input.taskIntent)
     const traces: RetrievalTraceEntry[] = []
+    const knowledgeRepoFilter = input.repositoryIds?.length
+      ? input.repositoryIds
+      : input.repositoryId
+        ? [input.repositoryId]
+        : undefined
 
     // ── 1. 记忆层 FTS5 检索 ──────────────────────────────────────────────
     const memStart = Date.now()
@@ -82,6 +98,7 @@ export class RetrievalPipeline {
       scopes: input.scopes,
       repositoryId: input.repositoryId,
       userId: input.userId,
+      visibility: input.visibility,
       branchName: input.branchName,
       limit
     })
@@ -115,7 +132,7 @@ export class RetrievalPipeline {
 
       switch (layer) {
         case 'proposition': {
-          const results = this.knowledgeStore.searchPropositions(keywords, limit)
+          const results = this.knowledgeStore.searchPropositions(keywords, limit, knowledgeRepoFilter)
           hits = results.map((r) => ({
             layer: 'proposition' as const,
             content: r.content,
@@ -130,7 +147,7 @@ export class RetrievalPipeline {
           break
         }
         case 'paragraph': {
-          const results = this.knowledgeStore.searchParagraphs(keywords, limit)
+          const results = this.knowledgeStore.searchParagraphs(keywords, limit, knowledgeRepoFilter)
           hits = results.map((r) => ({
             layer: 'paragraph' as const,
             content: r.content,
@@ -145,7 +162,7 @@ export class RetrievalPipeline {
           break
         }
         case 'chunk': {
-          const results = this.knowledgeStore.searchChunks(keywords, limit)
+          const results = this.knowledgeStore.searchChunks(keywords, limit, knowledgeRepoFilter)
           hits = results.map((r) => ({
             layer: 'chunk' as const,
             content: r.content,
@@ -161,7 +178,7 @@ export class RetrievalPipeline {
         }
         case 'summary': {
           // summary 层暂用 searchParagraphs 降级（summary 表数据量少，后续可加专用 search）
-          const results = this.knowledgeStore.searchParagraphs(keywords, limit)
+          const results = this.knowledgeStore.searchParagraphs(keywords, limit, knowledgeRepoFilter)
           hits = results.map((r) => ({
             layer: 'summary' as const,
             content: r.content,

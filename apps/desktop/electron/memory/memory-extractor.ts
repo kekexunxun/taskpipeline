@@ -120,12 +120,12 @@ export async function extractMemories(input: {
   input.signal?.addEventListener('abort', forwardAbort, { once: true })
   // 一次性会话 id：每次整理独立上下文，结束后立刻释放（含报错/中止路径）。
   const conversationId = `memory-extract-${input.context}-${randomUUID()}`
-  const userText = [
-    extractionPrompt(input.allowedScopes),
-    '',
-    '待整理的记录(已截断):',
-    input.text.slice(0, MAX_TRANSCRIPT_CHARS)
-  ].join('\n\n')
+  // 超长记录保留尾部（最新内容）：从头截断会让长对话后期永远看不到最近结论，
+  // 而记忆提取恰恰最依赖回合末尾的决策与偏好修正。
+  const transcript = input.text.length > MAX_TRANSCRIPT_CHARS ? input.text.slice(-MAX_TRANSCRIPT_CHARS) : input.text
+  const userText = [extractionPrompt(input.allowedScopes), '', '待整理的记录(超长时仅保留最近部分):', transcript].join(
+    '\n\n'
+  )
   const userRecord = input.driver.serializeUserMessage({
     id: randomUUID(),
     text: userText,

@@ -27,6 +27,7 @@ export type { ExtractedProposition } from './knowledge/proposition-extractor.js'
 
 // 检索流水线
 export { RetrievalPipeline, tokenize } from './retrieval-pipeline.js'
+export { analyzeKeywords } from './retrieval/keywords.js'
 export { reciprocalRankFusion } from './retrieval/rrf.js'
 export { getGranularityLayers, getPrimaryLayer } from './retrieval/granularity-router.js'
 export { buildContextPack } from './retrieval/context-pack.js'
@@ -72,6 +73,7 @@ export type {
   CreateMemoryNodeInput,
   UpdateMemoryNodeInput,
   MemoryScope,
+  MemoryVisibility,
 
   // Evidence
   EvidenceLink,

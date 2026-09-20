@@ -17,6 +17,7 @@ import {
   type MemoryNodeStatus,
   type MemoryNodeType,
   type MemoryScope,
+  type MemoryVisibility,
   type UpdateMemoryNodeInput
 } from './types.js'
 
@@ -28,7 +29,7 @@ const VALID_TRANSITIONS: Record<MemoryNodeStatus, MemoryNodeStatus[]> = {
   superseded: ['archived'],
   archived: ['active'], // 允许从归档恢复
   compacted: ['active'], // 允许从压缩恢复
-  expired: [] // 终态，不可转换
+  expired: ['archived'] // 超期候选保留期满后可归档（RetentionService.archiveOld）
 }
 
 /** 将 FTS5 关键词数组转成 MATCH 表达式（复用现有 MemoryStore 的 ftsQuery 逻辑） */
@@ -140,6 +141,10 @@ export class MemoryNodeStore {
       ...(patch.status !== undefined ? { status: patch.status } : {}),
       ...(patch.confidence !== undefined ? { confidence: patch.confidence } : {}),
       ...(patch.importance !== undefined ? { importance: patch.importance } : {}),
+      ...(patch.scope !== undefined ? { scope: patch.scope } : {}),
+      ...(patch.userId !== undefined ? { userId: patch.userId } : {}),
+      ...(patch.repositoryId !== undefined ? { repositoryId: patch.repositoryId } : {}),
+      ...(patch.conversationId !== undefined ? { conversationId: patch.conversationId } : {}),
       ...(patch.branchName !== undefined ? { branchName: patch.branchName } : {}),
       ...(patch.metadata !== undefined ? { metadata: patch.metadata } : {}),
       ...(patch.tags !== undefined ? { tags: patch.tags } : {}),
@@ -153,7 +158,9 @@ export class MemoryNodeStore {
       UPDATE memory_nodes SET
         parent_id = @parentId, node_type = @nodeType, title = @title,
         summary = @summary, status = @status, confidence = @confidence,
-        importance = @importance, branch_name = @branchName,
+        importance = @importance, scope = @scope, user_id = @userId,
+        repository_id = @repositoryId, conversation_id = @conversationId,
+        branch_name = @branchName,
         metadata = @metadata, tags = @tags, source = @source, updated_at = @updatedAt
       WHERE id = @id
     `
@@ -167,6 +174,10 @@ export class MemoryNodeStore {
         status: next.status,
         confidence: next.confidence,
         importance: next.importance,
+        scope: next.scope,
+        userId: next.userId,
+        repositoryId: next.repositoryId,
+        conversationId: next.conversationId,
         branchName: next.branchName,
         metadata: next.metadata ? JSON.stringify(next.metadata) : null,
         tags: JSON.stringify(next.tags),
@@ -279,13 +290,21 @@ export class MemoryNodeStore {
     return rows.map((row) => this.parseNode(row))
   }
 
-  /** FTS5 字面检索（降级通道） */
+  /**
+   * FTS5 字面检索（降级通道）。
+   *
+   * 两种过滤模式：
+   * - `visibility`：按作用域分支的 OR 可见性契约（推荐，与写入侧身份字段对齐）；
+   *   传入后会忽略平铺的 scopes/repositoryId/userId 条件。
+   * - 平铺条件（scopes/repositoryId/userId/branchName）：同字段 AND 交集，保留给单一归属的查询方。
+   */
   searchFts(input: {
     keywords: string[]
     scopes?: MemoryScope[]
     repositoryId?: string
     userId?: string
     branchName?: string
+    visibility?: MemoryVisibility
     limit?: number
   }): Array<MemoryNode & { score: number }> {
     const limit = Math.max(1, Math.min(input.limit ?? 10, 50))
@@ -303,17 +322,38 @@ export class MemoryNodeStore {
     )
     params.push(...ACTIVE_STATUSES, ...PENALIZED_STATUSES)
 
-    if (input.scopes?.length) {
-      clauses.push(`memory_nodes.scope IN (${input.scopes.map(() => '?').join(',')})`)
-      params.push(...input.scopes)
-    }
-    if (input.repositoryId) {
-      clauses.push('memory_nodes.repository_id = ?')
-      params.push(input.repositoryId)
-    }
-    if (input.userId) {
-      clauses.push('memory_nodes.user_id = ?')
-      params.push(input.userId)
+    if (input.visibility) {
+      const branches: string[] = []
+      const { userId, repositoryIds, conversationId } = input.visibility
+      if (userId) {
+        branches.push(`(memory_nodes.scope = 'user' AND memory_nodes.user_id = ?)`)
+        params.push(userId)
+      }
+      if (repositoryIds?.length) {
+        branches.push(
+          `(memory_nodes.scope = 'repo' AND memory_nodes.repository_id IN (${repositoryIds.map(() => '?').join(',')}))`
+        )
+        params.push(...repositoryIds)
+      }
+      if (conversationId) {
+        branches.push(`(memory_nodes.scope = 'conversation' AND memory_nodes.conversation_id = ?)`)
+        params.push(conversationId)
+      }
+      if (!branches.length) return []
+      clauses.push(`(${branches.join(' OR ')})`)
+    } else {
+      if (input.scopes?.length) {
+        clauses.push(`memory_nodes.scope IN (${input.scopes.map(() => '?').join(',')})`)
+        params.push(...input.scopes)
+      }
+      if (input.repositoryId) {
+        clauses.push('memory_nodes.repository_id = ?')
+        params.push(input.repositoryId)
+      }
+      if (input.userId) {
+        clauses.push('memory_nodes.user_id = ?')
+        params.push(input.userId)
+      }
     }
     if (input.branchName) {
       // 分支感知：优先当前分支，回退全局（branch_name IS NULL）

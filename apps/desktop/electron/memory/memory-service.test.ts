@@ -199,6 +199,198 @@ describe('CRUD 接口兼容', () => {
   })
 })
 
+describe('检索可见性契约（写入→检索跨层往返）', () => {
+  it('repo 记忆自动写入后按 repositoryIds 可命中，其它仓库不可见', async () => {
+    service.consolidateMemories(
+      [draft('repo', '支付仓库约定', 'paygate 模块统一使用幂等键 paygate-idem-key')],
+      ['r-pay'],
+      'conv-1'
+    )
+    const userId = service.ensureUserId()
+    const hit = await service.search({ userId, repositoryIds: ['r-pay'], query: 'paygate-idem-key' })
+    expect(hit.memories.some((m) => m.title === '支付仓库约定')).toBe(true)
+    const miss = await service.search({ userId, repositoryIds: ['r-other'], query: 'paygate-idem-key' })
+    expect(miss.memories.some((m) => m.title === '支付仓库约定')).toBe(false)
+  })
+
+  it('user 记忆在带 repositoryIds 的查询中不再被 AND 条件误排除', async () => {
+    const userId = service.ensureUserId()
+    service.upsertMemory({
+      scope: 'user',
+      title: '回复语言',
+      content: '统一使用中文回复 userreply-zh',
+      tags: [],
+      pinned: false,
+      importance: 0.5,
+      source: 'manual'
+    })
+    const result = await service.search({ userId, repositoryIds: ['r-any'], query: 'userreply-zh' })
+    expect(result.memories.some((m) => m.title === '回复语言')).toBe(true)
+  })
+
+  it('conversation 记忆只对所属对话可见', async () => {
+    const userId = service.ensureUserId()
+    service.consolidateMemories([draft('conversation', '本轮结论', '本对话临时结论 convmarker-tmp')], [], 'conv-a')
+    const mine = await service.search({ userId, conversationId: 'conv-a', query: 'convmarker-tmp' })
+    expect(mine.memories.some((m) => m.title === '本轮结论')).toBe(true)
+    const others = await service.search({ userId, conversationId: 'conv-b', query: 'convmarker-tmp' })
+    expect(others.memories.some((m) => m.title === '本轮结论')).toBe(false)
+  })
+
+  it('多仓库任务：两个仓库的记忆都能命中', async () => {
+    const userId = service.ensureUserId()
+    service.consolidateMemories([draft('repo', '甲约定', '多仓命中 multirepo-alpha')], ['r-1'], 'task-1')
+    service.consolidateMemories([draft('repo', '乙约定', '多仓命中 multirepo-beta')], ['r-2'], 'task-2')
+    const result = await service.search({ userId, repositoryIds: ['r-1', 'r-2'], query: '多仓命中' })
+    expect(result.memories.map((m) => m.title).sort()).toEqual(['乙约定', '甲约定'])
+  })
+})
+
+describe('置顶与生命周期解耦', () => {
+  it('手工新增不置顶也是 active，立即可检索', async () => {
+    const userId = service.ensureUserId()
+    const memory = service.upsertMemory({
+      scope: 'user',
+      title: '编辑器偏好',
+      content: '默认缩进两空格 editorindent-2s',
+      tags: [],
+      pinned: false,
+      importance: 0.5,
+      source: 'manual'
+    })
+    expect(memory.status).toBe('active')
+    expect(memory.pinned).toBe(false)
+    const result = await service.search({ userId, query: 'editorindent-2s' })
+    expect(result.memories.some((m) => m.title === '编辑器偏好')).toBe(true)
+  })
+
+  it('置顶/取消置顶只改 metadata，不回退生命周期状态', () => {
+    const memory = service.upsertMemory({
+      scope: 'user',
+      title: '命名风格',
+      content: '变量用 camelCase',
+      tags: [],
+      pinned: false,
+      importance: 0.5,
+      source: 'manual'
+    })
+    const pinned = service.updateMemory(memory.id, { pinned: true })
+    expect(pinned.pinned).toBe(true)
+    expect(pinned.status).toBe('active')
+    const unpinned = service.updateMemory(memory.id, { pinned: false })
+    expect(unpinned.pinned).toBe(false)
+    expect(unpinned.status).toBe('active') // 旧实现会回退到 candidate（非法转换报错/丢可见性）
+  })
+
+  it('置顶记忆在注入排序中优先', async () => {
+    const userId = service.ensureUserId()
+    service.upsertMemory({
+      scope: 'user',
+      title: '普通记忆',
+      content: '排序验证 rankmarker 内容一',
+      tags: [],
+      pinned: false,
+      importance: 0.5,
+      source: 'manual'
+    })
+    service.upsertMemory({
+      scope: 'user',
+      title: '置顶记忆',
+      content: '排序验证 rankmarker 内容二',
+      tags: [],
+      pinned: true,
+      importance: 0.5,
+      source: 'manual'
+    })
+    const result = await service.search({ userId, query: '排序验证 rankmarker' })
+    expect(result.memories[0]?.title).toBe('置顶记忆')
+  })
+})
+
+describe('作用域/仓库归属编辑落库', () => {
+  it('user → repo 切换携带仓库归属，可见性随契约迁移', async () => {
+    const userId = service.ensureUserId()
+    const memory = service.upsertMemory({
+      scope: 'user',
+      title: '归属修正',
+      content: '归属切换测试 scopeflip-marker',
+      tags: [],
+      pinned: false,
+      importance: 0.5,
+      source: 'manual'
+    })
+    const moved = service.updateMemory(memory.id, { scope: 'repo', repositoryId: 'r-x' })
+    expect(moved.scope).toBe('repo')
+    expect(moved.repositoryId).toBe('r-x')
+    const asUser = await service.search({ userId, query: 'scopeflip-marker' })
+    expect(asUser.memories.some((m) => m.title === '归属修正')).toBe(false)
+    const asRepo = await service.search({ userId, repositoryIds: ['r-x'], query: 'scopeflip-marker' })
+    expect(asRepo.memories.some((m) => m.title === '归属修正')).toBe(true)
+  })
+
+  it('切换到 repo 未选仓库时报错', () => {
+    const memory = service.upsertMemory({
+      scope: 'user',
+      title: '无法裸切',
+      content: '内容',
+      tags: [],
+      pinned: false,
+      importance: 0.5,
+      source: 'manual'
+    })
+    expect(() => service.updateMemory(memory.id, { scope: 'repo' })).toThrow(/仓库/)
+  })
+})
+
+describe('反思分区隔离', () => {
+  it('不同仓库同名约定不互并，各自独立晋升', () => {
+    const engine = service.getEngine()
+    engine.memoryNodes.create({
+      nodeType: 'procedure',
+      title: 'Build command',
+      summary: 'npm run build only-for-r1',
+      scope: 'repo',
+      repositoryId: 'r-1',
+      status: 'active'
+    })
+    service.consolidateMemories([draft('repo', 'Build command', 'cargo check only-for-r2')], ['r-2'], 'task-x')
+    const r2Node = engine.memoryNodes.list({ scope: 'repo', repositoryId: 'r-2' })
+    expect(r2Node).toHaveLength(1)
+    expect(r2Node[0]!.status).toBe('active')
+    expect(r2Node[0]!.summary).toBe('cargo check only-for-r2')
+    // r-1 的记忆未被污染
+    const r1Node = engine.memoryNodes.list({ scope: 'repo', repositoryId: 'r-1' })
+    expect(r1Node[0]!.summary).toBe('npm run build only-for-r1')
+  })
+
+  it('同仓库近似标题仍然正常合并', () => {
+    const engine = service.getEngine()
+    engine.memoryNodes.create({
+      nodeType: 'procedure',
+      title: '部署流程',
+      summary: '先跑 typecheck same-repo-merge-a',
+      scope: 'repo',
+      repositoryId: 'r-m',
+      status: 'active'
+    })
+    // 同标题草稿会在整理写入侧被查重丢弃（既有契约），合并发生在反思阶段：
+    // 这里直接构造同分区 candidate 验证 runReflection 的分区内互并。
+    engine.memoryNodes.create({
+      nodeType: 'procedure',
+      title: '部署流程',
+      summary: '再打 tag same-repo-merge-b',
+      scope: 'repo',
+      repositoryId: 'r-m',
+      status: 'candidate'
+    })
+    service.runReflection()
+    const nodes = engine.memoryNodes.list({ scope: 'repo', repositoryId: 'r-m', statuses: ['active'] })
+    expect(nodes).toHaveLength(1)
+    expect(nodes[0]!.summary).toContain('same-repo-merge-a')
+    expect(nodes[0]!.summary).toContain('same-repo-merge-b')
+  })
+})
+
 describe('启动迁移', () => {
   it('runLegacyMigration 物理删除旧表，后续调用幂等', () => {
     const db = (service.getEngine() as unknown as { db: Database.Database }).db
@@ -397,5 +589,96 @@ describe('生命周期维护', () => {
     // 受保护类型仍然是 candidate（未被过期）
     const stillCandidate = engine.memoryNodes.get(node!.id)
     expect(stillCandidate!.status).toBe('candidate')
+  })
+})
+
+describe('验证分层晋升', () => {
+  it('任务实现阶段结论验证前不晋升，verifyTaskMemories 翻转后晋升', () => {
+    const engine = service.getEngine()
+    const saved = service.consolidateMemories(
+      [draft('user', '接口改造结论', '采用批量写入 refactor-bulk-write')],
+      [],
+      'task:t-1',
+      { validation: 'implementation' }
+    )
+    expect(saved).toBe(1)
+    const created = engine.memoryNodes.list({ scope: 'user' })[0]!
+    expect(created.status).toBe('candidate')
+    expect(created.metadata?.validation).toBe('implementation')
+    // 再跑一轮反思：挂起候选仍不得进入 active
+    service.runReflection()
+    expect(engine.memoryNodes.get(created.id)!.status).toBe('candidate')
+    // 任务完成：翻转 + 立即参与晋升
+    expect(service.verifyTaskMemories('t-1')).toBe(1)
+    const verified = engine.memoryNodes.get(created.id)!
+    expect(verified.metadata?.validation).toBe('verified')
+    expect(verified.status).toBe('active')
+  })
+
+  it('无验证标记的对话草稿照常晋升（不受分层逻辑影响）', () => {
+    service.consolidateMemories([draft('user', '普通偏好', '喜欢简洁 plain-pref-marker')], [], 'conv-9')
+    const nodes = service.getEngine().memoryNodes.list({ scope: 'user', status: 'active' })
+    expect(nodes.some((n) => n.title === '普通偏好')).toBe(true)
+  })
+
+  it('verifyTaskMemories 对其他任务不越权翻转', () => {
+    const engine = service.getEngine()
+    service.consolidateMemories([draft('user', '甲任务数据库结论', '迁移采用 Flyway db-migration-a')], [], 'task:a', {
+      validation: 'implementation'
+    })
+    service.consolidateMemories(
+      [draft('repo', '乙任务前端结论', '弹窗改用 Portal 渲染 ui-portal-b')],
+      ['r-q'],
+      'task:b',
+      {
+        validation: 'implementation'
+      }
+    )
+    expect(service.verifyTaskMemories('a')).toBe(1)
+    const bNode = engine.memoryNodes.list({ scope: 'repo' }).find((n) => n.title === '乙任务前端结论')!
+    expect(bNode.status).toBe('candidate')
+    expect(bNode.metadata?.validation).toBe('implementation')
+  })
+
+  it('recordRetrievalHits 只为实际存在的节点落 retrieval_hit 证据', () => {
+    const engine = service.getEngine()
+    const node = engine.memoryNodes.create({
+      nodeType: 'constraint',
+      title: '支付约定',
+      summary: '必须使用幂等键 pay-idempotent-marker',
+      scope: 'user',
+      userId: service.ensureUserId(),
+      status: 'active'
+    })
+    expect(service.recordRetrievalHits([node.id, 'missing-node'], 'conv-r', '支付 幂等 约定')).toBe(1)
+    const links = engine.evidence.listByMemoryNode(node.id)
+    expect(links.some((l) => l.evidenceType === 'retrieval_hit' && l.sourceId === 'conv-r')).toBe(true)
+  })
+
+  it('任务期间检索命中的记忆，验证通过后获得 outcome_verified 正向证据', () => {
+    const engine = service.getEngine()
+    const node = engine.memoryNodes.create({
+      nodeType: 'procedure',
+      title: '构建命令约定',
+      summary: 'npm run build 一次通过 build-once-marker',
+      scope: 'repo',
+      repositoryId: 'r-v',
+      status: 'active'
+    })
+    engine.evidence.create({
+      memoryNodeId: node.id,
+      evidenceType: 'retrieval_hit',
+      sourceId: 'task:tv',
+      content: '构建命令'
+    })
+    // 无待翻转草稿，但验证事件仍应关联到命中过的记忆
+    expect(service.verifyTaskMemories('tv')).toBe(0)
+    const links = engine.evidence.listByMemoryNode(node.id)
+    expect(links.filter((l) => l.evidenceType === 'outcome_verified')).toHaveLength(1)
+    // 其他任务的检索命中不受波及
+    expect(service.verifyTaskMemories('other')).toBe(0)
+    expect(engine.evidence.listByMemoryNode(node.id).filter((l) => l.evidenceType === 'outcome_verified')).toHaveLength(
+      1
+    )
   })
 })

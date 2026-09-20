@@ -40,8 +40,10 @@ interface MemoryContextDeps {
     consolidateMemories(
       memories: Array<{ content: string; scope: string; keywords?: string[]; title?: string }>,
       repositoryIds: string[],
-      conversationId?: string
+      conversationId?: string,
+      opts?: { validation?: 'implementation' }
     ): number
+    verifyTaskMemories(taskId: string): number
   }
   chatDriverRegistry: {
     tryGet(
@@ -106,6 +108,22 @@ export async function resolveTaskChatModel(task?: Task): Promise<{ driverId: Cha
 
 // ── 记忆整理 ─────────────────────────────────────────────────────────────────
 
+/**
+ * 任务执行 runtime（provider 为厂商名）→ chat 驱动映射：
+ * - qoder → Qoder driver（model 去 `qoder:` 前缀，driver 内部也会容错）；
+ * - 其它厂商（deepseek / openai / openai-compatible / dashscope-* 等）均为 OpenAI 协议 → openai driver，
+ *   model 保留厂商前缀交给 driver 按 profile 解析；
+ * - 无法映射（缺 provider / model）返回 null，调用方回落 resolveTaskChatModel。
+ */
+export function toChatRuntime(
+  provider: string | undefined,
+  model: string | undefined
+): { driverId: ChatDriverId; model: string } | null {
+  if (!provider || !model) return null
+  if (provider === 'qoder') return { driverId: 'qoder', model: model.replace(/^qoder:/, '') }
+  return { driverId: 'openai', model }
+}
+
 export async function consolidateTaskMemory(taskId: string, responseTexts: string[]): Promise<void> {
   try {
     const task = d().store.getTask(taskId)
@@ -120,11 +138,13 @@ export async function consolidateTaskMemory(taskId: string, responseTexts: strin
     ].join('\n\n')
     // 复用任务执行模型（任务显式 > Agent 配置 > 系统默认），与任务同路径同模型整理记忆；
     // 缺运行时解析结果时回落任务级 chat 模型解析。
+    // 注意：resolveRuntime 的 provider 是厂商名（qoder / deepseek / dashscope-token-plan / ...），
+    // 不是 driver ID：只有 qoder 对应 Qoder driver，其余 OpenAI 协议厂商一律走 openai driver
+    //（model value 保留 `<厂商>:` 前缀，driver 内部按 profile 解析）；此前直接透传，
+    // 非 qoder 厂商 tryGet 落空会静默跳过整个记忆提取。
     const runtime = d().agentService.resolveRuntime(task, repos)
-    const { driverId, model } =
-      runtime.provider && runtime.model
-        ? { driverId: runtime.provider as ChatDriverId, model: runtime.model }
-        : await resolveTaskChatModel(task)
+    const mapped = toChatRuntime(runtime.provider, runtime.model)
+    const { driverId, model } = mapped ?? (await resolveTaskChatModel(task))
     const driver = d().chatDriverRegistry.tryGet(driverId)
     if (!driver) return
     // 记忆整理并入任务 Trace（不再产生独立 chat trace）：阶段容器（phase: memory）
@@ -147,7 +167,10 @@ export async function consolidateTaskMemory(taskId: string, responseTexts: strin
       const saved = d().memoryService.consolidateMemories(
         extracted,
         repos.map((repo) => repo.repositoryId),
-        `task:${taskId}`
+        `task:${taskId}`,
+        // 实现收尾在测试之前：这批结论未经运行验证，先挂起不晋升，
+        // 任务 completed 时由 verifyTaskMemoryOnComplete 翻转晋升。
+        { validation: 'implementation' }
       )
       if (saved > 0) {
         d().addTaskEvent({
@@ -179,12 +202,22 @@ export async function consolidateTaskMemory(taskId: string, responseTexts: strin
 }
 
 /**
+ * 对话整理增量游标：conversation.id → 上次提取时的消息数 + 最后一条已处理
+ * 消息 id（识别同长度改写：回退/重新生成时尾部替换，仅比长度会漏报）。
+ * 仅进程内维护：重启后回落到全量提取，由写入侧查重兜底；
+ * 校验失败（回退/编辑/compaction 重建）时重置游标重新全量提取。
+ */
+const chatExtractCursors = new Map<string, { count: number; lastId: string | undefined }>()
+
+/**
  * 把会话文本喂给 memory extraction,提取长期记忆。
  *
  * 协议:
  *  - conversation 来自 ChatService,messages 是 StoredMessageRecord(无 parts),
  *    所以这里直接用 driver.deserializeMessage 拼出 parts,提取 text。
  *  - driverId 由 conversation.driverId 决定(单会话切换 driver 时仍用最后选定的 driver 来 extract)。
+ *  - 增量提取：只整理游标之后的新消息，避免每回合重复总结全部历史
+ *    （配合尾部截断，长对话的最新内容不再被旧内容挤出窗口）。
  */
 export async function consolidateChatMemory(input: {
   conversation: ChatConversation
@@ -196,7 +229,15 @@ export async function consolidateChatMemory(input: {
 }): Promise<void> {
   try {
     const driver = d().chatDriverRegistry.tryGet(input.driverId)
-    const text = input.conversation.messages
+    if (!driver) return
+    const messages = input.conversation.messages
+    const recorded = chatExtractCursors.get(input.conversation.id)
+    let cursor = recorded?.count ?? 0
+    // 游标前一条消息被改写/删除（id 不再匹配）说明历史变了：重置全量重提。
+    if (recorded && (messages.length < cursor || messages[cursor - 1]?.id !== recorded.lastId)) cursor = 0
+    const fresh = messages.slice(cursor)
+    if (!fresh.length) return
+    const text = fresh
       .filter((message) => message.role !== 'system')
       .map((message) => {
         const record = message
@@ -210,8 +251,14 @@ export async function consolidateChatMemory(input: {
         return `${message.role === 'user' ? '用户' : '助手'}：${messageText}`
       })
       .join('\n\n')
-    if (!text.trim()) return
-    if (!driver) return
+    if (!text.trim()) {
+      // 无正文（纯工具输出等）也算已处理，推进游标避免每回合重试。
+      chatExtractCursors.set(input.conversation.id, {
+        count: messages.length,
+        lastId: messages[messages.length - 1]?.id
+      })
+      return
+    }
     // 项目对话（有 workingDirectory）：匹配 repository_profiles 的 localPath，
     // 允许 'repo' scope 并传入 repositoryIds，让工程约定类记忆正确归入仓库级而非用户级。
     const repositoryIds = resolveRepositoryIdsFromWorkingDirectory(input.conversation.workingDirectory)
@@ -229,10 +276,28 @@ export async function consolidateChatMemory(input: {
       // join 当前对话回合：记忆整理 LLM 调用与主对话同树。
       traceId: input.traceId
     })
+    // 提取尝试完成即推进游标（含失败返 []）：回退重试交给下一回合增量，
+    // 不重复烧 LLM 调用。
+    chatExtractCursors.set(input.conversation.id, {
+      count: messages.length,
+      lastId: messages[messages.length - 1]?.id
+    })
     if (!extracted.length) return
     d().memoryService.consolidateMemories(extracted, repositoryIds, input.conversation.id)
   } catch (error) {
     console.warn('[memory] chat consolidate failed:', error)
+  }
+}
+
+/**
+ * 任务完成钩子（task-lifecycle.updateState 调用）：把该任务实现阶段
+ * 挂起的记忆结论翻转为已验证并参与反思晋升。失败不阻断状态流转。
+ */
+export function verifyTaskMemoryOnComplete(taskId: string): void {
+  try {
+    d().memoryService.verifyTaskMemories(taskId)
+  } catch (error) {
+    console.warn('[memory] task memory verify promotion failed:', error)
   }
 }
 

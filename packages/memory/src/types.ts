@@ -76,15 +76,40 @@ export type CreateMemoryNodeInput = {
   source?: 'manual' | 'auto' | 'seed'
 }
 
-/** 更新 MemoryNode 的输入（所有字段可选） */
-export type UpdateMemoryNodeInput = Partial<Omit<CreateMemoryNodeInput, 'scope'>> & {
+/** 更新 MemoryNode 的输入（所有字段可选；scope / 归属字段允许修正） */
+export type UpdateMemoryNodeInput = Partial<CreateMemoryNodeInput> & {
   status?: MemoryNodeStatus
+}
+
+/**
+ * 检索可见性契约：一条节点对查询方可见，当且仅当命中任一分支：
+ * - scope='user' 且 user_id = userId
+ * - scope='repo' 且 repository_id ∈ repositoryIds
+ * - scope='conversation' 且 conversation_id = conversationId
+ *
+ * 与写入侧的身份字段一致（user 记忆只带 userId、repo 记忆只带 repositoryId、
+ * conversation 记忆只带 conversationId），避免 AND 交叉过滤把两类记忆都排除。
+ */
+export interface MemoryVisibility {
+  userId?: string
+  repositoryIds?: string[]
+  conversationId?: string
 }
 
 // ── Evidence ────────────────────────────────────────────────────────────────
 
 /** 证据类型 */
-export type EvidenceType = 'conversation' | 'task' | 'code_ref' | 'test_output' | 'review_note' | 'git_diff'
+export type EvidenceType =
+  | 'conversation'
+  | 'task'
+  | 'code_ref'
+  | 'test_output'
+  | 'review_note'
+  | 'git_diff'
+  /** 检索命中：记忆被 search_memory 工具检出任给模型（source_id = 对话 id / `task:${id}`） */
+  | 'retrieval_hit'
+  /** 结果验证：所在任务验证通过（completed），命中过的记忆获得正向信号 */
+  | 'outcome_verified'
 
 /** 证据链接：关联 MemoryNode 到原始来源 */
 export interface EvidenceLink {

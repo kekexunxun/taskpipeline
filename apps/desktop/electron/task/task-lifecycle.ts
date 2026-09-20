@@ -50,7 +50,7 @@ import type { PiTraceBuilder } from '../trace/instrument/pi-trace-builder.js'
 import type { TraceService } from '../trace/trace-service.js'
 import type { MemoryService } from '../memory/memory-service.js'
 import { getCodeIndex } from '../codeindex/codeindex-service.js'
-import { consolidateTaskMemory } from '../memory/memory-context.js'
+import { consolidateTaskMemory, verifyTaskMemoryOnComplete } from '../memory/memory-context.js'
 import { stripOpenAIModelPrefix, resolveLiteModel } from '../chat/model-profile.js'
 import { parseTestCaseGeneration } from '../agents/task-agent/parsers/test-case-parser.js'
 import type { TestCaseGenerationResult } from '../agents/task-agent/parsers/test-case-parser.js'
@@ -169,6 +169,8 @@ export function updateState(task: Task, state: Task['state']): Task {
   if (['failed', 'completed', 'cancelled'].includes(state)) {
     d().qoderOrch.closeSession(task.id)
   }
+  // 验证通过：把实现阶段挂起的任务记忆结论翻转为已验证并参与反思晋升
+  if (state === 'completed') verifyTaskMemoryOnComplete(task.id)
   return updated
 }
 
@@ -198,6 +200,22 @@ export function runTaskOperation<T>(taskId: string, action: (signal: AbortSignal
 // ── 任务记忆整理 ─────────────────────────────────────────────────────────────
 
 const taskMemoryPending = new Map<string, Promise<void>>()
+
+/**
+ * 等待仍在后台运行的任务记忆整理（before-quit 链路）：整理内部全
+ * try/catch，超时放弃不阻断退出；轮询排空是因为收尾期间可能仍有新整理入队。
+ */
+export async function waitForPendingTaskMemory(timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (taskMemoryPending.size > 0) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return
+    await Promise.race([
+      Promise.allSettled([...taskMemoryPending.values()]),
+      new Promise<void>((resolve) => setTimeout(resolve, Math.min(500, remaining)))
+    ])
+  }
+}
 
 // ── Trace 收尾 ───────────────────────────────────────────────────────────────
 

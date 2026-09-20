@@ -241,7 +241,7 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
           conversationId,
           memoryService,
           // trace 采集下沉到工具实际被调用时（而不是预先无条件检索时）。
-          onSearched: (query, result) => {
+          onSearched: (query, result, info) => {
             if (!turnTraceId || !tracePipeline.isActive(turnTraceId)) return
             const span = tracePipeline.startSpan(turnTraceId, {
               type: 'tool.execute',
@@ -250,7 +250,11 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
             })
             tracePipeline.endSpan(turnTraceId, span, {
               output: {
+                // 命中/注入区分：injected=本次结果是否真正渲染进了模型上下文，
+                // 每条带记忆 id 供后续按记忆维度分析命中与实际效用。
+                injected: info.injected,
                 memories: result.memories.map((m) => ({
+                  id: m.id,
                   scope: m.scope,
                   title: m.title,
                   snippet: m.content.slice(0, 200)
