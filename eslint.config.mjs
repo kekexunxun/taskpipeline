@@ -24,6 +24,8 @@ export default tseslint.config(
       '**/*.min.js',
       '**/vendor/**',
       'scripts/**',
+      // 测试夹具：是给解析器/索引器当输入的"样例源码"，不是本项目源码，故意含 require/CJS/未用变量等
+      '**/tests/fixtures/**',
       // Prettier / Stylelint / Vite 等配置文件由各自工具处理，避免与 eslint 规则冲突
       'prettier.config.mjs',
       'stylelint.config.mjs',

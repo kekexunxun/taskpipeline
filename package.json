@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @task-pipeline/core && npm run build -w @task-pipeline/memory && npm run build -w @task-pipeline/integrations && npm run build -w @task-pipeline/pi-package && npm run build -w @task-pipeline/desktop",
+    "build": "npm run build -w @task-pipeline/core && npm run build -w @task-pipeline/memory && npm run build -w @task-pipeline/integrations && npm run build -w @task-pipeline/pi-package && npm run build -w @task-pipeline/codeindex && npm run build -w @task-pipeline/desktop",
     "package": "npm run build && npm run package -w @task-pipeline/desktop",
     "package:dir": "npm run build && npm run package:dir -w @task-pipeline/desktop",
     "package:mac": "npm run build && npm run package:mac -w @task-pipeline/desktop",
@@ -18,7 +18,7 @@
     "rebuild:node": "npm rebuild better-sqlite3",
     "rebuild:electron": "npx --yes @electron/rebuild -f -w better-sqlite3 --build-from-source && node -e \"const fs=require('fs'),p=require('path'),src=p.join('node_modules/better-sqlite3/bin',process.platform+'-'+process.arch+'-136','better-sqlite3.node'),dst='node_modules/better-sqlite3/build/Release/better_sqlite3.node';if(fs.existsSync(src))fs.copyFileSync(src,dst)\"",
     "test": "npm run rebuild:node && npm run test -ws --if-present",
-    "typecheck": "npm run build -w @task-pipeline/core && npm run build -w @task-pipeline/integrations && npm run typecheck -w @task-pipeline/pi-package && npm run typecheck -w @task-pipeline/desktop",
+    "typecheck": "npm run build -w @task-pipeline/core && npm run build -w @task-pipeline/integrations && npm run typecheck -w @task-pipeline/pi-package && npm run typecheck -w @task-pipeline/codeindex && npm run typecheck -w @task-pipeline/desktop",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "lint:css": "stylelint \"**/*.css\"",

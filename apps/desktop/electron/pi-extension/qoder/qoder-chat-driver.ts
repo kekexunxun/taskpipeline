@@ -40,6 +40,7 @@ import type {
 } from '../../chat/chat-types.js'
 import type { McpServiceProfileResolver } from '../../mcp/mcp-services.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
+import { CODEBASE_SEARCH_STEERING } from '../../codeindex/codebase-search-tool.js'
 import { QoderSession, QoderSessionRegistry } from './qoder-session.js'
 import { QoderTraceBuilder } from './trace-builder.js'
 import { buildToolSourceMcp } from './tool-source-mcp.js'
@@ -406,11 +407,17 @@ export class QoderChatDriver implements ChatDriver {
       planDelegationInstruction(),
       planSuggestionGuidance()
     ]
-    // 记忆检索工具使用指引（静态、恒在,不依赖检索结果）：与 OpenAI 链路保持一致的提示。
+    // 检索类工具使用指引（静态、恒在,不依赖检索结果）：与 OpenAI 链路保持一致的提示。
     if (memoryMcp) {
-      systemPromptParts.push(
-        '当问题涉及工程约定、编码规范、历史决策或仓库文档（repowiki）时,先调用 search_memory 工具检索相关记忆再作答,不要凭空假设项目约定。'
-      )
+      const toolNames = new Set((input.memoryTools ?? []).map((t) => t.name))
+      if (toolNames.has('search_memory')) {
+        systemPromptParts.push(
+          '当问题涉及工程约定、编码规范、历史决策或仓库文档（repowiki）时,先调用 search_memory 工具检索相关记忆再作答,不要凭空假设项目约定。'
+        )
+      }
+      if (toolNames.has('codebase_search')) {
+        systemPromptParts.push(CODEBASE_SEARCH_STEERING)
+      }
     }
     const systemPrompt = systemPromptParts.join('\n\n')
     return {

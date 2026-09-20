@@ -39,6 +39,8 @@ import {
 } from './credential/credential-state.js'
 import { initTaskRunner, loadRepoContext, callOpenAIForPrompt, savePlanDecision } from './task/task-runner.js'
 import { createMemorySearchTool } from './memory/memory-search-tool.js'
+import { createCodebaseSearchTool } from './codeindex/codebase-search-tool.js'
+import { getCodeIndex, initCodeIndex } from './codeindex/codeindex-service.js'
 import { AgentService } from './agents/agent-service.js'
 import { AGENT_TEMPLATES } from './agents/templates.js'
 import { buildAgentGenerationPrompt, parseAgentGenerationResult } from './agents/agent-generator.js'
@@ -210,6 +212,8 @@ initModelProfile({
   resolveLiteModelFromQoder: () => qoderOrch.resolveLiteModel()
 })
 const memoryService = new MemoryService(store)
+// 源码索引服务（mini-Atlas）：模块级单例，库落在 dataDir 内、用户仓库外。
+initCodeIndex(dataDir)
 // 启动迁移：检测旧 memories / repo_wiki_docs 表，有数据则迁移到新 MemoryEngine
 try {
   memoryService.runLegacyMigration()
@@ -342,14 +346,25 @@ qoderOrch = new QoderOrchestrator({
       addTaskEvent({ taskId: task.id, kind: 'status', title: '注入测试 Agent 上下文', detail: sections.join('\n\n') })
     return { sections }
   },
-  resolveMemoryTools: (task, repos) => [
-    createMemorySearchTool({
-      userId: memoryService.ensureUserId(),
-      repositoryIds: repos.map((repo) => repo.repositoryId),
-      conversationId: `task:${task.id}`,
-      memoryService
-    })
-  ],
+  resolveMemoryTools: (task, repos) => {
+    const declarations = [
+      createMemorySearchTool({
+        userId: memoryService.ensureUserId(),
+        repositoryIds: repos.map((repo) => repo.repositoryId),
+        conversationId: `task:${task.id}`,
+        memoryService
+      })
+    ]
+    // 源码符号检索：roots = 任务各仓的 worktree（无 worktree 时退回 localPath），搭同一条管道。
+    const codeIndex = getCodeIndex()
+    if (codeIndex) {
+      const roots = repos
+        .map((repo) => ({ dir: repo.worktreePath ?? repo.localPath, name: repo.name }))
+        .filter((root) => Boolean(root.dir))
+      if (roots.length) declarations.push(createCodebaseSearchTool({ roots, service: codeIndex }))
+    }
+    return declarations
+  },
   finishImplementation,
   resolveOpenAIModelValue: () => resolveOpenAIModelValue(),
   syncSystemDefaultModel: () => syncSystemDefaultModel(),
@@ -645,6 +660,9 @@ app.on('before-quit', (event) => {
         /* ignore */
       }
       void releaseAllPiSessions()
+      await getCodeIndex()
+        ?.shutdown()
+        .catch(() => undefined)
       safeCloseStore()
       app.quit()
     })()

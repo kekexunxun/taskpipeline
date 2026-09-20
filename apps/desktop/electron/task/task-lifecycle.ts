@@ -49,6 +49,7 @@ import type { TracePipeline } from '../trace/bus/trace-pipeline.js'
 import type { PiTraceBuilder } from '../trace/instrument/pi-trace-builder.js'
 import type { TraceService } from '../trace/trace-service.js'
 import type { MemoryService } from '../memory/memory-service.js'
+import { getCodeIndex } from '../codeindex/codeindex-service.js'
 import { consolidateTaskMemory } from '../memory/memory-context.js'
 import { stripOpenAIModelPrefix, resolveLiteModel } from '../chat/model-profile.js'
 import { parseTestCaseGeneration } from '../agents/task-agent/parsers/test-case-parser.js'
@@ -1142,6 +1143,8 @@ async function removeTaskWorkspace(taskId: string, repositories: TaskRepository[
   const git = d().gitService
   for (const repo of repositories) {
     if (!repo.worktreePath) continue
+    // worktree 将销：先释放该目录的索引 watcher/队列并删除其库（库在 dataDir 内、worktree 外）。
+    await getCodeIndex()?.disposeWorkspace(repo.worktreePath, true)
     try {
       await git.removeWorktree(repo.localPath, repo.worktreePath)
     } catch {

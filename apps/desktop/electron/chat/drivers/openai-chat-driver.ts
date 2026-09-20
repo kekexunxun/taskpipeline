@@ -33,6 +33,7 @@ import type { McpServiceProfileResolver } from '../../mcp/mcp-services.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
 import type { ChatAttachmentCache } from '../chat-attachment-cache.js'
 import { createWebFetchAiTool } from '../web-fetch-tool.js'
+import { CODEBASE_SEARCH_STEERING } from '../../codeindex/codebase-search-tool.js'
 import { detectVendor, createVendorModel, type ModelVendor } from './model-providers.js'
 import { WRITE_PLAN_TOOL } from './project-query-tools.js'
 import { isOpenAIModelValue, prefixOfVendor, stripModelPrefix } from './model-value.js'
@@ -575,11 +576,18 @@ export class OpenAIChatDriver implements ChatDriver {
     if (systemText) {
       sections.push(systemText)
     }
-    // 3.1 记忆检索工具使用指引（静态、恒在,不依赖检索结果）。
+    // 3.1 检索类工具使用指引（静态、恒在,不依赖检索结果）。
+    //     记忆走 search_memory；源码符号走 codebase_search——按本回合实际挂载的工具分别提示。
     if (input.memoryTools?.length) {
-      sections.push(
-        '当问题涉及工程约定、编码规范、历史决策或仓库文档（repowiki）时,先调用 search_memory 工具检索相关记忆再作答,不要凭空假设项目约定。'
-      )
+      const toolNames = new Set(input.memoryTools.map((t) => t.name))
+      if (toolNames.has('search_memory')) {
+        sections.push(
+          '当问题涉及工程约定、编码规范、历史决策或仓库文档（repowiki）时,先调用 search_memory 工具检索相关记忆再作答,不要凭空假设项目约定。'
+        )
+      }
+      if (toolNames.has('codebase_search')) {
+        sections.push(CODEBASE_SEARCH_STEERING)
+      }
     }
     // 4. Skills 等动态信息
     if (input.skills?.length && this.resolveSkillContent) {

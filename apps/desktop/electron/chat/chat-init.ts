@@ -21,6 +21,8 @@ import { createMcpServiceResolver } from '../mcp/mcp-services.js'
 import { createMemorySearchTool } from '../memory/memory-search-tool.js'
 import type { MemoryService } from '../memory/memory-service.js'
 import { initMemoryContext, consolidateChatMemory } from '../memory/memory-context.js'
+import { createCodebaseSearchTool } from '../codeindex/codebase-search-tool.js'
+import { getCodeIndex } from '../codeindex/codeindex-service.js'
 import { QoderChatDriver } from '../pi-extension/qoder/index.js'
 import type { QoderOrchestrator } from '../pi-extension/qoder/index.js'
 import { readSkillContent } from '../skill/skill-store.js'
@@ -200,6 +202,21 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
     return 'jira'
   }
 
+  /**
+   * 解析某工作目录对应的检索 roots：若它属于某个 workspace 组，纳入组内全部目录；
+   * 否则只索引该目录本身。索引服务对危险根（fs 根/家目录）会自行跳过。
+   */
+  async function resolveWorkspaceRoots(workingDirectory: string): Promise<Array<{ dir: string; name?: string }>> {
+    try {
+      const groups = await chatService.listGroups()
+      const workspace = groups.find((g) => g.chatType === 'workspace' && g.directories.includes(workingDirectory))
+      if (workspace?.directories.length) return workspace.directories.map((dir) => ({ dir }))
+    } catch {
+      /* 组查询失败：退回单目录 */
+    }
+    return [{ dir: workingDirectory }]
+  }
+
   const chatService = new ChatService(
     store,
     dataDir,
@@ -217,7 +234,7 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
             .filter((repo) => workingDirectory === repo.localPath || workingDirectory.startsWith(repo.localPath + '/'))
             .map((repo) => repo.id)
         : []
-      return [
+      const declarations = [
         createMemorySearchTool({
           userId: memoryService.ensureUserId(),
           repositoryIds: repositoryIds.length ? repositoryIds : undefined,
@@ -248,6 +265,14 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
           }
         })
       ]
+      // 源码符号检索工具（codebase_search）：搭同一条 memoryTools 泛用管道，roots = 当前
+      // 工作目录所属 workspace 的全部目录（找不到 workspace 时退回单个工作目录）。
+      const codeIndex = getCodeIndex()
+      if (codeIndex && workingDirectory) {
+        const roots = await resolveWorkspaceRoots(workingDirectory)
+        if (roots.length) declarations.push(createCodebaseSearchTool({ roots, service: codeIndex }))
+      }
+      return declarations
     },
     consolidateChatMemory,
     chatTraceManager,

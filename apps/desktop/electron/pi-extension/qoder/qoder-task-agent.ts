@@ -41,6 +41,7 @@ import {
   writeStageInputSnapshot
 } from '../../task/stage-artifacts.js'
 import type { PlanReconcile } from '../../task/stage-artifacts.js'
+import { CODEBASE_SEARCH_STEERING } from '../../codeindex/codebase-search-tool.js'
 import { QoderSession, QoderSessionRegistry } from './qoder-session.js'
 import { buildToolSourceMcp } from './tool-source-mcp.js'
 import {
@@ -409,6 +410,7 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     return [
       ...(agentContext?.sections ?? []),
       MEMORY_SEARCH_TOOL_GUIDANCE,
+      CODEBASE_SEARCH_STEERING,
       '请只读分析以下 Coding 任务。可委派内置 Plan 子代理(Agent 工具)协助制定计划,也可直接分析输出。',
       `任务:${task.title}`,
       task.description,
@@ -491,6 +493,7 @@ export class QoderTaskAgentDriver implements TaskAgentDriver {
     return [
       ...(agentContext?.sections ?? []),
       MEMORY_SEARCH_TOOL_GUIDANCE,
+      CODEBASE_SEARCH_STEERING,
       task.title,
       task.description,
       task.planContent ? `Approved implementation plan:\n${task.planContent}` : '',
