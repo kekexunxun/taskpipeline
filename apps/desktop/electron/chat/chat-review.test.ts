@@ -8,7 +8,8 @@ import {
   buildChatReviewFixPrompt,
   runChatCodeReview,
   type ChatGitService,
-  type ChatReviewDeps
+  type ChatReviewDeps,
+  type ChatReviewCard
 } from './chat-review.js'
 
 const WD = '/proj'
@@ -155,5 +156,62 @@ describe('buildChatReviewFixPrompt', () => {
   it('渲染阻断意见为编号行', () => {
     const prompt = buildChatReviewFixPrompt([{ path: 'a.ts', line: 3, severity: 'high', message: '空指针' }])
     expect(prompt).toContain('1. [high] a.ts:3 — 空指针')
+  })
+})
+
+describe('runChatCodeReview onReview 卡片', () => {
+  it('无阻断时发射单张 passed 卡', async () => {
+    const deps = makeDeps()
+    deps.qoderOrchestrator = { callReviewer: async () => reviewJson([]) } as unknown as QoderOrchestrator
+    const cards: ChatReviewCard[] = []
+    await runChatCodeReview(deps, { ...baseCtx([editPart('/proj/a.ts')]), onReview: (c) => cards.push(c) })
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toMatchObject({ outcome: 'passed', comments: [], fixRounds: 0 })
+  })
+
+  it('有阻断且 autoFix 关：单张 blocked 卡携带阻断意见', async () => {
+    const deps = makeDeps()
+    const cards: ChatReviewCard[] = []
+    await runChatCodeReview(deps, { ...baseCtx([editPart('/proj/a.ts')]), onReview: (c) => cards.push(c) })
+    expect(cards).toHaveLength(1)
+    expect(cards[0].outcome).toBe('blocked')
+    expect(cards[0].autoFix).toBe(false)
+    expect(cards[0].comments.map((c) => c.severity)).toEqual(['high'])
+  })
+
+  it('Qoder autoFix 复审通过：发射 fixed 卡且 fixRounds=1', async () => {
+    const deps = makeDeps({ settings: { reviewAutoFix: 'true', reviewAutoFixMaxRounds: '2' } })
+    let first = true
+    deps.qoderOrchestrator = {
+      callReviewer: async () => {
+        if (first) {
+          first = false
+          return reviewJson(['high'])
+        }
+        return reviewJson([])
+      },
+      runChatFix: async () => ''
+    } as unknown as QoderOrchestrator
+    const cards: ChatReviewCard[] = []
+    await runChatCodeReview(deps, { ...baseCtx([editPart('/proj/a.ts')]), onReview: (c) => cards.push(c) })
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toMatchObject({ outcome: 'fixed', comments: [], fixRounds: 1, autoFix: true })
+  })
+
+  it('达修订上限仍有阻断：发射 failed 卡', async () => {
+    const deps = makeDeps({ settings: { reviewAutoFix: 'true', reviewAutoFixMaxRounds: '2' } })
+    deps.qoderOrchestrator = {
+      callReviewer: async () => reviewJson(['high']),
+      runChatFix: async () => ''
+    } as unknown as QoderOrchestrator
+    const cards: ChatReviewCard[] = []
+    const outcome = await runChatCodeReview(deps, {
+      ...baseCtx([editPart('/proj/a.ts')]),
+      onReview: (c) => cards.push(c)
+    })
+    expect(cards).toHaveLength(1)
+    expect(cards[0].outcome).toBe('failed')
+    expect(cards[0].comments.length).toBe(1)
+    expect(outcome.fixRounds).toBe(2)
   })
 })

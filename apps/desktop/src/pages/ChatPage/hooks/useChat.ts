@@ -446,6 +446,15 @@ export function useChat() {
         [chatId]: list.map((message) => {
           if (message.id !== assistantId) return message
           if (chunk.type === 'part') {
+            // CodeReview 结论卡：替换式更新（多轮修订时后端只发终态卡，这里兜底去重，保持单卡）。
+            if (chunk.part.type === 'chat.review-result') {
+              const idx = message.parts.findIndex((p) => p.type === 'chat.review-result')
+              if (idx >= 0) {
+                const next = [...message.parts]
+                next[idx] = chunk.part
+                return { ...message, parts: next }
+              }
+            }
             return { ...message, parts: [...message.parts, chunk.part] }
           }
           if (chunk.type === 'plan-start') {
@@ -497,6 +506,10 @@ export function useChat() {
         })
       }
     })
+    if (chunk.type === 'done') {
+      // 本轮彻底结束：清掉残留阶段提示，避免流式状态行（如评审进度）卡在末尾。
+      setHintsByChat((current) => (current[chatId] ? { ...current, [chatId]: undefined } : current))
+    }
     if (chunk.type === 'plan-part') {
       // 计划已生成：对话进入“等待用户处理”态（同 HITL 语义），退出计划模式。
       // 后端已把 chatMode 落盘为 normal，这里同步内存态，保证下一条消息（含“执行”

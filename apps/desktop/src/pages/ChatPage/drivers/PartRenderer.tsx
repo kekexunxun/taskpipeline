@@ -13,6 +13,7 @@ import {
   WebFetchToolBlock
 } from './parts/ToolBlocks'
 import { TaskListCard } from './parts/TaskListCard'
+import { ReviewResultCard } from './parts/ReviewResultCard'
 import type { ChatMessageStatus, ChatPlan, DriverPart } from '@/api'
 import { PlanCard } from '@/pages/ChatPage/components/PlanCard'
 import {
@@ -262,6 +263,9 @@ export function PartRenderer({
     }
     if (part.type === 'qoder.session') {
       return <QoderSessionPart key={key} part={part} />
+    }
+    if (part.type === 'chat.review-result') {
+      return <ReviewResultCard key={key} part={part} />
     }
     if (part.type === 'qoder.task-list') {
       return <TaskListCard key={key} header={part.header} items={part.items} />

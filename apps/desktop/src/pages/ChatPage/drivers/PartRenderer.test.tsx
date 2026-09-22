@@ -458,3 +458,71 @@ describe('PartRenderer', () => {
     expect(screen.getByText('子任务完整输出')).toBeInTheDocument()
   })
 })
+
+describe('PartRenderer · chat.review-result', () => {
+  it('渲染阻断意见卡：结论标题 + 意见列表 + 修订轮数', () => {
+    render(
+      <PartRenderer
+        parts={[
+          {
+            driverId: 'qoder',
+            type: 'chat.review-result',
+            outcome: 'failed',
+            level: 'high',
+            comments: [{ severity: 'high', path: 'a.ts', line: 3, message: '空指针风险' }],
+            filesReviewed: 2,
+            fixRounds: 2,
+            autoFix: true
+          }
+        ]}
+      />
+    )
+    expect(screen.getByText('自动修订后仍有阻断')).toBeInTheDocument()
+    expect(screen.getByText('空指针风险')).toBeInTheDocument()
+    expect(screen.getByText(/a\.ts:3/)).toBeInTheDocument()
+    expect(screen.getByText('2 文件')).toBeInTheDocument()
+    expect(screen.getByText('修订 2 轮')).toBeInTheDocument()
+  })
+
+  it('通过态：展示通过标题、无意见列表区', () => {
+    render(
+      <PartRenderer
+        parts={[
+          {
+            driverId: 'qoder',
+            type: 'chat.review-result',
+            outcome: 'passed',
+            level: 'high',
+            comments: [],
+            filesReviewed: 1,
+            fixRounds: 0,
+            autoFix: false
+          }
+        ]}
+      />
+    )
+    expect(screen.getByText('代码审查通过')).toBeInTheDocument()
+    expect(screen.getByText('无阻断级问题')).toBeInTheDocument()
+  })
+
+  it('阻断但未开自动修订：提示手动处理', () => {
+    render(
+      <PartRenderer
+        parts={[
+          {
+            driverId: 'openai',
+            type: 'chat.review-result',
+            outcome: 'blocked',
+            level: 'high',
+            comments: [{ severity: 'critical', path: 'b.ts', message: '注入风险' }],
+            filesReviewed: 1,
+            fixRounds: 0,
+            autoFix: false
+          }
+        ]}
+      />
+    )
+    expect(screen.getByText('发现阻断问题')).toBeInTheDocument()
+    expect(screen.getByText('自动修订未开启，请手动处理以上问题')).toBeInTheDocument()
+  })
+})

@@ -162,6 +162,14 @@ function ChatMessageImpl({
                     followingUserTexts={followingUserTexts}
                   />
                 )}
+                {/* 阶段提示（含 CodeReview 进度）：parts 已存在时旧版只在空占位行里渲染 hint，
+                    导致评审等后置阶段的 status 不可见。这里在正文下方补一条瞬态状态行，仅流式中展示。 */}
+                {isStreaming && message.parts.length > 0 && hint && (
+                  <div className="flex items-center gap-1.5 py-0.5 text-xs text-muted-foreground/70">
+                    <Loader2Icon size={12} className="shrink-0 animate-spin-slow" />
+                    <span>{hint}</span>
+                  </div>
+                )}
                 {isError && (
                   <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-3.5 py-2.5 text-xs leading-5 break-words whitespace-pre-wrap text-destructive">
                     {errorMessage ?? '模型返回异常，请稍后重试'}

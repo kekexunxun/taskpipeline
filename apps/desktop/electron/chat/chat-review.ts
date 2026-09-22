@@ -53,6 +53,25 @@ export type ChatReviewDeps = {
  */
 export type ChatReviewInfra = Omit<ChatReviewDeps, 'providerForChat' | 'modelForChat'>
 
+/**
+ * 评审结论卡片载荷（供前端渲染评审意见卡）：单张卡反映最终态，多轮修订时以替换式更新。
+ * - outcome: passed=无阻断通过; blocked=有阻断需人工(自动修订关闭 / 非 Qoder 运行时);
+ *   fixed=自动修订后复审通过; failed=达修订上限或修订/复审异常后仍有阻断。
+ */
+export type ChatReviewCard = {
+  outcome: 'passed' | 'blocked' | 'fixed' | 'failed'
+  /** 阻断级别口径（与 Task 同源 reviewBlockingLevel）。 */
+  level: 'critical' | 'high' | 'medium'
+  /** 阻断级意见（通过时为空）。 */
+  comments: ReviewComment[]
+  /** 本次评审覆盖的文件数。 */
+  filesReviewed: number
+  /** 实际执行的自动修订轮数。 */
+  fixRounds: number
+  /** 本轮是否开启了自动修订。 */
+  autoFix: boolean
+}
+
 export type ChatReviewContext = {
   chatId: string
   workingDirectory: string
@@ -66,7 +85,7 @@ export type ChatReviewContext = {
   /** 状态事件（桥接前端对话事件 / trace）。 */
   onStatus: (title: string, detail?: string) => void
   /** 每轮评审结果回调（含阻断意见），供前端渲染评审意见卡。 */
-  onReview?: (payload: { result: ReviewResult; blocking: ReviewComment[]; round: number }) => void
+  onReview?: (card: ChatReviewCard) => void
 }
 
 export type ChatReviewOutcome = {
@@ -243,19 +262,34 @@ export async function runChatCodeReview(deps: ChatReviewDeps, ctx: ChatReviewCon
   }
 
   const level = reviewBlockingLevel(deps.getSetting)
+  const autoFix = deps.getSetting('reviewAutoFix') === 'true'
+  // 评审卡以「终态单卡」发射：passed / blocked（需人工）在初次判定后即定，修订循环只在
+  // fixed（复审通过）或 failed（达上限 / 修订或复审异常）时发射，前端按 type 替换式更新。
+  const emitCard = (outcome: ChatReviewCard['outcome'], comments: ReviewComment[], fixRounds: number): void => {
+    ctx.onReview?.({
+      outcome,
+      level,
+      comments,
+      filesReviewed: Number(result.summary?.files ?? 0),
+      fixRounds,
+      autoFix
+    })
+  }
   let blocking = filterBlockingComments(result.comments, level)
-  ctx.onReview?.({ result, blocking, round: 0 })
   if (blocking.length === 0) {
     ctx.onStatus('代码审查通过', `无阻断级问题（阻断级别：${level}）`)
+    emitCard('passed', [], 0)
     return { reviewed: true, result, blocking: [], fixRounds: 0 }
   }
   ctx.onStatus('代码审查发现阻断问题', `${blocking.length} 条 ${level} 及以上意见`)
 
-  if (deps.getSetting('reviewAutoFix') !== 'true') {
+  if (!autoFix) {
+    emitCard('blocked', blocking, 0)
     return { reviewed: true, result, blocking, fixRounds: 0 }
   }
   if (deps.providerForChat(ctx.chatId) !== 'qoder') {
     ctx.onStatus('自动修订仅支持 Qoder 运行时', '已展示阻断意见，需手动处理')
+    emitCard('blocked', blocking, 0)
     return { reviewed: true, result, blocking, fixRounds: 0 }
   }
 
@@ -286,14 +320,15 @@ export async function runChatCodeReview(deps: ChatReviewDeps, ctx: ChatReviewCon
       break
     }
     blocking = filterBlockingComments(result.comments, level)
-    ctx.onReview?.({ result, blocking, round })
     if (blocking.length === 0) {
       ctx.onStatus('自动修订后复审通过')
-      break
+      emitCard('fixed', [], round)
+      return { reviewed: true, result, blocking: [], fixRounds: round }
     }
   }
   if (blocking.length > 0) {
     ctx.onStatus('已到达 Review 自动修订上限', `剩余 ${blocking.length} 条阻断意见需人工处理`)
+    emitCard('failed', blocking, fixRounds)
   }
   return { reviewed: true, result, blocking, fixRounds }
 }

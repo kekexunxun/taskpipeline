@@ -499,7 +499,30 @@ export class ChatService {
         parts,
         signal,
         onStatus: (title, detail) =>
-          this.dispatch(effective, { type: 'status', text: detail ? `${title}：${detail}` : title })
+          this.dispatch(effective, { type: 'status', text: detail ? `${title}：${detail}` : title }),
+        onReview: (card) => {
+          // 评审结论落为持久 part：替换本轮已有的评审卡（多轮修订只保留终态一张），
+          // 既随 assistant 消息一起 serializeAssistantMessage 落盘，也即时 dispatch 给前端。
+          const part: DriverPart = {
+            driverId: effective.driverId,
+            type: 'chat.review-result',
+            outcome: card.outcome,
+            level: card.level,
+            comments: card.comments.map((comment) => ({
+              ...(comment.severity !== undefined ? { severity: comment.severity } : {}),
+              ...(comment.path !== undefined ? { path: comment.path } : {}),
+              ...(comment.line !== undefined ? { line: comment.line } : {}),
+              ...(comment.message !== undefined ? { message: comment.message } : {})
+            })),
+            filesReviewed: card.filesReviewed,
+            fixRounds: card.fixRounds,
+            autoFix: card.autoFix
+          }
+          const existing = parts.findIndex((p) => p.type === 'chat.review-result')
+          if (existing >= 0) parts[existing] = part
+          else parts.push(part)
+          this.dispatch(effective, { type: 'part', part })
+        }
       }
     )
   }

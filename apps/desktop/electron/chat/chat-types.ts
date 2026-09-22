@@ -121,6 +121,24 @@ export type DriverPart =
       plan: ChatPlan
       parentTaskId?: string
     }
+  | {
+      driverId: ChatDriverId
+      /** Chat 每轮 CodeReview 结论卡（主进程评审编排产出，与用户回合文本/工具 part 并列落盘）。 */
+      type: 'chat.review-result'
+      /** 评审结论：passed=无阻断通过; blocked=有阻断需人工; fixed=自动修订后复审通过; failed=修订上限后仍有阻断。 */
+      outcome: 'passed' | 'blocked' | 'fixed' | 'failed'
+      /** 阻断级别口径（与 Task 同源 reviewBlockingLevel）。 */
+      level: 'critical' | 'high' | 'medium'
+      /** 阻断级意见列表（通过时为空）。 */
+      comments: Array<{ severity?: string; path?: string; line?: number; message?: string }>
+      /** 本次评审覆盖的文件数。 */
+      filesReviewed: number
+      /** 实际执行的自动修订轮数。 */
+      fixRounds: number
+      /** 本轮是否开启了自动修订。 */
+      autoFix: boolean
+      parentTaskId?: string
+    }
 
 /** 单条消息的流式用量（openai 从 ai-sdk finish 收集 + 单价表估算 costUsd；qoder 用 contextUsageRatio/credits）。 */
 export type ChatUsage = {
