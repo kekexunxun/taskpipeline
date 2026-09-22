@@ -230,12 +230,16 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
   }
 
   // Chat CodeReview 静态依赖（provider/model 由 ChatService 逐回合补全）。
+  // qoderOrchestrator 用 getter 惰性取：createChatSystem 在 main.ts 顶层先于
+  // qoderOrch 实例化执行，立即调用会命中 let 的 TDZ（启动即炸）。
   const chatReview: ChatReviewInfra = {
     gitService,
     ocrService,
     openAIReviewer,
     agentService,
-    qoderOrchestrator: getQoderOrch(),
+    get qoderOrchestrator() {
+      return getQoderOrch()
+    },
     getSetting: (key: string) => store.getSetting(key)
   }
 

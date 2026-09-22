@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { ToolApprovalCard, type ChatApprovalRequest } from './ToolApprovalCard'
 
-describe('ToolApprovalCard（HITL Dialog 确认框，对话/任务板块共用）', () => {
+describe('ToolApprovalCard（HITL 内联确认条，对话/任务板块共用）', () => {
   const approval: ChatApprovalRequest = {
     id: 'a1',
     method: 'confirm',
@@ -11,11 +11,12 @@ describe('ToolApprovalCard（HITL Dialog 确认框，对话/任务板块共用�
     timeout: 60_000
   }
 
-  it('展示标题与描述', () => {
+  it('只展示标题与操作按钮，message 不再重复渲染（详情已在消息流工具行展示）', () => {
     render(<ToolApprovalCard approval={approval} onRespond={vi.fn()} />)
     expect(screen.getByText('允许执行 Bash?')).toBeInTheDocument()
-    // message 在 DialogDescription 和 pre 详情区都会渲染
-    expect(screen.getAllByText('rm -rf build').length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: '允许' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '拒绝' })).toBeInTheDocument()
+    expect(screen.queryByText('rm -rf build')).not.toBeInTheDocument()
   })
 
   it('允许/拒绝按钮回调正确参数', () => {
@@ -27,20 +28,20 @@ describe('ToolApprovalCard（HITL Dialog 确认框，对话/任务板块共用�
     expect(onRespond).toHaveBeenCalledWith(false)
   })
 
-  it('超过 timeout 自动按拒绝处理（与主进程超时兜底对齐）', () => {
+  it('组件侧不做超时自动响应（超时拒绝由主进程兜底）', () => {
     vi.useFakeTimers()
     try {
       const onRespond = vi.fn()
       render(<ToolApprovalCard approval={{ ...approval, timeout: 5_000 }} onRespond={onRespond} />)
       expect(onRespond).not.toHaveBeenCalled()
-      vi.advanceTimersByTime(5_000)
-      expect(onRespond).toHaveBeenCalledWith(false)
+      vi.advanceTimersByTime(60_000)
+      expect(onRespond).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('无 timeout 时不自动触发响应', () => {
+  it('无 timeout 时同样不自动触发响应', () => {
     vi.useFakeTimers()
     try {
       const onRespond = vi.fn()

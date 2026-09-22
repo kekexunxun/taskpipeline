@@ -894,6 +894,9 @@ export class ChatService {
         workingDirectory: conversation.workingDirectory
       })
 
+      // 对话级 resume 锚点（随对话持久化，独立于历史裁剪）：常驻会话丢失后重建时用它恢复上下文。
+      const resumeSessionId = conversation.sessionIds?.[effective.driverId]
+
       // chat 阶段容器：主对话生成（driver 流式期间的 llm/tool/subtask span 挂入阶段）。
       await this.withStage(Boolean(turnTraceId), input.chatId, turnKey, 'chat', async () => {
         for await (const chunk of driver.streamChat({
@@ -901,6 +904,7 @@ export class ChatService {
           model: effective.model,
           ...(effective.modelParams ? { modelParams: effective.modelParams } : {}),
           history,
+          ...(resumeSessionId ? { resumeSessionId } : {}),
           userInput: {
             id: input.message.id,
             text: input.message.text,
@@ -1076,9 +1080,17 @@ export class ChatService {
           // 错误详情不依赖 driver 的序列化实现(各 driver 挑字段返回,可能丢弃多余 input),
           // 统一在编排层合并进 record,保证历史消息重新加载后仍能展示接口异常。
           const assistantRecord = errorMessage ? { ...serialized, errorMessage } : serialized
+          // 会话锚点随对话落盘（sessionIds）：qoder.session part 只落在历史首条消息里，
+          // 上下文压缩把它裁掉后，重启重建会话就找不到 resume 锚点（静默回落成新会话、
+          // 上下文全丢）。绑在对话级后与消息裁剪解耦。
+          const nextSessionIds =
+            capturedSessionId && conversation.sessionIds?.[effective.driverId] !== capturedSessionId
+              ? { ...conversation.sessionIds, [effective.driverId]: capturedSessionId }
+              : undefined
           await this.storage.appendMessage(input.chatId, assistantRecord, {
             model: effective.model,
-            driverId: effective.driverId
+            driverId: effective.driverId,
+            ...(nextSessionIds ? { sessionIds: nextSessionIds } : {})
           })
         }
       } catch (reason) {

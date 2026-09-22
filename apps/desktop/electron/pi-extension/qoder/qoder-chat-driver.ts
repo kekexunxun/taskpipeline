@@ -6,8 +6,9 @@
  *  - streamChat: 每个 conversationId 常驻一个 `QoderSession`(见 ../../qoder/qoder-session.ts),
  *    一次 `streamChat` 调用 = 一个回合:用户消息经异步消息流送入同一会话,
  *    输出(part / task-created)实时转发,`result` 收尾 —— 官方多轮对话语义,不再拼历史;
- *  - 会话控制作为底层能力:首次创建;历史末尾有 `qoder.session` 时自动 `resume`(应用重启后
- *    打开历史对话可恢复上下文);`abort → interrupt`(停止当前回复、保留会话);
+ *  - 会话控制作为底层能力:ChatService 传入对话级持久化的 `resumeSessionId` 时自动 `resume`
+ *    (应用重启后恢复上下文;不靠历史里的 qoder.session part——压缩会把它裁掉),
+ *    历史锚点仅作旧数据的兜底;`abort → interrupt`(停止当前回复、保留会话);
  *    `closeSession` 删除对话时调用;`dispose` 应用退出统一关闭;
  *  - 工具注入:把 `ToolSource` 翻译成 Qoder MCP server(共用 `./tool-source-mcp.ts`);
  *  - 任务已创建:每次 tool 执行后调 `ToolSource.describeResult(output)`,有结果就 emit
@@ -121,7 +122,7 @@ function rawToParts(raw: unknown): DriverPart[] {
   return emptyParts()
 }
 
-/** 从历史末尾倒序找最后一个 `qoder.session` part(恢复会话的锚点)。 */
+/** 从历史末尾倒序找最后一个 `qoder.session` part(旧数据的兜底锚点:对话级 sessionIds 落地前的存量对话)。 */
 function extractLastSessionId(history: StoredMessage[]): string | undefined {
   for (let i = history.length - 1; i >= 0; i--) {
     const message = history[i]
@@ -240,7 +241,8 @@ export class QoderChatDriver implements ChatDriver {
     const join = Boolean(input.traceId)
 
     // 常驻会话:已存在则复用(多轮上下文由会话提供);不存在则创建 ——
-    // 历史末尾有 qoder.session 时自动 resume(底层能力,应用重启后上下文不丢)。
+    // resume 锚点优先取对话级持久化的 resumeSessionId(ChatService 随落盘维护,不受历史
+    // 压缩/裁剪影响),旧数据兜底才从历史末尾找 qoder.session part。
     // mcpServers 在会话创建时固化:本轮 MCP 选择与会话创建时不一致则关闭重建
     // (上下文经 resume 恢复),保证勾选变化真正生效。
     // chatMode 不在此列:规划靠逐轮打委派标记(PLAN_REQUEST_MARK),子代理定义又与会话
@@ -369,7 +371,8 @@ export class QoderChatDriver implements ChatDriver {
     traceId?: string,
     sessionRef?: { current: QoderSession | undefined }
   ) {
-    const resumeSessionId = extractLastSessionId(input.history)
+    // 锚点优先级:对话级持久化 > 历史 part(仅旧数据需要)。
+    const resumeSessionId = input.resumeSessionId ?? extractLastSessionId(input.history)
     const taskSource = input.toolSource
     const mcpSetup = taskSource ? buildToolSourceMcp('task_creation', taskSource.tools()) : undefined
     // 记忆检索工具（search_memory）：与 task_creation 并列、各自一个 MCP server,互不冲突。

@@ -1,7 +1,7 @@
 import type { AtlassianClientFactory, McpClient } from '@task-pipeline/integrations'
 import { describe, expect, it, vi } from 'vitest'
+import { JiraTaskCreationBackend } from '../../chat/task-backends/jira.js'
 import { JiraTaskCreationAgent } from './task-creation-agent.js'
-import { JiraTaskCreationBackend } from './task-backends/jira.js'
 
 function setup(options: { configured?: boolean; tools?: unknown[]; result?: unknown } = {}) {
   const calls: Array<{ name: string; args: Record<string, unknown> }> = []

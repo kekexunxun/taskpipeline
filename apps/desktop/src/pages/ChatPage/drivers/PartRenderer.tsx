@@ -426,8 +426,15 @@ export function PartRenderer({
       (p) => !isSubtaskControlPart(p) && !(p.type === 'qoder.subtask-start' && nestedTaskIds.has(p.taskId))
     )
     // 停止对话时,Agent 可能已启动(subtask-start)但未产出任何内容;
-    // 没有可见子项且没有吸收输出时不展示该 Agent 卡片。
-    if (visibleChildren.length === 0 && !absorbed && (!block.nested || block.nested.length === 0)) return null
+    // 没有可见子项、没有吸收输出且没有任何过程态活动时应隐藏该 Agent 卡片。
+    // progress 聚合行在 header 展示(过程态 n 次/最后工具),算「有内容」。
+    if (
+      visibleChildren.length === 0 &&
+      !absorbed &&
+      aggregate.progressCount === 0 &&
+      (!block.nested || block.nested.length === 0)
+    )
+      return null
 
     // 子项与嵌套子组按时间线穿插排列（以各自在 parentedList 中的位置为准）：
     // 嵌套子组不再一律沉到卡片末尾，否则发生在阶段中段的子任务（如 planning 中途

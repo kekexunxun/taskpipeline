@@ -45,12 +45,11 @@ describe('ChatHistoryList', () => {
         {...noop}
       />
     )
-    // 项目组头仍显示(目录名)和数量 0
+    // 项目组头仍显示(目录名);计数徽章已下线,不再展示会话数
     expect(screen.getByText('x')).toBeInTheDocument()
-    expect(screen.getByText('0')).toBeInTheDocument()
   })
 
-  it('shows the conversation count and items for a group with chats', () => {
+  it('shows the conversation items for a group with chats', () => {
     render(
       <ChatHistoryList
         metas={[meta({ id: 'c1', workingDirectory: '/project/x', title: '发布检查' })]}
@@ -59,7 +58,6 @@ describe('ChatHistoryList', () => {
       />
     )
     expect(screen.getByText('发布检查')).toBeInTheDocument()
-    expect(screen.getByText('1')).toBeInTheDocument()
   })
 
   it('orders groups by latest activity, empty groups by updatedAt', () => {

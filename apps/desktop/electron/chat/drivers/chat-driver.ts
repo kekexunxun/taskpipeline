@@ -52,6 +52,13 @@ export type StreamChatInput = {
    */
   modelParams?: ModelParams
   history: StoredMessage[]
+  /**
+   * 对话级持久化的会话 resume 锚点（如 qodercli sessionId）。
+   * 常驻会话丢失后重建时用它在底层 SDK 恢复上下文。不依赖 `history`：
+   * 上下文压缩/token 裁剪可能把携带历史锚点的消息整条剪掉。
+   * 缺省 = 首轮（或旧数据无绑定），driver 自行兼容推导。
+   */
+  resumeSessionId?: string
   userInput: { id: string; text: string; createdAt: string; files?: UserFileAttachment[] }
   signal: AbortSignal
   toolSource?: ToolSource

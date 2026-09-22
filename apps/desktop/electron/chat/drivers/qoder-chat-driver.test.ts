@@ -890,6 +890,47 @@ describe('QoderChatDriver multi-turn history', () => {
     expect(options?.resume).toBe('sess-Y')
   })
 
+  it('prefers conversation-level resumeSessionId over history anchors (对话级锚点优先)', async () => {
+    // 历史里的 qoder.session 可能是陈旧锚点;对话级持久化(ChatService 随落盘维护)才是真值。
+    sdkMock.__pushScript({
+      messages: [textDelta('ok', 'sess-persisted'), resultMessage('ok', 'sess-persisted')]
+    })
+    const history: StoredMessage[] = [
+      storedUser('u1', 'first'),
+      storedAssistantWithSession('a1', 'sess-stale', 'old reply')
+    ]
+    await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history,
+        resumeSessionId: 'sess-persisted',
+        userInput: { id: 'u2', text: 'again', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    expect(sdkMock.__getLastQueryOptions()?.resume).toBe('sess-persisted')
+  })
+
+  it('resumes after compaction dropped the anchor message (压缩裁剪后重建仍可恢复)', async () => {
+    // 复现真实故障：上下文压缩把唯一带 qoder.session 的首条消息整条裁掉,
+    // 重启后历史里无任何锚点 —— 必须用对话级 resumeSessionId resume,不能静默新建会话。
+    sdkMock.__pushScript({
+      messages: [textDelta('ok', 'sess-persisted'), resultMessage('ok', 'sess-persisted')]
+    })
+    await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [storedUser('u-new', '继续')],
+        resumeSessionId: 'sess-persisted',
+        userInput: { id: 'u2', text: '继续', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    expect(sdkMock.__getLastQueryOptions()?.resume).toBe('sess-persisted')
+  })
+
   it('reuses the resident session across turns in the same conversation (多轮对话执行引擎)', async () => {
     sdkMock.__pushScript({
       messages: [textDelta('first answer', 'sess-1'), resultMessage('first answer', 'sess-1')]

@@ -22,14 +22,14 @@ describe('QoderMessageView', () => {
     expect(screen.getByText('你好,这是 Qoder 回复')).toBeInTheDocument()
   })
 
-  it('renders a thinking part as a collapsible with 思考过程 trigger label when not streaming', () => {
+  it('renders a thinking part as a collapsible with 深度思考 trigger label when not streaming', () => {
     render(
       <QoderMessageView
         message={qoderMessage([{ driverId: 'qoder', type: 'qoder.thinking', text: '推理过程', signature: 'sig-1' }])}
       />
     )
-    // 非流式时折叠 trigger 显示"思考过程"(表示推理已完成)
-    expect(screen.getByText('思考过程')).toBeInTheDocument()
+    // 非流式时折叠 trigger 显示"深度思考 - n秒"(ThinkingBlock 统一文案)
+    expect(screen.getByText(/深度思考 - \d+秒/)).toBeInTheDocument()
   })
 
   it('renders a qoder.session part with a 12-char truncated session id', () => {
@@ -117,8 +117,8 @@ describe('QoderMessageView', () => {
     )
     // session badge 在多 part 列表里被识别(用 function matcher 兼容可能的文本节点拆分)
     expect(screen.getByText((content) => content.includes('sess-abcdef'))).toBeInTheDocument()
-    // thinking 折叠 trigger
-    expect(screen.getByText('思考过程')).toBeInTheDocument()
+    // thinking 折叠 trigger(默认折叠,内容不可见)
+    expect(screen.getByText(/深度思考 - \d+秒/)).toBeInTheDocument()
     expect(screen.getByText('已为你创建任务')).toBeInTheDocument()
   })
 })

@@ -239,8 +239,8 @@ describe('SubTaskGroup 视觉', () => {
     )
     // trigger 显示 Task 名称
     expect(screen.getByText('查找发票推送相关代码')).toBeInTheDocument()
-    // 类型徽章
-    expect(screen.getByText('local_agent')).toBeInTheDocument()
+    // 类型徽章：统一展示「Agent」标签（taskType 不再单独展示）
+    expect(screen.getByText('Agent')).toBeInTheDocument()
     // 状态徽章
     expect(screen.getByText('已完成')).toBeInTheDocument()
     // 时间(只要 <time> 元素存在即可,locale 决定具体输出)

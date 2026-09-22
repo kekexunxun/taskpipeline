@@ -32,7 +32,8 @@ describe('ChatModelSelector hover params popover', () => {
     fireEvent.click(screen.getByRole('button', { name: '选择模型' }))
     await new Promise((resolve) => setTimeout(resolve, 100))
     fireEvent.mouseEnter(listItemByText('DeepSeek Chat'))
-    await waitFor(() => expect(screen.queryByText('参数设置')).not.toBeNull(), { timeout: 1500 })
+    // 自控 HoverParamsPanel(portal)：参数区标题为「参数」
+    await waitFor(() => expect(screen.queryByText('参数')).not.toBeNull(), { timeout: 1500 })
     expect(onChangeParams).not.toHaveBeenCalled()
   })
 
@@ -56,7 +57,7 @@ describe('ChatModelSelector hover params popover', () => {
     fireEvent.click(screen.getByRole('button', { name: '选择模型' }))
     await new Promise((resolve) => setTimeout(resolve, 100))
     fireEvent.mouseEnter(listItemByText('Plain Model'))
-    await waitFor(() => expect(screen.queryByText('该模型无可调参数')).not.toBeNull(), { timeout: 1500 })
+    await waitFor(() => expect(screen.queryByText('无可调参数')).not.toBeNull(), { timeout: 1500 })
   })
 
   it('leaving the list closes the popover', async () => {
@@ -66,9 +67,9 @@ describe('ChatModelSelector hover params popover', () => {
     fireEvent.click(screen.getByRole('button', { name: '选择模型' }))
     await new Promise((resolve) => setTimeout(resolve, 100))
     fireEvent.mouseEnter(listItemByText('DeepSeek Chat'))
-    await screen.findByText('参数设置')
+    await screen.findByText('参数')
     fireEvent.mouseLeave(listItemByText('DeepSeek Chat'))
-    await waitFor(() => expect(screen.queryByText('参数设置')).toBeNull(), { timeout: 1500 })
+    await waitFor(() => expect(screen.queryByText('参数')).toBeNull(), { timeout: 1500 })
   })
 
   it('shows the vendor name next to the user-defined display name', async () => {

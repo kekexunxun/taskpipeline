@@ -328,6 +328,13 @@ export type ChatConversationMeta = {
   workingDirectory?: string
   /** 上下文滚动摘要（问题 2-B）：溢出轮次压缩后的摘要与覆盖边界；缺省 = 尚未压缩。 */
   compaction?: ChatCompaction
+  /**
+   * 对话级常驻会话绑定（Qoder = qodercli sessionId）。resume 锚点不再从
+   * 「模型可见历史」里的 qoder.session part 推导 —— 锚点只在首轮落一次,
+   * 上下文压缩/token 裁剪会把它裁掉,应用重启后重建会话就会静默回落成
+   * 全新会话（上下文丢失）。随对话持久化,按 driverId 键控（切模型不丢锚点）。
+   */
+  sessionIds?: Partial<Record<ChatDriverId, string>>
 }
 /**
  * 对话完整形态。`messages` 是 driver 透传的 record 列表(不包含运行时 `parts`),

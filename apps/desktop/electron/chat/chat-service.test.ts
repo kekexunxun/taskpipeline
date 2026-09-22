@@ -49,6 +49,7 @@ function createFakeDriver(opts: FakeDriverOptions): ChatDriver & {
     memoryTools?: ToolDeclaration[]
     cwd?: string
     mcpServices?: string[]
+    resumeSessionId?: string
   }[]
 } {
   const received: {
@@ -58,6 +59,7 @@ function createFakeDriver(opts: FakeDriverOptions): ChatDriver & {
     memoryTools?: ToolDeclaration[]
     cwd?: string
     mcpServices?: string[]
+    resumeSessionId?: string
   }[] = []
   let scriptIndex = 0
   return {
@@ -95,7 +97,8 @@ function createFakeDriver(opts: FakeDriverOptions): ChatDriver & {
         toolSource: input.toolSource,
         memoryTools: input.memoryTools,
         cwd: input.cwd,
-        mcpServices: input.mcpServices
+        mcpServices: input.mcpServices,
+        resumeSessionId: input.resumeSessionId
       })
       if (opts.throwOnStream) throw new Error(opts.throwOnStream)
       if (opts.hangUntilAbort) {
@@ -119,6 +122,7 @@ function createFakeDriver(opts: FakeDriverOptions): ChatDriver & {
       memoryTools?: ToolDeclaration[]
       cwd?: string
       mcpServices?: string[]
+      resumeSessionId?: string
     }[]
   }
 }
@@ -177,6 +181,66 @@ describe('ChatService (driver-based)', () => {
     expect(reloaded?.messages[0]?.role).toBe('user')
     expect(reloaded?.messages[1]?.role).toBe('assistant')
     expect(reloaded?.messages[1]?.parts[0]?.type).toBe('text')
+  })
+
+  it('对话级会话锚点：首轮 qoder.session 随对话落盘 sessionIds，下一回合经 resumeSessionId 传回 driver', async () => {
+    // 回归保护：qoder.session part 只落在历史首条消息里，上下文压缩/token 裁剪会把它整条剪掉；
+    // 应用重启后重建常驻会话若只从历史找锚点，会静默回落成全新会话（上下文全丢）。
+    // 锚点必须持久化到对话级 meta，并在后续回合经 resumeSessionId 传给 driver。
+    const driver = createFakeDriver({
+      id: 'qoder',
+      displayName: 'Qoder',
+      scripts: [
+        {
+          emit: [
+            {
+              type: 'part',
+              part: { driverId: 'qoder', type: 'qoder.session', sessionId: 'sess-1' } satisfies DriverPart
+            },
+            { type: 'part', part: { driverId: 'qoder', type: 'text', text: 'hi' } satisfies DriverPart },
+            { type: 'done', status: 'done' }
+          ]
+        },
+        {
+          emit: [
+            { type: 'part', part: { driverId: 'qoder', type: 'text', text: 'second' } satisfies DriverPart },
+            { type: 'done', status: 'done' }
+          ]
+        }
+      ],
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
+    })
+    const registry = new ChatDriverRegistry()
+    registry.register(driver)
+    const win = {
+      webContents: {
+        send: () => {
+          /* noop */
+        }
+      }
+    } as unknown as BrowserWindow
+    const service = new ChatService(fakeStore(), dataDir, registry, () => win)
+    const conv = await service.createChat('qoder', 'qoder:test')
+    await service.startChatStream({
+      streamId: 'stream-1',
+      chatId: conv.id,
+      driverId: 'qoder',
+      model: 'qoder:test',
+      message: { id: 'u1', text: 'hello', createdAt: new Date().toISOString() }
+    })
+    // 锚点随对话 meta 落盘（与消息列表无关，压缩裁不掉）。
+    const reloaded = await service.getChat(conv.id)
+    expect(reloaded?.conversation.sessionIds).toEqual({ qoder: 'sess-1' })
+    // 首轮无锚点 → 第二轮 streamChat 收到对话级 resumeSessionId。
+    expect(driver.received[0]?.resumeSessionId).toBeUndefined()
+    await service.startChatStream({
+      streamId: 'stream-2',
+      chatId: conv.id,
+      driverId: 'qoder',
+      model: 'qoder:test',
+      message: { id: 'u2', text: 'again', createdAt: new Date().toISOString() }
+    })
+    expect(driver.received[1]?.resumeSessionId).toBe('sess-1')
   })
 
   it('记忆检索改为工具：每回合透传 search_memory 声明,execute 调 memoryService.search', async () => {

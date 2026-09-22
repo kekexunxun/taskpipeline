@@ -51,12 +51,12 @@ describe('PartRenderer', () => {
         ]}
       />
     )
-    // 流式 thinking_delta 被拆成多个 part:必须合并成 1 个「思考过程」折叠块,不能刷屏。
-    expect(screen.getAllByText('思考过程').length).toBe(1)
+    // 流式 thinking_delta 被拆成多个 part:必须合并成 1 个「深度思考」折叠块,不能刷屏。
+    expect(screen.getAllByText(/深度思考 - \d+秒/).length).toBe(1)
     // 正文仍然独立渲染。
     expect(screen.getByText('最终答案')).toBeInTheDocument()
-    // 展开后能看到完整的拼接推理文本。
-    fireEvent.click(screen.getByText('思考过程'))
+    // ThinkingBlock 默认折叠,展开后才能看到完整的拼接推理文本。
+    fireEvent.click(screen.getByText(/深度思考 - \d+秒/))
     // thinking_delta 按 token 粒度推送:合并必须直接拼接,不能插入换行(否则每个词一行)
     expect(screen.getByText('第一步思考第二步思考第三步思考')).toBeInTheDocument()
   })
@@ -108,9 +108,9 @@ describe('PartRenderer', () => {
     expect(trigger).toBeInTheDocument()
     expect(trigger.getAttribute('data-state')).toBe('closed')
 
-    // header 视觉块:子任务标签 + taskType + description + 状态徽章
+    // header 视觉块:子任务标签 + 统一 Agent 徽章(taskType 不再单独展示) + 状态徽章
     expect(screen.getByText('查询文档')).toBeInTheDocument()
-    expect(screen.getByText('search')).toBeInTheDocument()
+    expect(screen.getByText('Agent')).toBeInTheDocument()
     expect(screen.getByText('已完成')).toBeInTheDocument()
 
     // 默认折叠:子任务内的 part 不可见(Radix CollapsibleContent 在 closed 时 hidden)
@@ -259,6 +259,7 @@ describe('PartRenderer', () => {
   it('shows 执行中 status badge when subtask-start exists but no subtask-end has arrived yet', () => {
     render(
       <PartRenderer
+        isStreaming
         parts={[
           {
             driverId: 'qoder',
@@ -279,11 +280,10 @@ describe('PartRenderer', () => {
         ]}
       />
     )
-    // 还没收到 subtask-end → status 走 running 分支
+    // 还没收到 subtask-end 且流式进行中 → status 走 running 分支
     expect(screen.getByText('执行中')).toBeInTheDocument()
     expect(screen.queryByText('已完成')).toBeNull()
-    // 运行中:展开后最新一条 progress 描述作为「当前活动」显示
-    fireEvent.click(getSubtaskTrigger('t-running'))
+    // 运行中:卡片自动展开,最新一条 progress 描述作为「当前活动」显示
     expect(screen.getByText('正在搜索')).toBeInTheDocument()
   })
 
@@ -312,7 +312,7 @@ describe('PartRenderer', () => {
     expect(trigger.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('pairs qoder.tool-use with its tool-result into a single ToolCallRow (点击展开输入/输出)', () => {
+  it('pairs qoder.tool-use with its tool-result into a ReadToolBlock (紧凑单行,点击展开输出)', () => {
     render(
       <PartRenderer
         parts={[
@@ -327,15 +327,13 @@ describe('PartRenderer', () => {
         ]}
       />
     )
-    // 紧凑单行:工具名 + 内联摘要(file_path 压缩为末段文件名)
-    expect(screen.getByText('Tools - Read')).toBeInTheDocument()
+    // Read 走专用渲染器:紧凑单行「已查看 + 文件名」(file_path 压缩为末段文件名)
+    expect(screen.getByText('已查看')).toBeInTheDocument()
     expect(screen.getByText('a.ts')).toBeInTheDocument()
-    // result 不单独成行
-    expect(screen.queryByText('Tools - 工具结果')).not.toBeInTheDocument()
-    // 展开后输入/输出
-    fireEvent.click(screen.getByRole('button', { name: /Read/ }))
-    expect(screen.getByText('输入')).toBeInTheDocument()
-    expect(screen.getByText('输出')).toBeInTheDocument()
+    // result 不单独成行,折叠时输出不可见
+    expect(screen.queryByText('文件内容')).toBeNull()
+    // 展开后输出
+    fireEvent.click(screen.getByRole('button', { name: /a\.ts/ }))
     expect(screen.getByText('文件内容')).toBeInTheDocument()
   })
 
@@ -371,8 +369,10 @@ describe('PartRenderer', () => {
         ]}
       />
     )
-    // 流式期间显示「思考中…」折叠块,两条 thinking 合并成一块
-    expect(screen.getByText('思考中…')).toBeInTheDocument()
+    // 流式期间显示「思考中 - n秒」折叠块,两条 thinking 合并成一块
+    expect(screen.getByText(/^思考中 - \d+秒$/)).toBeInTheDocument()
+    // 新版 ThinkingBlock 默认折叠(不再流式自动展开),展开后才能看到合并文本
+    fireEvent.click(screen.getByText(/^思考中 - \d+秒$/))
     const blocks = screen.getAllByText(/第一段推理/)
     expect(blocks).toHaveLength(1)
     // reasoning-delta 按 token 粒度推送:合并必须直接拼接,不能插入换行(否则每个词一行)
@@ -396,17 +396,20 @@ describe('PartRenderer', () => {
       />
     )
     // token 间直接拼接,只有模型自带的换行保留(归一化后表现为一个空格分隔)
+    // 默认折叠 → 先展开
+    fireEvent.click(screen.getByText(/^思考中 - \d+秒$/))
     expect(screen.getByText('用户询问模型身份 简洁回应')).toBeInTheDocument()
-    // 仍是单个「思考中…」折叠块
-    expect(screen.getAllByText('思考中…').length).toBe(1)
+    // 仍是单个「思考中」折叠块
+    expect(screen.getAllByText(/^思考中 - \d+秒$/).length).toBe(1)
   })
 
   it('renders an orphan tool-result (no matching tool-use) as a fallback row', () => {
     render(
       <PartRenderer parts={[{ driverId: 'qoder', type: 'qoder.tool-result', toolCallId: 'c-x', output: '孤立输出' }]} />
     )
-    expect(screen.getByText('Tools - 工具结果')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /工具结果/ }))
+    // 孤儿兑底改用 BashTool 风格卡片,描述固定「工具执行」
+    expect(screen.getByText('工具执行')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /工具执行/ }))
     expect(screen.getByText('孤立输出')).toBeInTheDocument()
   })
 
@@ -444,10 +447,10 @@ describe('PartRenderer', () => {
         ]}
       />
     )
-    // header:description + task_type / subagent_type 徽章
+    // header:description + 统一「Agent」标签(taskType/subagentType 徽章已下线)
     expect(screen.getByText('查询文档')).toBeInTheDocument()
-    expect(screen.getByText('local_agent')).toBeInTheDocument()
-    expect(screen.getByText('Explore')).toBeInTheDocument()
+    expect(screen.getByText('Agent')).toBeInTheDocument()
+    expect(screen.queryByText('local_agent')).not.toBeInTheDocument()
     // 主流程不出现 Task 工具行(被子任务卡吸收)
     expect(screen.queryByRole('button', { name: /Task/ })).not.toBeInTheDocument()
     expect(screen.queryByText('子任务完整输出')).toBeNull()

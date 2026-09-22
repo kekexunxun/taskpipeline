@@ -417,6 +417,11 @@ export type ChatConversationMeta = {
   workingDirectory?: string
   /** 上下文滚动摘要（问题 2-B）：溢出轮次压缩后的摘要与覆盖边界；缺省 = 尚未压缩。 */
   compaction?: ChatCompaction
+  /**
+   * 对话级常驻会话绑定（与 electron/chat/chat-types.ts 同步）：Qoder = qodercli sessionId，
+   * 按 driverId 键控；重建会话的 resume 锚点，不依赖消息历史（压缩/裁剪不影响）。
+   */
+  sessionIds?: Partial<Record<ChatDriverId, string>>
 }
 
 /**
