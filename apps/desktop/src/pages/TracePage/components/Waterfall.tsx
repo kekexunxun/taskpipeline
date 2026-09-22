@@ -162,24 +162,39 @@ export function Waterfall({
     return { start, total }
   }, [spans])
 
-  // 折叠集合：默认折叠 depth > 1 的节点子树（长链路中间步骤），用户可手动展开。
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  // 折叠集合：默认只展开前两级（第 2 级带子节点的行初始折叠，长链路中间步骤不刷屏），
+  // 用户一旦手动操作（toggle/折叠全部/全部展开）即以用户选择为准，不再被默认值覆盖。
+  const defaultCollapsed = useMemo(() => {
+    const set = new Set<string>()
+    const walk = (nodes: AgentSpan[], depth: number) => {
+      for (const node of nodes) {
+        const kids = children.get(node.spanId) ?? []
+        if (kids.length === 0) continue
+        if (depth >= 1) set.add(node.spanId)
+        walk(kids, depth + 1)
+      }
+    }
+    walk(roots, 0)
+    return set
+  }, [roots, children])
+  const [userCollapsed, setUserCollapsed] = useState<null | Set<string>>(null)
+  const collapsed = userCollapsed ?? defaultCollapsed
   const toggle = (spanId: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev)
+    setUserCollapsed((prev) => {
+      const next = new Set(prev ?? defaultCollapsed)
       if (next.has(spanId)) next.delete(spanId)
       else next.add(spanId)
       return next
     })
   }
   const collapseAll = () => {
-    setCollapsed((prev) => {
-      const next = new Set(prev)
+    setUserCollapsed((prev) => {
+      const next = new Set(prev ?? defaultCollapsed)
       for (const span of spans) if (span.type !== 'llm.generate') next.add(span.spanId)
       return next
     })
   }
-  const expandAll = () => setCollapsed(new Set())
+  const expandAll = () => setUserCollapsed(new Set())
 
   if (spans.length === 0 || !timeAxis) {
     return <div className="p-6 text-center text-xs text-muted-foreground">该 Trace 尚未产生 span 数据</div>

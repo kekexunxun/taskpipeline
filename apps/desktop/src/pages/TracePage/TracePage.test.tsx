@@ -411,7 +411,8 @@ describe('TracePage 组件（v2）', () => {
     expect(parseInt(toolPad, 10)).toBe(8) // 上提后 depth 0
   })
 
-  it('Waterfall 委派 Agent 行下 LLM → 工具嵌套缩进（逐级 18px）', () => {
+  it('Waterfall 默认只展开前两级，第 3 级折叠后可手动展开，委派 Agent 行下嵌套缩进逐级 18px', async () => {
+    const user = userEvent.setup()
     render(
       <Waterfall
         spans={[
@@ -460,6 +461,11 @@ describe('TracePage 组件（v2）', () => {
         onSelect={vi.fn()}
       />
     )
+    // 默认只打开 2 级：第 2 级（LLM）可见但折叠，第 3 级工具行隐藏
+    expect(screen.getByText('qoder-lite')).toBeTruthy()
+    expect(screen.queryByText('Grep')).toBeNull()
+    // 手动展开第 3 级
+    await user.click(screen.getByLabelText('展开 qoder-lite'))
     // Agent → LLM → 工具 三级缩进：8 / 26 / 44 px（18px/级，根拍平后顶层从 8 起）
     const agentPad = screen.getByText('实现功能').parentElement!.style.paddingLeft
     const llmPad = screen.getByText('qoder-lite').parentElement!.style.paddingLeft
