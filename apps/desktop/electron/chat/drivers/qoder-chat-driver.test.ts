@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { MAX_CHAT_STEPS, STEP_LIMIT_NOTICE } from '../chat-step-limit.js'
+import {
+  MAX_QODER_CHAT_TURNS,
+  MAX_QODER_AUTO_CONTINUES,
+  QODER_AUTO_CONTINUE_PROMPT,
+  STEP_LIMIT_NOTICE
+} from '../chat-step-limit.js'
 import type { StoredMessage } from '../chat-types.js'
 import type { QoderToolPermissionHandler } from '../../pi-extension/qoder/qoder-chat-driver.js'
 
@@ -391,8 +396,9 @@ describe('QoderChatDriver', () => {
     expect(taskCreated.length).toBe(1)
   })
 
-  it('uses the shared MAX_CHAT_STEPS budget for maxTurns when a task tool source is attached', async () => {
-    // 挂任务工具的 chat 才会锁 maxTurns(此前硬编码 10):现与 OpenAI 路径同源 MAX_CHAT_STEPS。
+  it('uses the dedicated MAX_QODER_CHAT_TURNS budget for maxTurns when a task tool source is attached', async () => {
+    // 挂任务工具的 chat 才会锁 maxTurns(此前硬编码 10,后与 OpenAI 同值 15):
+    // Qoder 走常驻会话、多给回合成本远低于 OpenAI 全量重发,现用更宽的任务 chat 专用预算。
     sdkMock.__pushScript({ messages: [textDelta('ok', 'sess-steps'), resultMessage('ok', 'sess-steps')] })
     await collect(
       driver().streamChat({
@@ -411,7 +417,7 @@ describe('QoderChatDriver', () => {
         }
       })
     )
-    expect(sdkMock.__getLastQueryOptions()?.maxTurns).toBe(MAX_CHAT_STEPS)
+    expect(sdkMock.__getLastQueryOptions()?.maxTurns).toBe(MAX_QODER_CHAT_TURNS)
   })
 
   it('does not set maxTurns without a task tool source', async () => {
@@ -428,13 +434,14 @@ describe('QoderChatDriver', () => {
     expect(sdkMock.__getLastQueryOptions()?.maxTurns).toBeUndefined()
   })
 
-  it('appends a visible step-limit notice when the SDK aborts with error_max_turns', async () => {
-    // 撞 maxTurns 上限:SDK 发 result.subtype='error_max_turns'(此前静默收尾、无收尾文本),
-    // 应补一条可见的提示 text part 后正常 done 收尾。
+  it('auto-continues on error_max_turns and recovers when a follow-up turn completes normally', async () => {
+    // 首次撞线不再直接甩提示:保持同一回合 active,补推内部「继续」,续跑产出正常收尾时不弹提示。
     sdkMock.__pushScript({
       messages: [
-        textDelta('我继续查', 'sess-limit'),
-        { type: 'result', session_id: 'sess-limit', subtype: 'error_max_turns', result: '' }
+        textDelta('我先查了一半', 'sess-cont'),
+        { type: 'result', session_id: 'sess-cont', subtype: 'error_max_turns', result: '' },
+        textDelta('接着把剩下的做完了', 'sess-cont'),
+        resultMessage('done', 'sess-cont')
       ]
     })
     const events = await collect(
@@ -447,8 +454,38 @@ describe('QoderChatDriver', () => {
       })
     )
     const texts = events.flatMap((e) => (e.type === 'part' && e.part.type === 'text' ? [e.part.text] : []))
+    expect(texts.some((t) => t.includes('接着把剩下的做完了'))).toBe(true)
+    expect(texts).not.toContain(STEP_LIMIT_NOTICE)
+    // 补推的内部「继续」进入会话输入流(对用户不可见为独立历史消息)。
+    expect(sdkMock.__getUserMessages().some((m) => m.includes(QODER_AUTO_CONTINUE_PROMPT))).toBe(true)
+    expect(events.some((e) => e.type === 'error')).toBe(false)
+  })
+
+  it('falls back to the step-limit notice only after auto-continue budget is exhausted', async () => {
+    // 反复撞线:自动续跑预算内有界消耗,穷尽后才降级到可见提示并正常 done 收尾。
+    const maxTurnsResults = Array.from({ length: MAX_QODER_AUTO_CONTINUES + 1 }, () => ({
+      type: 'result',
+      session_id: 'sess-limit',
+      subtype: 'error_max_turns',
+      result: ''
+    })) as SdkMessage[]
+    sdkMock.__pushScript({ messages: maxTurnsResults })
+    const events = await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const texts = events.flatMap((e) => (e.type === 'part' && e.part.type === 'text' ? [e.part.text] : []))
     expect(texts).toContain(STEP_LIMIT_NOTICE)
     expect(texts[texts.length - 1]).toBe(STEP_LIMIT_NOTICE)
+    // 每次续跑补推一条内部「继续」,共消耗 MAX_QODER_AUTO_CONTINUES 次。
+    expect(sdkMock.__getUserMessages().filter((m) => m.includes(QODER_AUTO_CONTINUE_PROMPT))).toHaveLength(
+      MAX_QODER_AUTO_CONTINUES
+    )
     expect(events.some((e) => e.type === 'error')).toBe(false)
   })
 

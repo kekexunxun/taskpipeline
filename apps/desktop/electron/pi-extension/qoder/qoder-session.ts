@@ -29,7 +29,7 @@ import {
 import type { ChatStreamChunk, ChatTaskCreationResult, DriverPart, UserFileAttachment } from '../../chat/chat-types.js'
 import type { ToolSource } from '../../chat/drivers/tool-source.js'
 import type { ChatAttachmentCache } from '../../chat/chat-attachment-cache.js'
-import { STEP_LIMIT_NOTICE } from '../../chat/chat-step-limit.js'
+import { STEP_LIMIT_NOTICE, MAX_QODER_AUTO_CONTINUES, QODER_AUTO_CONTINUE_PROMPT } from '../../chat/chat-step-limit.js'
 
 /** SDK query options(用于让会话 options 与 SDK 类型严格对齐)。 */
 type SdkQueryOptions = NonNullable<Parameters<typeof query>[0]['options']>
@@ -204,6 +204,11 @@ type ActiveTurn = {
   /** 已派发过 task-created(去重:tool_result 与 result 都携带产出时只发一次)。 */
   taskCreated?: boolean
   toolSource?: ToolSource
+  /**
+   * 本回合剩余可自动「继续」的次数(撞 `error_max_turns` 时消耗)。初始 = MAX_QODER_AUTO_CONTINUES;
+   * 为 0 仍撞线才降级到 STEP_LIMIT_NOTICE。跨续跑保持同一回合(同一 turn 对象),故挂在 turn 上。
+   */
+  autoContinueBudget: number
 }
 
 // === 会话 ====================================================================
@@ -379,7 +384,8 @@ export class QoderSession {
       toolStartedAt: new Map(),
       thinkingBuffer: '',
       thinkingSnapshots: [],
-      toolSource: input.toolSource
+      toolSource: input.toolSource,
+      autoContinueBudget: MAX_QODER_AUTO_CONTINUES
     }
     this.activeTurn = turn
     // 竞态兜底:消费循环在回合开始前就已报错 → 注入本回合(原样上抛,保留错误类型)。
@@ -886,8 +892,17 @@ export class QoderSession {
         }
       }
       if (message.subtype === 'error_max_turns') {
-        // 撞 SDK maxTurns 上限:此前静默收尾(界面表现为「没说完就停了」),补一条可见提示。
-        // 作为 text part 落盘,历史回放同样可见(Qoder 历史由 SDK session 管理,parts 仅展示)。
+        // 撞 SDK maxTurns 上限。真·编码任务常需远超单轮往返预算(实证 trace 里串行 read→edit 回合
+        // 被硬切),此前直接甩「请回复继续」给用户手动敲。改为有界自动续跑:预算内保持本回合 active,
+        // 向同一常驻会话补推一条内部「继续」(等价于替用户点继续),让 SDK 下一 query 输出回流本回合。
+        // 关键:不能置 done——consume() 在非 active 时会把续跑首条消息缓冲进 pendingMessages 而漏接;
+        // 也不能 wakeTurn——生成器继续挂起等下一 query 的 chunk,直到预算用尽走下面的收尾。
+        if (turn.autoContinueBudget > 0) {
+          turn.autoContinueBudget--
+          this.pushUserMessage(QODER_AUTO_CONTINUE_PROMPT)
+          return
+        }
+        // 续跑预算用尽仍不收敛:降级到可见提示(作为 text part 落盘,历史回放同样可见),正常收尾。
         pushPart({ driverId: 'qoder', type: 'text', text: STEP_LIMIT_NOTICE })
       }
       turn.status = 'done'

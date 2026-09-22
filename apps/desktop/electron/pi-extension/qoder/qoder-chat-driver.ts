@@ -42,7 +42,7 @@ import type {
 import type { McpServiceProfileResolver } from '../../mcp/mcp-services.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
 import { CODEBASE_SEARCH_STEERING, CODEBASE_SEARCH_SUBAGENT_STEERING } from '../../codeindex/codebase-search-tool.js'
-import { MAX_CHAT_STEPS } from '../../chat/chat-step-limit.js'
+import { MAX_QODER_CHAT_TURNS } from '../../chat/chat-step-limit.js'
 import { QoderSession, QoderSessionRegistry } from './qoder-session.js'
 import { QoderTraceBuilder } from './trace-builder.js'
 import { buildToolSourceMcp } from './tool-source-mcp.js'
@@ -464,9 +464,10 @@ export class QoderChatDriver implements ChatDriver {
       // 始终预授权 `Agent`：委派 planner 子代理不该再弹一层确认框。
       // search_memory 由宿主自己检索、无副作用,同样预授权免弹框。
       allowedTools: ['Agent', ...(mcpSetup?.toolNames ?? []), ...(memoryMcp?.toolNames ?? [])],
-      // 挂任务工具的 chat 也要留够主循环步数:与 OpenAI 路径共享 MAX_CHAT_STEPS 口径,
-      // 撞线时 SDK 发 result.subtype='error_max_turns',由 qoder-session 补可见提示收尾。
-      ...(taskSource && mcpSetup ? { maxTurns: MAX_CHAT_STEPS } : {}),
+      // 挂任务工具的 chat 也要留够主循环步数:Qoder 走常驻会话、多给回合成本远低于 OpenAI
+      // 全量重发,故用更宽的 `MAX_QODER_CHAT_TURNS`(而非与 OpenAI 同值的 MAX_CHAT_STEPS)。
+      // 撞线时 SDK 发 result.subtype='error_max_turns',由 qoder-session 有界自动续跑、兜不住才补提示。
+      ...(taskSource && mcpSetup ? { maxTurns: MAX_QODER_CHAT_TURNS } : {}),
       ...(serverNames.length
         ? {
             mcpServers,
