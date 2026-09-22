@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { MAX_CHAT_STEPS, STEP_LIMIT_NOTICE } from '../chat-step-limit.js'
 import type { StoredMessage } from '../chat-types.js'
 import type { QoderToolPermissionHandler } from '../../pi-extension/qoder/qoder-chat-driver.js'
 
@@ -388,6 +389,67 @@ describe('QoderChatDriver', () => {
     )
     const taskCreated = events.filter((e) => e.type === 'task-created')
     expect(taskCreated.length).toBe(1)
+  })
+
+  it('uses the shared MAX_CHAT_STEPS budget for maxTurns when a task tool source is attached', async () => {
+    // 挂任务工具的 chat 才会锁 maxTurns(此前硬编码 10):现与 OpenAI 路径同源 MAX_CHAT_STEPS。
+    sdkMock.__pushScript({ messages: [textDelta('ok', 'sess-steps'), resultMessage('ok', 'sess-steps')] })
+    await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal,
+        toolSource: {
+          id: 'jira',
+          displayName: 'Jira',
+          systemPrompt: () => '',
+          tools: () => [],
+          describeResult: () => undefined,
+          close: () => undefined
+        }
+      })
+    )
+    expect(sdkMock.__getLastQueryOptions()?.maxTurns).toBe(MAX_CHAT_STEPS)
+  })
+
+  it('does not set maxTurns without a task tool source', async () => {
+    sdkMock.__pushScript({ messages: [textDelta('ok', 'sess-noturns'), resultMessage('ok', 'sess-noturns')] })
+    await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    expect(sdkMock.__getLastQueryOptions()?.maxTurns).toBeUndefined()
+  })
+
+  it('appends a visible step-limit notice when the SDK aborts with error_max_turns', async () => {
+    // 撞 maxTurns 上限:SDK 发 result.subtype='error_max_turns'(此前静默收尾、无收尾文本),
+    // 应补一条可见的提示 text part 后正常 done 收尾。
+    sdkMock.__pushScript({
+      messages: [
+        textDelta('我继续查', 'sess-limit'),
+        { type: 'result', session_id: 'sess-limit', subtype: 'error_max_turns', result: '' }
+      ]
+    })
+    const events = await collect(
+      driver().streamChat({
+        conversationId: 'c',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: 'hi', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal
+      })
+    )
+    const texts = events.flatMap((e) => (e.type === 'part' && e.part.type === 'text' ? [e.part.text] : []))
+    expect(texts).toContain(STEP_LIMIT_NOTICE)
+    expect(texts[texts.length - 1]).toBe(STEP_LIMIT_NOTICE)
+    expect(events.some((e) => e.type === 'error')).toBe(false)
   })
 
   it('returns no models when Qoder is not enabled/connected', async () => {

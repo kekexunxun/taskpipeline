@@ -20,7 +20,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { api } from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
 import { cn } from '@/lib/utils'
-import type { ChatMessage, ChatPlan, UserFileAttachment } from '@/api'
+import type { ChatMessage, ChatPlan, ChatGroup, UserFileAttachment } from '@/api'
 
 export default function ChatPage() {
   return (
@@ -99,8 +99,10 @@ function ChatPageInner() {
   const [isTransitioning, setIsTransitioning] = useState(false)
   // 欢迎页的输入草稿（独立于 chat.draft，因为欢迎页没有 activeId）
   const [welcomeDraft, setWelcomeDraft] = useState('')
-  // 工作区创建弹窗
+  // 工作区创建/编辑弹窗
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false)
+  // 弹窗编辑目标（undefined = 创建模式）
+  const [editingWorkspace, setEditingWorkspace] = useState<ChatGroup | undefined>()
   // 右侧面板开关
   const [sidePanelOpen, setSidePanelOpen] = useState(true)
 
@@ -290,6 +292,10 @@ function ChatPageInner() {
         }}
         onDelete={(id) => void chat.remove(id)}
         onDeleteGroup={(id) => void chat.removeGroup(id)}
+        onEditGroup={(group) => {
+          setEditingWorkspace(group)
+          setWorkspaceDialogOpen(true)
+        }}
       />
       <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">
         {isEmpty ? (
@@ -304,7 +310,10 @@ function ChatPageInner() {
             projectValue={welcomeDirectory}
             onProjectChange={setWelcomeDirectory}
             onAddProject={() => void chooseProjectDirectory()}
-            onSetupWorkspace={() => setWorkspaceDialogOpen(true)}
+            onSetupWorkspace={() => {
+              setEditingWorkspace(undefined)
+              setWorkspaceDialogOpen(true)
+            }}
             leftSlot={
               <>
                 <ChatModelSelector
@@ -566,14 +575,15 @@ function ChatPageInner() {
       {/* 工具调用 HITL：confirm 已内联到对话流（ChatConversation 卡片），
       UiRequestDialog 仅兆底 select/input/editor（对话板块不产生）与任务板块共用。 */}
       <UiRequestDialog />
-      {/* 工作区创建弹窗 */}
+      {/* 工作区创建/编辑弹窗 */}
       <WorkspaceCreateDialog
         open={workspaceDialogOpen}
         onOpenChange={setWorkspaceDialogOpen}
-        onCreated={(group) => {
-          // 创建后刷新 groups 并自动选中新工作区的第一个目录
+        editGroup={editingWorkspace}
+        onSaved={(group) => {
+          // 保存后刷新 groups；创建时自动选中新工作区的第一个目录
           void chat.refreshMetas()
-          setWelcomeDirectory(group.directories[0])
+          if (!editingWorkspace) setWelcomeDirectory(group.directories[0])
         }}
       />
     </div>

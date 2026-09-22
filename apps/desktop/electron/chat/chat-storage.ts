@@ -447,6 +447,21 @@ export class ChatStorage {
   }
 
   /**
+   * 更新 workspace 类型 group(用户显式编辑名称/目录)。仅允许 chatType='workspace'。
+   */
+  async updateGroup(id: string, name: string, directories: string[]): Promise<ChatGroup | undefined> {
+    await this.loadIndex()
+    const groups = this.getCachedGroups()
+    const group = groups.find((g) => g.id === id)
+    if (!group || group.chatType !== 'workspace') return undefined
+    group.name = name
+    group.directories = directories
+    group.updatedAt = new Date().toISOString()
+    await this.writeGroups(groups)
+    return group
+  }
+
+  /**
    * 删除 group(用户显式删除 workspace;directory group 一般不手动删除,靠 trim 淘汰)。
    */
   async deleteGroup(id: string): Promise<void> {

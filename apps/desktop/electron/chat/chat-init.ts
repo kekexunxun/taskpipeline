@@ -26,7 +26,7 @@ import { createMcpServiceResolver } from '../mcp/mcp-services.js'
 import { createMemorySearchTool } from '../memory/memory-search-tool.js'
 import type { MemoryService } from '../memory/memory-service.js'
 import { initMemoryContext, consolidateChatMemory } from '../memory/memory-context.js'
-import { createCodebaseSearchTool } from '../codeindex/codebase-search-tool.js'
+import { createCodebaseSearchTool, warmCodebaseSearch } from '../codeindex/codebase-search-tool.js'
 import { getCodeIndex } from '../codeindex/codeindex-service.js'
 import { QoderChatDriver } from '../pi-extension/qoder/index.js'
 import type { QoderOrchestrator } from '../pi-extension/qoder/index.js'
@@ -296,7 +296,11 @@ export function createChatSystem(deps: ChatSystemDeps): ChatSystem {
       const codeIndex = getCodeIndex()
       if (codeIndex && workingDirectory) {
         const roots = await resolveWorkspaceRoots(workingDirectory)
-        if (roots.length) declarations.push(createCodebaseSearchTool({ roots, service: codeIndex }))
+        if (roots.length) {
+          declarations.push(createCodebaseSearchTool({ roots, service: codeIndex }))
+          // 预热：本回合装配工具即后台触发各根目录首扫，让模型真正调用时索引大概率已就绪。
+          warmCodebaseSearch(codeIndex, roots)
+        }
       }
       return declarations
     },

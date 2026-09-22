@@ -14,6 +14,7 @@ import {
 } from './parts/ToolBlocks'
 import { TaskListCard } from './parts/TaskListCard'
 import { ReviewResultCard } from './parts/ReviewResultCard'
+import { aggregateTaskToolParts } from './aggregateTaskParts'
 import type { ChatMessageStatus, ChatPlan, DriverPart } from '@/api'
 import { PlanCard } from '@/pages/ChatPage/components/PlanCard'
 import {
@@ -195,7 +196,10 @@ export function PartRenderer({
         out.push(part)
       }
     }
-    return out
+    // 任务工具（TaskCreate/TaskUpdate）聚合为常驻清单卡：Chat 落的是原始 tool parts，
+    // 这里在渲染层折叠成 qoder.task-list，与执行 Tab（eventsToDriverParts 已预聚合）表现一致。
+    // 对已聚合的入参是幂等的（无原始任务工具行 → 原样返回）。
+    return aggregateTaskToolParts(out)
   }, [parts])
 
   // 同一次 interleaveTimeline 调用内要拿回原始 DriverPart,需要 ParentedItem 引用一致。

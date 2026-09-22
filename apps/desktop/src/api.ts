@@ -515,6 +515,27 @@ export type StartChatStreamInput = {
 }
 export type AbortChatStreamInput = { streamId: string; chatId: string }
 
+/**
+ * 在飞流的 reattach 快照（主进程 getReattachState 产出）：渲染层切页重挂载后，
+ * 用内存 parts 恢复在飞 assistant 消息，并按 seq 水位去重续接后续事件。
+ */
+export type ActiveChatStreamSnapshot = {
+  chatId: string
+  streamId: string
+  driverId: ChatDriverId
+  model: string
+  /** 主进程侧在飞 assistant 消息 id（与磁盘增量快照同 id，可直接覆盖合并）。 */
+  assistantId: string
+  createdAt: string
+  /** dispatch 单调水位（续流事件 take-the-larger 去重）。 */
+  seq: number
+  parts: DriverPart[]
+}
+export type ChatReattachState = {
+  streams: ActiveChatStreamSnapshot[]
+  chats: Array<{ conversation: ChatConversation; messages: ChatMessage[] } | undefined>
+}
+
 /** driver 流式过程事件(主进程 → 前端,跨 driver 透传)。 */
 export type ChatStreamChunk =
   | { type: 'start'; messageId: string; messageMetadata?: ChatMessageMetadata }
@@ -539,6 +560,11 @@ export type ChatStreamEvent = {
   chunk?: ChatStreamChunk
   error?: string
   done?: boolean
+  /**
+   * 活跃流事件的单调递增序号（主进程 dispatch 时盖）：reattach 后快照与续流
+   * 事件可能重叠，前端按「seq > 已应用水位才应用」去重。非活跃流事件无。
+   */
+  seq?: number
 }
 
 /** 上下文压缩瞬时状态事件：主进程在压缩起止各广播一次，供前端渲染临时提示（不持久）。end 可带压缩后的上下文估算。 */
@@ -673,6 +699,8 @@ export type AgentApi = {
   listChatGroups(): Promise<ChatGroup[]>
   /** 创建工作区(workspace 类型分组)。 */
   createChatWorkspace(name: string, directories: string[]): Promise<ChatGroup>
+  /** 编辑工作区(更新 workspace 类型分组的名称/目录)。 */
+  updateChatWorkspace(id: string, name: string, directories: string[]): Promise<ChatGroup | undefined>
   /** 删除分组。 */
   deleteChatGroup(id: string): Promise<void>
   attachRepository(taskId: string, repositoryId: string): Promise<TaskRepository>
@@ -788,6 +816,8 @@ export type AgentApi = {
   getDefaultModel(): Promise<SystemDefaultModel | undefined>
   startChatStream(input: StartChatStreamInput): Promise<void>
   abortChat(input: AbortChatStreamInput): Promise<void>
+  /** 渲染层重挂载 reattach：取在飞流内存快照 + 所属对话数据（切回 Chat 页续渲染）。 */
+  getChatReattachState(): Promise<ChatReattachState>
   /** 对话引导：在当前轮次注入引导消息，不打断对话。 */
   injectChatGuidance(chatId: string, text: string): Promise<void>
   /** 保存附件到本地缓存，返回本地路径元信息。 */
@@ -1204,6 +1234,9 @@ export const api: AgentApi = window.agentApi ?? {
   async createChatWorkspace(_name: string, _directories: string[]) {
     throw new Error('Electron is required')
   },
+  async updateChatWorkspace(_id: string, _name: string, _directories: string[]) {
+    throw new Error('Electron is required')
+  },
   async deleteChatGroup(_id: string) {},
   async attachRepository(taskId, repositoryId) {
     const profile = demoRepositories.find((item) => item.id === repositoryId)
@@ -1560,6 +1593,10 @@ export const api: AgentApi = window.agentApi ?? {
     memoryListeners.forEach((callback) =>
       callback({ streamId, chatId, driverId, chunk: { type: 'done', status: 'aborted' }, done: true })
     )
+  },
+  async getChatReattachState() {
+    // 内存实现：demo 流秒级完成，无跨挂载的在飞流。
+    return { streams: [], chats: [] }
   },
   async injectChatGuidance() {
     // 内存实现：引导消息无持久化需求，静默忽略

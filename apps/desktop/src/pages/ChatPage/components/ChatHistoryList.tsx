@@ -1,6 +1,7 @@
-import { FolderIcon, FolderOpenIcon, FoldersIcon, PlusIcon, Trash2Icon } from 'lucide-react'
+import { FolderIcon, FolderOpenIcon, FoldersIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react'
 import { useState } from 'react'
 import { ChatHistoryItem } from './ChatHistoryItem'
+import { getCollapsedGroups, saveCollapsedGroups } from '@/utils/collapsed-groups-cache'
 import type { ChatConversationMeta, ChatGroup } from '@/api'
 import {
   AlertDialog,
@@ -77,7 +78,8 @@ export function ChatHistoryList({
   onCreateInDirectory,
   onShowWelcome,
   onDelete,
-  onDeleteGroup
+  onDeleteGroup,
+  onEditGroup
 }: {
   metas: ChatConversationMeta[]
   /** 统一分组列表(目录 + 工作区)。 */
@@ -94,9 +96,12 @@ export function ChatHistoryList({
   onShowWelcome(): void
   onDelete(id: string): void
   onDeleteGroup(id: string): void
+  /** 编辑工作区(workspace 类型分组)。 */
+  onEditGroup(group: ChatGroup): void
 }) {
   const groupedItems = groupMetas(metas, groups)
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  // 折叠状态持久化到 localStorage:重进 chat 页不再重置为全部展开。
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => getCollapsedGroups())
   const [deletingGroup, setDeletingGroup] = useState<ChatGroup | null>(null)
 
   const toggleCollapse = (key: string) => {
@@ -107,6 +112,7 @@ export function ChatHistoryList({
       } else {
         next.add(key)
       }
+      saveCollapsedGroups(next)
       return next
     })
   }
@@ -190,6 +196,19 @@ export function ChatHistoryList({
                                 aria-label="在此工作区新建对话"
                               >
                                 <PlusIcon size={11} />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                className="h-5 w-5 text-muted-foreground/70 opacity-0 group-hover/header:opacity-100"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  onEditGroup(cg)
+                                }}
+                                title="编辑此工作区"
+                                aria-label="编辑此工作区"
+                              >
+                                <PencilIcon size={11} />
                               </Button>
                               <Button
                                 variant="ghost"

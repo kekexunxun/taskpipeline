@@ -386,4 +386,32 @@ export type ChatStreamEvent = {
   chunk?: ChatStreamChunk
   error?: string
   done?: boolean
+  /**
+   * 活跃流事件的单调递增序号（dispatch 时盖）：渲染层重挂载 reattach 后，
+   * 快照与续流事件可能重叠，前端按「seq > 已应用水位才应用」去重。非活跃流事件无。
+   */
+  seq?: number
+}
+
+/**
+ * 单条在飞流的 reattach 快照：主进程内存态（比磁盘增量快照新），
+ * 供渲染层切页重挂载后恢复在飞 assistant 消息并续接后续事件。
+ */
+export type ActiveChatStreamSnapshot = {
+  chatId: string
+  streamId: string
+  driverId: ChatDriverId
+  model: string
+  /** 主进程侧在飞 assistant 消息 id（与磁盘增量快照同 id，可直接覆盖合并）。 */
+  assistantId: string
+  createdAt: string
+  /** dispatch 单调水位：reattach 后去重续用。 */
+  seq: number
+  parts: DriverPart[]
+}
+
+/** 渲染层重挂载时请求的 reattach 状态：在飞流列表 + 所属对话完整数据。 */
+export type ChatReattachState = {
+  streams: ActiveChatStreamSnapshot[]
+  chats: Array<{ conversation: ChatConversation; messages: StoredMessage[] } | undefined>
 }

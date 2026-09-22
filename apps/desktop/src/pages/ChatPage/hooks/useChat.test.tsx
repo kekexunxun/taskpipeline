@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useChat } from './useChat'
-import type { ChatConversation } from '@/api'
+import type { ChatConversation, ChatReattachState, StoredMessage } from '@/api'
 
 /**
  * useChat 多对话并行 + 内联 HITL 核心逻辑测试。
@@ -25,13 +25,21 @@ const mockApi = vi.hoisted(() => {
   return {
     chatListeners,
     conv,
+    /** reattach 快照 mock：默认无在飞流；单测内赋值后挂载时生效。 */
+    reattachable: { streams: [], chats: [] } as ChatReattachState,
     getChat: vi.fn(async (id: string) => ({ conversation: conv(id), messages: [] })),
+    getChatReattachState: vi.fn(async () => mockApi.reattachable),
     createChat: vi.fn(async ({ driverId, model }: { driverId?: string; model?: string }) => ({
       ...conv('c1'),
       driverId,
       model
     })),
-    respondTaskUi: vi.fn(async () => undefined)
+    respondTaskUi: vi.fn(async () => undefined),
+    abortChat: vi.fn(async () => undefined),
+    /** 向所有监听广播一条流事件（模拟主进程 dispatch）。 */
+    fire(event: unknown) {
+      chatListeners.forEach((callback) => callback(event))
+    }
   }
 })
 
@@ -54,7 +62,8 @@ vi.mock('@/api', () => ({
     createChat: mockApi.createChat,
     deleteChat: vi.fn(async () => undefined),
     startChatStream: vi.fn(async () => undefined),
-    abortChat: vi.fn(async () => undefined),
+    abortChat: mockApi.abortChat,
+    getChatReattachState: mockApi.getChatReattachState,
     respondTaskUi: mockApi.respondTaskUi,
     onChatStreamEvent: vi.fn((callback: (event: unknown) => void) => {
       mockApi.chatListeners.add(callback)
@@ -71,6 +80,7 @@ describe('useChat（多对话并行 + 内联 HITL）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockApi.chatListeners.clear()
+    mockApi.reattachable = { streams: [], chats: [] }
   })
 
   it('draft 按对话隔离：切对话不串草稿，切回恢复', async () => {
@@ -142,5 +152,113 @@ describe('useChat（多对话并行 + 内联 HITL）', () => {
     })
     expect(result.current.messages).toHaveLength(2)
     expect(result.current.streaming).toBe(true)
+  })
+
+  it('reattach：重挂载接管在飞流，seq 水位去重续渲染，done 收口', async () => {
+    const stalePart = { driverId: 'qoder', type: 'text', text: '旧快照' } as const
+    const inFlight: StoredMessage = {
+      id: 'a9',
+      role: 'assistant',
+      createdAt: '2026-01-01T00:00:01.000Z',
+      driverId: 'qoder',
+      raw: { kind: 'assistant', parts: [stalePart] },
+      parts: [stalePart]
+    }
+    mockApi.reattachable = {
+      streams: [
+        {
+          chatId: 'c9',
+          streamId: 's9',
+          driverId: 'qoder',
+          model: 'qoder:lite',
+          assistantId: 'a9',
+          createdAt: '2026-01-01T00:00:01.000Z',
+          seq: 3,
+          parts: [{ driverId: 'qoder', type: 'text', text: '内存新快照' }]
+        }
+      ],
+      chats: [{ conversation: mockApi.conv('c9'), messages: [inFlight] }]
+    }
+    const { result } = renderHook(() => useChat())
+    await waitFor(() => expect(result.current.streamingChatIds.has('c9')).toBe(true))
+    await act(async () => {
+      await result.current.select('c9')
+    })
+    // 磁盘滞后快照被内存 parts 覆盖（同 assistantId 不重复成两条）
+    expect(result.current.messages).toHaveLength(1)
+    const messageOf = () => result.current.messages[0]!
+    expect(
+      messageOf()
+        .parts.map((p) => (p.type === 'text' ? p.text : ''))
+        .join('')
+    ).toBe('内存新快照')
+
+    // 重叠事件（seq ≤ 水位 3）：已含在快照里，不重应用
+    act(() =>
+      mockApi.fire({
+        chatId: 'c9',
+        streamId: 's9',
+        driverId: 'qoder',
+        seq: 3,
+        chunk: { type: 'part', part: { driverId: 'qoder', type: 'text', text: '旧快照' } }
+      })
+    )
+    expect(messageOf().parts).toHaveLength(1)
+
+    // 续流事件（seq > 水位）：正常应用
+    act(() =>
+      mockApi.fire({
+        chatId: 'c9',
+        streamId: 's9',
+        driverId: 'qoder',
+        seq: 4,
+        chunk: { type: 'part', part: { driverId: 'qoder', type: 'text', text: ' + 续流' } }
+      })
+    )
+    expect(
+      messageOf()
+        .parts.map((p) => (p.type === 'text' ? p.text : ''))
+        .join('')
+    ).toBe('内存新快照 + 续流')
+
+    // done chunk → 解除接管，退出流式态
+    act(() =>
+      mockApi.fire({
+        chatId: 'c9',
+        streamId: 's9',
+        driverId: 'qoder',
+        seq: 5,
+        chunk: { type: 'done', status: 'done' }
+      })
+    )
+    await waitFor(() => expect(result.current.streamingChatIds.has('c9')).toBe(false))
+    // 后续 done:true 信封不再影响状态
+    act(() => mockApi.fire({ chatId: 'c9', streamId: 's9', driverId: 'qoder', done: true }))
+    expect(result.current.streamingChatIds.has('c9')).toBe(false)
+  })
+
+  it('reattach：stop 对无活会话的接管流按登记 streamId 请主进程 abort', async () => {
+    mockApi.reattachable = {
+      streams: [
+        {
+          chatId: 'c9',
+          streamId: 's9',
+          driverId: 'qoder',
+          model: 'qoder:lite',
+          assistantId: 'a9',
+          createdAt: '2026-01-01T00:00:01.000Z',
+          seq: 1,
+          parts: [{ driverId: 'qoder', type: 'text', text: '在飞' }]
+        }
+      ],
+      chats: [{ conversation: mockApi.conv('c9'), messages: [] }]
+    }
+    const { result } = renderHook(() => useChat())
+    await waitFor(() => expect(result.current.streamingChatIds.has('c9')).toBe(true))
+    await act(async () => {
+      await result.current.select('c9')
+    })
+    act(() => result.current.stop())
+    expect(mockApi.abortChat).toHaveBeenCalledWith({ chatId: 'c9', streamId: 's9' })
   })
 })

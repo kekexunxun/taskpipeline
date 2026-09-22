@@ -113,6 +113,27 @@ describe('ChatStorage v4', () => {
     expect(groups[0]?.directories).toEqual(['/project/x'])
   })
 
+  it('creates and updates a workspace group', async () => {
+    const root = temporaryRoot()
+    const storage = new ChatStorage(root)
+    const created = await storage.createGroup('前端', ['/a', '/b'])
+    expect(created.chatType).toBe('workspace')
+    expect(created.name).toBe('前端')
+    expect(created.directories).toEqual(['/a', '/b'])
+    const updated = await storage.updateGroup(created.id, '前端服务', ['/a', '/b', '/c'])
+    expect(updated?.name).toBe('前端服务')
+    expect(updated?.directories).toEqual(['/a', '/b', '/c'])
+    // 重新加载验证已落盘
+    const reloaded = new ChatStorage(root)
+    const stored = (await reloaded.listGroups()).find((g) => g.id === created.id)
+    expect(stored?.name).toBe('前端服务')
+    expect(stored?.directories).toEqual(['/a', '/b', '/c'])
+    // 不允许编辑 directory 类型 group
+    await storage.saveConversation({ ...conversation('c'), workingDirectory: '/project/x' })
+    const dirGroup = (await storage.listGroups()).find((g) => g.chatType === 'directory')
+    expect(await storage.updateGroup(dirGroup!.id, 'x', ['/y'])).toBeUndefined()
+  })
+
   it('trims empty groups beyond the cap but keeps active ones', async () => {
     const root = temporaryRoot()
     const storage = new ChatStorage(root)

@@ -29,12 +29,14 @@ import {
 import type { ChatDriver } from './drivers/chat-driver.js'
 import type {
   AbortChatStreamInput,
+  ActiveChatStreamSnapshot,
   ChatConversation,
   ChatConversationMeta,
   ChatConversationMode,
   ChatMessageMetadata,
   ChatModelGroup,
   ChatGroup,
+  ChatReattachState,
   ChatStreamEvent,
   ChatStreamChunk,
   ChatDriverId,
@@ -49,7 +51,25 @@ import type {
 import type { TaskCreationBackend } from './task-backends/index.js'
 import { runChatCodeReview, type ChatReviewInfra } from './chat-review.js'
 
-type ActiveStream = { streamId: string; abort: AbortController }
+/**
+ * 在飞流注册项：除 streamId/abort 外还携带 reattach 快照（driverId/model/assistantId/
+ * parts/seq）。渲染层卸载重挂载（如切去 Trace 再切回 Chat）时活订阅丢失，
+ * 主进程流不受影响；重挂载方经 getReattachState 拿内存 parts 恢复在飞消息，
+ * 再按 seq 水位去重续应用后续事件。
+ */
+type ActiveStream = {
+  streamId: string
+  abort: AbortController
+  driverId: ChatDriverId
+  model: string
+  /** 本轮在飞 assistant 消息 id（与磁盘增量快照同 id）。 */
+  assistantId: string
+  createdAt: string
+  /** 本轮已累积 parts（与流循环同一数组引用，快照时 slice 拷贝）。 */
+  parts: DriverPart[]
+  /** dispatch 单调水位：每条外发事件 +1，reattach 去重用。 */
+  seq: number
+}
 type TaskBackendFactory = () => TaskCreationBackend | undefined
 /**
  * 记忆检索工具解析器：按对话归属（工作目录 -> repositoryIds / conversationId）产出本回合可用的
@@ -237,6 +257,11 @@ export class ChatService {
     return this.storage.createGroup(name, directories)
   }
 
+  /** 编辑 workspace 类型分组(更新名称/目录)。 */
+  async updateWorkspaceGroup(id: string, name: string, directories: string[]): Promise<ChatGroup | undefined> {
+    return this.storage.updateGroup(id, name, directories)
+  }
+
   /** 删除分组(用户显式删除 workspace)。 */
   async deleteGroup(id: string): Promise<void> {
     return this.storage.deleteGroup(id)
@@ -393,6 +418,28 @@ export class ChatService {
   abortChat(input: AbortChatStreamInput): void {
     const active = this.activeStreams.get(input.chatId)
     if (active?.streamId === input.streamId) active.abort.abort()
+  }
+
+  /**
+   * 渲染层重挂载（如切去 Trace 再切回 Chat，活订阅已丢）时的 reattach 状态：
+   * 在飞流内存快照 + 所属对话全量数据。内存 parts 比磁盘增量快照（3s 落盘）更新，
+   * seq 水位供前端对快照之后的续流事件去重。
+   */
+  async getReattachState(): Promise<ChatReattachState> {
+    const streams: ActiveChatStreamSnapshot[] = [...this.activeStreams.entries()].map(([chatId, active]) => ({
+      chatId,
+      streamId: active.streamId,
+      driverId: active.driverId,
+      model: active.model,
+      assistantId: active.assistantId,
+      createdAt: active.createdAt,
+      seq: active.seq,
+      parts: active.parts.slice()
+    }))
+    const chats = await Promise.all(
+      [...new Set(streams.map((stream) => stream.chatId))].map((chatId) => this.getChat(chatId))
+    )
+    return { streams, chats }
   }
 
   /**
@@ -629,7 +676,20 @@ export class ChatService {
     const prior = this.activeStreams.get(input.chatId)
     if (prior) prior.abort.abort()
     const abort = new AbortController()
-    this.activeStreams.set(input.chatId, { streamId: input.streamId, abort })
+    // 在飞 assistant 消息与累积 parts 提前创建：随流一起登记进 activeStreams，
+    // 供重挂载方（getReattachState）快照当前内存态。
+    const assistantId = randomUUID()
+    const parts: DriverPart[] = []
+    this.activeStreams.set(input.chatId, {
+      streamId: input.streamId,
+      abort,
+      driverId: effective.driverId,
+      model: effective.model,
+      assistantId,
+      createdAt: input.message.createdAt,
+      parts,
+      seq: 0
+    })
     // 追踪流的完整生命周期（含 finally 持久化），供 abortAllActiveStreams 等待落盘完成。
     let resolveLifecycle!: () => void
     const lifecyclePromise = new Promise<void>((resolve) => {
@@ -675,8 +735,6 @@ export class ChatService {
     const messages: StoredMessageRecord[] = agentSystemRecord
       ? [...existing, agentSystemRecord, userRecord]
       : [...existing, userRecord]
-    const assistantId = randomUUID()
-    const parts: DriverPart[] = []
     // 流存活心跳定时器（本方法局部，多对话并发各自独立；finally 中清除）。
     let heartbeat: ReturnType<typeof setInterval> | undefined
     // 最后一次「driver 真实活动」时刻：每个 driver chunk 刷新；HITL 弹窗在飞期间心跳顺带刷新
@@ -1124,11 +1182,16 @@ export class ChatService {
     input: Pick<StartChatStreamInput, 'streamId' | 'chatId' | 'driverId'>,
     chunk: ChatStreamChunk
   ): void {
+    // 活跃流事件盖单调 seq：reattach 方按「seq > 已应用水位」去重，
+    // 消除快照与续流事件的重叠/缝隙。非活跃流（已收尾）事件不带 seq。
+    const active = this.activeStreams.get(input.chatId)
+    const seq = active && active.streamId === input.streamId ? (active.seq += 1) : undefined
     this.getMainWindow()?.webContents.send('chat:stream-event', {
       streamId: input.streamId,
       chatId: input.chatId,
       driverId: input.driverId,
-      chunk
+      chunk,
+      ...(seq !== undefined ? { seq } : {})
     } satisfies ChatStreamEvent)
   }
 

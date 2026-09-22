@@ -34,6 +34,7 @@ import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
 import type { ChatAttachmentCache } from '../chat-attachment-cache.js'
 import { createWebFetchAiTool } from '../web-fetch-tool.js'
 import { CODEBASE_SEARCH_STEERING } from '../../codeindex/codebase-search-tool.js'
+import { MAX_CHAT_STEPS } from '../chat-step-limit.js'
 import { detectVendor, createVendorModel, type ModelVendor } from './model-providers.js'
 import { WRITE_PLAN_TOOL } from './project-query-tools.js'
 import { isOpenAIModelValue, prefixOfVendor, stripModelPrefix } from './model-value.js'
@@ -65,9 +66,10 @@ type OpenAIProfile = {
  * agentic 循环的**每轮**硬步数上限（1 step = 1 次模型往返，同一步可并行多个 tool_call）。
  * 复杂多步查证允许更多步；末步（stepNumber >= MAX_CHAT_STEPS-1）由 `prepareStep` 摘工具 +
  * 注入收尾指令，逼模型以「完整文本结论」自然收尾，而非撞上硬上限停在半句工具调用上。
+ * 常量与 Qoder chat 的 `maxTurns` 同源（`chat-step-limit.ts`），避免两条链路口径漂移。
  * TODO: 后续可接到 profile/modelParams 允许逐模型覆盖。
  */
-export const MAX_CHAT_STEPS = 15
+export { MAX_CHAT_STEPS }
 
 /** 末步收敛时追加到 system 尾部的强制收尾指令。 */
 const WIND_DOWN_INSTRUCTION =

@@ -13,6 +13,7 @@ import {
   type ChatMessageMetadata,
   type ChatModelGroup,
   type ChatGroup,
+  type ChatReattachState,
   type ChatStreamChunk,
   type DriverPart,
   type ModelParams,
@@ -64,6 +65,13 @@ export type PendingMessage = {
   text: string
   files?: UserFileAttachment[]
 }
+
+/**
+ * reattach 接管登记：路由切换（如切去 Trace）卸载过 ChatPage 后，本挂载没有
+ * 活 transport session，但主进程流仍在跑；接管表按主进程快照登记在飞流，
+ * 全局事件监听用 appliedSeq 水位去重续应用，流终态时清除。
+ */
+type ReattachedStream = { streamId: string; assistantId: string; appliedSeq: number }
 
 function textOf(parts: DriverPart[]): string {
   return parts
@@ -139,6 +147,8 @@ export function useChat() {
   }, [compactingChatIds])
   /** 活跃流表(key = chatId,同一对话同时只允许一个流)。 */
   const activeStreams = useRef<Map<string, ActiveStream>>(new Map())
+  /** 重挂载后接管的在飞流（key = chatId）：不在 activeStreams 里，由全局监听续渲染。 */
+  const reattachedStreams = useRef<Map<string, ReattachedStream>>(new Map())
   /** 流看门狗:每个流一个 timer,收到事件时重置;超时(主进程崩溃/IPC 断连)则清理残留流状态。 */
   const streamWatchdogs = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const { modelGroups } = useChatModels()
@@ -339,6 +349,8 @@ export function useChat() {
       // 只终止该对话的流,不影响其它并行对话。
       activeStreams.current.get(id)?.abort()
       activeStreams.current.delete(id)
+      // reattach 接管登记同步解除（主进程 deleteChat 自行 abort；此处防残留登记误触）。
+      reattachedStreams.current.delete(id)
       const removeWatchdog = streamWatchdogs.current.get(id)
       if (removeWatchdog) {
         clearTimeout(removeWatchdog)
@@ -412,17 +424,37 @@ export function useChat() {
     [refreshMetas, showError, showSuccess]
   )
 
+  /** 编辑 workspace 分组(名称/目录);成功后刷新列表。 */
+  const updateGroup = useCallback(
+    async (id: string, name: string, directories: string[]) => {
+      try {
+        await api.updateChatWorkspace(id, name, directories)
+        await refreshMetas()
+        showSuccess('工作区已更新')
+      } catch (reason) {
+        showError(reason instanceof Error ? reason.message : String(reason))
+      }
+    },
+    [refreshMetas, showError, showSuccess]
+  )
+
   const stop = useCallback(() => {
     // 只停当前对话的流。
     const id = activeIdRef.current
-    if (id) {
+    if (!id) return
+    if (activeStreams.current.has(id)) {
       activeStreams.current.get(id)?.abort()
       const stopWatchdog = streamWatchdogs.current.get(id)
       if (stopWatchdog) {
         clearTimeout(stopWatchdog)
         streamWatchdogs.current.delete(id)
       }
+      return
     }
+    // reattach 接管流（重挂载后本挂载无活会话）：直接请主进程 abort；
+    // 流式态/看门狗的清理由终态事件（done）回到监听时 endReattach 完成。
+    const re = reattachedStreams.current.get(id)
+    if (re) void api.abortChat({ chatId: id, streamId: re.streamId })
   }, [])
 
   /**
@@ -621,6 +653,140 @@ export function useChat() {
     })
   }, [])
 
+  /**
+   * 解除一条 reattach 接管流：清接管登记、看门狗与流式态（流终态 / 看门狗超时
+   * 两条路径共用）。不 abort 主进程流——能走到这里说明主进程已自行收尾或断连。
+   */
+  const endReattach = useCallback(
+    (chatId: string) => {
+      reattachedStreams.current.delete(chatId)
+      const timer = streamWatchdogs.current.get(chatId)
+      if (timer) {
+        clearTimeout(timer)
+        streamWatchdogs.current.delete(chatId)
+      }
+      setStreamingChatIds((current) => {
+        if (!current.has(chatId)) return current
+        const next = new Set(current)
+        next.delete(chatId)
+        return next
+      })
+      setHintsByChat((current) => (current[chatId] ? { ...current, [chatId]: undefined } : current))
+      flushApprovals(chatId)
+      void refreshMetas()
+    },
+    [flushApprovals, refreshMetas]
+  )
+
+  /** reattach 流看门狗：与活流同策略—任何事件（含 heartbeat）重置；静默超时则清理残留流态。 */
+  const armReattachWatchdog = useCallback(
+    (chatId: string) => {
+      const existing = streamWatchdogs.current.get(chatId)
+      if (existing) clearTimeout(existing)
+      streamWatchdogs.current.set(
+        chatId,
+        setTimeout(() => {
+          if (!reattachedStreams.current.has(chatId)) return
+          // HITL 等待用户响应期间无事件属正常态，不视为流死亡（同活流看门狗语义）。
+          if (pendingApprovalsRef.current[chatId]?.length) return
+          endReattach(chatId)
+        }, STREAM_WATCHDOG_MS)
+      )
+    },
+    [endReattach]
+  )
+
+  // === reattach：路由切换（如切去 Trace）卸载过 ChatPage 后，活事件订阅已随
+  // 组件销毁，但主进程流照常运行并 dispatch。重新挂载时：
+  // 1. 先注册全局接管监听（早于拉快照，保证快照之后的事件不漏）；
+  // 2. 拉主进程在飞流快照，用内存 parts 覆盖磁盘增量快照（最多滞后 3s），
+  //    登记接管表并恢复流式态；后续事件按 seq 水位 take-the-larger 去重。
+  useEffect(() => {
+    const unsubscribe = api.onChatStreamEvent((event) => {
+      const entry = reattachedStreams.current.get(event.chatId)
+      if (!entry || entry.streamId !== event.streamId) return
+      // 本挂载已为该对话起了新活流（重新发送接管旧轮）：让位给活会话，不双渲染。
+      if (activeStreams.current.has(event.chatId)) return
+      armReattachWatchdog(event.chatId)
+      if (event.done) {
+        endReattach(event.chatId)
+        return
+      }
+      const chunk = event.chunk
+      if (!chunk) return
+      const seq = event.seq
+      if (seq !== undefined) {
+        // 去重：快照已含 seq ≤ 水位的内容（主进程先累积后 dispatch，重叠部分不重应用）。
+        if (seq <= entry.appliedSeq) return
+        entry.appliedSeq = seq
+      }
+      applyChunk(event.chatId, entry.assistantId, chunk)
+      // done chunk 后主进程还会发 done:true 信封；提前解除，后者自然落空。
+      if (chunk.type === 'done') endReattach(event.chatId)
+    })
+    return unsubscribe
+  }, [applyChunk, armReattachWatchdog, endReattach])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      let state: ChatReattachState
+      try {
+        state = await api.getChatReattachState()
+      } catch {
+        return
+      }
+      if (cancelled || state.streams.length === 0) return
+      const chatsById = new Map(
+        state.chats
+          .filter((chat): chat is NonNullable<typeof chat> => Boolean(chat))
+          .map((chat) => [chat.conversation.id, chat])
+      )
+      for (const stream of state.streams) {
+        // StrictMode 双挂载 / 本挂载已有活流：已登记或已接管的不重复处理（新快照重跑也安全：
+        // 主进程侧 seq/parts 单调更新，覆盖为更新的状态）。
+        if (activeStreams.current.has(stream.chatId)) continue
+        const chat = chatsById.get(stream.chatId)
+        // 对话已被删除（快照取不到）：不接管，残留登记（若有）直接解除。
+        if (!chat) {
+          endReattach(stream.chatId)
+          continue
+        }
+        const snapshotMessage: ChatMessage = {
+          id: stream.assistantId,
+          role: 'assistant',
+          createdAt: stream.createdAt,
+          driverId: stream.driverId,
+          raw: { kind: 'assistant', parts: stream.parts },
+          parts: stream.parts,
+          metadata: { createdAt: stream.createdAt, model: stream.model }
+        }
+        // 以下三步必须同步完成（无 await）：登记接管表前到达的事件会被监听丢弃，
+        // 但主进程「先累积 parts 后 dispatch」保证未送达的事件必在快照内（seq ≤ 水位）。
+        setConversationsByChat((current) =>
+          current[stream.chatId] ? current : { ...current, [stream.chatId]: chat.conversation }
+        )
+        setMessagesByChat((current) => {
+          const list = current[stream.chatId] ?? chat.messages
+          const rest = list.filter((message) => message.id !== stream.assistantId)
+          return { ...current, [stream.chatId]: [...rest, snapshotMessage] }
+        })
+        reattachedStreams.current.set(stream.chatId, {
+          streamId: stream.streamId,
+          assistantId: stream.assistantId,
+          appliedSeq: stream.seq
+        })
+        setStreamingChatIds((current) => new Set(current).add(stream.chatId))
+        armReattachWatchdog(stream.chatId)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // 仅挂载时拉一次：接管表后续由事件监听自行收敛，不依赖其它状态。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   /** 将消息加入指定对话的待发送队列（对话进行中用户预输入）。 */
   const enqueuePending = useCallback((chatId: string, text: string, files?: UserFileAttachment[]) => {
     const message: PendingMessage = { id: crypto.randomUUID(), text, files }
@@ -742,6 +908,12 @@ export function useChat() {
         [chatId]: [...(current[chatId] ?? []), userMessage, assistantMessage]
       }))
       setStreamingChatIds((current) => new Set(current).add(chatId))
+      // 旧轮若正被 reattach 接管：主进程启动新流时会自动 abort 它，这里提前
+      // 注销接管登记，避免旧轮终态事件误清新流的流式态/看门狗（共享 chatId 键）。
+      if (reattachedStreams.current.delete(chatId)) {
+        const staleTimer = streamWatchdogs.current.get(chatId)
+        if (staleTimer) clearTimeout(staleTimer)
+      }
 
       const session = transport.start({
         streamId,
@@ -959,6 +1131,7 @@ export function useChat() {
       create,
       remove,
       removeGroup,
+      updateGroup,
       send,
       stop,
       pushApproval,
@@ -1008,6 +1181,7 @@ export function useChat() {
       create,
       remove,
       removeGroup,
+      updateGroup,
       send,
       stop,
       pushApproval,

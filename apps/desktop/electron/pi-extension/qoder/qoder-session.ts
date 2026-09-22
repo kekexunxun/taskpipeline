@@ -29,6 +29,7 @@ import {
 import type { ChatStreamChunk, ChatTaskCreationResult, DriverPart, UserFileAttachment } from '../../chat/chat-types.js'
 import type { ToolSource } from '../../chat/drivers/tool-source.js'
 import type { ChatAttachmentCache } from '../../chat/chat-attachment-cache.js'
+import { STEP_LIMIT_NOTICE } from '../../chat/chat-step-limit.js'
 
 /** SDK query options(用于让会话 options 与 SDK 类型严格对齐)。 */
 type SdkQueryOptions = NonNullable<Parameters<typeof query>[0]['options']>
@@ -883,6 +884,11 @@ export class QoderSession {
           turn.taskCreated = true
           this.pushChunk(turn, { type: 'task-created', result: described as ChatTaskCreationResult })
         }
+      }
+      if (message.subtype === 'error_max_turns') {
+        // 撞 SDK maxTurns 上限:此前静默收尾(界面表现为「没说完就停了」),补一条可见提示。
+        // 作为 text part 落盘,历史回放同样可见(Qoder 历史由 SDK session 管理,parts 仅展示)。
+        pushPart({ driverId: 'qoder', type: 'text', text: STEP_LIMIT_NOTICE })
       }
       turn.status = 'done'
       this.wakeTurn(turn)

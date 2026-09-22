@@ -790,6 +790,8 @@ export function registerIpc(d: IpcDeps): void {
     void chatService.startChatStream(input).catch((reason) => console.error('[chat] stream_failed', reason))
   })
   ipcMain.handle('chats:abort', (_event, input) => chatService.abortChat(input))
+  /** 渲染层重挂载 reattach（如切去 Trace 再切回 Chat）：在飞流内存快照 + 所属对话数据。 */
+  ipcMain.handle('chats:reattach', () => chatService.getReattachState())
   ipcMain.handle('chats:inject-guidance', (_event, chatId: string, text: string) =>
     chatService.injectGuidance(chatId, text)
   )
@@ -849,6 +851,11 @@ export function registerIpc(d: IpcDeps): void {
   })
   ipcMain.handle('chat-groups:create-workspace', async (_event, name: string, directories: string[]) => {
     const result = await chatService.createWorkspaceGroup(name, directories)
+    await refreshPathRegistry()
+    return result
+  })
+  ipcMain.handle('chat-groups:update-workspace', async (_event, id: string, name: string, directories: string[]) => {
+    const result = await chatService.updateWorkspaceGroup(id, name, directories)
     await refreshPathRegistry()
     return result
   })

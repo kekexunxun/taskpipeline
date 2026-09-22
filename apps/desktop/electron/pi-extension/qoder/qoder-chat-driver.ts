@@ -40,7 +40,8 @@ import type {
 } from '../../chat/chat-types.js'
 import type { McpServiceProfileResolver } from '../../mcp/mcp-services.js'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
-import { CODEBASE_SEARCH_STEERING } from '../../codeindex/codebase-search-tool.js'
+import { CODEBASE_SEARCH_STEERING, CODEBASE_SEARCH_SUBAGENT_STEERING } from '../../codeindex/codebase-search-tool.js'
+import { MAX_CHAT_STEPS } from '../../chat/chat-step-limit.js'
 import { QoderSession, QoderSessionRegistry } from './qoder-session.js'
 import { QoderTraceBuilder } from './trace-builder.js'
 import { buildToolSourceMcp } from './tool-source-mcp.js'
@@ -417,6 +418,8 @@ export class QoderChatDriver implements ChatDriver {
       }
       if (toolNames.has('codebase_search')) {
         systemPromptParts.push(CODEBASE_SEARCH_STEERING)
+        // 子代理看不到 codebase_search：额外要求主会话先自己取锚点再委派，避免整包甩给 Explore 退回 grep。
+        systemPromptParts.push(CODEBASE_SEARCH_SUBAGENT_STEERING)
       }
     }
     const systemPrompt = systemPromptParts.join('\n\n')
@@ -458,7 +461,9 @@ export class QoderChatDriver implements ChatDriver {
       // 始终预授权 `Agent`：委派 planner 子代理不该再弹一层确认框。
       // search_memory 由宿主自己检索、无副作用,同样预授权免弹框。
       allowedTools: ['Agent', ...(mcpSetup?.toolNames ?? []), ...(memoryMcp?.toolNames ?? [])],
-      ...(taskSource && mcpSetup ? { maxTurns: 10 } : {}),
+      // 挂任务工具的 chat 也要留够主循环步数:与 OpenAI 路径共享 MAX_CHAT_STEPS 口径,
+      // 撞线时 SDK 发 result.subtype='error_max_turns',由 qoder-session 补可见提示收尾。
+      ...(taskSource && mcpSetup ? { maxTurns: MAX_CHAT_STEPS } : {}),
       ...(serverNames.length
         ? {
             mcpServers,

@@ -106,6 +106,8 @@ contextBridge.exposeInMainWorld('agentApi', {
   getDefaultModel: () => ipcRenderer.invoke('chats:default-model'),
   startChatStream: (input: unknown) => ipcRenderer.invoke('chats:start-stream', input),
   abortChat: (input: unknown) => ipcRenderer.invoke('chats:abort', input),
+  /** 渲染层重挂载 reattach：取在飞流快照与所属对话数据（切回 Chat 续渲染）。 */
+  getChatReattachState: () => ipcRenderer.invoke('chats:reattach'),
   /** 对话引导：在当前轮次注入引导消息，不打断对话。 */
   injectChatGuidance: (chatId: string, text: string) => ipcRenderer.invoke('chats:inject-guidance', chatId, text),
   /** 保存附件到本地缓存（渲染进程 → 主进程写文件，返回本地路径）。 */
@@ -124,6 +126,8 @@ contextBridge.exposeInMainWorld('agentApi', {
   // === Chat 分组(工作区 CRUD) ==================================================
   createChatWorkspace: (name: string, directories: string[]) =>
     ipcRenderer.invoke('chat-groups:create-workspace', name, directories),
+  updateChatWorkspace: (id: string, name: string, directories: string[]) =>
+    ipcRenderer.invoke('chat-groups:update-workspace', id, name, directories),
   deleteChatGroup: (id: string) => ipcRenderer.invoke('chat-groups:delete', id),
   onChatStreamEvent: (callback: (event: unknown) => void) => {
     const listener = (_: unknown, event: unknown) => callback(event)

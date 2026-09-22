@@ -846,4 +846,74 @@ describe('ChatService driver 挂死检测（主进程侧静默探活）', () => 
       mockUiPending = false
     }
   })
+
+  it('reattach：在飞流内存快照与 dispatch seq 单调水位', async () => {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const base = createFakeDriver({
+      id: 'qoder',
+      displayName: 'Qoder',
+      scripts: [],
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
+    })
+    const gated: ChatDriver = {
+      ...base,
+      async *streamChat(_input) {
+        yield { type: 'part', part: { driverId: 'qoder', type: 'text', text: '半程' } } satisfies ChatStreamChunk
+        await gate
+        yield { type: 'part', part: { driverId: 'qoder', type: 'text', text: '后续' } } satisfies ChatStreamChunk
+        yield { type: 'done', status: 'done' } satisfies ChatStreamChunk
+      }
+    }
+    const registry = new ChatDriverRegistry()
+    registry.register(gated)
+    const envelopes: { seq?: number; done?: boolean; chunk?: ChatStreamChunk }[] = []
+    const win = {
+      webContents: {
+        send: (_channel: string, payload: { seq?: number; done?: boolean; chunk?: ChatStreamChunk }) => {
+          envelopes.push(payload)
+        }
+      }
+    } as unknown as BrowserWindow
+    const service = new ChatService(fakeStore(), dataDir, registry, () => win)
+    const conv = await service.createChat('qoder', 'qoder:test')
+    const streamPromise = service.startChatStream({
+      streamId: 'stream-re',
+      chatId: conv.id,
+      driverId: 'qoder',
+      model: 'qoder:test',
+      message: { id: 'u1', text: 'hello', createdAt: new Date().toISOString() }
+    })
+    // 等首个 part 事件外发（主进程先累积 parts 后 dispatch，事件到达即快照含该 part）。
+    await vi.waitFor(() => expect(envelopes.some((e) => e.chunk?.type === 'part')).toBe(true))
+
+    const state = await service.getReattachState()
+    expect(state.streams).toHaveLength(1)
+    const snapshot = state.streams[0]!
+    expect(snapshot.chatId).toBe(conv.id)
+    expect(snapshot.streamId).toBe('stream-re')
+    expect(snapshot.driverId).toBe('qoder')
+    expect(snapshot.model).toBe('qoder:test')
+    expect(snapshot.assistantId).toBeTruthy()
+    expect(snapshot.parts.map((p) => (p.type === 'text' ? p.text : ''))).toEqual(['半程'])
+    // seq 水位 ≥ 已到达的 part 事件序号：重挂载方据此对续流事件去重。
+    const lastPartSeq = Math.max(...envelopes.filter((e) => e.seq !== undefined).map((e) => e.seq!))
+    expect(snapshot.seq).toBeGreaterThanOrEqual(lastPartSeq)
+    // 对话全量数据随行（在飞 assistant 由定时增量落盘，此处至少含 user）。
+    expect(state.chats[0]?.messages.some((m) => m.role === 'user')).toBe(true)
+
+    release()
+    await streamPromise
+    // 所有活跃流事件都带单调递增 seq；收尾 done:true 信封不带。
+    const seqs = envelopes.filter((e) => e.seq !== undefined).map((e) => e.seq!)
+    expect(seqs.length).toBeGreaterThan(2)
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b))
+    expect(new Set(seqs).size).toBe(seqs.length)
+    expect(envelopes.at(-1)).toMatchObject({ done: true })
+    expect(envelopes.at(-1)?.seq).toBeUndefined()
+    // 流收口后不再有可接管的在飞流。
+    expect((await service.getReattachState()).streams).toHaveLength(0)
+  })
 })

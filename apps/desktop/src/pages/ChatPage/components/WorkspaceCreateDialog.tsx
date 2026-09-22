@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { FolderIcon, PlusIcon, XIcon } from 'lucide-react'
 import { api } from '@/api'
 import type { ChatGroup } from '@/api'
@@ -18,19 +18,36 @@ function baseName(dir: string): string {
   return dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
 }
 
+/**
+ * 工作区创建 / 编辑弹窗。
+ * - 不传 `editGroup` = 创建模式；
+ * - 传入 `editGroup` = 编辑模式，打开时用其 name/directories 预填表单。
+ */
 export function WorkspaceCreateDialog({
   open,
   onOpenChange,
-  onCreated
+  editGroup,
+  onSaved
 }: {
   open: boolean
   onOpenChange(open: boolean): void
-  onCreated(group: ChatGroup): void
+  /** 传入则为编辑模式，反填其名称与目录。 */
+  editGroup?: ChatGroup
+  /** 创建或编辑成功后回调，携带保存后的分组。 */
+  onSaved(group: ChatGroup): void
 }) {
   const { showError } = useFeedback()
   const [name, setName] = useState('')
   const [directories, setDirectories] = useState<string[]>([])
-  const [creating, setCreating] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const isEdit = !!editGroup
+
+  // 打开时同步表单：编辑模式反填，创建模式清空。
+  useEffect(() => {
+    if (!open) return
+    setName(editGroup?.name ?? '')
+    setDirectories(editGroup?.directories ?? [])
+  }, [open, editGroup])
 
   const handleAddDirectories = useCallback(async () => {
     try {
@@ -50,7 +67,7 @@ export function WorkspaceCreateDialog({
     setDirectories((prev) => prev.filter((d) => d !== dir))
   }
 
-  const handleCreate = async () => {
+  const handleSave = async () => {
     if (!name.trim()) {
       showError('请输入工作区名称')
       return
@@ -59,18 +76,21 @@ export function WorkspaceCreateDialog({
       showError('请至少选择 2 个目录')
       return
     }
-    setCreating(true)
+    setSaving(true)
     try {
-      const group = await api.createChatWorkspace(name.trim(), directories)
-      onCreated(group)
-      // 重置表单
-      setName('')
-      setDirectories([])
+      const group = isEdit
+        ? await api.updateChatWorkspace(editGroup!.id, name.trim(), directories)
+        : await api.createChatWorkspace(name.trim(), directories)
+      if (!group) {
+        showError('工作区不存在或已被删除')
+        return
+      }
+      onSaved(group)
       onOpenChange(false)
     } catch (reason) {
       showError(reason instanceof Error ? reason.message : String(reason))
     } finally {
-      setCreating(false)
+      setSaving(false)
     }
   }
 
@@ -87,7 +107,7 @@ export function WorkspaceCreateDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>创建工作区</DialogTitle>
+          <DialogTitle>{isEdit ? '编辑工作区' : '创建工作区'}</DialogTitle>
           <DialogDescription>将多个项目目录组合为一个工作区，用于跨项目对话。</DialogDescription>
         </DialogHeader>
 
@@ -151,8 +171,8 @@ export function WorkspaceCreateDialog({
           <Button variant="outline" size="sm" onClick={() => handleOpenChange(false)}>
             取消
           </Button>
-          <Button size="sm" onClick={handleCreate} disabled={creating || !name.trim() || directories.length < 2}>
-            {creating ? '创建中...' : '创建工作区'}
+          <Button size="sm" onClick={handleSave} disabled={saving || !name.trim() || directories.length < 2}>
+            {saving ? (isEdit ? '保存中...' : '创建中...') : isEdit ? '保存修改' : '创建工作区'}
           </Button>
         </DialogFooter>
       </DialogContent>
