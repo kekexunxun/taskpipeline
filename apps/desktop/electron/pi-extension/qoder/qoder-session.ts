@@ -403,6 +403,11 @@ export class QoderSession {
     // 不过滤 result/error:竞态下消费循环可能抢先把本回合输出(含 result)全部缓冲,
     // 过滤 result 会导致回合永不结束;result/error 由 handleMessage 自然收尾。
     const buffered = this.pendingMessages.splice(0)
+    if (buffered.length > 0) {
+      // 诊断日志：记录重放的残留消息类型，便于排查跨回合污染（如子任务取消后的 subtask-progress）。
+      const types = buffered.map((m) => `${m.type}${m.subtype ? `:${m.subtype}` : ''}`).join(', ')
+      console.debug(`[qoder-session] replaying ${buffered.length} pending messages at turn start: ${types}`)
+    }
     for (const message of buffered) {
       this.handleMessage(message, turn)
     }
@@ -557,6 +562,13 @@ export class QoderSession {
   }
 
   private pushUserMessage(text: string, files?: UserFileAttachment[], attachmentCache?: ChatAttachmentCache): void {
+    // 诊断日志：记录用户消息推送到 SDK 输入流（特别是自动续跑消息）。
+    const isAutoContinue = text === QODER_AUTO_CONTINUE_PROMPT
+    if (isAutoContinue) {
+      console.debug(
+        `[qoder-session] pushing auto-continue message, hasWaiter=${this.inputWaiters.length > 0}, queueSize=${this.inputQueue.length}`
+      )
+    }
     // 构建 content blocks：文本 + 图片（如有附件）
     const content: Array<Record<string, unknown>> = [{ type: 'text', text }]
 
@@ -585,8 +597,14 @@ export class QoderSession {
       parent_tool_use_id: null
     }
     const waiter = this.inputWaiters.shift()
-    if (waiter) waiter(message)
-    else this.inputQueue.push(message)
+    if (waiter) {
+      waiter(message)
+      if (isAutoContinue) console.debug(`[qoder-session] auto-continue message delivered via waiter`)
+    } else {
+      this.inputQueue.push(message)
+      if (isAutoContinue)
+        console.debug(`[qoder-session] auto-continue message queued, new size=${this.inputQueue.length}`)
+    }
   }
 
   private wakeTurn(turn: ActiveTurn): void {
@@ -928,6 +946,10 @@ export class QoderSession {
     }
 
     if (message.type === 'result') {
+      // 诊断日志：记录 result 的 subtype，便于排查回合异常结束（如 error_max_turns 未触发自动续跑）。
+      if (message.subtype) {
+        console.debug(`[qoder-session] result received: subtype=${message.subtype}, budget=${turn.autoContinueBudget}`)
+      }
       const resultText = typeof message.result === 'string' ? message.result : ''
       if (resultText && !turn.buffer.includes(resultText)) {
         const extra = resultText.startsWith(turn.buffer) ? resultText.slice(turn.buffer.length) : resultText
@@ -957,6 +979,17 @@ export class QoderSession {
       }
       turn.status = 'done'
       this.wakeTurn(turn)
+      // 回合结束后延迟清空 pendingMessages：SDK 可能在 result 后发送残留消息（如被取消子任务的
+      // subtask-progress），这些消息不应被下一回合重放。延迟 100ms 允许 legitimate 消息先被处理。
+      setTimeout(() => {
+        if (this.pendingMessages.length > 0) {
+          const staleTypes = this.pendingMessages.map((m) => m.type).join(', ')
+          console.debug(
+            `[qoder-session] clearing ${this.pendingMessages.length} stale pending messages after turn end: ${staleTypes}`
+          )
+          this.pendingMessages.length = 0
+        }
+      }, 100)
       return
     }
 
