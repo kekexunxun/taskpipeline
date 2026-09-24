@@ -10,7 +10,7 @@
  *
  * 所有业务逻辑已提取到独立模块，本文件仅负责「接线」。
  */
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { app, BrowserWindow, nativeImage } from 'electron'
@@ -22,6 +22,7 @@ import {
   type SettingResolver
 } from '@task-pipeline/core'
 import { redactSecrets } from '@task-pipeline/integrations'
+import { indexKeyFor } from '@task-pipeline/codeindex'
 import { QoderOrchestrator, QoderTraceBuilder, sweepOrphanTaskSessions } from './pi-extension/qoder/index.js'
 import { initAutoUpdater } from './auto-updater.js'
 import { TracePipeline } from './trace/bus/trace-pipeline.js'
@@ -215,6 +216,30 @@ initModelProfile({
 const memoryService = new MemoryService(store)
 // 源码索引服务（mini-Atlas）：模块级单例，库落在 dataDir 内、用户仓库外。
 initCodeIndex(dataDir)
+// 一次性回填：为已有索引目录补写 meta.json（版本发布前不存在 meta.json），孤儿目录直接清理。
+try {
+  const ciRoot = join(dataDir, 'codeindex')
+  if (existsSync(ciRoot)) {
+    const knownKeys = new Map<string, string>()
+    for (const repo of store.listRepositoryProfiles()) {
+      knownKeys.set(indexKeyFor(repo.localPath), repo.localPath)
+    }
+    for (const entry of readdirSync(ciRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const entryDir = join(ciRoot, entry.name)
+      const metaPath = join(entryDir, 'meta.json')
+      if (existsSync(metaPath)) continue
+      const originalDir = knownKeys.get(entry.name)
+      if (originalDir) {
+        writeFileSync(metaPath, JSON.stringify({ dir: originalDir, createdAt: new Date().toISOString() }))
+      } else {
+        rmSync(entryDir, { recursive: true, force: true })
+      }
+    }
+  }
+} catch (error) {
+  console.warn('[codeindex] meta.json backfill migration failed:', error)
+}
 // 启动迁移：检测旧 memories / repo_wiki_docs 表，有数据则迁移到新 MemoryEngine
 try {
   memoryService.runLegacyMigration()

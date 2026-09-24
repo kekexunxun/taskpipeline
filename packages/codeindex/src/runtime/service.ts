@@ -1,11 +1,13 @@
 /** 可复用的多目录索引服务；不依赖 Electron，也不自行选择数据库或监听实现。 */
-import { basename, join } from 'node:path'
-import type { CodeIndexStore } from '../db/sqlite-store.js'
+import { basename, dirname, join } from 'node:path'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import type Database from 'better-sqlite3'
+import { CodeIndexStore } from '../db/sqlite-store.js'
 import { CodeIndexer } from '../indexer/index.js'
 import { DebouncedSyncQueue, type SyncRunContext } from '../indexer/sync.js'
 import { unsafeIndexRootReason } from '../indexer/discover.js'
 import { formatBoundedSearch } from '../search/bounded-formatter.js'
-import type { FileSystem, IndexWatcher, IndexWatcherFactory, ParserBackend, SearchHit } from '../types.js'
+import type { FileSystem, IndexSummary, IndexWatcher, IndexWatcherFactory, ParserBackend, SearchHit } from '../types.js'
 import { type CodeIndexRegistry, indexKeyFor } from './registry.js'
 
 export interface IndexRoot {
@@ -29,6 +31,13 @@ export interface CodeIndexServiceOptions {
   /** 不提供则不监听，适用于一次性索引、CLI 或自定义变更通知。 */
   createWatcher?: IndexWatcherFactory
   onError?: (error: unknown, context: { phase: 'index' | 'sync'; rootDir: string }) => void
+  /**
+   * 索引存储根目录（如 dataDir/codeindex）；提供后启用 listIndexes 磁盘发现。
+   * 不提供时 listIndexes 只返回内存中已加载的索引。
+   */
+  indexRootDir?: string
+  /** 打开临时数据库连接用；listIndexes 发现离线索引时需要。 */
+  openDatabase?: (dbPath: string) => Database.Database
 }
 
 interface DirState {
@@ -192,6 +201,137 @@ export class CodeIndexService {
       const state = this.states.get(indexKeyFor(dir))
       return { dir, ready: state?.ready ?? false, nodes: state ? state.store.getStats(state.repoId).nodeCount : 0 }
     })
+  }
+
+  // ── 索引管理 ────────────────────────────────────────────────────────────
+
+  /**
+   * 扫描 indexRootDir 下所有索引（含未在内存中的），返回摘要列表。
+   * 未提供 indexRootDir 时只返回内存中已加载的索引。
+   */
+  listIndexes(): IndexSummary[] {
+    const results: IndexSummary[] = []
+    const seen = new Set<string>()
+
+    // 1) 内存中已加载的索引
+    for (const state of this.states.values()) {
+      if (state.closing) continue
+      const stats = state.store.getStats(state.repoId)
+      const dbPath = this.registry.dbPathFor(state.dir)
+      let dbSizeBytes = 0
+      try {
+        dbSizeBytes = statSync(dbPath).size
+      } catch {
+        /* ignore */
+      }
+      results.push({
+        dir: state.dir,
+        key: state.repoId,
+        dbPath,
+        ready: state.ready,
+        indexing: !state.ready,
+        nodeCount: stats.nodeCount,
+        fileCount: stats.fileCount,
+        edgeCount: stats.edgeCount,
+        dbSizeBytes,
+        createdAt: this.readMetaCreatedAt(dbPath),
+        languages: Object.keys(stats.filesByLanguage)
+      })
+      seen.add(state.repoId)
+    }
+
+    // 2) 磁盘上存在但不在内存中的索引
+    const rootDir = this.opts.indexRootDir
+    if (rootDir && existsSync(rootDir)) {
+      for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const key = entry.name
+        if (seen.has(key)) continue
+        const entryDir = join(rootDir, key)
+        const dbPath = join(entryDir, 'graph.db')
+        if (!existsSync(dbPath)) continue
+        const meta = this.readMeta(entryDir)
+        if (!meta) continue // 无 meta.json 跳过
+        let dbSizeBytes = 0
+        try {
+          dbSizeBytes = statSync(dbPath).size
+        } catch {
+          /* ignore */
+        }
+        // 临时打开 DB 取 stats
+        let nodeCount = 0,
+          fileCount = 0,
+          edgeCount = 0
+        let languages: string[] = []
+        const openDb = this.opts.openDatabase
+        if (openDb) {
+          let tmpDb: Database.Database | undefined
+          try {
+            tmpDb = openDb(dbPath)
+            const tmpStore = new CodeIndexStore(tmpDb)
+            const s = tmpStore.getStats(key)
+            nodeCount = s.nodeCount
+            fileCount = s.fileCount
+            edgeCount = s.edgeCount
+            languages = Object.keys(s.filesByLanguage)
+          } catch {
+            /* 打开失败跳过 */
+          } finally {
+            try {
+              tmpDb?.close()
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+        results.push({
+          dir: meta.dir,
+          key,
+          dbPath,
+          ready: false,
+          indexing: false,
+          nodeCount,
+          fileCount,
+          edgeCount,
+          dbSizeBytes,
+          createdAt: meta.createdAt,
+          languages
+        })
+        seen.add(key)
+      }
+    }
+
+    return results
+  }
+
+  /** 删除指定目录的索引（复用 disposeWorkspace 的安全链路）。 */
+  async deleteIndex(dir: string): Promise<void> {
+    await this.disposeWorkspace(dir, true)
+  }
+
+  /** 重建指定目录的索引：先删库再懒建。首扫异步执行，调用方可刷新列表观察进度。 */
+  async rebuildIndex(dir: string): Promise<void> {
+    await this.disposeWorkspace(dir, true)
+    this.ensureIndexed(dir)
+  }
+
+  private readMetaCreatedAt(dbPath: string): string {
+    try {
+      const meta = JSON.parse(readFileSync(join(dirname(dbPath), 'meta.json'), 'utf-8'))
+      return typeof meta.createdAt === 'string' ? meta.createdAt : ''
+    } catch {
+      return ''
+    }
+  }
+
+  private readMeta(indexDir: string): { dir: string; createdAt: string } | undefined {
+    try {
+      const meta = JSON.parse(readFileSync(join(indexDir, 'meta.json'), 'utf-8'))
+      if (typeof meta.dir === 'string') return { dir: meta.dir, createdAt: meta.createdAt ?? '' }
+      return undefined
+    } catch {
+      return undefined
+    }
   }
 
   private async runSync(state: DirState, ctx: SyncRunContext): Promise<void> {

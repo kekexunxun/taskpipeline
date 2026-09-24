@@ -1,6 +1,7 @@
 /** 按工作目录管理连接、引用计数、LRU 和写锁；数据库位置及创建/清理策略由宿主注入。 */
 import { createHash } from 'node:crypto'
-import { resolve } from 'node:path'
+import { existsSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import type Database from 'better-sqlite3'
 import { CodeIndexStore } from '../db/sqlite-store.js'
 
@@ -149,6 +150,15 @@ export class CodeIndexRegistry {
     const db = this.opts.openDatabase(dbPath)
     try {
       const store = new CodeIndexStore(db).init()
+      // 写入索引元数据：记录原始目录路径，供 listIndexes 发现磁盘索引时使用。
+      const metaPath = join(dirname(dbPath), 'meta.json')
+      if (!existsSync(metaPath)) {
+        try {
+          writeFileSync(metaPath, JSON.stringify({ dir: resolve(dir), createdAt: new Date().toISOString() }))
+        } catch {
+          /* 元数据写入失败不影响索引功能 */
+        }
+      }
       return { dir: resolve(dir), repoId: key, dbPath, db, store, users: 0, lastUsed: Date.now() }
     } catch (error) {
       db.close()

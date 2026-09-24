@@ -271,4 +271,27 @@ export interface IndexStats {
   filesByLanguage: Record<string, number>
 }
 
+/** 单个索引目录的管理摘要（listIndexes 返回）。 */
+export interface IndexSummary {
+  /** 原始工作目录绝对路径。 */
+  dir: string
+  /** sha256 前 32 位，即索引目录名。 */
+  key: string
+  /** 数据库文件绝对路径。 */
+  dbPath: string
+  /** 是否在内存中且首扫完成。 */
+  ready: boolean
+  /** 是否正在首扫。 */
+  indexing: boolean
+  nodeCount: number
+  fileCount: number
+  edgeCount: number
+  /** 数据库文件大小（字节）。 */
+  dbSizeBytes: number
+  /** 首次索引时间（ISO 8601）。 */
+  createdAt: string
+  /** 已索引的语言列表。 */
+  languages: string[]
+}
+
 export type { Database }

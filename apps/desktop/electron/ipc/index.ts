@@ -875,6 +875,22 @@ export function registerIpc(d: IpcDeps): void {
   // === PathRegistry ==========================================================
   ipcMain.handle('path-registry:list', () => pathRegistry.listEntries())
 
+  // === CodeIndex 索引管理 =================================================
+  ipcMain.handle('codeindex:list', async () => {
+    const { listCodeIndexeses } = await import('../codeindex/codeindex-service.js')
+    return listCodeIndexeses()
+  })
+  ipcMain.handle('codeindex:delete', async (_event, dir: string) => {
+    if (!dir || typeof dir !== 'string') throw new Error('无效的目录路径')
+    const { deleteCodeIndex } = await import('../codeindex/codeindex-service.js')
+    await deleteCodeIndex(dir)
+  })
+  ipcMain.handle('codeindex:rebuild', async (_event, dir: string) => {
+    if (!dir || typeof dir !== 'string') throw new Error('无效的目录路径')
+    const { rebuildCodeIndex } = await import('../codeindex/codeindex-service.js')
+    await rebuildCodeIndex(dir)
+  })
+
   // === 自动更新 ==============================================================
   ipcMain.handle('app:version', () => app.getVersion())
 

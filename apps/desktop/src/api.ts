@@ -685,6 +685,21 @@ export type SkillInfo = {
   source: 'folder' | 'zip'
 }
 
+/** 源码索引管理摘要（codeindex）。 */
+export type CodeIndexSummary = {
+  dir: string
+  key: string
+  dbPath: string
+  ready: boolean
+  indexing: boolean
+  nodeCount: number
+  fileCount: number
+  edgeCount: number
+  dbSizeBytes: number
+  createdAt: string
+  languages: string[]
+}
+
 export type AgentApi = {
   listTasks(): Promise<TaskCard[]>
   getTask(id: string): Promise<TaskDetail>
@@ -796,6 +811,10 @@ export type AgentApi = {
   searchRepoWiki(repositoryId: string, query: string): Promise<RepoWikiSearchHit[]>
   // path-registry
   listPathRegistry(): Promise<PathRegistryEntry[]>
+  // codeindex
+  listCodeIndexes(): Promise<CodeIndexSummary[]>
+  deleteCodeIndex(dir: string): Promise<void>
+  rebuildCodeIndex(dir: string): Promise<void>
   // agents
   listAgents(): Promise<AgentProfile[]>
   saveAgent(profile: AgentProfile): Promise<AgentProfile[]>
@@ -1403,6 +1422,11 @@ export const api: AgentApi = window.agentApi ?? {
   async listPathRegistry() {
     return [] as PathRegistryEntry[]
   },
+  async listCodeIndexes() {
+    return [] as CodeIndexSummary[]
+  },
+  async deleteCodeIndex(_dir: string) {},
+  async rebuildCodeIndex(_dir: string) {},
 
   // Agent mock（浏览器回退模式：内存 demo 数据）
   async listAgents() {

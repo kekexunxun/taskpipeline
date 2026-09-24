@@ -84,6 +84,10 @@ contextBridge.exposeInMainWorld('agentApi', {
   searchRepoWiki: (repositoryId: string, query: string) => ipcRenderer.invoke('repowiki:search', repositoryId, query),
   // === PathRegistry 路径索引注册表 ==========================================
   listPathRegistry: () => ipcRenderer.invoke('path-registry:list'),
+  // === CodeIndex 索引管理 ==================================================
+  listCodeIndexes: () => ipcRenderer.invoke('codeindex:list'),
+  deleteCodeIndex: (dir: string) => ipcRenderer.invoke('codeindex:delete', dir),
+  rebuildCodeIndex: (dir: string) => ipcRenderer.invoke('codeindex:rebuild', dir),
   // === Agent 配置 ==================================================
   listAgents: () => ipcRenderer.invoke('agents:list'),
   saveAgent: (profile: unknown) => ipcRenderer.invoke('agents:save', profile),

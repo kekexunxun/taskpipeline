@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import {
   BotIcon,
   ChevronRightIcon,
@@ -11,7 +11,6 @@ import {
   PencilIcon,
   PlusIcon,
   RefreshCwIcon,
-  SearchIcon,
   Trash2Icon,
   UploadIcon,
   InfoIcon,
@@ -24,11 +23,12 @@ import { MemoryDialog } from './MemoryDialog'
 import { OpenAIProfileDialog, type OpenAIProfile } from './OpenAIProfileDialog'
 import { McpSettingsTab } from './McpSettingsTab'
 import { SkillSettingsTab } from './SkillSettingsTab'
+import { CodeIndexSettingsTab } from './CodeIndexSettingsTab'
 import type { ChatConversationMeta, PathRegistryEntry } from '@/api'
 import { ModelBadges } from '@/components/ModelBadges'
 import { HitlModeSwitcher, type HitlMode } from '@/components/HitlModeSwitcher'
 import { detectVendor, MODEL_VENDORS, type ModelVendor } from '@/utils/model-vendors'
-import { api, type CapabilityKey, type MemorySearchResult, type SystemDefaultModel, type UpdateStatus } from '@/api'
+import { api, type CapabilityKey, type SystemDefaultModel, type UpdateStatus } from '@/api'
 import { useFeedback } from '@/hooks/useGlobalFeedback'
 import { useAgents } from '@/hooks/useAgents'
 import { cn } from '@/lib/utils'
@@ -349,233 +349,6 @@ function MemoryCard({
         </div>
       )}
     </article>
-  )
-}
-
-/**
- * 检索测试（仅开发环境）。
- *
- * - vite 在 dev 模式下会注入 `import.meta.env.DEV = true`，生产构建中该常量被
- *   静态替换为 `false`，esbuild 会把外层 `return null` 视作死代码并把
- *   `MemorySearchProbeInner` 一起从 bundle 中消除，因此不会影响生产包体或运行行为。
- * - 直接复用 `api.searchMemory`：与任务执行时 `consolidateTaskMemory` /
- *   `collectTaskMemoryContext` 调用的同一接口，确保调测结果与生产一致。
- * - 用 wrapper 包一层是为了让 dev 门控单独占据一个函数，从而避免
- *   `if (return) ... hooks` 触发 react-hooks/rules-of-hooks 错误。
- */
-function MemorySearchProbe({ repositories }: { repositories: RepositoryProfile[] }) {
-  if (!import.meta.env.DEV) return null
-  return <MemorySearchProbeInner repositories={repositories} />
-}
-
-function MemorySearchProbeInner({ repositories }: { repositories: RepositoryProfile[] }) {
-  const [query, setQuery] = useState('')
-  const [limit, setLimit] = useState(10)
-  const [selected, setSelected] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(repositories.map((repository) => [repository.id, true]))
-  )
-  const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState<MemorySearchResult | undefined>()
-  const [error, setError] = useState<string | undefined>()
-
-  const selectedRepositoryIds = useMemo(
-    () => repositories.filter((repository) => selected[repository.id]).map((repository) => repository.id),
-    [repositories, selected]
-  )
-
-  const run = async () => {
-    const trimmed = query.trim()
-    if (!trimmed) {
-      setError('请输入查询关键词')
-      return
-    }
-    setError(undefined)
-    setBusy(true)
-    try {
-      const response = await api.searchMemory(trimmed, {
-        repositoryIds: selectedRepositoryIds,
-        limit,
-        // 告诉主进程这是 dev 探针调用，让其落 trace_events（"other" 分类）。
-        // 生产聊天 / 任务流不设该字段，自然不会产生额外 trace。
-        traceSource: 'dev-probe'
-      })
-      setResult(response)
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
-      setResult(undefined)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <Section
-      title="检索测试（仅开发环境）"
-      description="复现任务执行前的检索调用，方便排查 FTS 命中与仓库文档索引问题；生产构建不显示。"
-    >
-      <div className="space-y-2.5">
-        <div className="flex flex-wrap items-end gap-2">
-          <Field label="查询词" className="min-w-[260px] flex-1">
-            <Input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="例如：优惠券并发幂等"
-              className="h-8 text-xs"
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') void run()
-              }}
-            />
-          </Field>
-          <Field label="Limit">
-            <Input
-              type="number"
-              min={1}
-              max={50}
-              value={limit}
-              onChange={(event) => {
-                const next = Number(event.target.value) || 10
-                setLimit(Math.max(1, Math.min(50, next)))
-              }}
-              className="h-8 w-16 text-xs"
-            />
-          </Field>
-          <Button size="sm" disabled={busy} onClick={() => void run()}>
-            {busy ? <Loader2Icon className="animate-spin-slow" size={11} /> : <SearchIcon size={11} />}
-            {busy ? '检索中' : '执行检索'}
-          </Button>
-        </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border bg-card/40 px-3 py-2 text-[11px]">
-          <span className="text-muted-foreground">仓库范围</span>
-          {repositories.length ? (
-            repositories.map((repository) => (
-              <label key={repository.id} className="inline-flex cursor-pointer items-center gap-1 text-foreground">
-                <input
-                  type="checkbox"
-                  className="size-3 accent-primary"
-                  checked={Boolean(selected[repository.id])}
-                  onChange={(event) =>
-                    setSelected((current) => ({ ...current, [repository.id]: event.target.checked }))
-                  }
-                />
-                <span className="truncate">{repository.name}</span>
-              </label>
-            ))
-          ) : (
-            <span className="text-muted-foreground">尚未配置仓库</span>
-          )}
-        </div>
-        {error && <p className="text-xs text-destructive">{error}</p>}
-        {result && (
-          <div className="space-y-3">
-            <div className="rounded-md border bg-card/40 px-3 py-2">
-              <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                <span>LLM 提取的关键词（实际走 FTS5 查的是这些）</span>
-                <span className="font-mono">{result.keywords.length} 个</span>
-              </div>
-              {result.keywords.length ? (
-                <div className="mt-1.5 flex flex-wrap gap-1">
-                  {result.keywords.map((keyword) => (
-                    <span
-                      key={keyword}
-                      className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] text-primary"
-                    >
-                      {keyword}
-                    </span>
-                  ))}
-                </div>
-              ) : (
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  （空。LLM 提取失败且 fallback 也没拿到任何关键词。）
-                </p>
-              )}
-            </div>
-            <ProbeResultGroup
-              title="记忆命中"
-              empty="未命中任何记忆（用户级 / 对话级 / 仓库级）"
-              items={result.memories}
-              renderItem={(item) => ({
-                key: item.id,
-                headline: item.title,
-                meta: `${item.scope}${item.repositoryId ? ' · 仓库级' : ''} · score ${item.score}`,
-                body: item.content,
-                tags: item.tags
-              })}
-            />
-            <ProbeResultGroup
-              title="repowiki 命中"
-              empty="未命中任何仓库文档"
-              items={result.wikiDocs}
-              renderItem={(item) => ({
-                key: item.id,
-                headline: item.title || item.path,
-                meta: `${item.path} · score ${item.score}`,
-                body: item.content,
-                tags: []
-              })}
-            />
-            <p className="text-[11px] text-muted-foreground">
-              共 {result.memories.length} 条记忆、{result.wikiDocs.length} 篇文档（仓库范围{' '}
-              {selectedRepositoryIds.length}）
-            </p>
-          </div>
-        )}
-      </div>
-    </Section>
-  )
-}
-
-type ProbeRenderedItem = {
-  key: string
-  headline: string
-  meta: string
-  body: string
-  tags: string[]
-}
-
-function ProbeResultGroup<T extends { id: string; score: number }>({
-  title,
-  empty,
-  items,
-  renderItem
-}: {
-  title: string
-  empty: string
-  items: T[]
-  renderItem: (item: T) => ProbeRenderedItem
-}) {
-  if (!items.length) {
-    return (
-      <div className="rounded-md border border-dashed p-3 text-center text-[11px] text-muted-foreground">{empty}</div>
-    )
-  }
-  return (
-    <div className="space-y-1.5">
-      <h4 className="text-xs font-semibold text-foreground">{title}</h4>
-      {items.map((item) => {
-        const view = renderItem(item)
-        return (
-          <article key={view.key} className="rounded-md border bg-card/40 px-3 py-2 text-xs leading-relaxed">
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-semibold text-foreground">{view.headline}</span>
-              <span className="font-mono text-[10px] text-muted-foreground">{view.meta}</span>
-            </div>
-            <p className="mt-1 break-words whitespace-pre-wrap text-muted-foreground">
-              {view.body.slice(0, 320)}
-              {view.body.length > 320 ? '…' : ''}
-            </p>
-            {view.tags.length > 0 && (
-              <div className="mt-1 flex flex-wrap gap-1">
-                {view.tags.map((tag) => (
-                  <span key={tag} className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                    {tag}
-                  </span>
-                ))}
-              </div>
-            )}
-          </article>
-        )
-      })}
-    </div>
   )
 }
 
@@ -1285,6 +1058,9 @@ export function SettingsDialog({
                 <TabsTrigger className="h-7 justify-start px-2 text-xs!" value="skill">
                   Skill
                 </TabsTrigger>
+                <TabsTrigger className="h-7 justify-start px-2 text-xs!" value="codeindex">
+                  索引
+                </TabsTrigger>
                 <TabsTrigger className="h-7 justify-start px-2 text-xs!" value="about">
                   关于
                 </TabsTrigger>
@@ -1307,17 +1083,17 @@ export function SettingsDialog({
                           value={settings.reviewBlockingLevel}
                           onValueChange={(value) => setSettingLive('reviewBlockingLevel', value)}
                         >
-                          <SelectTrigger className="h-8 w-[160px] text-xs" aria-label="Review 阻断级别">
+                          <SelectTrigger className="h-8 w-[160px] text-[11px]!" aria-label="Review 阻断级别">
                             <SelectValue />
                           </SelectTrigger>
-                          <SelectContent className="text-xs">
-                            <SelectItem value="critical" className="text-xs">
+                          <SelectContent>
+                            <SelectItem value="critical" className="text-[11px]">
                               仅 critical
                             </SelectItem>
-                            <SelectItem value="high" className="text-xs">
+                            <SelectItem value="high" className="text-[11px]">
                               critical + high（默认）
                             </SelectItem>
-                            <SelectItem value="medium" className="text-xs">
+                            <SelectItem value="medium" className="text-[11px]">
                               含 medium（最严）
                             </SelectItem>
                           </SelectContent>
@@ -1347,7 +1123,7 @@ export function SettingsDialog({
                           min={1}
                           max={10}
                           aria-label="自动修订轮数上限"
-                          className="h-8 w-16 rounded-md border bg-background px-2 text-xs"
+                          className="h-8 w-16 rounded-md border bg-background px-2 text-[11px]!"
                           value={Number(settings.reviewAutoFixMaxRounds) || 2}
                           onChange={(event) => updateRoundsLive(event.target.value)}
                         />
@@ -1363,14 +1139,14 @@ export function SettingsDialog({
                           value={settings.autoCreateMergeRequests}
                           onValueChange={(value) => setSettingLive('autoCreateMergeRequests', value)}
                         >
-                          <SelectTrigger className="h-8 w-[160px] text-xs" aria-label="MR 默认提交档">
+                          <SelectTrigger className="h-8 w-[180px] text-[11px]!" aria-label="MR 默认提交档">
                             <SelectValue />
                           </SelectTrigger>
-                          <SelectContent className="text-xs">
-                            <SelectItem value="false" className="text-xs">
-                              停在待提交，我手动提
+                          <SelectContent>
+                            <SelectItem value="false" className="text-[11px]">
+                              停在待提交，我手动处理
                             </SelectItem>
-                            <SelectItem value="true" className="text-xs">
+                            <SelectItem value="true" className="text-[11px]">
                               自动提交 MR
                             </SelectItem>
                           </SelectContent>
@@ -1701,7 +1477,6 @@ export function SettingsDialog({
                   </Tabs>
                 </TabsContent>
                 <TabsContent value="memory" className="flex flex-col gap-5">
-                  <MemorySearchProbe repositories={repositories} />
                   <Section
                     title="记忆管理"
                     description="用户级、仓库级与对话级长期记忆会注入到对话与任务执行上下文，可在此新增、修正或删除。"
@@ -2049,6 +1824,9 @@ export function SettingsDialog({
                 </TabsContent>
                 <TabsContent value="skill" className="space-y-5">
                   <SkillSettingsTab />
+                </TabsContent>
+                <TabsContent value="codeindex" className="space-y-5">
+                  <CodeIndexSettingsTab />
                 </TabsContent>
                 <TabsContent value="about" className="space-y-5">
                   <Section title="版本信息" description="查看当前版本并检查更新。">

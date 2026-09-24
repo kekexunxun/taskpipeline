@@ -21,6 +21,7 @@ export type {
   IndexProgress,
   IndexResult,
   IndexStats,
+  IndexSummary,
   IndexWatcher,
   IndexWatcherFactory,
   IndexWatcherOptions,
