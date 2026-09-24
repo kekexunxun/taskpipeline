@@ -72,6 +72,20 @@ describe('ChatModelSelector hover params popover', () => {
     await waitFor(() => expect(screen.queryByText('参数')).toBeNull(), { timeout: 1500 })
   })
 
+  it('clears the popover when the dialog closes while an item is hovered', async () => {
+    const onChange = vi.fn()
+    const onChangeParams = vi.fn()
+    render(<ChatModelSelector groups={groups} onChange={onChange} onChangeParams={onChangeParams} />)
+    fireEvent.click(screen.getByRole('button', { name: '选择模型' }))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    fireEvent.mouseEnter(listItemByText('DeepSeek Chat'))
+    await waitFor(() => expect(screen.queryByText('参数')).not.toBeNull(), { timeout: 1500 })
+    // 选中后弹窗关闭；条目卸载时浏览器不会派发 mouseLeave，浮层应被主动清空。
+    fireEvent.click(listItemByText('DeepSeek Chat'))
+    expect(onChange).toHaveBeenCalledWith('openai:deepseek-chat')
+    await waitFor(() => expect(screen.queryByText('参数')).toBeNull(), { timeout: 1500 })
+  })
+
   it('shows the vendor name next to the user-defined display name', async () => {
     const onChange = vi.fn()
     const onChangeParams = vi.fn()

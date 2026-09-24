@@ -188,7 +188,7 @@ function HoverParamsPanel({
   if (!pos) return null
   return createPortal(
     <div
-      className="animate-in fade-in-0 fixed z-[9999] w-60 overflow-hidden rounded-xl border bg-popover text-popover-foreground shadow-xl"
+      className="fixed z-[9999] w-60 animate-in overflow-hidden rounded-xl border bg-popover text-popover-foreground shadow-xl fade-in-0"
       style={{ left: pos.left, top: pos.top, pointerEvents: 'auto' }}
       onMouseEnter={onEnter}
       onMouseLeave={onLeave}
@@ -262,6 +262,22 @@ export function ChatModelSelector({
   const [open, setOpen] = useState(false)
   const [hoveredValue, setHoveredValue] = useState<string>()
   const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  // 弹窗关闭时同步清空 hover 状态，避免条目卸载时 mouseleave 不派发导致浮层残留。
+  useEffect(() => {
+    if (!open) {
+      setHoveredValue(undefined)
+      if (closeTimer.current) {
+        clearTimeout(closeTimer.current)
+        closeTimer.current = undefined
+      }
+    }
+    return () => {
+      if (closeTimer.current) {
+        clearTimeout(closeTimer.current)
+        closeTimer.current = undefined
+      }
+    }
+  }, [open])
   const handleEnter = (val: string) => {
     if (closeTimer.current) clearTimeout(closeTimer.current)
     setHoveredValue(val)
