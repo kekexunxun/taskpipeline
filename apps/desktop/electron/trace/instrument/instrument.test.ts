@@ -178,6 +178,36 @@ describe('TracePipeline', () => {
 })
 
 describe('QoderTraceBuilder', () => {
+  it.each(['看图修改布局', ''])('带图输入落盘保留附件且只消费一次（文本：%s）', async (text) => {
+    pipeline.beginTrace({ traceId: 'q-image', kind: 'chat', title: '图片提问', source: 'qoder' })
+    pipeline.startSpan('q-image', { type: 'session.start', name: '会话' })
+    const builder = new QoderTraceBuilder(pipeline, 'q-image', 'chat')
+    const input = {
+      messageId: 'user-image',
+      text,
+      files: [{ localPath: '/cache/chat/image.png', mediaType: 'image/png', filename: '截图.png', size: 123 }]
+    }
+    builder.setTurnInput(input)
+    builder.onMessage({ type: 'user', message: { content: [{ type: 'text', text: 'SDK 回显' }, { type: 'image' }] } })
+    builder.onMessage({ type: 'assistant', message: { content: [{ type: 'text', text: '我看到了图片' }] } })
+    builder.onMessage({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id: 'read-1', name: 'Read', input: {} }] }
+    })
+    builder.onMessage({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'read-1', content: '文件内容' }] }
+    })
+    builder.onMessage({ type: 'assistant', message: { content: [{ type: 'text', text: '完成' }] } })
+    builder.finish()
+    pipeline.endTrace('q-image')
+    const llms = (await storage.getTrace('q-image'))!.filter((span) => span.type === 'llm.generate')
+    expect(llms).toHaveLength(2)
+    expect(llms[0]!.input).toEqual(input)
+    expect(llms[1]!.input).toBeUndefined()
+    expect(JSON.stringify(llms)).not.toContain('base64')
+  })
+
   it('assistant 消息 → llm + tool 成对 span，usage 正确', async () => {
     pipeline.beginTrace({ traceId: 'q1', kind: 'chat', title: 'qoder 提问', source: 'qoder' })
     pipeline.startSpan('q1', { type: 'session.start', name: '会话' })

@@ -1,6 +1,7 @@
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render, screen, within } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 import { PartRenderer } from './PartRenderer'
+import type { ChatPlan } from '@/api'
 
 /**
  * Radix Collapsible 的 trigger 上会带 `data-state="open" | "closed"`,
@@ -459,6 +460,97 @@ describe('PartRenderer', () => {
     expect(screen.queryByText('完成')).toBeNull()
     expect(screen.getByText('输出')).toBeInTheDocument()
     expect(screen.getByText('子任务完整输出')).toBeInTheDocument()
+  })
+})
+
+describe('PartRenderer · 计划卡片', () => {
+  const plan: ChatPlan = {
+    id: 'plan-preview',
+    chatId: 'chat-1',
+    createdAt: '2026-09-23T08:50:00.000Z',
+    status: 'pending',
+    filePath: '/plans/preview.md',
+    content:
+      '# 技能修复计划\n\n---\n\n## 实施步骤\n- **检查**技能入口\n- [ ] 修复 `skill_name` 配置\n- 参考[说明](https://example.com)验证\n\n## 验收标准\n完成全部回归测试'
+  }
+
+  it('标题和操作按钮之间展示最多五行的简洁文本预览', () => {
+    render(
+      <PartRenderer
+        parts={[{ driverId: 'qoder', type: 'plan', plan }]}
+        planWaiting
+        onExecutePlan={vi.fn()}
+        onCancelPlan={vi.fn()}
+      />
+    )
+    const title = screen.getByRole('button', { name: /Plan_/ })
+    const preview = screen.getByRole('button', { name: '查看完整计划' })
+    const execute = screen.getByRole('button', { name: '执行' })
+    const cancel = screen.getByRole('button', { name: '取消' })
+    expect(preview.firstElementChild).toHaveClass('line-clamp-5', 'whitespace-pre-line', 'break-words')
+    expect(preview.textContent).toBe(
+      '技能修复计划\n实施步骤\n• 检查技能入口\n• 修复 skill_name 配置\n• 参考说明验证\n验收标准\n完成全部回归测试'
+    )
+    expect(title.compareDocumentPosition(preview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(preview.compareDocumentPosition(execute) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(execute).toHaveClass('h-5.5', 'text-[11px]!')
+    expect(cancel).toHaveClass('h-5.5', 'text-[11px]!', 'border', 'border-input', 'bg-background', 'text-foreground')
+  })
+
+  it('点击预览打开包含完整 Markdown 的面板', () => {
+    render(<PartRenderer parts={[{ driverId: 'qoder', type: 'plan', plan }]} planWaiting />)
+    fireEvent.click(screen.getByRole('button', { name: '查看完整计划' }))
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByRole('heading', { name: '技能修复计划' })).toBeInTheDocument()
+    expect(within(dialog).getByText('完成全部回归测试')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: '说明' })).toHaveAttribute('data-streamdown', 'link')
+  })
+
+  it('执行和取消保持独立回调，禁用时不能触发', () => {
+    const onExecutePlan = vi.fn()
+    const onCancelPlan = vi.fn()
+    const props = {
+      parts: [{ driverId: 'qoder', type: 'plan', plan }] as const,
+      planWaiting: true,
+      onExecutePlan,
+      onCancelPlan
+    }
+    const { rerender } = render(<PartRenderer {...props} parts={[...props.parts]} />)
+    fireEvent.click(screen.getByRole('button', { name: '执行' }))
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(onExecutePlan).toHaveBeenCalledWith(plan)
+    expect(onCancelPlan).toHaveBeenCalledWith(plan)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    rerender(<PartRenderer {...props} parts={[...props.parts]} planActionsDisabled />)
+    expect(screen.getByRole('button', { name: '执行' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '取消' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: '执行' }))
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(onExecutePlan).toHaveBeenCalledTimes(1)
+    expect(onCancelPlan).toHaveBeenCalledTimes(1)
+  })
+
+  it('已取消计划仍展示内容预览，但不再显示操作按钮', () => {
+    render(
+      <PartRenderer
+        parts={[{ driverId: 'qoder', type: 'plan', plan: { ...plan, status: 'cancelled' } }]}
+        onExecutePlan={vi.fn()}
+        onCancelPlan={vi.fn()}
+      />
+    )
+    expect(screen.getByRole('button', { name: '查看完整计划' })).toHaveTextContent('技能修复计划')
+    expect(screen.queryByRole('button', { name: '执行' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '取消' })).not.toBeInTheDocument()
+  })
+
+  it('空内容不显示预览入口，内容更新后正常展示', () => {
+    const { rerender } = render(
+      <PartRenderer parts={[{ driverId: 'qoder', type: 'plan', plan: { ...plan, content: ' \n\n ' } }]} />
+    )
+    expect(screen.queryByRole('button', { name: '查看完整计划' })).not.toBeInTheDocument()
+    rerender(<PartRenderer parts={[{ driverId: 'qoder', type: 'plan', plan }]} />)
+    expect(screen.getByRole('button', { name: '查看完整计划' })).toHaveTextContent('技能修复计划')
   })
 })
 

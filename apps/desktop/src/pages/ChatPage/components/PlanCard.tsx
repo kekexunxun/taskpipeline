@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   FileTextIcon,
   PlayIcon,
@@ -30,12 +30,30 @@ function getPlanDisplayName(plan: ChatPlan): string {
   return `Plan_${mm}${dd}_${hh}${mi}${ss}_${unique}`
 }
 
+/** 提取轻量文本预览，保留内容换行，去除常见 Markdown 标记。 */
+function getPlanPreview(content: string): string {
+  return content
+    .replace(/^\s*(```|~~~).*$/gm, '')
+    .split(/\r?\n/)
+    .map((line) =>
+      line
+        .trim()
+        .replace(/^#{1,6}\s+/, '')
+        .replace(/^[-*+]\s+(?:\[[ xX]\]\s*)?/, '• ')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+        .replace(/!?\[([^\]]*)\]\([^)]+\)/g, '$1')
+    )
+    .filter((line) => line && !/^([-*_]\s*){3,}$/.test(line))
+    .join('\n')
+}
+
 /**
  * PlanCard — 紧凑风格的计划卡片（参考 BashToolBlock 设计）。
  *
  * 设计：
- *  - 仅显示计划名称 + 状态徽章 + 执行/取消操作按钮，不展示计划内容；
- *  - 点击卡片主体（标题区）打开 Sheet 预览完整计划内容；
+ *  - 显示计划名称 + 状态徽章 + 最多五行内容预览 + 执行/取消操作按钮；
+ *  - 点击标题或内容预览打开 Sheet 查看完整计划内容；
  *  - pending 状态下卡片内提供“执行”与“取消”两个操作；
  *  - executing 状态显示旋转 loading 动画。
  */
@@ -57,6 +75,7 @@ export function PlanCard({
   const statusConfig = getStatusConfig(plan.status)
   const StatusIcon = statusConfig.icon
   const displayName = getPlanDisplayName(plan)
+  const preview = useMemo(() => getPlanPreview(plan.content), [plan.content])
   // 仅待执行且有回调时展示操作行（行在卡片内，“明显”可见）。
   const showActions = plan.status === 'pending' && Boolean(onExecute || onCancel)
 
@@ -93,28 +112,42 @@ export function PlanCard({
           />
         </button>
 
+        {preview && (
+          <button
+            type="button"
+            aria-label="查看完整计划"
+            className="block w-full px-3 pb-2.5 text-left transition-colors hover:bg-muted/30"
+            onClick={() => setSheetOpen(true)}
+          >
+            <span className="line-clamp-5 text-xs leading-5 break-words whitespace-pre-line text-muted-foreground">
+              {preview}
+            </span>
+          </button>
+        )}
+
         {showActions && (
-          <div className="flex items-center gap-2 px-3 pb-2">
+          <div className="flex items-center gap-1.5 px-3 pb-2.5">
             {onExecute && (
               <Button
                 size="sm"
+                variant="secondary"
                 onClick={() => onExecute(plan)}
                 disabled={disabled}
-                className="h-6 gap-1.5 bg-primary px-2.5 text-xs text-primary-foreground hover:bg-primary/90"
+                className="h-5.5 gap-1 bg-primary px-2 text-[11px]! text-primary-foreground shadow-none hover:bg-primary/90"
               >
-                <PlayIcon className="size-3" />
+                <PlayIcon className="size-2.5" />
                 执行
               </Button>
             )}
             {onCancel && (
               <Button
                 size="sm"
-                variant="ghost"
+                variant="outline"
                 onClick={() => onCancel(plan)}
                 disabled={disabled}
-                className="h-6 gap-1.5 px-2.5 text-xs text-muted-foreground hover:bg-muted/40"
+                className="h-5.5 gap-1 border-input bg-background px-2 text-[11px]! text-foreground shadow-none hover:bg-accent"
               >
-                <BanIcon className="size-3" />
+                <BanIcon className="size-2.5" />
                 取消
               </Button>
             )}

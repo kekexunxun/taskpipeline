@@ -132,7 +132,12 @@ function systemSubtype(
 }
 
 /** SDK 用户消息的最小形态（只取断言委派标记需要的字段）。 */
-type SdkUserLike = { message?: { content?: Array<{ type?: string; text?: string }> } }
+type SdkUserLike = {
+  uuid?: string
+  priority?: string
+  shouldQuery?: boolean
+  message?: { content?: Array<{ type: string; text?: string }> }
+}
 
 vi.mock('@qoder-ai/qoder-agent-sdk', () => {
   // 把脚本化的 SDKMessage 数组喂给 driver。
@@ -143,6 +148,8 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
   const captured: Array<{ options: Record<string, unknown>; prompt?: string }> = []
   /** 会话输入流（用户消息）被排空后记下的文本，供断言「计划轮次的委派标记」。 */
   const userMessages: string[] = []
+  const userInputs: SdkUserLike[] = []
+  const cancelAsyncMessage = vi.fn(async (_uuid: string) => true)
   let closed = false
   let generation = 0
   const wake = () => {
@@ -161,6 +168,7 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
         void (async () => {
           try {
             for await (const msg of input) {
+              userInputs.push(msg)
               const blocks = msg.message?.content ?? []
               userMessages.push(blocks.map((block) => block.text ?? '').join(''))
             }
@@ -205,7 +213,8 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
         },
         async interrupt() {
           /* noop */
-        }
+        },
+        cancelAsyncMessage
       }
     },
     tool: (name: string, _description: string, _schema: unknown, execute: (input: unknown) => unknown) => ({
@@ -221,10 +230,14 @@ vi.mock('@qoder-ai/qoder-agent-sdk', () => {
     __getLastQueryOptions: () => captured[captured.length - 1]?.options,
     __getLastQueryPrompt: () => captured[captured.length - 1]?.prompt,
     __getUserMessages: () => [...userMessages],
+    __getUserInputs: () => [...userInputs],
+    __cancelAsyncMessage: cancelAsyncMessage,
     __getQueryCallCount: () => captured.length,
     __resetCaptured: () => {
       captured.length = 0
       userMessages.length = 0
+      userInputs.length = 0
+      cancelAsyncMessage.mockClear()
       scripts.length = 0
       closed = false
       generation++
@@ -239,6 +252,8 @@ const sdkMock = (await import('@qoder-ai/qoder-agent-sdk')) as unknown as {
   __pushScript: (script: { messages: SdkMessage[] }) => void
   __getLastQueryOptions: () => Record<string, unknown> | undefined
   __getUserMessages: () => string[]
+  __getUserInputs: () => SdkUserLike[]
+  __cancelAsyncMessage: ReturnType<typeof vi.fn>
   __getLastQueryPrompt: () => string | undefined
   __getQueryCallCount: () => number
   __resetCaptured: () => void
@@ -847,6 +862,121 @@ describe('QoderChatDriver 工具输入输出与思考去重', () => {
     expect(toolUses[0]?.type === 'qoder.tool-use' && toolUses[0].input).toEqual({ q: 'docs' })
     const toolResults = parts.filter((p) => p.type === 'qoder.tool-result')
     expect(toolResults).toHaveLength(1)
+  })
+})
+
+describe('QoderChatDriver 对话引导', () => {
+  async function startTurn() {
+    const qoder = driver()
+    const onGuidanceReady = vi.fn()
+    const finished = collect(
+      qoder.streamChat({
+        conversationId: 'guidance-chat',
+        model: 'qoder:claude-sonnet-4.5',
+        history: [],
+        userInput: { id: 'u1', text: '开始工作', createdAt: new Date().toISOString() },
+        signal: new AbortController().signal,
+        onGuidanceReady
+      })
+    )
+    await vi.waitFor(() => expect(onGuidanceReady).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(sdkMock.__getUserInputs()).toHaveLength(1))
+    return { qoder, finished }
+  }
+
+  it('没有会话时明确失败，不再静默成功', async () => {
+    await expect(driver().injectGuidance('missing', '引导')).rejects.toThrow('会话尚未就绪或已结束')
+  })
+
+  it('投递到同一会话，等待 CLI 开始处理而非仅入队后确认成功', async () => {
+    const { qoder, finished } = await startTurn()
+    try {
+      const confirmed = vi.fn()
+      const guidance = qoder.injectGuidance('guidance-chat', '不要独立一行').then(confirmed)
+      await vi.waitFor(() => expect(sdkMock.__getUserInputs()).toHaveLength(2))
+      const input = sdkMock.__getUserInputs()[1]!
+      expect(input).toMatchObject({
+        uuid: expect.any(String),
+        priority: 'next',
+        shouldQuery: false,
+        message: { content: [{ type: 'text', text: '不要独立一行' }] }
+      })
+      sdkMock.__pushScript({
+        messages: [{ type: 'command_lifecycle', command_uuid: input.uuid, state: 'queued' }]
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(confirmed).not.toHaveBeenCalled()
+      sdkMock.__pushScript({
+        messages: [{ type: 'command_lifecycle', command_uuid: input.uuid, state: 'started' }]
+      })
+      await guidance
+      expect(confirmed).toHaveBeenCalledOnce()
+      expect(sdkMock.__getQueryCallCount()).toBe(1)
+      sdkMock.__pushScript({ messages: [resultMessage('完成', 'sess-guidance')] })
+      await finished
+      await expect(qoder.injectGuidance('guidance-chat', '已结束')).rejects.toThrow('没有进行中的回复')
+    } finally {
+      qoder.dispose()
+    }
+  })
+
+  it('兼容 user 回显确认，历史重放不当作本次送达', async () => {
+    const { qoder, finished } = await startTurn()
+    try {
+      const confirmed = vi.fn()
+      const guidance = qoder.injectGuidance('guidance-chat', '补充约束').then(confirmed)
+      await vi.waitFor(() => expect(sdkMock.__getUserInputs()).toHaveLength(2))
+      const input = sdkMock.__getUserInputs()[1]!
+      sdkMock.__pushScript({ messages: [{ type: 'user', uuid: input.uuid, isReplay: true }] })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(confirmed).not.toHaveBeenCalled()
+      sdkMock.__pushScript({ messages: [{ type: 'user', uuid: input.uuid, message: input.message }] })
+      await guidance
+      sdkMock.__pushScript({ messages: [resultMessage('完成', 'sess-guidance')] })
+      await finished
+    } finally {
+      qoder.dispose()
+    }
+  })
+
+  it.each(['cancelled', 'discarded'])('CLI %s 时向调用方返回失败', async (state) => {
+    const { qoder, finished } = await startTurn()
+    try {
+      const rejected = expect(qoder.injectGuidance('guidance-chat', '补充约束')).rejects.toThrow('未采用引导消息')
+      await vi.waitFor(() => expect(sdkMock.__getUserInputs()).toHaveLength(2))
+      sdkMock.__pushScript({
+        messages: [{ type: 'command_lifecycle', command_uuid: sdkMock.__getUserInputs()[1]!.uuid, state }]
+      })
+      await rejected
+      sdkMock.__pushScript({ messages: [resultMessage('完成', 'sess-guidance')] })
+      await finished
+    } finally {
+      qoder.dispose()
+    }
+  })
+
+  it('会话关闭时结束等待，避免按钮永久 loading', async () => {
+    const { qoder, finished } = await startTurn()
+    const rejected = expect(qoder.injectGuidance('guidance-chat', '补充约束')).rejects.toThrow('会话已关闭')
+    qoder.closeSession('guidance-chat')
+    await rejected
+    await finished
+  })
+
+  it('确认超时会尝试取消队列消息并返回明确错误', async () => {
+    const { qoder, finished } = await startTurn()
+    vi.useFakeTimers()
+    try {
+      const rejected = expect(qoder.injectGuidance('guidance-chat', '补充约束')).rejects.toThrow('引导确认超时')
+      await vi.advanceTimersByTimeAsync(60_000)
+      await rejected
+      expect(sdkMock.__cancelAsyncMessage).toHaveBeenCalledOnce()
+      qoder.closeSession('guidance-chat')
+      await finished
+    } finally {
+      vi.useRealTimers()
+      qoder.dispose()
+    }
   })
 })
 

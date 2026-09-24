@@ -113,6 +113,8 @@ contextBridge.exposeInMainWorld('agentApi', {
   /** 保存附件到本地缓存（渲染进程 → 主进程写文件，返回本地路径）。 */
   saveChatAttachment: (chatId: string, data: ArrayBuffer, filename: string, mediaType: string) =>
     ipcRenderer.invoke('chats:save-attachment', chatId, data, filename, mediaType),
+  previewChatImage: (localPath: string, mediaType: string) =>
+    ipcRenderer.invoke('chats:preview-image', localPath, mediaType),
   chooseDirectory: () => ipcRenderer.invoke('dialog:choose-directory'),
   chooseDirectories: () => ipcRenderer.invoke('dialog:choose-directories'),
   /** 对话级 Git 文件变更（根据 workingDirectory 查询工作区状态）。 */

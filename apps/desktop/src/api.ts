@@ -832,6 +832,8 @@ export type AgentApi = {
     filename: string,
     mediaType: string
   ): Promise<UserFileAttachment>
+  /** 从附件缓存读取图片预览；缓存文件已删除时返回 undefined。 */
+  previewChatImage(localPath: string, mediaType: string): Promise<string | undefined>
   onChatStreamEvent(callback: (event: ChatStreamEvent) => void): () => void
   /** 上下文压缩瞬时状态（start/end），供渲染临时提示；主进程经 chat:compaction 通道广播。 */
   onChatCompaction(callback: (event: ChatCompactionEvent) => void): () => void
@@ -1515,6 +1517,9 @@ export const api: AgentApi = window.agentApi ?? {
       filename,
       size: data.byteLength
     }
+  },
+  async previewChatImage() {
+    return undefined
   },
   async startChatStream({ streamId, chatId, driverId, model, message, mode }) {
     const conv = memoryChats.get(chatId)

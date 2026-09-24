@@ -18,6 +18,7 @@
  *    `close`(结束会话)、`dispose`(应用退出统一清理)。
  */
 
+import { randomUUID } from 'node:crypto'
 import {
   DEFAULT_RUNTIME_TRANSPORT,
   accessToken,
@@ -265,6 +266,7 @@ export type QoderTurnInput = {
   text: string
   toolSource?: ToolSource
   signal?: AbortSignal
+  onGuidanceReady?: () => void
   /** 用户上传的附件（图片等多模态内容）。 */
   files?: UserFileAttachment[]
   /** 附件缓存（用于读取本地文件内容）。 */
@@ -300,6 +302,7 @@ export class QoderSession {
   private pendingError: unknown
   private readonly inputQueue: SDKUserMessage[] = []
   private readonly inputWaiters: Array<(msg: SDKUserMessage | undefined) => void> = []
+  private readonly pendingGuidance = new Map<string, { resolve: () => void; reject: (error: Error) => void }>()
   /** HITL 拒绝的工具调用 ID 集合(canUseTool 返回 deny 时写入,handleToolResult 读取后标记 isError)。 */
   readonly deniedCallIds = new Set<string>()
 
@@ -404,6 +407,7 @@ export class QoderSession {
       this.handleMessage(message, turn)
     }
     this.pushUserMessage(input.text, input.files, input.attachmentCache)
+    input.onGuidanceReady?.()
     try {
       while (true) {
         // 先 drain 队列:回合结束(result)后可能还有已入队未 yield 的 part,不能丢。
@@ -437,6 +441,7 @@ export class QoderSession {
 
   /** 停止当前回复,保留会话(后续仍可 turn())。 */
   async interrupt(): Promise<void> {
+    this.rejectPendingGuidance(new Error('当前回复已停止，引导未确认送达'))
     try {
       await this.query.interrupt()
     } catch {
@@ -450,24 +455,67 @@ export class QoderSession {
    *  - priority: 'next' — 在下一个合适时机投递（不打断当前生成）
    *  - shouldQuery: false — 只加入上下文，不触发 assistant 回复
    */
-  injectGuidance(text: string): void {
-    if (this.closed) return
+  async injectGuidance(text: string): Promise<void> {
+    if (this.closed) throw new Error('Qoder 会话已关闭')
+    if (this.activeTurn?.status !== 'active') throw new Error('Qoder 当前没有进行中的回复')
+    const uuid = randomUUID()
     const message: SDKUserMessage = {
       type: 'user',
+      uuid,
       message: { role: 'user', content: [{ type: 'text', text }] },
       parent_tool_use_id: null,
       priority: 'next',
       shouldQuery: false
     }
-    const waiter = this.inputWaiters.shift()
-    if (waiter) waiter(message)
-    else this.inputQueue.push(message)
+    // 入本地队列不代表 CLI 已采用；等 command_lifecycle 或 user 回显再确认成功。
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingGuidance.get(uuid)?.reject(new Error('引导确认超时，未确认是否生效，请勿重复发送'))
+        void this.query.cancelAsyncMessage(uuid).catch(() => undefined)
+      }, 60_000)
+      const cleanup = () => {
+        clearTimeout(timer)
+        this.pendingGuidance.delete(uuid)
+        const index = this.inputQueue.findIndex((entry) => entry.uuid === uuid)
+        if (index >= 0) this.inputQueue.splice(index, 1)
+      }
+      this.pendingGuidance.set(uuid, {
+        resolve: () => {
+          cleanup()
+          resolve()
+        },
+        reject: (error) => {
+          cleanup()
+          reject(error)
+        }
+      })
+      const waiter = this.inputWaiters.shift()
+      if (waiter) waiter(message)
+      else this.inputQueue.push(message)
+    })
+  }
+
+  private confirmGuidance(message: SDKMessage): void {
+    if (message.type === 'command_lifecycle') {
+      const pending = this.pendingGuidance.get(message.command_uuid)
+      if (message.state === 'started' || message.state === 'completed') pending?.resolve()
+      else if (message.state === 'cancelled' || message.state === 'discarded') {
+        pending?.reject(new Error('Qoder 未采用引导消息'))
+      }
+    } else if (message.type === 'user' && message.uuid && !('isReplay' in message && message.isReplay)) {
+      this.pendingGuidance.get(message.uuid)?.resolve()
+    }
+  }
+
+  private rejectPendingGuidance(error: Error): void {
+    for (const pending of this.pendingGuidance.values()) pending.reject(error)
   }
 
   /** 结束会话:关闭 query、唤醒所有挂起等待。关闭带超时保护,避免 qodercli 子进程异常时悬挂。 */
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    this.rejectPendingGuidance(new Error('Qoder 会话已关闭，引导未确认送达'))
     for (const resolve of this.inputWaiters.splice(0)) resolve(undefined)
     if (this.activeTurn) {
       this.activeTurn.status = 'closed'
@@ -584,6 +632,7 @@ export class QoderSession {
         const message = raw as SDKMessage
         // 会话级事实在任何分发之前采集：回合外的 init / 残留 result 同样要落档。
         this.captureFacts(message as RawSdkMessage)
+        this.confirmGuidance(message)
         this.options.onMessage?.(message)
         const turn = this.activeTurn
         if (!turn || turn.status !== 'active') {
@@ -605,6 +654,7 @@ export class QoderSession {
       }
     }
     // query 流结束(close / CLI 进程退出 / resume 失败):结束当前回合。
+    this.rejectPendingGuidance(new Error('Qoder 会话已结束，引导未确认送达'))
     this.failTurn(new Error('Qoder 会话已结束'))
   }
 

@@ -23,7 +23,7 @@ import type { ChatAttachmentCache } from '../chat/chat-attachment-cache.js'
 import type { MemoryService } from '../memory/memory-service.js'
 import type { AgentService } from '../agents/agent-service.js'
 import type { TracePipeline } from '../trace/bus/trace-pipeline.js'
-import type { TraceService } from '../trace/trace-service.js'
+import { withChatAttachments, type TraceService } from '../trace/trace-service.js'
 import type { McpServerEntry } from '../mcp/mcp-config.js'
 import { removeTaskArtifacts } from '../task/stage-artifacts.js'
 import { purgeTaskSessionsFor } from '../task/task-lifecycle.js'
@@ -286,7 +286,12 @@ export function registerIpc(d: IpcDeps): void {
 
   // === Trace 页面（v2）=====================================================
   ipcMain.handle('trace:list', () => traceService.listSummaries())
-  ipcMain.handle('trace:get', (_event, _kind: string, traceId: string) => traceService.getTrace(traceId))
+  ipcMain.handle('trace:get', async (_event, _kind: string, traceId: string) => {
+    const spans = await traceService.getTrace(traceId)
+    if (!spans || !/^chat-[\w-]+$/.test(traceId)) return spans
+    const chat = await chatService.getChat(traceId.slice(5))
+    return chat ? withChatAttachments(spans, chat.messages) : spans
+  })
   ipcMain.handle('trace:dashboard', () => traceService.dashboardStats())
   ipcMain.handle('trace:delete', (_event, _kind: string, traceId: string) => traceService.deleteTrace(traceId))
 
@@ -799,6 +804,9 @@ export function registerIpc(d: IpcDeps): void {
     'chats:save-attachment',
     (_event, chatId: string, data: ArrayBuffer, filename: string, mediaType: string) =>
       chatAttachmentCache.saveAttachment(chatId, Buffer.from(data), filename, mediaType)
+  )
+  ipcMain.handle('chats:preview-image', (_event, localPath: string, mediaType: string) =>
+    chatAttachmentCache.previewImage(localPath, mediaType)
   )
   ipcMain.handle('chats:changed-files', async (_event, workingDirectory?: string) => {
     if (!workingDirectory) return []

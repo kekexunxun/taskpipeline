@@ -297,7 +297,11 @@ export class QoderChatDriver implements ChatDriver {
       traceBuilder = new QoderTraceBuilder(this.tracePipeline, traceId, 'chat', 'qoder', model, input.traceLabel)
       // 本回合用户输入：SDK 不一定回显 user 文本消息，尤其一次性辅助会话——
       // 关键词提取/记忆整理的 span 此前因此看不到 Prompt。
-      traceBuilder.setTurnInput(input.userInput.text)
+      traceBuilder.setTurnInput(
+        input.userInput.files?.length
+          ? { messageId: input.userInput.id, text: input.userInput.text, files: input.userInput.files }
+          : input.userInput.text
+      )
       this.traceBuilders.set(builderKey, traceBuilder)
     }
 
@@ -311,7 +315,8 @@ export class QoderChatDriver implements ChatDriver {
         files: input.userInput.files,
         attachmentCache: this.attachmentCache,
         toolSource: input.toolSource,
-        signal: input.signal
+        signal: input.signal,
+        onGuidanceReady: input.onGuidanceReady
       })) {
         yield chunk
       }
@@ -356,9 +361,10 @@ export class QoderChatDriver implements ChatDriver {
     void this.sessions.close(conversationId)
   }
 
-  injectGuidance(conversationId: string, text: string): void {
+  async injectGuidance(conversationId: string, text: string): Promise<void> {
     const session = this.sessions.get(conversationId)
-    session?.injectGuidance(text)
+    if (!session) throw new Error('Qoder 会话尚未就绪或已结束')
+    await session.injectGuidance(text)
   }
 
   dispose(): void {

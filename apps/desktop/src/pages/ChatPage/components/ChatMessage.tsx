@@ -4,6 +4,7 @@ import { QoderMessageView } from '../drivers/QoderMessageView'
 import { OpenAIMessageView } from '../drivers/OpenAIMessageView'
 import { MessageCopyButton } from '@/components/ai-elements/message'
 import { Badge } from '@/components/ui/badge'
+import { LocalAttachments } from '@/components/LocalAttachments'
 import { Button } from '@/components/ui/button'
 import type { ChatDriverId, ChatMessage, ChatPlan } from '@/api'
 import { cn } from '@/lib/utils'
@@ -226,8 +227,9 @@ function UserBubble({ message }: { message: ChatMessage }) {
     [message.parts]
   )
   return (
-    <div className="max-w-full rounded-2xl rounded-tr-sm border border-border/40 bg-secondary px-3.5 py-2 text-sm leading-6 break-words whitespace-pre-wrap">
-      {text}
+    <div className="flex max-w-full flex-col gap-2 rounded-2xl rounded-tr-sm border border-border/40 bg-secondary px-3.5 py-2 text-sm leading-6 break-words whitespace-pre-wrap">
+      <LocalAttachments files={message.parts.filter((part) => part.type === 'file')} />
+      {text && <div>{text}</div>}
     </div>
   )
 }

@@ -13,6 +13,7 @@ import {
   shouldPersistPlanDoc
 } from './chat-service.js'
 import { ChatDriverRegistry } from './drivers/driver-registry.js'
+import { ChatStorage } from './chat-storage.js'
 import type { ChatDriver } from './drivers/chat-driver.js'
 import type { ToolDeclaration } from './drivers/tool-source.js'
 import type { ChatModelInfo, ChatStreamChunk, DriverPart, StoredMessage } from './chat-types.js'
@@ -101,6 +102,7 @@ function createFakeDriver(opts: FakeDriverOptions): ChatDriver & {
         resumeSessionId: input.resumeSessionId
       })
       if (opts.throwOnStream) throw new Error(opts.throwOnStream)
+      input.onGuidanceReady?.()
       if (opts.hangUntilAbort) {
         await new Promise<void>((resolve) => {
           if (input.signal.aborted) resolve()
@@ -139,6 +141,148 @@ describe('ChatService (driver-based)', () => {
   let dataDir: string
   beforeEach(() => {
     dataDir = join(tmpdir(), `chat-service-${crypto.randomUUID()}`)
+  })
+
+  it('引导等待 Qoder 会话就绪，并等待 driver 投递确认', async () => {
+    const qoder = createFakeDriver({
+      id: 'qoder',
+      displayName: 'Qoder',
+      scripts: [],
+      hangUntilAbort: true,
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
+    })
+    let ready!: () => void
+    const preparing = new Promise<undefined>((resolve) => {
+      ready = () => resolve(undefined)
+    })
+    const prepare = vi.fn(() => preparing)
+    let acknowledge!: () => void
+    const receipt = new Promise<void>((resolve) => {
+      acknowledge = resolve
+    })
+    qoder.injectGuidance = vi.fn(() => receipt)
+    const registry = new ChatDriverRegistry()
+    registry.register(qoder)
+    const service = new ChatService(
+      fakeStore(),
+      dataDir,
+      registry,
+      () => undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      prepare
+    )
+    const conv = await service.createChat('qoder', 'qoder:test')
+    const stream = service.startChatStream({
+      streamId: 'guidance-stream',
+      chatId: conv.id,
+      driverId: 'qoder',
+      model: 'qoder:test',
+      message: { id: 'u1', text: '开始工作', createdAt: new Date().toISOString() }
+    })
+    try {
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce())
+      const confirmed = vi.fn()
+      const guidance = service.injectGuidance(conv.id, '补充约束').then(confirmed)
+      await Promise.resolve()
+      expect(qoder.injectGuidance).not.toHaveBeenCalled()
+      ready()
+      await vi.waitFor(() => expect(qoder.injectGuidance).toHaveBeenCalledWith(conv.id, '补充约束'))
+      expect(confirmed).not.toHaveBeenCalled()
+      acknowledge()
+      await guidance
+      expect(confirmed).toHaveBeenCalledOnce()
+    } finally {
+      ready()
+      acknowledge()
+      service.abortChat({ chatId: conv.id, streamId: 'guidance-stream' })
+      await stream
+    }
+  })
+
+  it('引导按活跃流 Provider 路由，不读取滞后的会话配置，并透传投递失败', async () => {
+    const qoder = createFakeDriver({
+      id: 'qoder',
+      displayName: 'Qoder',
+      scripts: [],
+      hangUntilAbort: true,
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
+    })
+    qoder.injectGuidance = vi.fn().mockRejectedValue(new Error('SDK 投递失败'))
+    const registry = new ChatDriverRegistry()
+    registry.register(qoder)
+    const service = new ChatService(fakeStore(), dataDir, registry, () => undefined)
+    const conv = await service.createChat('qoder', 'qoder:test')
+    const stream = service.startChatStream({
+      streamId: 'guidance-stream',
+      chatId: conv.id,
+      driverId: 'qoder',
+      model: 'qoder:test',
+      message: { id: 'u1', text: '开始工作', createdAt: new Date().toISOString() }
+    })
+    await vi.waitFor(() => expect(qoder.received).toHaveLength(1))
+    const readConversation = vi
+      .spyOn(ChatStorage.prototype, 'getConversation')
+      .mockResolvedValue({ ...conv, driverId: 'openai' })
+    try {
+      await expect(service.injectGuidance(conv.id, '补充约束')).rejects.toThrow('SDK 投递失败')
+      expect(qoder.injectGuidance).toHaveBeenCalledWith(conv.id, '补充约束')
+      expect(readConversation).not.toHaveBeenCalled()
+      await expect(service.injectGuidance(conv.id, '  ')).rejects.toThrow('引导内容不能为空')
+    } finally {
+      readConversation.mockRestore()
+      service.abortChat({ chatId: conv.id, streamId: 'guidance-stream' })
+      await stream
+    }
+    await expect(service.injectGuidance(conv.id, '已结束')).rejects.toThrow('当前对话已结束')
+  })
+
+  it('会话准备期间停止回复会结束引导等待，不再投递', async () => {
+    const qoder = createFakeDriver({
+      id: 'qoder',
+      displayName: 'Qoder',
+      scripts: [],
+      models: [{ value: 'qoder:test', displayName: '测试模型' }]
+    })
+    qoder.injectGuidance = vi.fn(async () => undefined)
+    let ready!: () => void
+    const preparing = new Promise<undefined>((resolve) => {
+      ready = () => resolve(undefined)
+    })
+    const prepare = vi.fn(() => preparing)
+    const registry = new ChatDriverRegistry()
+    registry.register(qoder)
+    const service = new ChatService(
+      fakeStore(),
+      dataDir,
+      registry,
+      () => undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      prepare
+    )
+    const conv = await service.createChat('qoder', 'qoder:test')
+    const stream = service.startChatStream({
+      streamId: 'guidance-stream',
+      chatId: conv.id,
+      driverId: 'qoder',
+      model: 'qoder:test',
+      message: { id: 'u1', text: '开始工作', createdAt: new Date().toISOString() }
+    })
+    try {
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce())
+      const rejected = expect(service.injectGuidance(conv.id, '补充约束')).rejects.toThrow('当前对话已结束')
+      service.abortChat({ chatId: conv.id, streamId: 'guidance-stream' })
+      await rejected
+      expect(qoder.injectGuidance).not.toHaveBeenCalled()
+    } finally {
+      ready()
+      await stream
+    }
   })
 
   it('dispatches a stream end-to-end and persists the assistant record', async () => {

@@ -62,6 +62,8 @@ type ActiveStream = {
   abort: AbortController
   driverId: ChatDriverId
   model: string
+  /** 前置上下文准备期间的引导等待本轮 driver 就绪，避免会话尚未创建就静默丢消息。 */
+  guidanceReady: Promise<boolean>
   /** 本轮在飞 assistant 消息 id（与磁盘增量快照同 id）。 */
   assistantId: string
   createdAt: string
@@ -446,17 +448,20 @@ export class ChatService {
    * 对话引导：在当前轮次中注入引导消息，不打断对话。
    * - Qoder driver：走 SDK 原生 priority + shouldQuery 机制，实时注入当前轮次。
    * - OpenAI driver：请求-响应模式无法中途注入，排队等当前轮次结束后写入历史。
-   * - 无活跃流时忽略（引导只对正在进行的对话生效）。
+   * - 无活跃流或投递失败时返回错误（引导只对正在进行的对话生效）。
    */
   async injectGuidance(chatId: string, text: string): Promise<void> {
     const active = this.activeStreams.get(chatId)
-    if (!active) return
-    const conversation = await this.storage.getConversation(chatId)
-    if (!conversation?.driverId) return
-    const driver = this.driverRegistry.tryGet(conversation.driverId)
-    // Qoder driver 有活跃会话：直接走 SDK 原生注入
-    if (driver?.injectGuidance) {
-      driver.injectGuidance(chatId, text)
+    if (!active || active.abort.signal.aborted) throw new Error('当前对话已结束，无法引导')
+    if (!text.trim()) throw new Error('引导内容不能为空')
+    // 以实际执行中的 driver 为准，落盘配置可能还停留在切换 Provider 之前。
+    const driver = this.driverRegistry.get(active.driverId)
+    if (driver.injectGuidance) {
+      const ready = await active.guidanceReady
+      if (!ready || this.activeStreams.get(chatId) !== active || active.abort.signal.aborted) {
+        throw new Error('当前对话已结束，无法引导')
+      }
+      await driver.injectGuidance(chatId, text)
       return
     }
     // OpenAI 等无状态 driver：排队，当前轮次结束后持久化
@@ -680,11 +685,18 @@ export class ChatService {
     // 供重挂载方（getReattachState）快照当前内存态。
     const assistantId = randomUUID()
     const parts: DriverPart[] = []
+    let resolveGuidanceReady!: (ready: boolean) => void
+    const guidanceReady = new Promise<boolean>((resolve) => {
+      resolveGuidanceReady = resolve
+    })
+    const cancelGuidanceWait = () => resolveGuidanceReady(false)
+    abort.signal.addEventListener('abort', cancelGuidanceWait, { once: true })
     this.activeStreams.set(input.chatId, {
       streamId: input.streamId,
       abort,
       driverId: effective.driverId,
       model: effective.model,
+      guidanceReady,
       assistantId,
       createdAt: input.message.createdAt,
       parts,
@@ -912,6 +924,7 @@ export class ChatService {
             ...(input.message.files?.length ? { files: input.message.files } : {})
           },
           signal: abort.signal,
+          onGuidanceReady: () => resolveGuidanceReady(true),
           cwd: conversation.workingDirectory,
           ...(turnTraceId ? { traceId: turnTraceId } : {}),
           ...(toolSource ? { toolSource } : {}),
@@ -1033,6 +1046,8 @@ export class ChatService {
         this.dispatch(effective, { type: 'error', message })
       }
     } finally {
+      cancelGuidanceWait()
+      abort.signal.removeEventListener('abort', cancelGuidanceWait)
       // 停止流存活心跳：本轮已结束（成功 / 失败 / abort），不再需要重置看门狗。
       if (heartbeat) {
         clearInterval(heartbeat)

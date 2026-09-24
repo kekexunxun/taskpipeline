@@ -7,6 +7,7 @@
 
 import type { AgentEvent, AgentSpan, TraceDashboardStats, TraceStorage, TraceSummary } from '@task-pipeline/core'
 import { JsonlTraceStorage, agentStageLabel, buildSpanOwnershipIndex, ownerSubtaskOf } from '@task-pipeline/core'
+import type { StoredMessage } from '../chat/chat-types.js'
 
 export class TraceService {
   private readonly storage: TraceStorage
@@ -40,6 +41,47 @@ export class TraceService {
     const spans = await this.storage.getTrace(taskId)
     return spans ? spansToAgentEvents(spans) : []
   }
+}
+
+/** 旧 Trace 未采集附件时，只读关联唯一匹配的聊天消息，不改写原始 input 或落盘数据。 */
+export function withChatAttachments(spans: AgentSpan[], messages: StoredMessage[]): AgentSpan[] {
+  const users = messages.filter((message) => message.role === 'user')
+  const textOf = (message: StoredMessage) =>
+    message.parts
+      .filter((part) => part.type === 'text')
+      .map((part) => part.text)
+      .join('\n')
+  const isCandidate = (span: AgentSpan) =>
+    span.type === 'llm.generate' &&
+    span.meta?.source === 'qoder' &&
+    !span.meta?.traceLabel &&
+    !span.meta?.parentToolUseId &&
+    typeof span.input === 'string'
+  return spans.map((span) => {
+    if (!isCandidate(span)) return span
+    const matches = users.filter((message) => textOf(message) === span.input)
+    // 重复提问或同一文本对应多个调用时不猜配，避免把其它轮次图片挂进来。
+    if (matches.length !== 1 || spans.filter((item) => isCandidate(item) && item.input === span.input).length !== 1) {
+      return span
+    }
+    const message = matches[0]!
+    const index = users.indexOf(message)
+    const sentAt = Date.parse(message.createdAt)
+    const nextAt = users[index + 1] ? Date.parse(users[index + 1]!.createdAt) : Infinity
+    if (!(span.startedAt >= sentAt && span.startedAt < nextAt)) return span
+    const files = message.parts
+      .filter((part) => part.type === 'file')
+      .map(({ localPath, mediaType, filename }) => ({
+        localPath,
+        mediaType,
+        ...(filename ? { filename } : {})
+      }))
+    if (!files.length) return span
+    return {
+      ...span,
+      meta: { ...span.meta, userAttachments: files, attachmentSource: 'chat-history', userMessageId: message.id }
+    }
+  })
 }
 
 /**

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from 'react'
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { LoaderIcon, PanelRightCloseIcon, PanelRightOpenIcon } from 'lucide-react'
 import { ChatHistoryList } from './components/ChatHistoryList'
@@ -105,6 +105,8 @@ function ChatPageInner() {
   const [editingWorkspace, setEditingWorkspace] = useState<ChatGroup | undefined>()
   // 右侧面板开关
   const [sidePanelOpen, setSidePanelOpen] = useState(true)
+  const guidanceRequests = useRef(new Set<string>())
+  const [guidanceStates, setGuidanceStates] = useState<Record<string, 'sending' | 'sent' | 'failed'>>({})
 
   // 执行计划回调：切换 chatMode 为 normal 并发送执行指令
   const handleExecutePlan = useCallback(
@@ -182,11 +184,17 @@ function ChatPageInner() {
   }
 
   /** 将 pending 消息的文本作为对话引导注入当前轮次 */
-  const handleGuidance = async (text: string) => {
-    if (!chat.activeId) return
+  const handleGuidance = async (messageId: string, text: string) => {
+    const chatId = chat.activeId
+    if (!chatId || !chat.streaming || guidanceRequests.current.has(messageId)) return
+    // 同步锁先于渲染更新生效，快速连点也只会发送一次。
+    guidanceRequests.current.add(messageId)
+    setGuidanceStates((current) => ({ ...current, [messageId]: 'sending' }))
     try {
-      await api.injectChatGuidance(chat.activeId, text)
+      await api.injectChatGuidance(chatId, text)
+      setGuidanceStates((current) => ({ ...current, [messageId]: 'sent' }))
     } catch (reason) {
+      setGuidanceStates((current) => ({ ...current, [messageId]: 'failed' }))
       showError(reason instanceof Error ? reason.message : String(reason))
     }
   }
@@ -474,11 +482,20 @@ function ChatPageInner() {
                       {/* 引导按钮 */}
                       <button
                         type="button"
-                        onClick={() => void handleGuidance(msg.text)}
-                        className="shrink-0 rounded px-1 py-0.5 text-[9px] text-primary/60 hover:bg-primary/10 hover:text-primary"
+                        onClick={() => void handleGuidance(msg.id, msg.text)}
+                        disabled={!chat.streaming || Boolean(guidanceStates[msg.id])}
+                        aria-busy={guidanceStates[msg.id] === 'sending'}
+                        className="inline-flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-[10px]! text-primary/60 enabled:hover:bg-primary/10 enabled:hover:text-primary disabled:cursor-default disabled:opacity-60"
                         title="对话引导"
                       >
-                        引导
+                        {guidanceStates[msg.id] === 'sending' && <LoaderIcon className="size-3 animate-spin" />}
+                        {guidanceStates[msg.id] === 'sending'
+                          ? '引导中'
+                          : guidanceStates[msg.id] === 'sent'
+                            ? '已引导'
+                            : guidanceStates[msg.id] === 'failed'
+                              ? '引导失败'
+                              : '引导'}
                       </button>
                       <button
                         type="button"

@@ -13,7 +13,8 @@
 
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFile, realpath, stat } from 'node:fs/promises'
+import { isAbsolute, join, relative, sep } from 'node:path'
 
 export type UserFileAttachment = {
   /** 本地缓存绝对路径。 */
@@ -58,6 +59,29 @@ export class ChatAttachmentCache {
   /** 读取附件内容为 Buffer（driver 发 API 前调用）。 */
   readAttachment(localPath: string): Buffer {
     return readFileSync(localPath)
+  }
+
+  /** 供界面预览图片：仅允许缓存目录内的真实文件，不向渲染进程开放任意路径读取。 */
+  async previewImage(localPath: string, mediaType: string): Promise<string | undefined> {
+    if (!/^image\/(png|jpeg|gif|webp|bmp|avif|svg\+xml|x-icon|vnd\.microsoft\.icon)$/.test(mediaType)) {
+      throw new Error('不支持预览此附件类型')
+    }
+    const isInside = (root: string, target: string) => {
+      const path = relative(root, target)
+      return Boolean(path) && !isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`)
+    }
+    if (!isAbsolute(localPath) || !isInside(this.root, localPath)) throw new Error('附件路径不在缓存目录内')
+    try {
+      const [root, target] = await Promise.all([realpath(this.root), realpath(localPath)])
+      if (!isInside(root, target)) throw new Error('附件路径不在缓存目录内')
+      const info = await stat(target)
+      if (!info.isFile() || info.size > 20 * 1024 * 1024) throw new Error('附件无法预览或图片超过 20 MB')
+      const buffer = await readFile(target)
+      return `data:${mediaType};base64,${buffer.toString('base64')}`
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
   }
 
   /** 清理某个对话的全部附件。 */

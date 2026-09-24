@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentEvent, AgentSpan } from '@task-pipeline/core'
-import { spansToAgentEvents } from './trace-service.js'
+import type { StoredMessage } from '../chat/chat-types.js'
+import { spansToAgentEvents, withChatAttachments } from './trace-service.js'
 
 /** payload 为 unknown 类型，断言前收窄为 Record 便于访问属性。 */
 function payloadOf(event: AgentEvent): Record<string, unknown> | undefined {
@@ -22,6 +23,56 @@ function span(partial: Partial<AgentSpan>): AgentSpan {
     ...partial
   }
 }
+
+describe('历史 Trace 关联附件', () => {
+  const file = {
+    driverId: 'qoder' as const,
+    type: 'file' as const,
+    localPath: '/cache/chat/image.png',
+    mediaType: 'image/png'
+  }
+  const user: StoredMessage = {
+    id: 'user-image',
+    role: 'user',
+    driverId: 'qoder',
+    createdAt: new Date(500).toISOString(),
+    raw: {},
+    parts: [{ driverId: 'qoder', type: 'text', text: '修改技能列表' }, file]
+  }
+  const llm = () => span({ type: 'llm.generate', input: '修改技能列表', meta: { source: 'qoder' } })
+
+  it('唯一消息与时间窗口匹配时补展示元信息，保留原始 Trace 不变', () => {
+    const original = llm()
+    const [result] = withChatAttachments([original], [user])
+    expect(result!.input).toBe(original.input)
+    expect(result!.meta).toMatchObject({
+      userAttachments: [{ localPath: file.localPath, mediaType: file.mediaType }],
+      attachmentSource: 'chat-history',
+      userMessageId: user.id
+    })
+    expect(original.meta).toEqual({ source: 'qoder' })
+  })
+
+  it('重复文本或重复调用不猜配附件', () => {
+    const original = llm()
+    expect(withChatAttachments([original], [user, { ...user, id: 'duplicate' }])[0]).toBe(original)
+    expect(withChatAttachments([original, { ...original, spanId: 'other' }], [user])[0]).toBe(original)
+  })
+
+  it('其它回合、辅助调用、子代理和已采集输入不关联', () => {
+    const originals = [
+      { ...llm(), startedAt: 100 },
+      { ...llm(), meta: { source: 'qoder', traceLabel: '关键词提取' } },
+      { ...llm(), meta: { source: 'qoder', parentToolUseId: 'subtask' } },
+      { ...llm(), input: { text: '修改技能列表', files: [file] } }
+    ]
+    expect(withChatAttachments(originals, [user])).toEqual(originals)
+    const original = llm()
+    const next = { ...user, id: 'next', createdAt: new Date(800).toISOString(), parts: [] }
+    expect(withChatAttachments([original], [user, next])[0]).toBe(original)
+    expect(withChatAttachments([original], [])[0]).toBe(original)
+  })
+})
 
 describe('spansToAgentEvents（看板执行 Tab 适配）', () => {
   it('task.run 根不产事件（只是执行树锚点），agent.run → status 事件', () => {

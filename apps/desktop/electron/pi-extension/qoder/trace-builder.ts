@@ -25,6 +25,9 @@
 
 import type { AgentSpan, SpanSource, TraceKind } from '@task-pipeline/core'
 import type { TracePipeline } from '../../trace/bus/trace-pipeline.js'
+import type { UserFileAttachment } from '../../chat/chat-attachment-cache.js'
+
+type TurnInput = string | { messageId: string; text: string; files: UserFileAttachment[] }
 
 type QoderUsage = {
   input_tokens?: number | null
@@ -112,7 +115,7 @@ export class QoderTraceBuilder {
   /** 最近一条 SDK 消息到达时间：兜底收尾悬挂 span 的 endedAt（消除假时长）。 */
   private lastMessageAt = 0
   /** 最近一条 user 文本消息：作为下一 llm span 的 input（消费一次即清空）。 */
-  private pendingUserText: string | undefined
+  private pendingUserText: TurnInput | undefined
   /** 构建时栈底的根 span（task.run / session.start）：栈空时挂回的兜底，避免出现游离根节点。 */
   private readonly rootSpanId: string | undefined
   /** llm span 展示名/模型名：调用方传入真实模型（task.qoderModel / driver model），缺省兜底 'qoder'。 */
@@ -171,8 +174,8 @@ export class QoderTraceBuilder {
   }
 
   /** 外部调用：显式提供本回合用户输入（对话主路径 driver 传入），作下一 llm span 的 input。 */
-  setTurnInput(text: string): void {
-    if (text) this.pendingUserText = text
+  setTurnInput(input: TurnInput): void {
+    this.pendingUserText = input || undefined
   }
 
   /** 会话结束兜底：结束未关闭的 llm/工具/子任务 span（以 lastMessageAt 收尾，避免假时长）。 */
@@ -555,7 +558,13 @@ export class QoderTraceBuilder {
     for (const block of content) {
       if (block.type === 'tool_result') {
         this.endTool(block.tool_use_id ?? '', block.content, block.is_error === true)
-      } else if (block.type === 'text' && block.text && !this.lastParentToolUseId) {
+      } else if (
+        block.type === 'text' &&
+        block.text &&
+        !this.lastParentToolUseId &&
+        typeof this.pendingUserText !== 'object'
+      ) {
+        // SDK 的纯文本回显不能覆盖 driver 已提供的附件引用。
         this.pendingUserText = block.text
       }
     }

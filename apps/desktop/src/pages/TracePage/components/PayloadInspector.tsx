@@ -3,6 +3,7 @@ import type { AgentSpan } from '@task-pipeline/core'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Button } from '@/components/ui/button'
+import { LocalAttachments, type LocalFileAttachment } from '@/components/LocalAttachments'
 
 const TYPE_LABELS: Record<string, string> = {
   'session.start': '会话开始',
@@ -22,7 +23,9 @@ const INTERNAL_META_KEYS = new Set([
   'stepIndex',
   'phase',
   'traceLabel',
-  'agentName'
+  'agentName',
+  'userAttachments',
+  'attachmentSource'
 ])
 
 function filterMeta(meta: Record<string, unknown>): Record<string, unknown> {
@@ -53,6 +56,9 @@ function formatDuration(ms?: number): string {
  * （默认折叠），text 作为 Completions 主体，避免用户看到未加工的 JSON。
  */
 function OutputWithThinking({ span }: { span: AgentSpan }) {
+  const inputObj = span.input && typeof span.input === 'object' ? (span.input as Record<string, unknown>) : undefined
+  const inputFiles = readAttachments(inputObj?.files)
+  const historyFiles = readAttachments(span.meta?.userAttachments)
   const outputObj =
     span.output && typeof span.output === 'object' && !Array.isArray(span.output)
       ? (span.output as Record<string, unknown>)
@@ -68,7 +74,13 @@ function OutputWithThinking({ span }: { span: AgentSpan }) {
     <>
       <CollapsibleSection title="Prompt（发送给模型）" defaultOpen>
         <JsonBlock value={span.input} />
+        <LocalAttachments files={inputFiles} />
       </CollapsibleSection>
+      {historyFiles.length > 0 && span.meta?.attachmentSource === 'chat-history' && (
+        <CollapsibleSection title="关联消息附件（来自聊天记录）" defaultOpen>
+          <LocalAttachments files={historyFiles} />
+        </CollapsibleSection>
+      )}
       <CollapsibleSection title="Completions（模型返回）" defaultOpen>
         {thinking ? (
           <CollapsibleSection title="思考过程" defaultOpen={false}>
@@ -181,6 +193,19 @@ function CollapsibleSection({
       </CollapsibleTrigger>
       <CollapsibleContent className="mt-1">{children}</CollapsibleContent>
     </Collapsible>
+  )
+}
+
+function readAttachments(value: unknown): LocalFileAttachment[] {
+  if (!Array.isArray(value)) return []
+  return value.filter(
+    (file): file is LocalFileAttachment =>
+      file &&
+      typeof file === 'object' &&
+      typeof file.localPath === 'string' &&
+      typeof file.mediaType === 'string' &&
+      (file.filename === undefined || typeof file.filename === 'string') &&
+      (file.size === undefined || typeof file.size === 'number')
   )
 }
 

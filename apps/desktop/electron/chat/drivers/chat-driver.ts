@@ -61,6 +61,8 @@ export type StreamChatInput = {
   resumeSessionId?: string
   userInput: { id: string; text: string; createdAt: string; files?: UserFileAttachment[] }
   signal: AbortSignal
+  /** 支持实时引导的 driver 在本轮输入通道就绪后调用。 */
+  onGuidanceReady?: () => void
   toolSource?: ToolSource
   /**
    * 记忆检索工具声明（`search_memory`）。与 `toolSource` 平级、独立注入：不依赖是否绑定了
@@ -160,9 +162,9 @@ export interface ChatDriver {
    * 对话引导：在当前轮次中注入引导消息，不打断对话。
    * Qoder 走 SDK priority + shouldQuery 原生机制；
    * OpenAI 排队等当前轮次结束后注入历史（请求-响应模式无法中途注入）。
-   * 无活跃流时忽略。
+   * 返回投递确认；会话不可用或投递失败时拒绝。
    */
-  injectGuidance?(conversationId: string, text: string): void
+  injectGuidance?(conversationId: string, text: string): Promise<void>
   /** 释放 driver 持有的资源(MCP client / HTTP pool / SDK 子进程)。 */
   dispose(): void
 }

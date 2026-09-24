@@ -1,7 +1,79 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ChatMessageView } from './ChatMessage'
-import type { ChatMessage } from '@/api'
+import { api, type ChatMessage } from '@/api'
+
+afterEach(() => vi.restoreAllMocks())
+
+describe('用户消息附件', () => {
+  const file = {
+    type: 'file' as const,
+    localPath: '/cache/chat/image.png',
+    mediaType: 'image/png',
+    filename: '截图.png'
+  }
+  const imageUrl = 'data:image/png;base64,aW1hZ2U='
+  const message = (driverId: 'qoder' | 'openai', text = '调整技能列表布局'): ChatMessage => ({
+    id: 'user-image',
+    role: 'user',
+    driverId,
+    createdAt: '2026-09-23T02:56:32.223Z',
+    raw: { kind: 'user', text, files: [file] },
+    parts: [
+      { driverId, type: 'text', text },
+      { driverId, ...file }
+    ]
+  })
+
+  it.each(['qoder', 'openai'] as const)('展示 %s 历史消息的图片，并支持打开与关闭预览', async (driverId) => {
+    const preview = vi.spyOn(api, 'previewChatImage').mockResolvedValue(imageUrl)
+    render(<ChatMessageView message={message(driverId)} />)
+    expect(screen.getByText('调整技能列表布局')).toBeInTheDocument()
+    expect(await screen.findByRole('img', { name: '截图.png' })).toHaveAttribute('src', imageUrl)
+    expect(preview).toHaveBeenCalledWith(file.localPath, file.mediaType)
+    fireEvent.click(screen.getByRole('button', { name: '预览图片：截图.png' }))
+    expect(screen.getByRole('dialog', { name: '截图.png' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  })
+
+  it('纯图片消息仍显示附件，不显示空文本复制按钮', async () => {
+    vi.spyOn(api, 'previewChatImage').mockResolvedValue(imageUrl)
+    render(<ChatMessageView message={message('qoder', '')} />)
+    expect(await screen.findByRole('img')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '复制消息' })).toBeNull()
+  })
+
+  it('缓存缺失显示提示并保留文字', async () => {
+    vi.spyOn(api, 'previewChatImage').mockResolvedValue(undefined)
+    render(<ChatMessageView message={message('qoder')} />)
+    expect(await screen.findByText('图片文件已不存在')).toBeInTheDocument()
+    expect(screen.getByText('调整技能列表布局')).toBeInTheDocument()
+    expect(screen.getByText('截图.png')).toBeInTheDocument()
+  })
+
+  it('预览读取失败与图片解码失败均显示占位', async () => {
+    const preview = vi
+      .spyOn(api, 'previewChatImage')
+      .mockRejectedValueOnce(new Error('无法读取'))
+      .mockResolvedValue(imageUrl)
+    const { rerender } = render(<ChatMessageView message={message('qoder')} />)
+    expect(await screen.findByText('图片无法预览')).toBeInTheDocument()
+    rerender(<ChatMessageView key="second" message={message('qoder')} />)
+    fireEvent.error(await screen.findByRole('img'))
+    expect(await screen.findByText('图片无法预览')).toBeInTheDocument()
+    expect(preview).toHaveBeenCalledTimes(2)
+  })
+
+  it('普通文件显示名称，不尝试读取为图片', () => {
+    const preview = vi.spyOn(api, 'previewChatImage')
+    const value = message('qoder')
+    value.parts = [{ ...file, driverId: 'qoder', mediaType: 'text/plain', filename: '需求.txt' }]
+    render(<ChatMessageView message={value} />)
+    expect(screen.getByText('需求.txt')).toBeInTheDocument()
+    expect(preview).not.toHaveBeenCalled()
+  })
+})
 
 describe('ChatMessageView task creation action', () => {
   it('executes the structured Jira key instead of parsing assistant text', async () => {

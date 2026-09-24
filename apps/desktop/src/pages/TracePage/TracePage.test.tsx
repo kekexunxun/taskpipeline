@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { AgentSpan, TraceSummary } from '@task-pipeline/core'
@@ -6,6 +6,9 @@ import { TraceDetail } from './components/TraceDetail'
 import { TraceList } from './components/TraceList'
 import { Waterfall } from './components/Waterfall'
 import { PayloadInspector } from './components/PayloadInspector'
+import { api } from '@/api'
+
+afterEach(() => vi.restoreAllMocks())
 
 const resolveTitle = (s: TraceSummary) => s.title
 
@@ -37,6 +40,55 @@ const summary: TraceSummary = {
 }
 
 describe('TracePage 组件（v2）', () => {
+  it('PayloadInspector 预览结构化输入中的图片，兼容纯图片输入', async () => {
+    vi.spyOn(api, 'previewChatImage').mockResolvedValue('data:image/png;base64,aW1hZ2U=')
+    render(
+      <PayloadInspector
+        span={span({
+          input: {
+            messageId: 'image-only',
+            text: '',
+            files: [{ localPath: '/cache/image.png', mediaType: 'image/png', filename: '截图.png', size: 100 }]
+          }
+        })}
+        onClose={vi.fn()}
+      />
+    )
+    expect(await screen.findByRole('img', { name: '截图.png' })).toBeInTheDocument()
+    expect(screen.queryByText('关联消息附件（来自聊天记录）')).toBeNull()
+  })
+
+  it('PayloadInspector 展示旧 Trace 关联图片并注明来源', async () => {
+    vi.spyOn(api, 'previewChatImage').mockResolvedValue('data:image/png;base64,aW1hZ2U=')
+    render(
+      <PayloadInspector
+        span={span({
+          input: '原始文字输入',
+          meta: {
+            source: 'qoder',
+            attachmentSource: 'chat-history',
+            userAttachments: [{ localPath: '/cache/image.png', mediaType: 'image/png', filename: '历史截图.png' }]
+          }
+        })}
+        onClose={vi.fn()}
+      />
+    )
+    expect(screen.getByText('原始文字输入')).toBeInTheDocument()
+    expect(screen.getByText('关联消息附件（来自聊天记录）')).toBeInTheDocument()
+    expect(await screen.findByRole('img', { name: '历史截图.png' })).toBeInTheDocument()
+  })
+
+  it('PayloadInspector 遇到非附件结构不读取本地文件', () => {
+    const preview = vi.spyOn(api, 'previewChatImage')
+    render(
+      <PayloadInspector
+        span={span({ input: { files: [null, { url: 'https://example.com' }, 'image'] } })}
+        onClose={vi.fn()}
+      />
+    )
+    expect(preview).not.toHaveBeenCalled()
+  })
+
   it('TraceDetail 渲染头部统计与瀑布图', () => {
     const spans = [
       span({
